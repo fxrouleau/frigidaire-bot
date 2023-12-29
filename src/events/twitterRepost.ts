@@ -15,8 +15,8 @@ module.exports = {
     const twitterLink = message.content.match(re);
     if (twitterLink !== null) {
       const rest = message.content.replace(twitterLink[0], "");
-      message.delete();
       const newLink = replaceString(twitterLink[0]);
+      await message.delete();
       message.channel.send(
         `> Sent by: ${message.author.globalName} 
 > ${rest}
