@@ -4,7 +4,19 @@ delete a twitter / x link and post a fxtwitter link instead. This is because, at
 properly in discord. Downside is that if you ping someone, they get 'double' pinged, although the original message
 gets deleted.
 
-## Setting up
+## Just use it
+If you want to just use the bot easily without downloading this repository, you can use the following docker-compose template:
+```yaml
+version: '3'
+services:
+  discord-bot:
+    image: zergyhan/frigidaire-bot
+    environment:
+      - CLIENT_SECRET=YOUR_SECRET_HERE
+```
+I'll leave getting your client secret as your task, as it's probably simple if you've managed to find this repo.
+
+## Setting up local
 Made to run easily in docker with docker compose. Just add an environment variable called `CLIENT_SECRET` with the discord
 bot's secret. Alternatively, you can add a .env file with `CLIENT_SECRET` and run it locally.
 
