@@ -20,7 +20,7 @@ module.exports = {
       message.channel.send(
         `> Sent by: ${message.author.globalName} 
 > ${rest}
-${newLink}`,
+[Twitter](${newLink})`,
       );
     }
   },
