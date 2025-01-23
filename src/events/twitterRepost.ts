@@ -4,7 +4,7 @@ const re = /(https?:\/\/(twitter|x)\.com\/.+\/status\/\S+)/;
 
 const replaceString = (input: string) => {
   return input.replace(re, (match, p1) => {
-    const replacedDomain = p1.replace(/(twitter\.com|x\.com)/, "fxtwitter.com");
+    const replacedDomain = p1.replace(/(twitter\.com|x\.com)/, "fixvx.com");
     return match.replace(p1, replacedDomain).replace(/\?.*/, "");
   });
 };
