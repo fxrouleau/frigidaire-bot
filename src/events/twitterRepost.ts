@@ -13,7 +13,7 @@ module.exports = {
   name: Events.MessageCreate,
   async execute(message: Message) {
     // Quick sanity checks
-    if (!message.author.bot) return;
+    if (message.author.bot) return;
     if (message.channel.type !== ChannelType.GuildText) return;
 
     // Check if the message contains a Twitter link
@@ -29,6 +29,8 @@ module.exports = {
         message.delete(),
         webhook.send(newMessage)
       ]);
+      // Cleanup the webhook, we don't need it anymore; they're one-time use
+      await webhook.delete();
     }
   },
 };
