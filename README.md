@@ -1,10 +1,11 @@
 # Frigidaire Bot
-This is a bot that I use for my friends discord server. Currently the only functionality that it has it to 
-delete a twitter / x link and post a fxtwitter link instead. This is because, at the time, twitter does not embed 
-properly in discord. Downside is that if you ping someone, they get 'double' pinged, although the original message
-gets deleted.
+This is a bot that I've created for personal use on a discord server with friends. Currently, the only functionality is to 
+replace a Twitter/X link and repost the message with a fixvx link instead. This is because, at the time, Twitter does not embed 
+properly in discord. The downside is that there are 2 notification messages. The bot replaces the message with a webhook
+message, utilising the user's avatar and name, to make it look like the user sent the message, as unfortunately discord
+does not allow bots to edit other user's messages, not does it allow to intercept messages before they are sent.
 
-## Just use it
+## Docker Compose
 If you want to just use the bot easily without downloading this repository, you can use the following docker-compose template:
 ```yaml
 version: '3'
@@ -14,24 +15,5 @@ services:
     environment:
       - CLIENT_SECRET=YOUR_SECRET_HERE
 ```
-I'll leave getting your client secret as your task, as it's probably simple if you've managed to find this repo.
-
-## Setting up local
-Made to run easily in docker with docker compose. Just add an environment variable called `CLIENT_SECRET` with the discord
-bot's secret. Alternatively, you can add a .env file with `CLIENT_SECRET` and run it locally.
-
-After adding it, you can run it with 
-```shell
-docker compose up -d
-```
-
-Alternatively, you can run it locally. First, you have to set up your local env.
-```shell
-yarn install --production
-```
-Then, you can run it.
-```shell
-yarn prod
-```
-
-Between the two, I highly recommend the docker compose route.
+Client secret can be gotten from the [discord developer portal](https://discord.com/developers/applications) under the bot section.
+You will have to give the bot permissions to manage webhooks, read and send messages.
