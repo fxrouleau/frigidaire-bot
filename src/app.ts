@@ -1,23 +1,17 @@
-import { Client, Events, GatewayIntentBits } from "discord.js";
-import * as dotenv from "dotenv";
-import * as process from "process";
-import * as path from "path";
-import * as fs from "fs";
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as process from 'node:process';
+import { Client, GatewayIntentBits } from 'discord.js';
+import * as dotenv from 'dotenv';
 
 dotenv.config();
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
-const eventsPath = path.join(__dirname, "events");
-const eventFiles = fs
-  .readdirSync(eventsPath)
-  .filter((file) => file.endsWith(".ts"));
+const eventsPath = path.join(__dirname, 'events');
+const eventFiles = fs.readdirSync(eventsPath).filter((file) => file.endsWith('.ts'));
 
 for (const file of eventFiles) {
   const filePath = path.join(eventsPath, file);

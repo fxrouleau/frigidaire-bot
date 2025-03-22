@@ -10,11 +10,13 @@
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
     "@types/node": "^20.10.5",
+    "lefthook": "^1.11.3",
     "nodemon": "^3.0.2",
     "prettier": "3.1.1"
   },
   "scripts": {
     "dev": "nodemon",
-    "prod": "ts-node src/app.ts"
+    "prod": "ts-node src/app.ts",
+    "check": "yarn biome check --fix"
   }
 }

@@ -1,11 +1,11 @@
-import { Events, type Message, ChannelType, type BaseGuildTextChannel } from "discord.js";
+import { type BaseGuildTextChannel, ChannelType, Events, type Message } from 'discord.js';
 
 const re = /(https?:\/\/(twitter|x)\.com\/.+\/status\/\S+)/;
 
 const replaceString = (input: string) => {
   return input.replace(re, (match, p1) => {
-    const replacedDomain = p1.replace(/(twitter\.com|x\.com)/, "fixvx.com");
-    return match.replace(p1, replacedDomain).replace(/\?.*/, "");
+    const replacedDomain = p1.replace(/(twitter\.com|x\.com)/, 'fixvx.com');
+    return match.replace(p1, replacedDomain).replace(/\?.*/, '');
   });
 };
 
@@ -25,10 +25,7 @@ module.exports = {
         avatar: message.member?.displayAvatarURL({ forceStatic: true }),
       });
       const newMessage = message.content.replace(twitterLink[0], replaceString(twitterLink[0]));
-      await Promise.all([
-        message.delete(),
-        webhook.send(newMessage)
-      ]);
+      await Promise.all([message.delete(), webhook.send(newMessage)]);
       // Cleanup the webhook, we don't need it anymore; they're one-time use
       await webhook.delete();
     }
