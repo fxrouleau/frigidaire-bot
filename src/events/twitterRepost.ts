@@ -1,4 +1,4 @@
-import { Events, Message, ChannelType, BaseGuildTextChannel } from "discord.js";
+import { Events, type Message, ChannelType, type BaseGuildTextChannel } from "discord.js";
 
 const re = /(https?:\/\/(twitter|x)\.com\/.+\/status\/\S+)/;
 
@@ -21,8 +21,8 @@ module.exports = {
     if (twitterLink !== null) {
       // Create the hook
       const webhook = await (message.channel as BaseGuildTextChannel).createWebhook({
-        name: message.member!.nickname || message.author.displayName,
-        avatar: message.member!.displayAvatarURL({ forceStatic: true }),
+        name: message.member?.nickname || message.author.displayName,
+        avatar: message.member?.displayAvatarURL({ forceStatic: true }),
       });
       const newMessage = message.content.replace(twitterLink[0], replaceString(twitterLink[0]));
       await Promise.all([
