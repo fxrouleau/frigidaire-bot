@@ -17,3 +17,24 @@ services:
 ```
 Client secret can be gotten from the [discord developer portal](https://discord.com/developers/applications) under the bot section.
 You will have to give the bot permissions to manage webhooks, read and send messages.
+
+## Development
+### Setup
+- Node 22 LTS
+- Typescript
+- Modern yarn
+- [discord.js](https://discord.js.org/docs/packages/discord.js/14.18.0)
+
+### Recommended plugins
+- BiomeJS ([VSCode](https://marketplace.visualstudio.com/items?itemName=biomejs.biome), [Jetbrains](https://plugins.jetbrains.com/plugin/22761-biome))
+- EditorConfig ([VSCode](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig))
+
+### Running
+For both versions, you'll need an env file with the following content:
+```env
+CLIENT_SECRET=YOUR_SECRET_HERE
+```
+
+To run the development version, run `yarn dev` to start the bot.
+
+To test the production version, run `yarn build` followed by `yarn prod` to start the bot.
