@@ -1,6 +1,14 @@
 name: docker-push.yml
 on:
   push:
+    paths:
+        - 'Dockerfile'
+        - 'docker-compose.yml'
+        - '.github/workflows'
+        - 'package.json'
+        - 'yarn.lock'
+        - '.dockerignore'
+        - 'src/**'
     branches:
       - master
 
