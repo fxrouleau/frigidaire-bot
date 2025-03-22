@@ -15,7 +15,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKER_USERNAME }}/frigidaire-bot
+          images: ${{ vars.DOCKER_USERNAME }}/frigidaire-bot
           tags: |
             type=raw,value={{ date 'YYYYMMDD' }}
             type=sha
