@@ -1,4 +1,4 @@
-import { Events, Message } from "discord.js";
+import { Events, Message, ChannelType, BaseGuildTextChannel } from "discord.js";
 
 const re = /(https?:\/\/(twitter|x)\.com\/.+\/status\/\S+)/;
 
@@ -12,16 +12,23 @@ const replaceString = (input: string) => {
 module.exports = {
   name: Events.MessageCreate,
   async execute(message: Message) {
+    // Quick sanity checks
+    if (!message.author.bot) return;
+    if (message.channel.type !== ChannelType.GuildText) return;
+
+    // Check if the message contains a Twitter link
     const twitterLink = message.content.match(re);
     if (twitterLink !== null) {
-      const rest = message.content.replace(twitterLink[0], "");
-      const newLink = replaceString(twitterLink[0]);
-      await message.delete();
-      message.channel.send(
-        `> Sent by: ${message.author.globalName} 
-> ${rest}
-[Twitter](${newLink})`,
-      );
+      // Create the hook
+      const webhook = await (message.channel as BaseGuildTextChannel).createWebhook({
+        name: message.author.displayName,
+        avatar: message.author.displayAvatarURL({ forceStatic: true }),
+      });
+      const newMessage = message.content.replace(twitterLink[0], replaceString(twitterLink[0]));
+      await Promise.all([
+        message.delete(),
+        webhook.send(newMessage)
+      ]);
     }
   },
 };
