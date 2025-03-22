@@ -4,7 +4,7 @@ on:
     paths:
         - 'Dockerfile'
         - 'docker-compose.yml'
-        - '.github/workflows'
+        - '.github/workflows/**'
         - 'package.json'
         - 'yarn.lock'
         - '.dockerignore'
