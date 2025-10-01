@@ -2,7 +2,7 @@
 This is a bot that I've created for personal use on a discord server with friends. It has two main features:
 
 1.  **Twitter/X Link Replacement**: The bot automatically replaces Twitter/X links with `fixvx.com` links to ensure proper embedding in Discord. This is because, at the time of writing, Twitter embeds do not work correctly. The bot uses a webhook to make it look like the user sent the corrected message, as Discord does not allow bots to edit other users' messages directly.
-2.  **OpenAI Integration**: You can mention the bot (`@Frigidaire Bot`) to start a conversation with OpenAI's `gpt-4o-mini`. The conversation history is shared among all users in the channel and will be maintained for up to 5 minutes of inactivity before being reset.
+2.  **OpenAI Integration**: You can mention the bot (`@Frigidaire Bot`) to start a conversation with OpenAI's `gpt-5-mini`. The conversation history is shared among all users in the channel and will be maintained for up to 5 minutes of inactivity before being reset.
 
 ## Docker Compose
 If you want to just use the bot easily without downloading this repository, you can use the following docker-compose template:
