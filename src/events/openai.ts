@@ -163,7 +163,7 @@ async function generate_image(message: Message, prompt: string): Promise<string>
       size: '1024x1024',
     });
 
-    const imageUrl = response.data[0].url;
+    const imageUrl = response.data?.[0]?.url;
     if (imageUrl) {
       await message.reply({
         content: `Here is the image you requested for the prompt: "${prompt}"`,
