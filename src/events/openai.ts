@@ -1,5 +1,6 @@
 import { type Collection, Events, type Message } from 'discord.js';
 import OpenAI from 'openai';
+import { logger } from '../logger';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -134,6 +135,8 @@ module.exports = {
 
     // Check if the bot is mentioned
     if (message.mentions.has(message.client.user.id)) {
+      const author = message.member?.displayName || message.author.username;
+      logger.info(`Bot was mentioned by ${author}, processing...`);
       const channelId = message.channel.id;
       const now = Date.now();
 
@@ -203,33 +206,39 @@ module.exports = {
           conversationHistory[channelId].history.push(responseMessage); // Add assistant's tool call message
 
           for (const toolCall of toolCalls) {
-            if (toolCall.type === 'function') {
-              const functionName = toolCall.function.name;
-              if (functionName === 'summarize_messages') {
-                let functionArgs: { start_time: string; end_time: string };
+            let toolResponse: string;
+            if (toolCall.type !== 'function') continue;
+
+            const functionName = toolCall.function.name;
+            const author = message.member?.displayName || message.author.username;
+            logger.info(`Tool ${functionName} called by ${author}.`);
+
+            switch (functionName) {
+              case 'summarize_messages': {
                 try {
-                  functionArgs = JSON.parse(toolCall.function.arguments);
+                  const args = JSON.parse(toolCall.function.arguments);
+                  toolResponse = await summarize_messages(message, args.start_time, args.end_time);
                 } catch (e) {
-                  console.error('Failed to parse tool arguments:', e);
-                  await message.reply(
-                    'I received invalid parameters from the model and could not proceed. Please try again.',
-                  );
-                  continue; // Skip to the next tool call
+                  logger.error('Failed to parse arguments for summarize_messages:', e);
+                  toolResponse = 'Invalid arguments provided for summarization.';
                 }
-
-                const summary = await summarize_messages(message, functionArgs.start_time, functionArgs.end_time);
-
-                // Add the tool's response to the history
-                conversationHistory[channelId].history.push({
-                  tool_call_id: toolCall.id,
-                  role: 'tool',
-                  content: summary,
-                });
+                break;
               }
+              default:
+                logger.warn(`Unknown tool called: ${functionName}`);
+                toolResponse = `Unknown tool: ${functionName}`;
             }
+
+            // Add the tool's response to the history for every tool call
+            conversationHistory[channelId].history.push({
+              tool_call_id: toolCall.id,
+              role: 'tool',
+              content: toolResponse,
+            });
           }
 
           // Second API call to get a natural language response based on the tool's output
+          logger.info('Sending tool results to OpenAI for final response.');
           const finalCompletion = await openai.chat.completions.create({
             model: 'gpt-5-mini',
             messages: conversationHistory[channelId].history,
@@ -239,13 +248,21 @@ module.exports = {
           if (finalResponse) {
             conversationHistory[channelId].history.push({ role: 'assistant', content: finalResponse });
             await message.reply(finalResponse);
+          } else {
+            logger.warn('OpenAI returned a null message content after tool call.');
+            await message.reply("I've processed the information, but I don't have anything further to add.");
           }
         } else {
           // If the model decides to chat directly
           const responseContent = responseMessage.content;
+          const author = message.member?.displayName || message.author.username;
           if (responseContent) {
+            logger.info(`Sending conversational response to ${author}.`);
             conversationHistory[channelId].history.push({ role: 'assistant', content: responseContent });
             await message.reply(responseContent);
+          } else {
+            logger.warn('OpenAI returned a null message content for a direct chat.');
+            await message.reply("I'm not sure how to respond to that.");
           }
         }
       } catch (error) {
