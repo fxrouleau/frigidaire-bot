@@ -1,6 +1,7 @@
 import { type Collection, Events, type Message } from 'discord.js';
 import OpenAI from 'openai';
 import { logger } from '../logger';
+import { splitMessage } from '../utils';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -247,7 +248,10 @@ module.exports = {
           const finalResponse = finalCompletion.choices[0].message.content;
           if (finalResponse) {
             conversationHistory[channelId].history.push({ role: 'assistant', content: finalResponse });
-            await message.reply(finalResponse);
+            const chunks = splitMessage(finalResponse);
+            for (const chunk of chunks) {
+              await message.reply(chunk);
+            }
           } else {
             logger.warn('OpenAI returned a null message content after tool call.');
             await message.reply("I've processed the information, but I don't have anything further to add.");
@@ -259,7 +263,10 @@ module.exports = {
           if (responseContent) {
             logger.info(`Sending conversational response to ${author}.`);
             conversationHistory[channelId].history.push({ role: 'assistant', content: responseContent });
-            await message.reply(responseContent);
+            const chunks = splitMessage(responseContent);
+            for (const chunk of chunks) {
+              await message.reply(chunk);
+            }
           } else {
             logger.warn('OpenAI returned a null message content for a direct chat.');
             await message.reply("I'm not sure how to respond to that.");
