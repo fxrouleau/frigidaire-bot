@@ -3,13 +3,14 @@ import OpenAI from 'openai';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 
-type MessageContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+type MessageContentPart =
+  | { type: 'input_text'; text: string }
+  | { type: 'input_image'; image_url: string; detail?: 'low' | 'high' | 'auto' };
 
-type ConversationMessage =
-  | { role: 'system'; content: string }
-  | { role: 'assistant'; content: string }
-  | { role: 'user'; content: MessageContentPart[]; name?: string }
-  | { role: 'tool'; content: string; tool_call_id: string };
+type ConversationMessage = {
+  role: 'user' | 'assistant' | 'system' | 'developer';
+  content: string | MessageContentPart[];
+};
 
 type FunctionToolDefinition = {
   type: 'function';
@@ -34,11 +35,13 @@ type ResponseOutputItem = {
 };
 
 type ToolCall = {
-  id: string;
+  id?: string;
+  call_id?: string;
   type: string;
   function?: {
     name: string;
     arguments: string;
+    call_id?: string;
   };
 };
 
@@ -124,23 +127,17 @@ function buildSystemInstructions(botName: string): string {
   return `You are ${botName}, a helpful assistant in a Discord channel. Be conversational, concise, and friendly. You can see and process images. Use the summarize_messages tool only when the user explicitly asks for a summary. Use the generate_image tool only when the user asks to create or generate an image. Use the web_search tool when the user asks for up-to-date information or when you need external knowledge beyond your training data. For all other situations, respond directly without calling tools. The current time is ${new Date().toISOString()}.`;
 }
 
-/**
- * Sanitize a string to be a valid OpenAI `name` property.
- * The `name` property can contain a-z, A-Z, 0-9, and underscores, with a maximum length of 64 characters.
- * @param name The name to sanitize.
- * @returns The sanitized name.
- */
-function sanitizeName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 64);
-}
-
 function buildUserContentParts(msg: Message): MessageContentPart[] {
-  const content: MessageContentPart[] = [{ type: 'text', text: msg.content }];
+  const content: MessageContentPart[] = [];
+  const text = msg.content.trim();
+  if (text.length > 0) {
+    content.push({ type: 'input_text', text });
+  }
 
   if (msg.attachments.size > 0) {
     for (const attachment of msg.attachments.values()) {
       if (attachment.contentType?.startsWith('image/')) {
-        content.push({ type: 'image_url', image_url: { url: attachment.url } });
+        content.push({ type: 'input_image', image_url: attachment.url, detail: 'auto' });
       }
     }
   }
@@ -160,12 +157,13 @@ function toConversationMessage(msg: Message, botId: string): ConversationMessage
     };
   }
 
-  const authorName = msg.member?.displayName || msg.author.displayName || msg.author.username;
-  const sanitized = sanitizeName(authorName);
+  const userContent = buildUserContentParts(msg);
+  if (userContent.length === 0) {
+    return null;
+  }
   return {
     role: 'user',
-    content: buildUserContentParts(msg),
-    ...(sanitized ? { name: sanitized } : {}),
+    content: userContent,
   };
 }
 
@@ -198,8 +196,14 @@ async function submitToolOutputs(responseId: string, toolOutputs: ToolOutput[]):
   return rawResponse;
 }
 
-async function resolveToolCalls(initialResponse: ResponseLike, message: Message): Promise<ResponseLike> {
+type ToolResolutionResult = {
+  response: ResponseLike;
+  ranCustomTool: boolean;
+};
+
+async function resolveToolCalls(initialResponse: ResponseLike, message: Message): Promise<ToolResolutionResult> {
   let response = initialResponse;
+  let ranCustomTool = false;
 
   while (
     response.status === 'requires_action' &&
@@ -216,6 +220,13 @@ async function resolveToolCalls(initialResponse: ResponseLike, message: Message)
       }
 
       const { name, arguments: rawArgs } = toolCall.function;
+      const toolCallId = toolCall.call_id || toolCall.function.call_id || toolCall.id;
+
+      if (!toolCallId) {
+        logger.error('Tool call missing call_id; cannot submit output.');
+        continue;
+      }
+
       const author = message.member?.displayName || message.author.username;
       logger.info(`Tool ${name} called by ${author}.`);
 
@@ -243,9 +254,10 @@ async function resolveToolCalls(initialResponse: ResponseLike, message: Message)
       }
 
       toolOutputs.push({
-        tool_call_id: toolCall.id,
+        tool_call_id: toolCallId,
         output: toolResponse,
       });
+      ranCustomTool = true;
     }
 
     if (toolOutputs.length === 0) {
@@ -256,7 +268,7 @@ async function resolveToolCalls(initialResponse: ResponseLike, message: Message)
     response = await submitToolOutputs(response.id, toolOutputs);
   }
 
-  return response;
+  return { response, ranCustomTool };
 }
 
 /**
@@ -394,14 +406,15 @@ module.exports = {
     const isStateValid = existingState?.responseId && now - existingState.timestamp <= CONVERSATION_TIMEOUT;
     const previousResponseId = isStateValid ? (existingState?.responseId ?? undefined) : undefined;
 
-    const sanitizedAuthorName = sanitizeName(
-      message.member?.displayName || message.author.displayName || message.author.username,
-    );
+    const userContentParts = buildUserContentParts(message);
+    if (userContentParts.length === 0) {
+      await message.reply("I didn't find any text or supported attachments to process.");
+      return;
+    }
 
     const currentUserMessage: ConversationMessage = {
       role: 'user',
-      content: buildUserContentParts(message),
-      ...(sanitizedAuthorName ? { name: sanitizedAuthorName } : {}),
+      content: userContentParts,
     };
 
     let inputMessages: ConversationMessage[] = [];
@@ -439,7 +452,8 @@ module.exports = {
 
       let response = (await openai.responses.create(requestPayload as ResponseCreateParams)) as ResponseLike;
 
-      response = await resolveToolCalls(response, message);
+      const toolResult = await resolveToolCalls(response, message);
+      response = toolResult.response;
 
       const finalText = extractResponseText(response);
 
@@ -448,6 +462,8 @@ module.exports = {
         for (const chunk of splitMessage(finalText)) {
           await message.reply(chunk);
         }
+      } else if (toolResult.ranCustomTool) {
+        logger.info('Custom tool handled the response; no additional assistant message returned.');
       } else {
         logger.warn('OpenAI returned an empty response.');
         await message.reply("I'm not sure how to respond to that.");
