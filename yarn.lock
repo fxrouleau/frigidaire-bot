@@ -718,6 +718,7 @@ __metadata:
     dotenv: "npm:^16.4.7"
     lefthook: "npm:^1.11.3"
     nodemon: "npm:^3.1.9"
+    openai: "npm:^6.1.0"
     ts-node: "npm:^10.9.2"
     typescript: "npm:^5.8.2"
   languageName: unknown
@@ -1300,6 +1301,23 @@ __metadata:
   version: 3.0.0
   resolution: "normalize-path@npm:3.0.0"
   checksum: 10c0/e008c8142bcc335b5e38cf0d63cfd39d6cf2d97480af9abdbe9a439221fd4d749763bab492a8ee708ce7a194bb00c9da6d0a115018672310850489137b3da046
+  languageName: node
+  linkType: hard
+
+"openai@npm:^6.1.0":
+  version: 6.1.0
+  resolution: "openai@npm:6.1.0"
+  peerDependencies:
+    ws: ^8.18.0
+    zod: ^3.25 || ^4.0
+  peerDependenciesMeta:
+    ws:
+      optional: true
+    zod:
+      optional: true
+  bin:
+    openai: bin/cli
+  checksum: 10c0/770808d8afbbe084691e65738fc2cbd02f816fd0bd7240346ec55b39e4652532d0a30dd0be3bd2593f53c6035968713a4a51ac34ee4fbc9602c03fb0568a1771
   languageName: node
   linkType: hard
 
