@@ -6,7 +6,9 @@ This document provides an analysis of the Frigidaire Bot repository to guide fut
 
 The project is a Discord bot developed in **TypeScript**. It offers two primary functionalities:
 1.  **Twitter/X Link Replacement**: Automatically replaces `twitter.com` or `x.com` links in messages with `fixvx.com` to ensure proper video/image embedding in Discord.
-2.  **OpenAI Chatbot**: The bot can be mentioned (`@Frigidaire Bot`) to engage in a conversation. It uses an OpenAI model to generate responses. When a new conversation is initiated, the bot reads the last 10 messages from the channel to build a contextual understanding. The conversation context is maintained per-channel and resets after 5 minutes of inactivity. Each message in the context includes the user's display name to identify the speaker.
+2.  **OpenAI Integration**: The bot uses OpenAI's `gpt-5-mini` model with a **tool-calling** architecture to determine user intent. When mentioned, it decides whether to perform a standard chat or a specific function.
+    *   **Chat**: For general conversation, the bot reads the last 10 messages to understand the context. This conversation history is stateful and expires after 5 minutes of inactivity.
+    *   **Summarize**: If the user asks for a summary, the bot uses the `summarize_messages` tool. This tool extracts `start_time` and `end_time` from the user's natural language request (e.g., "this morning," "from 2 to 4 pm"). It then fetches all messages within that timeframe (up to one week) and performs a separate OpenAI call to generate a concise summary. This process is stateless.
 
 ### File Structure
 

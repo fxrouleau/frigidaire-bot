@@ -2,7 +2,15 @@
 This is a bot that I've created for personal use on a discord server with friends. It has two main features:
 
 1.  **Twitter/X Link Replacement**: The bot automatically replaces Twitter/X links with `fixvx.com` links to ensure proper embedding in Discord. This is because, at the time of writing, Twitter embeds do not work correctly. The bot uses a webhook to make it look like the user sent the corrected message, as Discord does not allow bots to edit other users' messages directly.
-2.  **OpenAI Integration**: You can mention the bot (`@Frigidaire Bot`) to start a conversation with OpenAI's `gpt-5-mini`. To provide better contextual responses, the bot will read the last 10 messages in the channel when a new conversation begins. The conversation history is shared among all users in the channel and will be maintained for up to 5 minutes of inactivity before being reset.
+2.  **OpenAI Integration**: You can mention the bot (`@Frigidaire Bot`) to interact with it. The bot uses OpenAI's `gpt-5-mini` model to understand your request and can perform two main tasks:
+    *   **Chat**: Engage in a natural conversation. The bot remembers the last 10 messages to understand the context.
+    *   **Summarize**: Ask the bot to summarize the chat history within a specific timeframe (up to a maximum of one week). The bot understands natural language for timeframes.
+        - **Examples**:
+            - `@Frigidaire Bot summarize what happened this morning.`
+            - `@Frigidaire Bot can you summarize the conversation from 3am to 6am today?`
+            - `@Frigidaire Bot give me a summary of yesterday's chat.`
+
+    The conversation history for the chat feature is shared among all users in the channel and will be maintained for up to 5 minutes of inactivity before being reset.
 
 ## Docker Compose
 If you want to just use the bot easily without downloading this repository, you can use the following docker-compose template:
