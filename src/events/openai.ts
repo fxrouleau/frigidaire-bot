@@ -42,6 +42,16 @@ const conversationHistory: {
 const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 /**
+ * Sanitize a string to be a valid OpenAI `name` property.
+ * The `name` property can contain a-z, A-Z, 0-9, and underscores, with a maximum length of 64 characters.
+ * @param name The name to sanitize.
+ * @returns The sanitized name.
+ */
+function sanitizeName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 64);
+}
+
+/**
  * Fetches messages within a given time range and returns a summary.
  */
 async function summarize_messages(message: Message, startTime: string, endTime: string): Promise<string> {
@@ -140,20 +150,23 @@ module.exports = {
         const historicalContext: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [...recentMessages.values()]
           .reverse()
           .filter((msg) => !msg.author.bot || msg.author.id === message.client.user.id)
-          .map((msg) => {
+          .map((msg): OpenAI.Chat.Completions.ChatCompletionMessageParam => {
             const authorName = msg.member?.displayName || msg.author.displayName;
+            const isAssistant = msg.author.id === message.client.user.id;
             return {
-              role: msg.author.id === message.client.user.id ? 'assistant' : 'user',
-              content: `${authorName}: ${msg.content}`,
+              role: isAssistant ? 'assistant' : 'user',
+              content: msg.content,
+              ...(isAssistant ? {} : { name: sanitizeName(authorName) }),
             };
           });
 
+        const botName = message.client.user.displayName;
         conversationHistory[channelId] = {
           timestamp: now,
           history: [
             {
               role: 'system',
-              content: `You are a helpful assistant in a Discord channel. Your primary function is to chat. ONLY use the 'summarize_messages' tool if the user explicitly asks for a summary of the conversation. For all other questions or conversations, respond directly as a standard chatbot. The current time is ${new Date().toISOString()}`,
+              content: `You are ${botName}, a helpful assistant in a Discord channel. Your primary function is to chat. Be conversational and concise. Do not offer multiple versions of an answer (e.g., "Straight:", "Casual:"). Provide a single, direct response. ONLY use the 'summarize_messages' tool if the user explicitly asks for a summary. For all other questions, respond directly as a standard chatbot. The current time is ${new Date().toISOString()}`,
             },
             ...historicalContext,
           ],
@@ -164,7 +177,8 @@ module.exports = {
       const currentAuthorName = message.member?.displayName || message.author.displayName;
       conversationHistory[channelId].history.push({
         role: 'user',
-        content: `${currentAuthorName}: ${message.content}`,
+        content: message.content,
+        name: sanitizeName(currentAuthorName),
       });
       conversationHistory[channelId].timestamp = now;
 
