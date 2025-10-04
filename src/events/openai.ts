@@ -1,4 +1,4 @@
-import { type Collection, Events, type Message } from 'discord.js';
+import { AttachmentBuilder, type Collection, Events, type Message } from 'discord.js';
 import OpenAI from 'openai';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
@@ -165,11 +165,12 @@ async function generate_image(message: Message, prompt: string): Promise<string>
 
     const imageUrl = response.data?.[0]?.url;
     if (imageUrl) {
+      const attachment = new AttachmentBuilder(imageUrl);
       await message.reply({
-        content: `Here is the image you requested for the prompt: "${prompt}"`,
-        files: [imageUrl],
+        content: 'Here is the image you requested.',
+        files: [attachment],
       });
-      return `The image was generated successfully and sent to the user. The prompt was: "${prompt}".`;
+      return 'The image was generated successfully and sent to the user.';
     }
     return 'I was unable to generate an image for that prompt.';
   } catch (error) {
@@ -245,7 +246,10 @@ module.exports = {
         };
       }
 
-      // Add the new user message (with potential images) to the history
+      // Create a local, mutable copy of the history for this request
+      const localHistory = [...conversationHistory[channelId].history];
+
+      // Add the new user message (with potential images) to the local history
       const currentAuthorName = message.member?.displayName || message.author.displayName;
       const userMessageContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
         { type: 'text', text: message.content },
@@ -259,12 +263,11 @@ module.exports = {
         }
       }
 
-      conversationHistory[channelId].history.push({
+      localHistory.push({
         role: 'user',
         content: userMessageContent,
         name: sanitizeName(currentAuthorName),
       });
-      conversationHistory[channelId].timestamp = now;
 
       try {
         if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
@@ -274,7 +277,7 @@ module.exports = {
         // First API call to determine intent (chat vs. tool)
         const completion = await openai.chat.completions.create({
           model: 'gpt-5-mini',
-          messages: conversationHistory[channelId].history,
+          messages: localHistory,
           tools: tools,
           tool_choice: 'auto',
         });
@@ -284,7 +287,7 @@ module.exports = {
 
         // If the model wants to call a tool
         if (toolCalls) {
-          conversationHistory[channelId].history.push(responseMessage); // Add assistant's tool call message
+          localHistory.push(responseMessage); // Add assistant's tool call message
 
           for (const toolCall of toolCalls) {
             let toolResponse: string;
@@ -321,7 +324,7 @@ module.exports = {
             }
 
             // Add the tool's response to the history for every tool call
-            conversationHistory[channelId].history.push({
+            localHistory.push({
               tool_call_id: toolCall.id,
               role: 'tool',
               content: toolResponse,
@@ -332,12 +335,12 @@ module.exports = {
           logger.info('Sending tool results to OpenAI for final response.');
           const finalCompletion = await openai.chat.completions.create({
             model: 'gpt-5-mini',
-            messages: conversationHistory[channelId].history,
+            messages: localHistory,
           });
 
           const finalResponse = finalCompletion.choices[0].message.content;
           if (finalResponse) {
-            conversationHistory[channelId].history.push({ role: 'assistant', content: finalResponse });
+            localHistory.push({ role: 'assistant', content: finalResponse });
             const chunks = splitMessage(finalResponse);
             for (const chunk of chunks) {
               await message.reply(chunk);
@@ -352,7 +355,7 @@ module.exports = {
           const author = message.member?.displayName || message.author.username;
           if (responseContent) {
             logger.info(`Sending conversational response to ${author}.`);
-            conversationHistory[channelId].history.push({ role: 'assistant', content: responseContent });
+            localHistory.push({ role: 'assistant', content: responseContent });
             const chunks = splitMessage(responseContent);
             for (const chunk of chunks) {
               await message.reply(chunk);
@@ -362,6 +365,12 @@ module.exports = {
             await message.reply("I'm not sure how to respond to that.");
           }
         }
+
+        // Atomically update the shared conversation history
+        conversationHistory[channelId] = {
+          timestamp: Date.now(),
+          history: localHistory,
+        };
       } catch (error) {
         console.error('Error in OpenAI interaction:', error);
         await message.reply('Sorry, I encountered an error while processing your request.');
