@@ -153,7 +153,7 @@ module.exports = {
           history: [
             {
               role: 'system',
-              content: `You are a helpful assistant in a Discord channel. Your primary function is to chat. If the user asks to summarize messages, use the 'summarize_messages' tool. Otherwise, respond as a standard chatbot. The current time is ${new Date().toISOString()}`,
+              content: `You are a helpful assistant in a Discord channel. Your primary function is to chat. ONLY use the 'summarize_messages' tool if the user explicitly asks for a summary of the conversation. For all other questions or conversations, respond directly as a standard chatbot. The current time is ${new Date().toISOString()}`,
             },
             ...historicalContext,
           ],
