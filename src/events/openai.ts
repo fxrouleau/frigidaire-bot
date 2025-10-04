@@ -165,7 +165,7 @@ async function generate_image(message: Message, prompt: string): Promise<string>
 
     const imageUrl = response.data?.[0]?.url;
     if (imageUrl) {
-      const attachment = new AttachmentBuilder(imageUrl);
+      const attachment = new AttachmentBuilder(imageUrl).setName('image.png');
       await message.reply({
         content: 'Here is the image you requested.',
         files: [attachment],
