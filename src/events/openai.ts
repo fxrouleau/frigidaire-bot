@@ -1,4 +1,4 @@
-import { Events, type Message } from 'discord.js';
+import { type Collection, Events, type Message } from 'discord.js';
 import OpenAI from 'openai';
 
 const openai = new OpenAI({
@@ -65,7 +65,10 @@ async function summarize_messages(message: Message, startTime: string, endTime: 
     // Fetch messages in chunks of 100, going backwards in time.
     // We'll fetch a max of 50 chunks (5000 messages) as a safeguard.
     for (let i = 0; i < 50; i++) {
-      const chunk = await message.channel.messages.fetch({ limit: 100, before: lastIdBeforeChunk });
+      const chunk: Collection<string, Message> = await message.channel.messages.fetch({
+        limit: 100,
+        before: lastIdBeforeChunk,
+      });
       if (chunk.size === 0) break;
 
       lastIdBeforeChunk = chunk.lastKey();
@@ -96,7 +99,9 @@ async function summarize_messages(message: Message, startTime: string, endTime: 
 
     const summaryPrompt = `Please provide a concise summary of the key topics and events from the following Discord chat conversation:\n\n---\n${formattedMessages}\n---`;
 
-    await message.channel.sendTyping();
+    if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
+      await message.channel.sendTyping();
+    }
     const summaryCompletion = await openai.chat.completions.create({
       model: 'gpt-5-mini',
       messages: [
@@ -164,7 +169,9 @@ module.exports = {
       conversationHistory[channelId].timestamp = now;
 
       try {
-        await message.channel.sendTyping();
+        if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
+          await message.channel.sendTyping();
+        }
 
         // First API call to determine intent (chat vs. tool)
         const completion = await openai.chat.completions.create({
@@ -182,27 +189,29 @@ module.exports = {
           conversationHistory[channelId].history.push(responseMessage); // Add assistant's tool call message
 
           for (const toolCall of toolCalls) {
-            const functionName = toolCall.function.name;
-            if (functionName === 'summarize_messages') {
-              let functionArgs: { start_time: string; end_time: string };
-              try {
-                functionArgs = JSON.parse(toolCall.function.arguments);
-              } catch (e) {
-                console.error('Failed to parse tool arguments:', e);
-                await message.reply(
-                  'I received invalid parameters from the model and could not proceed. Please try again.',
-                );
-                continue; // Skip to the next tool call
+            if (toolCall.type === 'function') {
+              const functionName = toolCall.function.name;
+              if (functionName === 'summarize_messages') {
+                let functionArgs: { start_time: string; end_time: string };
+                try {
+                  functionArgs = JSON.parse(toolCall.function.arguments);
+                } catch (e) {
+                  console.error('Failed to parse tool arguments:', e);
+                  await message.reply(
+                    'I received invalid parameters from the model and could not proceed. Please try again.',
+                  );
+                  continue; // Skip to the next tool call
+                }
+
+                const summary = await summarize_messages(message, functionArgs.start_time, functionArgs.end_time);
+
+                // Add the tool's response to the history
+                conversationHistory[channelId].history.push({
+                  tool_call_id: toolCall.id,
+                  role: 'tool',
+                  content: summary,
+                });
               }
-
-              const summary = await summarize_messages(message, functionArgs.start_time, functionArgs.end_time);
-
-              // Add the tool's response to the history
-              conversationHistory[channelId].history.push({
-                tool_call_id: toolCall.id,
-                role: 'tool',
-                content: summary,
-              });
             }
           }
 
