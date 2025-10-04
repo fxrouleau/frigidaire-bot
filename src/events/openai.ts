@@ -35,6 +35,23 @@ const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'generate_image',
+      description: 'Generate an image based on a user-provided prompt using DALL-E 3.',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: {
+            type: 'string',
+            description: 'A detailed description of the image to generate.',
+          },
+        },
+        required: ['prompt'],
+      },
+    },
+  },
 ];
 
 // Shared conversation history
@@ -129,6 +146,38 @@ async function summarize_messages(message: Message, startTime: string, endTime: 
   }
 }
 
+/**
+ * Generates an image using DALL-E 3 and sends it to the channel.
+ */
+async function generate_image(message: Message, prompt: string): Promise<string> {
+  logger.info(`Image generation requested with prompt: "${prompt}"`);
+  if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
+    await message.channel.sendTyping();
+  }
+
+  try {
+    const response = await openai.images.generate({
+      model: 'dall-e-3',
+      prompt: prompt,
+      n: 1,
+      size: '1024x1024',
+    });
+
+    const imageUrl = response.data[0].url;
+    if (imageUrl) {
+      await message.reply({
+        content: `Here is the image you requested for the prompt: "${prompt}"`,
+        files: [imageUrl],
+      });
+      return `The image was generated successfully and sent to the user. The prompt was: "${prompt}".`;
+    }
+    return 'I was unable to generate an image for that prompt.';
+  } catch (error) {
+    logger.error('Error in generate_image:', error);
+    return 'An error occurred while generating the image. This may be due to a content policy violation or other issue.';
+  }
+}
+
 module.exports = {
   name: Events.MessageCreate,
   async execute(message: Message) {
@@ -157,10 +206,29 @@ module.exports = {
           .map((msg): OpenAI.Chat.Completions.ChatCompletionMessageParam => {
             const authorName = msg.member?.displayName || msg.author.displayName;
             const isAssistant = msg.author.id === message.client.user.id;
+
+            if (isAssistant) {
+              return {
+                role: 'assistant',
+                content: msg.content,
+              };
+            }
+
+            // For user messages, construct a multi-part content array to support images
+            const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [{ type: 'text', text: msg.content }];
+
+            if (msg.attachments.size > 0) {
+              for (const attachment of msg.attachments.values()) {
+                if (attachment.contentType?.startsWith('image/')) {
+                  content.push({ type: 'image_url', image_url: { url: attachment.url } });
+                }
+              }
+            }
+
             return {
-              role: isAssistant ? 'assistant' : 'user',
-              content: msg.content,
-              ...(isAssistant ? {} : { name: sanitizeName(authorName) }),
+              role: 'user',
+              content,
+              name: sanitizeName(authorName),
             };
           });
 
@@ -170,18 +238,30 @@ module.exports = {
           history: [
             {
               role: 'system',
-              content: `You are ${botName}, a helpful assistant in a Discord channel. Your primary function is to chat. Be conversational and concise. Do not offer multiple versions of an answer (e.g., "Straight:", "Casual:"). Provide a single, direct response. ONLY use the 'summarize_messages' tool if the user explicitly asks for a summary. For all other questions, respond directly as a standard chatbot. The current time is ${new Date().toISOString()}`,
+              content: `You are ${botName}, a helpful assistant in a Discord channel. You can see and process images. Your primary function is to chat. Be conversational and concise. Do not offer multiple versions of an answer (e.g., "Straight:", "Casual:"). Provide a single, direct response. ONLY use the 'summarize_messages' tool if asked for a summary. ONLY use the 'generate_image' tool if asked to create or generate an image. For all other questions, respond directly as a standard chatbot. The current time is ${new Date().toISOString()}`,
             },
             ...historicalContext,
           ],
         };
       }
 
-      // Add the new user message to the history
+      // Add the new user message (with potential images) to the history
       const currentAuthorName = message.member?.displayName || message.author.displayName;
+      const userMessageContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
+        { type: 'text', text: message.content },
+      ];
+
+      if (message.attachments.size > 0) {
+        for (const attachment of message.attachments.values()) {
+          if (attachment.contentType?.startsWith('image/')) {
+            userMessageContent.push({ type: 'image_url', image_url: { url: attachment.url } });
+          }
+        }
+      }
+
       conversationHistory[channelId].history.push({
         role: 'user',
-        content: message.content,
+        content: userMessageContent,
         name: sanitizeName(currentAuthorName),
       });
       conversationHistory[channelId].timestamp = now;
@@ -222,6 +302,16 @@ module.exports = {
                 } catch (e) {
                   logger.error('Failed to parse arguments for summarize_messages:', e);
                   toolResponse = 'Invalid arguments provided for summarization.';
+                }
+                break;
+              }
+              case 'generate_image': {
+                try {
+                  const args = JSON.parse(toolCall.function.arguments);
+                  toolResponse = await generate_image(message, args.prompt);
+                } catch (e) {
+                  logger.error('Failed to parse arguments for generate_image:', e);
+                  toolResponse = 'Invalid arguments provided for image generation.';
                 }
                 break;
               }
