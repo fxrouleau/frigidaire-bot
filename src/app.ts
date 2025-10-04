@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as process from 'node:process';
 import { Client, GatewayIntentBits } from 'discord.js';
 import * as dotenv from 'dotenv';
+import { logger } from './logger';
 
 dotenv.config();
 
@@ -16,7 +17,7 @@ const eventFiles = fs.readdirSync(eventsPath).filter((file) => file.endsWith('.t
 for (const file of eventFiles) {
   // Conditionally skip loading the OpenAI event if the API key is not set
   if (file.startsWith('openai.') && !process.env.OPENAI_API_KEY) {
-    console.log('OpenAI functionality is disabled. Skipping event handler.');
+    logger.info('OpenAI functionality is disabled. Skipping event handler.');
     continue;
   }
 
