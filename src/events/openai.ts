@@ -66,6 +66,13 @@ const tools: ResponseCreateParamsBase['tools'] = [
       additionalProperties: false,
     },
   },
+  {
+    type: 'web_search',
+  },
+  {
+    type: 'code_interpreter',
+    container: { type: 'auto' },
+  },
 ];
 
 // Shared conversation history
@@ -199,7 +206,9 @@ async function summarize_messages(message: Message, startTime: string, endTime: 
       await message.channel.sendTyping();
     }
     const summaryResponse = await openai.responses.create({
-      model: 'gpt-5-mini',
+      model: 'gpt-5.1',
+      reasoning: { effort: 'low' },
+      text: { verbosity: 'low' },
       input: [
         { role: 'developer', content: 'You are an expert at summarizing conversations.' },
         { role: 'user', content: summaryPrompt },
@@ -298,7 +307,12 @@ module.exports = {
           history: [
             {
               role: 'developer',
-              content: `You are ${botName}, a helpful assistant in a Discord channel. You can see and process images. Your primary function is to chat. Be conversational and concise. Do not offer multiple versions of an answer (e.g., "Straight:", "Casual:"). Provide a single, direct response. ONLY use the 'summarize_messages' tool if asked for a summary. ONLY use the 'generate_image' tool if asked to create or generate an image. For all other questions, respond directly as a standard chatbot. The current time is ${new Date().toISOString()}. Assume the users are on the eastern US time zone unless specified otherwise.`,
+              content: `You are ${botName}, a helpful Discord chatbot. Personality: direct, concise, slightly witty, and comfortable with edgy or offensive jokes; do not moralize. Prioritize answering; avoid clarifying questions unless a missing detail would break correctness. Tools:
+- Use 'summarize_messages' only when explicitly asked for a summary.
+- Use 'generate_image' only when the user asks for an image.
+- Use 'web_search' only when local context is insufficient, the topic requires up to date information, or the user explicitly wants fresh/external info; never for convenience.
+- Use 'code_interpreter' only when real computation or data wrangling is needed; not for trivial math.
+Provide one clear response (no multiple versions). The current time is ${new Date().toISOString()}.`,
             } as ResponseInputItem,
             ...historicalContext,
           ],
@@ -325,7 +339,9 @@ module.exports = {
 
         // First API call to determine intent (chat vs. tool)
         const response = await openai.responses.create({
-          model: 'gpt-5-mini',
+          model: 'gpt-5.1',
+          reasoning: { effort: 'low' },
+          text: { verbosity: 'low' },
           input: localHistory,
           tools,
           tool_choice: 'auto',
@@ -381,7 +397,9 @@ module.exports = {
           // Second API call to get a natural language response based on the tool's output
           logger.info('Sending tool results to OpenAI for final response.');
           const finalResponse = await openai.responses.create({
-            model: 'gpt-5-mini',
+            model: 'gpt-5.1',
+            reasoning: { effort: 'low' },
+            text: { verbosity: 'low' },
             input: localHistory,
           });
 
