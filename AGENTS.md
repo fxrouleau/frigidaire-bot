@@ -77,11 +77,3 @@ The repository is structured as follows:
 
 -   **Event-Driven**: The bot's logic is organized around Discord gateway events (e.g., `MessageCreate`). Each event is handled in its own dedicated file within the `src/events/` directory, which promotes modularity and separation of concerns.
 -   **Dynamic Event Loading**: The main `app.ts` file dynamically reads all `.ts` or `.js` files in the `src/events/` directory and registers them as event listeners. This makes adding new event handlers as simple as creating a new file in the directory, without needing to modify the main application file.
-
-### Migration Notes (Responses API)
-
--   **Responses vs Chat Completions**: The OpenAI integration now relies on `client.responses.create` instead of the legacy chat completions endpoint. Inputs are provided as a list of message items (`{ role, content }`) and we pass `previous_response_id` to reuse stored context instead of maintaining our own transcript.
--   **Tool Loop**: The v6.1.0 SDK does not yet expose `responses.submitToolOutputs`. We call the private `_client.post('/responses/{id}/submit_tool_outputs', …)` helper to return results for custom tools (`summarize_messages`, `generate_image`). If the SDK adds first-class support later, replace the helper with the official method.
--   **Built-in Web Search**: Adding `{ type: 'web_search' }` to the `tools` array enables the model to fetch live information. The system prompt advises the model to prefer this tool when users request current events or unknown facts.
--   **Message Formatting**: Discord messages (and attachments) are transformed into the Responses content schema: text becomes `{ type: 'text' }`, images become `{ type: 'image_url' }`. This differs from Chat Completions’ `image_url` part but matches the new API requirements.
--   **State Handling**: We keep per-channel state as the last response ID and timestamp. After 5 minutes we discard it; otherwise we pass `previous_response_id` so OpenAI maintains context server-side. Summaries remain stateless.
