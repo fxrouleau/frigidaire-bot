@@ -7,57 +7,89 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+type InputContentPart =
+  | { type: 'input_text'; text: string }
+  | {
+      type: 'input_image';
+      image_url: string;
+    };
+
+type FunctionCallItem = {
+  type: 'function_call';
+  name: string;
+  arguments?: string;
+  call_id: string;
+};
+
+type FunctionCallOutputItem = {
+  type: 'function_call_output';
+  call_id: string;
+  output: string;
+};
+
+type MessageOutputItem = {
+  type: 'message';
+  role: string;
+  content?: { type: 'output_text'; text: string }[];
+};
+
+type ConversationItem =
+  | {
+      role: 'developer' | 'user' | 'assistant';
+      content: string | InputContentPart[];
+      name?: string;
+    }
+  | FunctionCallItem
+  | FunctionCallOutputItem
+  | MessageOutputItem;
+
 // Defines the tools the model can use
-const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
+const tools = [
   {
     type: 'function',
-    function: {
-      name: 'summarize_messages',
-      description:
-        "Summarize the messages in the channel within a given timeframe. The user's current time is an ISO 8601 string. The maximum timeframe to summarize is one week.",
-      parameters: {
-        type: 'object',
-        properties: {
-          start_time: {
-            type: 'string',
-            format: 'date-time',
-            description:
-              'The start of the time range for the summary, in ISO 8601 format. E.g., "2025-10-03T03:00:00Z".',
-          },
-          end_time: {
-            type: 'string',
-            format: 'date-time',
-            description:
-              'The end of the time range for the summary, in ISO 8601 format. If the user asks for "today", this should be the current time.',
-          },
+    name: 'summarize_messages',
+    description:
+      "Summarize the messages in the channel within a given timeframe. The user's current time is an ISO 8601 string. The maximum timeframe to summarize is one week.",
+    parameters: {
+      type: 'object',
+      properties: {
+        start_time: {
+          type: 'string',
+          format: 'date-time',
+          description:
+            'The start of the time range for the summary, in ISO 8601 format. E.g., "2025-10-03T03:00:00Z".',
         },
-        required: ['start_time', 'end_time'],
+        end_time: {
+          type: 'string',
+          format: 'date-time',
+          description:
+            'The end of the time range for the summary, in ISO 8601 format. If the user asks for "today", this should be the current time.',
+        },
       },
+      required: ['start_time', 'end_time'],
+      additionalProperties: false,
     },
   },
   {
     type: 'function',
-    function: {
-      name: 'generate_image',
-      description: 'Generate an image based on a user-provided prompt using DALL-E 3.',
-      parameters: {
-        type: 'object',
-        properties: {
-          prompt: {
-            type: 'string',
-            description: 'A detailed description of the image to generate.',
-          },
+    name: 'generate_image',
+    description: 'Generate an image based on a user-provided prompt using DALL-E 3.',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'A detailed description of the image to generate.',
         },
-        required: ['prompt'],
       },
+      required: ['prompt'],
+      additionalProperties: false,
     },
   },
-];
+] as const;
 
 // Shared conversation history
-const conversationHistory: {
-  [key: string]: { timestamp: number; history: OpenAI.Chat.Completions.ChatCompletionMessageParam[] };
-} = {};
+const conversationHistory: Record<string, { timestamp: number; history: ConversationItem[] }> = {};
 const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 /**
@@ -68,6 +100,57 @@ const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
  */
 function sanitizeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 64);
+}
+
+function buildContentParts(msg: Message): InputContentPart[] {
+  const contentParts: InputContentPart[] = [];
+
+  const trimmed = msg.content?.trim();
+  if (trimmed) {
+    contentParts.push({ type: 'input_text', text: trimmed });
+  }
+
+  if (msg.attachments.size > 0) {
+    for (const attachment of msg.attachments.values()) {
+      if (attachment.contentType?.startsWith('image/') && attachment.url) {
+        contentParts.push({ type: 'input_image', image_url: attachment.url });
+      }
+    }
+  }
+
+  return contentParts;
+}
+
+function extractResponseText(response: any): string | undefined {
+  if (typeof response?.output_text === 'string' && response.output_text.trim().length > 0) {
+    return response.output_text.trim();
+  }
+
+  if (Array.isArray(response?.output)) {
+    for (const item of response.output) {
+      if (item?.type === 'message' && Array.isArray(item.content)) {
+        const textPart = item.content.find(
+          (part: any) => part?.type === 'output_text' && typeof part?.text === 'string',
+        );
+        if (textPart) {
+          return textPart.text;
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function ensureTextContent(parts: InputContentPart[]): InputContentPart[] {
+  if (parts.length === 0) {
+    return [{ type: 'input_text', text: '' }];
+  }
+  return parts;
+}
+
+function isFunctionCall(item: any): item is FunctionCallItem {
+  return item?.type === 'function_call' && typeof item?.name === 'string';
 }
 
 /**
@@ -131,15 +214,15 @@ async function summarize_messages(message: Message, startTime: string, endTime: 
     if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
       await message.channel.sendTyping();
     }
-    const summaryCompletion = await openai.chat.completions.create({
+    const summaryResponse = await openai.responses.create({
       model: 'gpt-5-mini',
-      messages: [
-        { role: 'system', content: 'You are an expert at summarizing conversations.' },
+      input: [
+        { role: 'developer', content: 'You are an expert at summarizing conversations.' },
         { role: 'user', content: summaryPrompt },
       ],
     });
 
-    return summaryCompletion.choices[0].message.content || 'I was unable to generate a summary.';
+    return extractResponseText(summaryResponse) || 'I was unable to generate a summary.';
   } catch (error) {
     console.error('Error in summarize_messages:', error);
     return 'An error occurred while trying to summarize the messages.';
@@ -201,10 +284,10 @@ module.exports = {
       // Initialize conversation history if it doesn't exist or has expired
       if (!conversationHistory[channelId] || now - conversationHistory[channelId].timestamp > CONVERSATION_TIMEOUT) {
         const recentMessages = await message.channel.messages.fetch({ limit: 10, before: message.id });
-        const historicalContext: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [...recentMessages.values()]
+        const historicalContext: ConversationItem[] = [...recentMessages.values()]
           .reverse()
           .filter((msg) => !msg.author.bot || msg.author.id === message.client.user.id)
-          .map((msg): OpenAI.Chat.Completions.ChatCompletionMessageParam => {
+          .map((msg) => {
             const authorName = msg.member?.displayName || msg.author.displayName;
             const isAssistant = msg.author.id === message.client.user.id;
 
@@ -216,15 +299,7 @@ module.exports = {
             }
 
             // For user messages, construct a multi-part content array to support images
-            const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [{ type: 'text', text: msg.content }];
-
-            if (msg.attachments.size > 0) {
-              for (const attachment of msg.attachments.values()) {
-                if (attachment.contentType?.startsWith('image/')) {
-                  content.push({ type: 'image_url', image_url: { url: attachment.url } });
-                }
-              }
-            }
+            const content = ensureTextContent(buildContentParts(msg));
 
             return {
               role: 'user',
@@ -238,7 +313,7 @@ module.exports = {
           timestamp: now,
           history: [
             {
-              role: 'system',
+              role: 'developer',
               content: `You are ${botName}, a helpful assistant in a Discord channel. You can see and process images. Your primary function is to chat. Be conversational and concise. Do not offer multiple versions of an answer (e.g., "Straight:", "Casual:"). Provide a single, direct response. ONLY use the 'summarize_messages' tool if asked for a summary. ONLY use the 'generate_image' tool if asked to create or generate an image. For all other questions, respond directly as a standard chatbot. The current time is ${new Date().toISOString()}`,
             },
             ...historicalContext,
@@ -251,17 +326,7 @@ module.exports = {
 
       // Add the new user message (with potential images) to the local history
       const currentAuthorName = message.member?.displayName || message.author.displayName;
-      const userMessageContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
-        { type: 'text', text: message.content },
-      ];
-
-      if (message.attachments.size > 0) {
-        for (const attachment of message.attachments.values()) {
-          if (attachment.contentType?.startsWith('image/')) {
-            userMessageContent.push({ type: 'image_url', image_url: { url: attachment.url } });
-          }
-        }
-      }
+      const userMessageContent = ensureTextContent(buildContentParts(message));
 
       localHistory.push({
         role: 'user',
@@ -275,32 +340,29 @@ module.exports = {
         }
 
         // First API call to determine intent (chat vs. tool)
-        const completion = await openai.chat.completions.create({
+        const response = await openai.responses.create({
           model: 'gpt-5-mini',
-          messages: localHistory,
-          tools: tools,
+          input: localHistory as any,
+          tools: tools as any,
           tool_choice: 'auto',
         });
 
-        const responseMessage = completion.choices[0].message;
-        const toolCalls = responseMessage.tool_calls;
+        const toolCalls = (response.output ?? []).filter(isFunctionCall);
 
         // If the model wants to call a tool
-        if (toolCalls) {
-          localHistory.push(responseMessage); // Add assistant's tool call message
+        if (toolCalls.length > 0) {
+          localHistory.push(...(response.output ?? [])); // Add assistant's tool call message(s)
 
           for (const toolCall of toolCalls) {
             let toolResponse: string;
-            if (toolCall.type !== 'function') continue;
-
-            const functionName = toolCall.function.name;
+            const functionName = toolCall.name;
             const author = message.member?.displayName || message.author.username;
             logger.info(`Tool ${functionName} called by ${author}.`);
 
             switch (functionName) {
               case 'summarize_messages': {
                 try {
-                  const args = JSON.parse(toolCall.function.arguments);
+                  const args = JSON.parse(toolCall.arguments || '{}');
                   toolResponse = await summarize_messages(message, args.start_time, args.end_time);
                 } catch (e) {
                   logger.error('Failed to parse arguments for summarize_messages:', e);
@@ -310,7 +372,7 @@ module.exports = {
               }
               case 'generate_image': {
                 try {
-                  const args = JSON.parse(toolCall.function.arguments);
+                  const args = JSON.parse(toolCall.arguments || '{}');
                   toolResponse = await generate_image(message, args.prompt);
                 } catch (e) {
                   logger.error('Failed to parse arguments for generate_image:', e);
@@ -325,23 +387,23 @@ module.exports = {
 
             // Add the tool's response to the history for every tool call
             localHistory.push({
-              tool_call_id: toolCall.id,
-              role: 'tool',
-              content: toolResponse,
+              type: 'function_call_output',
+              call_id: toolCall.call_id,
+              output: toolResponse,
             });
           }
 
           // Second API call to get a natural language response based on the tool's output
           logger.info('Sending tool results to OpenAI for final response.');
-          const finalCompletion = await openai.chat.completions.create({
+          const finalResponse = await openai.responses.create({
             model: 'gpt-5-mini',
-            messages: localHistory,
+            input: localHistory as any,
           });
 
-          const finalResponse = finalCompletion.choices[0].message.content;
-          if (finalResponse) {
-            localHistory.push({ role: 'assistant', content: finalResponse });
-            const chunks = splitMessage(finalResponse);
+          const finalMessage = extractResponseText(finalResponse);
+          if (finalMessage) {
+            localHistory.push(...(finalResponse.output ?? []));
+            const chunks = splitMessage(finalMessage);
             for (const chunk of chunks) {
               await message.reply(chunk);
             }
@@ -351,11 +413,11 @@ module.exports = {
           }
         } else {
           // If the model decides to chat directly
-          const responseContent = responseMessage.content;
+          const responseContent = extractResponseText(response);
           const author = message.member?.displayName || message.author.username;
           if (responseContent) {
             logger.info(`Sending conversational response to ${author}.`);
-            localHistory.push({ role: 'assistant', content: responseContent });
+            localHistory.push(...(response.output ?? []));
             const chunks = splitMessage(responseContent);
             for (const chunk of chunks) {
               await message.reply(chunk);
