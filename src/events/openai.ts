@@ -3,14 +3,13 @@ import OpenAI from 'openai';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 
-type MessageContentPart =
-  | { type: 'input_text'; text: string }
-  | { type: 'input_image'; image_url: string; detail?: 'low' | 'high' | 'auto' };
+type MessageContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
 
-type ConversationMessage = {
-  role: 'user' | 'assistant' | 'system' | 'developer';
-  content: string | MessageContentPart[];
-};
+type ConversationMessage =
+  | { role: 'system'; content: string }
+  | { role: 'assistant'; content: string }
+  | { role: 'user'; content: MessageContentPart[]; name?: string }
+  | { role: 'tool'; content: string; tool_call_id: string };
 
 type FunctionToolDefinition = {
   type: 'function';
@@ -125,17 +124,23 @@ function buildSystemInstructions(botName: string): string {
   return `You are ${botName}, a helpful assistant in a Discord channel. Be conversational, concise, and friendly. You can see and process images. Use the summarize_messages tool only when the user explicitly asks for a summary. Use the generate_image tool only when the user asks to create or generate an image. Use the web_search tool when the user asks for up-to-date information or when you need external knowledge beyond your training data. For all other situations, respond directly without calling tools. The current time is ${new Date().toISOString()}.`;
 }
 
+/**
+ * Sanitize a string to be a valid OpenAI `name` property.
+ * The `name` property can contain a-z, A-Z, 0-9, and underscores, with a maximum length of 64 characters.
+ * @param name The name to sanitize.
+ * @returns The sanitized name.
+ */
+function sanitizeName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 64);
+}
+
 function buildUserContentParts(msg: Message): MessageContentPart[] {
-  const content: MessageContentPart[] = [];
-  const text = msg.content.trim();
-  if (text.length > 0) {
-    content.push({ type: 'input_text', text });
-  }
+  const content: MessageContentPart[] = [{ type: 'text', text: msg.content }];
 
   if (msg.attachments.size > 0) {
     for (const attachment of msg.attachments.values()) {
       if (attachment.contentType?.startsWith('image/')) {
-        content.push({ type: 'input_image', image_url: attachment.url, detail: 'auto' });
+        content.push({ type: 'image_url', image_url: { url: attachment.url } });
       }
     }
   }
@@ -155,13 +160,12 @@ function toConversationMessage(msg: Message, botId: string): ConversationMessage
     };
   }
 
-  const userContent = buildUserContentParts(msg);
-  if (userContent.length === 0) {
-    return null;
-  }
+  const authorName = msg.member?.displayName || msg.author.displayName || msg.author.username;
+  const sanitized = sanitizeName(authorName);
   return {
     role: 'user',
-    content: userContent,
+    content: buildUserContentParts(msg),
+    ...(sanitized ? { name: sanitized } : {}),
   };
 }
 
@@ -390,15 +394,14 @@ module.exports = {
     const isStateValid = existingState?.responseId && now - existingState.timestamp <= CONVERSATION_TIMEOUT;
     const previousResponseId = isStateValid ? (existingState?.responseId ?? undefined) : undefined;
 
-    const userContentParts = buildUserContentParts(message);
-    if (userContentParts.length === 0) {
-      await message.reply("I didn't find any text or supported attachments to process.");
-      return;
-    }
+    const sanitizedAuthorName = sanitizeName(
+      message.member?.displayName || message.author.displayName || message.author.username,
+    );
 
     const currentUserMessage: ConversationMessage = {
       role: 'user',
-      content: userContentParts,
+      content: buildUserContentParts(message),
+      ...(sanitizedAuthorName ? { name: sanitizedAuthorName } : {}),
     };
 
     let inputMessages: ConversationMessage[] = [];
