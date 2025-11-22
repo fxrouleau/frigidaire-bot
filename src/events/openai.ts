@@ -35,13 +35,11 @@ type ResponseOutputItem = {
 };
 
 type ToolCall = {
-  id?: string;
-  call_id?: string;
+  id: string;
   type: string;
   function?: {
     name: string;
     arguments: string;
-    call_id?: string;
   };
 };
 
@@ -196,14 +194,8 @@ async function submitToolOutputs(responseId: string, toolOutputs: ToolOutput[]):
   return rawResponse;
 }
 
-type ToolResolutionResult = {
-  response: ResponseLike;
-  ranCustomTool: boolean;
-};
-
-async function resolveToolCalls(initialResponse: ResponseLike, message: Message): Promise<ToolResolutionResult> {
+async function resolveToolCalls(initialResponse: ResponseLike, message: Message): Promise<ResponseLike> {
   let response = initialResponse;
-  let ranCustomTool = false;
 
   while (
     response.status === 'requires_action' &&
@@ -220,13 +212,6 @@ async function resolveToolCalls(initialResponse: ResponseLike, message: Message)
       }
 
       const { name, arguments: rawArgs } = toolCall.function;
-      const toolCallId = toolCall.call_id || toolCall.function.call_id || toolCall.id;
-
-      if (!toolCallId) {
-        logger.error('Tool call missing call_id; cannot submit output.');
-        continue;
-      }
-
       const author = message.member?.displayName || message.author.username;
       logger.info(`Tool ${name} called by ${author}.`);
 
@@ -254,10 +239,9 @@ async function resolveToolCalls(initialResponse: ResponseLike, message: Message)
       }
 
       toolOutputs.push({
-        tool_call_id: toolCallId,
+        tool_call_id: toolCall.id,
         output: toolResponse,
       });
-      ranCustomTool = true;
     }
 
     if (toolOutputs.length === 0) {
@@ -268,7 +252,7 @@ async function resolveToolCalls(initialResponse: ResponseLike, message: Message)
     response = await submitToolOutputs(response.id, toolOutputs);
   }
 
-  return { response, ranCustomTool };
+  return response;
 }
 
 /**
@@ -452,8 +436,7 @@ module.exports = {
 
       let response = (await openai.responses.create(requestPayload as ResponseCreateParams)) as ResponseLike;
 
-      const toolResult = await resolveToolCalls(response, message);
-      response = toolResult.response;
+      response = await resolveToolCalls(response, message);
 
       const finalText = extractResponseText(response);
 
@@ -462,8 +445,6 @@ module.exports = {
         for (const chunk of splitMessage(finalText)) {
           await message.reply(chunk);
         }
-      } else if (toolResult.ranCustomTool) {
-        logger.info('Custom tool handled the response; no additional assistant message returned.');
       } else {
         logger.warn('OpenAI returned an empty response.');
         await message.reply("I'm not sure how to respond to that.");
