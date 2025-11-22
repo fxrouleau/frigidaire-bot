@@ -1,5 +1,11 @@
 import { AttachmentBuilder, type Collection, Events, type Message } from 'discord.js';
 import OpenAI from 'openai';
+import type {
+  ResponseOutputItem as OpenAIResponseOutputItem,
+  Response,
+  ResponseCreateParamsBase,
+  ResponseInputItem,
+} from 'openai/resources/responses/responses';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 
@@ -14,50 +20,23 @@ type InputContentPart =
       image_url: string;
     };
 
-type FunctionCallItem = {
-  type: 'function_call';
-  name: string;
-  arguments?: string;
-  call_id: string;
-};
-
-type FunctionCallOutputItem = {
-  type: 'function_call_output';
-  call_id: string;
-  output: string;
-};
-
-type MessageOutputItem = {
-  type: 'message';
-  role: string;
-  content?: { type: 'output_text'; text: string }[];
-};
-
-type ConversationItem =
-  | {
-      role: 'developer' | 'user' | 'assistant';
-      content: string | InputContentPart[];
-      name?: string;
-    }
-  | FunctionCallItem
-  | FunctionCallOutputItem
-  | MessageOutputItem;
+type ConversationItem = ResponseInputItem | OpenAIResponseOutputItem;
 
 // Defines the tools the model can use
-const tools = [
+const tools: ResponseCreateParamsBase['tools'] = [
   {
     type: 'function',
     name: 'summarize_messages',
     description:
       "Summarize the messages in the channel within a given timeframe. The user's current time is an ISO 8601 string. The maximum timeframe to summarize is one week.",
+    strict: true,
     parameters: {
       type: 'object',
       properties: {
         start_time: {
           type: 'string',
           format: 'date-time',
-          description:
-            'The start of the time range for the summary, in ISO 8601 format. E.g., "2025-10-03T03:00:00Z".',
+          description: 'The start of the time range for the summary, in ISO 8601 format. E.g., "2025-10-03T03:00:00Z".',
         },
         end_time: {
           type: 'string',
@@ -74,6 +53,7 @@ const tools = [
     type: 'function',
     name: 'generate_image',
     description: 'Generate an image based on a user-provided prompt using DALL-E 3.',
+    strict: true,
     parameters: {
       type: 'object',
       properties: {
@@ -86,7 +66,14 @@ const tools = [
       additionalProperties: false,
     },
   },
-] as const;
+  {
+    type: 'web_search',
+  },
+  {
+    type: 'code_interpreter',
+    container: { type: 'auto' },
+  },
+];
 
 // Shared conversation history
 const conversationHistory: Record<string, { timestamp: number; history: ConversationItem[] }> = {};
@@ -121,17 +108,19 @@ function buildContentParts(msg: Message): InputContentPart[] {
   return contentParts;
 }
 
-function extractResponseText(response: any): string | undefined {
-  if (typeof response?.output_text === 'string' && response.output_text.trim().length > 0) {
+function extractResponseText(response: { output_text?: string; output?: OpenAIResponseOutputItem[] }):
+  | string
+  | undefined {
+  if (typeof response.output_text === 'string' && response.output_text.trim().length > 0) {
     return response.output_text.trim();
   }
 
-  if (Array.isArray(response?.output)) {
+  if (Array.isArray(response.output)) {
     for (const item of response.output) {
-      if (item?.type === 'message' && Array.isArray(item.content)) {
+      if (item.type === 'message' && Array.isArray(item.content)) {
         const textPart = item.content.find(
-          (part: any) => part?.type === 'output_text' && typeof part?.text === 'string',
-        );
+          (part) => part?.type === 'output_text' && typeof (part as { text?: string }).text === 'string',
+        ) as { text?: string } | undefined;
         if (textPart) {
           return textPart.text;
         }
@@ -149,8 +138,10 @@ function ensureTextContent(parts: InputContentPart[]): InputContentPart[] {
   return parts;
 }
 
-function isFunctionCall(item: any): item is FunctionCallItem {
-  return item?.type === 'function_call' && typeof item?.name === 'string';
+function isFunctionCall(
+  item: OpenAIResponseOutputItem,
+): item is Extract<OpenAIResponseOutputItem, { type: 'function_call' }> {
+  return item.type === 'function_call' && typeof (item as { name?: unknown }).name === 'string';
 }
 
 /**
@@ -215,7 +206,9 @@ async function summarize_messages(message: Message, startTime: string, endTime: 
       await message.channel.sendTyping();
     }
     const summaryResponse = await openai.responses.create({
-      model: 'gpt-5-mini',
+      model: 'gpt-5.1',
+      reasoning: { effort: 'low' },
+      text: { verbosity: 'low' },
       input: [
         { role: 'developer', content: 'You are an expert at summarizing conversations.' },
         { role: 'user', content: summaryPrompt },
@@ -295,7 +288,7 @@ module.exports = {
               return {
                 role: 'assistant',
                 content: msg.content,
-              };
+              } as ResponseInputItem;
             }
 
             // For user messages, construct a multi-part content array to support images
@@ -305,7 +298,7 @@ module.exports = {
               role: 'user',
               content,
               name: sanitizeName(authorName),
-            };
+            } as ResponseInputItem;
           });
 
         const botName = message.client.user.displayName;
@@ -314,8 +307,13 @@ module.exports = {
           history: [
             {
               role: 'developer',
-              content: `You are ${botName}, a helpful assistant in a Discord channel. You can see and process images. Your primary function is to chat. Be conversational and concise. Do not offer multiple versions of an answer (e.g., "Straight:", "Casual:"). Provide a single, direct response. ONLY use the 'summarize_messages' tool if asked for a summary. ONLY use the 'generate_image' tool if asked to create or generate an image. For all other questions, respond directly as a standard chatbot. The current time is ${new Date().toISOString()}`,
-            },
+              content: `You are ${botName}, a helpful Discord chatbot. Personality: direct, concise, slightly witty, and comfortable with edgy or offensive jokes; do not moralize. Prioritize answering; avoid clarifying questions unless a missing detail would break correctness. Tools:
+- Use 'summarize_messages' only when explicitly asked for a summary.
+- Use 'generate_image' only when the user asks for an image.
+- Use 'web_search' only when local context is insufficient, the topic requires up to date information, or the user explicitly wants fresh/external info; never for convenience.
+- Use 'code_interpreter' only when real computation or data wrangling is needed; not for trivial math.
+Provide one clear response (no multiple versions). The current time is ${new Date().toISOString()}.`,
+            } as ResponseInputItem,
             ...historicalContext,
           ],
         };
@@ -332,7 +330,7 @@ module.exports = {
         role: 'user',
         content: userMessageContent,
         name: sanitizeName(currentAuthorName),
-      });
+      } as ResponseInputItem);
 
       try {
         if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
@@ -341,17 +339,20 @@ module.exports = {
 
         // First API call to determine intent (chat vs. tool)
         const response = await openai.responses.create({
-          model: 'gpt-5-mini',
-          input: localHistory as any,
-          tools: tools as any,
+          model: 'gpt-5.1',
+          reasoning: { effort: 'low' },
+          text: { verbosity: 'low' },
+          input: localHistory,
+          tools,
           tool_choice: 'auto',
         });
 
-        const toolCalls = (response.output ?? []).filter(isFunctionCall);
+        const outputItems = (response.output ?? []) as OpenAIResponseOutputItem[];
+        const toolCalls = outputItems.filter(isFunctionCall);
 
         // If the model wants to call a tool
         if (toolCalls.length > 0) {
-          localHistory.push(...(response.output ?? [])); // Add assistant's tool call message(s)
+          localHistory.push(...outputItems); // Add assistant's tool call message(s)
 
           for (const toolCall of toolCalls) {
             let toolResponse: string;
@@ -390,19 +391,22 @@ module.exports = {
               type: 'function_call_output',
               call_id: toolCall.call_id,
               output: toolResponse,
-            });
+            } as ResponseInputItem);
           }
 
           // Second API call to get a natural language response based on the tool's output
           logger.info('Sending tool results to OpenAI for final response.');
           const finalResponse = await openai.responses.create({
-            model: 'gpt-5-mini',
-            input: localHistory as any,
+            model: 'gpt-5.1',
+            reasoning: { effort: 'low' },
+            text: { verbosity: 'low' },
+            input: localHistory,
           });
 
           const finalMessage = extractResponseText(finalResponse);
           if (finalMessage) {
-            localHistory.push(...(finalResponse.output ?? []));
+            const finalOutputItems = (finalResponse.output ?? []) as OpenAIResponseOutputItem[];
+            localHistory.push(...finalOutputItems);
             const chunks = splitMessage(finalMessage);
             for (const chunk of chunks) {
               await message.reply(chunk);
@@ -417,7 +421,7 @@ module.exports = {
           const author = message.member?.displayName || message.author.username;
           if (responseContent) {
             logger.info(`Sending conversational response to ${author}.`);
-            localHistory.push(...(response.output ?? []));
+            localHistory.push(...outputItems);
             const chunks = splitMessage(responseContent);
             for (const chunk of chunks) {
               await message.reply(chunk);
