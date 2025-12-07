@@ -149,6 +149,16 @@ export class OpenAIProvider implements AiProvider {
 
   private normalizeConversationEntry(entry: ConversationEntry): ResponseInputItem {
     if (entry.kind === 'message') {
+      if (entry.role === 'assistant') {
+        const textContent = this.ensureTextContent(entry.content)
+          .map((part) => (part.type === 'text' ? part.text : `[image]: ${part.url}`))
+          .join('\n');
+        return {
+          role: 'assistant',
+          content: textContent,
+        };
+      }
+
       return {
         role: entry.role === 'system' ? 'developer' : entry.role,
         content: this.ensureTextContent(entry.content).map((part) => this.toInputContent(part)),
