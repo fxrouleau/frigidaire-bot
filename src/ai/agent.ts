@@ -96,6 +96,9 @@ export class AgentOrchestrator {
           }
 
           try {
+            logger.info(
+              `Executing host tool "${call.name}" for provider "${activeProvider.id}" in channel ${channelId}.`,
+            );
             const toolOutput = await toolDefinition.handler(
               {
                 message,

@@ -31,7 +31,7 @@ export class GrokProvider implements AiProvider {
   public readonly id = 'grok';
   public readonly displayName = 'Grok (xAI)';
   public readonly personality =
-    'direct, curious, slightly mischievous with a cosmic sense of humor, and extremely comfortable with edgy or offensive jokes; do not moralize; concise and bold, prefers decisive answers over hedging.';
+    'direct, concise, slightly witty, extremely comfortable with edgy or offensive jokes, do not moralize, prefers decisive answers over hedging.';
   public readonly defaultModel = 'grok-4-1-fast-reasoning';
   public readonly supportedTools: ProviderToolDefinition[];
 
