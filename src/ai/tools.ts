@@ -48,7 +48,7 @@ const imageTool: ToolDefinition = {
         description: 'If true, refine the most recently generated image for this channel.',
       },
     },
-    required: ['prompt'],
+    required: ['prompt', 'refine_previous'],
     additionalProperties: false,
   },
   handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
