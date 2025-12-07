@@ -128,8 +128,10 @@ export class GrokProvider implements AiProvider {
 
   private normalizeConversationEntry(entry: ConversationEntry): ResponseInputItem {
     if (entry.kind === 'message') {
+      const role: 'assistant' | 'user' | 'system' =
+        entry.role === 'assistant' ? 'assistant' : entry.role === 'user' ? 'user' : 'system';
       return {
-        role: entry.role === 'system' ? 'developer' : entry.role,
+        role,
         content: this.ensureTextContent(entry.content).map((part) => this.toInputContent(part)),
       };
     }
@@ -143,11 +145,11 @@ export class GrokProvider implements AiProvider {
       };
     }
 
+    // tool_result: represent as a user text message so Grok accepts the role
     return {
-      type: 'function_call_output',
-      call_id: entry.id,
-      output: entry.content,
-    };
+      role: 'user',
+      content: [{ type: 'input_text', text: `Tool ${entry.name} result: ${entry.content}` }],
+    } as unknown as ResponseInputItem;
   }
 
   private toInputContent(part: NormalizedContentPart): InputContentPart {
