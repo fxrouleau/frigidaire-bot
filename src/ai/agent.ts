@@ -16,9 +16,11 @@ export class AgentOrchestrator {
   }
 
   async handleMention(message: Message) {
+    const stopTyping = this.startTypingLoop(message);
     const botName = message.client.user.displayName;
     const provider = getProviderForChannel(message.channel.id);
     if (!provider) {
+      stopTyping();
       await message.reply('No AI provider is configured for this bot.');
       return;
     }
@@ -45,6 +47,7 @@ export class AgentOrchestrator {
         this.store.set(channelId, {
           providerId: provider.id,
           entries: updatedEntries,
+          thoughts: undefined,
           timestamp: Date.now(),
         });
         state = this.store.get(channelId);
@@ -52,6 +55,7 @@ export class AgentOrchestrator {
     }
 
     if (!state) {
+      stopTyping();
       await message.reply('Failed to initialize the conversation state.');
       return;
     }
@@ -62,14 +66,11 @@ export class AgentOrchestrator {
     const workingEntries: ConversationEntry[] = [...state.entries, userEntry];
 
     try {
-      if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
-        await message.channel.sendTyping();
-      }
-
       const firstResponse = await activeProvider.chat({
         messages: workingEntries,
         tools: providerTools,
         toolChoice: 'auto',
+        thoughts: state.thoughts,
       });
 
       workingEntries.push(...firstResponse.outputEntries);
@@ -139,22 +140,34 @@ export class AgentOrchestrator {
           messages: workingEntries,
           tools: providerTools,
           toolChoice: 'none',
+          thoughts: firstResponse.thoughts ?? state.thoughts,
         });
 
         workingEntries.push(...followUp.outputEntries);
         await this.sendReply(followUp.text, message);
-      } else {
-        await this.sendReply(firstResponse.text, message);
+
+        this.store.set(channelId, {
+          providerId: activeProvider.id,
+          entries: workingEntries,
+          thoughts: followUp.thoughts ?? firstResponse.thoughts ?? state.thoughts,
+          timestamp: Date.now(),
+        });
+        return;
       }
+
+      await this.sendReply(firstResponse.text, message);
 
       this.store.set(channelId, {
         providerId: activeProvider.id,
         entries: workingEntries,
+        thoughts: firstResponse.thoughts ?? state.thoughts,
         timestamp: Date.now(),
       });
     } catch (error) {
       logger.error('Error while processing AI response:', error);
       await message.reply('Sorry, I encountered an error while processing your request.');
+    } finally {
+      stopTyping();
     }
   }
 
@@ -218,6 +231,7 @@ export class AgentOrchestrator {
         this.store.set(channelId, {
           providerId: result.provider.id,
           entries: updatedEntries,
+          thoughts: undefined,
           timestamp: Date.now(),
         });
       } else {
@@ -245,14 +259,58 @@ export class AgentOrchestrator {
   }
 
   private buildDeveloperPrompt(botName: string, provider: AiProvider): string {
-    const currentTime = new Date().toISOString();
+    const now = new Date();
+    const tz = 'America/New_York';
+    const currentTimeEt = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: tz,
+      hour12: false,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZoneName: 'short',
+    }).format(now);
+    const toolLines: string[] = [];
+    const toolNames = new Set(provider.supportedTools.map((t) => t.name));
+
+    if (toolNames.has('summarize_messages')) {
+      toolLines.push("- Use 'summarize_messages' only when explicitly asked for a summary.");
+    }
+    if (toolNames.has('generate_image')) {
+      toolLines.push("- Use 'generate_image' only when the user asks for an image.");
+    }
+    if (toolNames.has('web_search')) {
+      if (provider.id === 'gemini') {
+        toolLines.push(
+          "- Use 'web_search' when it would materially improve correctness, freshness, or completeness (Google Search available; free quota).",
+        );
+      } else {
+        toolLines.push(
+          "- Use 'web_search' only when local context is insufficient, the topic requires up-to-date information, or the user explicitly wants fresh/external info; never for convenience.",
+        );
+      }
+    }
+    if (toolNames.has('code_interpreter')) {
+      if (provider.id === 'gemini') {
+        toolLines.push(
+          "- Use 'code_interpreter' freely whenever it helps solve the request accurately or efficiently.",
+        );
+      } else {
+        toolLines.push(
+          "- Use 'code_interpreter' only when real computation or data wrangling is needed; not for trivial math.",
+        );
+      }
+    }
+    if (toolNames.has('switch_provider')) {
+      toolLines.push("- Use 'switch_provider' if the user explicitly asks to change the AI provider/model.");
+    }
+
+    const toolSection = toolLines.length > 0 ? `Tools:\n${toolLines.join('\n')}\n` : '';
+
     return `You are ${botName}, a helpful Discord chatbot. Personality: ${provider.personality}
-Tools:
-- Use 'summarize_messages' only when explicitly asked for a summary.
-- Use 'generate_image' only when the user asks for an image.
-- Use 'web_search' only when local context is insufficient, the topic requires up-to-date information, or the user explicitly wants fresh/external info; never for convenience.
-- Use 'code_interpreter' only when real computation or data wrangling is needed; not for trivial math.
-Provide one clear response (no multiple versions). The current time is ${currentTime}.`;
+${toolSection}Provide one clear response (no multiple versions). The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_York; apply EST/EDT automatically).`;
   }
 
   private buildUserContentParts(msg: Message): NormalizedContentPart[] {
@@ -283,5 +341,36 @@ Provide one clear response (no multiple versions). The current time is ${current
     for (const chunk of chunks) {
       await message.reply(chunk);
     }
+  }
+
+  private startTypingLoop(message: Message): () => void {
+    const channel = message.channel;
+    if (!channel.isTextBased() || !('sendTyping' in channel)) {
+      return () => {};
+    }
+
+    let active = true;
+    let timer: NodeJS.Timeout | undefined;
+
+    const tick = async () => {
+      if (!active) return;
+      try {
+        await channel.sendTyping();
+      } catch (error) {
+        logger.warn('Failed to send typing indicator:', error);
+        active = false;
+        return;
+      }
+      if (active) {
+        timer = setTimeout(tick, 8000);
+      }
+    };
+
+    tick();
+
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
   }
 }

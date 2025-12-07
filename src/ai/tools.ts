@@ -34,7 +34,8 @@ const summarizeTool: ToolDefinition = {
 
 const imageTool: ToolDefinition = {
   name: 'generate_image',
-  description: 'Generate an image based on a user-provided prompt using DALL-E 3.',
+  description:
+    'Generate an image from a prompt. If refine_previous is true, improve the most recently generated image for this channel using the refinement text.',
   parameters: {
     type: 'object',
     properties: {
@@ -42,16 +43,28 @@ const imageTool: ToolDefinition = {
         type: 'string',
         description: 'A detailed description of the image to generate.',
       },
+      refine_previous: {
+        type: 'boolean',
+        description: 'If true, refine the most recently generated image for this channel.',
+      },
     },
     required: ['prompt'],
     additionalProperties: false,
   },
   handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
-    if (!ctx.provider.generateImage) {
-      return 'This provider does not support image generation.';
-    }
     const prompt = String(args.prompt ?? '');
-    return ctx.provider.generateImage(ctx.message, prompt);
+    const refinePrevious = Boolean(args.refine_previous ?? false);
+
+    // Prefer provider-local image generation helper if available (covers providers without server-side images)
+    if (ctx.provider.generateImageLocal) {
+      return ctx.provider.generateImageLocal(ctx.message, prompt, { refinePrevious });
+    }
+
+    if (ctx.provider.generateImage) {
+      return ctx.provider.generateImage(ctx.message, prompt);
+    }
+
+    return 'This provider does not support image generation.';
   },
 };
 

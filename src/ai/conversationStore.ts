@@ -4,6 +4,7 @@ export type ConversationState = {
   providerId: string;
   entries: ConversationEntry[];
   timestamp: number;
+  thoughts?: unknown;
 };
 
 export class ConversationStore {
