@@ -1,5 +1,5 @@
 import * as crypto from 'node:crypto';
-import { AttachmentBuilder, type Message } from 'discord.js';
+import type { Message } from 'discord.js';
 import OpenAI from 'openai';
 import type {
   Response,
@@ -27,18 +27,23 @@ type InputContentPart =
       detail: 'low' | 'high' | 'auto';
     };
 
-export class OpenAIProvider implements AiProvider {
-  public readonly id = 'openai';
-  public readonly displayName = 'OpenAI';
+export class GrokProvider implements AiProvider {
+  public readonly id = 'grok';
+  public readonly displayName = 'Grok (xAI)';
   public readonly personality =
-    'direct, concise, slightly witty, and comfortable with edgy or offensive jokes; do not moralize. Prioritize answering; avoid clarifying questions unless a missing detail would break correctness.';
-  public readonly defaultModel = 'gpt-5.1';
+    'direct, curious, slightly mischievous with a cosmic sense of humor, and extremely comfortable with edgy or offensive jokes; do not moralize; concise and bold, prefers decisive answers over hedging.';
+  public readonly defaultModel = 'grok-4.1-fast-reasoning';
   public readonly supportedTools: ProviderToolDefinition[];
 
   private readonly client: OpenAI;
 
   constructor(config: { apiKey: string }) {
-    this.client = new OpenAI({ apiKey: config.apiKey });
+    this.client = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: 'https://api.x.ai/v1',
+    });
+
+    // Grok supports built-in web search and code interpreter; host handles summarize, image, switch_provider.
     this.supportedTools = [
       ...toolDefinitions.map(
         (tool) =>
@@ -50,8 +55,8 @@ export class OpenAIProvider implements AiProvider {
             hostHandled: true,
           }) satisfies ProviderToolDefinition,
       ),
-      { name: 'web_search', type: 'web_search' },
-      { name: 'code_interpreter', type: 'code_interpreter' },
+      { name: 'web_search', type: 'web_search', hostHandled: false },
+      { name: 'code_interpreter', type: 'code_interpreter', hostHandled: false },
     ];
   }
 
@@ -59,8 +64,9 @@ export class OpenAIProvider implements AiProvider {
     messages: ConversationEntry[];
     tools: ProviderToolDefinition[];
     toolChoice?: 'auto' | 'none';
+    thoughts?: unknown;
   }): Promise<ProviderChatResponse> {
-    const openAiTools: ResponseCreateParamsBase['tools'] = input.tools.map((tool) => {
+    const grokTools: ResponseCreateParamsBase['tools'] = input.tools.map((tool) => {
       if (tool.type === 'function') {
         return {
           type: 'function',
@@ -70,11 +76,9 @@ export class OpenAIProvider implements AiProvider {
           parameters: tool.parameters ?? {},
         };
       }
-
       if (tool.type === 'code_interpreter') {
         return { type: 'code_interpreter', container: { type: 'auto' } };
       }
-
       return { type: 'web_search' };
     });
 
@@ -83,7 +87,7 @@ export class OpenAIProvider implements AiProvider {
       reasoning: { effort: 'low' },
       text: { verbosity: 'low' },
       input: input.messages.map((entry) => this.normalizeConversationEntry(entry)),
-      tools: openAiTools,
+      tools: grokTools,
       tool_choice: input.toolChoice ?? 'auto',
     });
 
@@ -112,39 +116,14 @@ export class OpenAIProvider implements AiProvider {
 
       return this.extractResponseText(summaryResponse) || 'I was unable to generate a summary.';
     } catch (error) {
-      logger.error('Error in summarizeMessages (openai):', error);
+      logger.error('Error in summarizeMessages (grok):', error);
       return 'An error occurred while trying to summarize the messages.';
     }
   }
 
-  async generateImage(message: Message, prompt: string): Promise<string> {
-    logger.info(`Image generation requested with prompt: "${prompt}"`);
-    if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
-      await message.channel.sendTyping();
-    }
-
-    try {
-      const response = await this.client.images.generate({
-        model: 'dall-e-3',
-        prompt,
-        n: 1,
-        size: '1024x1024',
-      });
-
-      const imageUrl = response.data?.[0]?.url;
-      if (imageUrl) {
-        const attachment = new AttachmentBuilder(imageUrl).setName('image.png');
-        await message.reply({
-          content: 'Here is the image you requested.',
-          files: [attachment],
-        });
-        return 'The image was generated successfully and sent to the user.';
-      }
-      return 'I was unable to generate an image for that prompt.';
-    } catch (error) {
-      logger.error('Error in generateImage:', error);
-      return 'An error occurred while generating the image. This may be due to a content policy violation or other issue.';
-    }
+  async generateImageLocal(message: Message, prompt: string, options?: { refinePrevious?: boolean }): Promise<string> {
+    const { generateLocalImage } = await import('../tools/localImageGenerator');
+    return generateLocalImage(message, prompt, { refinePrevious: options?.refinePrevious });
   }
 
   private normalizeConversationEntry(entry: ConversationEntry): ResponseInputItem {
@@ -173,7 +152,7 @@ export class OpenAIProvider implements AiProvider {
 
   private toInputContent(part: NormalizedContentPart): InputContentPart {
     if (part.type === 'image') {
-      return { type: 'input_image', image_url: part.url, detail: 'auto' as const };
+      return { type: 'input_image', image_url: part.url, detail: 'auto' };
     }
     return { type: 'input_text', text: part.text };
   }
@@ -187,18 +166,16 @@ export class OpenAIProvider implements AiProvider {
 
   private parseResponse(response: Response): ProviderChatResponse {
     const outputItems = (response.output ?? []) as ResponseOutputItem[];
-    const toolCalls = this.extractToolCalls(outputItems);
+    const toolCalls = this.extractFunctionToolCalls(outputItems);
     const outputEntries: ConversationEntry[] = [];
 
-    if (toolCalls.length > 0) {
-      for (const call of toolCalls) {
-        outputEntries.push({
-          kind: 'tool_call',
-          id: call.id,
-          name: call.name,
-          arguments: call.arguments,
-        });
-      }
+    for (const call of toolCalls) {
+      outputEntries.push({
+        kind: 'tool_call',
+        id: call.id,
+        name: call.name,
+        arguments: call.arguments,
+      });
     }
 
     const responseText = this.extractResponseText(response);
@@ -210,15 +187,22 @@ export class OpenAIProvider implements AiProvider {
       });
     }
 
+    const extended = response as Response & {
+      encrypted_content?: unknown;
+      reasoning_content?: unknown;
+    };
+    const thoughts = extended.encrypted_content ?? extended.reasoning_content;
+
     return {
       text: responseText,
       toolCalls,
       outputEntries,
+      thoughts,
       raw: response,
     };
   }
 
-  private extractToolCalls(outputItems: ResponseOutputItem[]): ProviderToolCall[] {
+  private extractFunctionToolCalls(outputItems: ResponseOutputItem[]): ProviderToolCall[] {
     return outputItems
       .filter((item) => item.type === 'function_call')
       .map((item) => {

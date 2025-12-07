@@ -1,6 +1,8 @@
 import type { Message } from 'discord.js';
 
-export type NormalizedContentPart = { type: 'text'; text: string } | { type: 'image'; url: string };
+export type NormalizedContentPart =
+  | { type: 'text'; text: string; thoughtSignature?: string }
+  | { type: 'image'; url: string; thoughtSignature?: string };
 
 export type ConversationEntry =
   | {
@@ -14,6 +16,7 @@ export type ConversationEntry =
       id: string;
       name: string;
       arguments: Record<string, unknown>;
+      thoughtSignature?: string;
     }
   | {
       kind: 'tool_result';
@@ -40,12 +43,14 @@ export type ProviderToolCall = {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  thoughtSignature?: string;
 };
 
 export type ProviderChatResponse = {
   text?: string;
   toolCalls: ProviderToolCall[];
   outputEntries: ConversationEntry[];
+  thoughts?: unknown;
   raw?: unknown;
 };
 
@@ -76,7 +81,9 @@ export interface AiProvider {
     messages: ConversationEntry[];
     tools: ProviderToolDefinition[];
     toolChoice?: 'auto' | 'none';
+    thoughts?: unknown;
   }): Promise<ProviderChatResponse>;
   summarizeMessages?(message: Message, startTime: string, endTime: string): Promise<string>;
   generateImage?(message: Message, prompt: string): Promise<string>;
+  generateImageLocal?(message: Message, prompt: string, options?: { refinePrevious?: boolean }): Promise<string>;
 }

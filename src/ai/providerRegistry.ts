@@ -1,5 +1,7 @@
 import * as process from 'node:process';
 import { logger } from '../logger';
+import { GeminiProvider } from './providers/geminiProvider';
+import { GrokProvider } from './providers/grokProvider';
 import { OpenAIProvider } from './providers/openaiProvider';
 import type { AiProvider } from './types';
 
@@ -21,6 +23,30 @@ function ensureProvidersRegistered() {
     );
   } else {
     logger.warn('OPENAI_API_KEY is missing; OpenAI provider will not be registered.');
+  }
+
+  const grokKey = process.env.XAI_API_KEY;
+  if (grokKey) {
+    providers.set(
+      'grok',
+      new GrokProvider({
+        apiKey: grokKey,
+      }),
+    );
+  } else {
+    logger.warn('XAI_API_KEY is missing; Grok provider will not be registered.');
+  }
+
+  const geminiKey = process.env.GOOGLE_GENAI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (geminiKey) {
+    providers.set(
+      'gemini',
+      new GeminiProvider({
+        apiKey: geminiKey,
+      }),
+    );
+  } else {
+    logger.warn('GOOGLE_GENAI_API_KEY/GOOGLE_API_KEY is missing; Gemini provider will not be registered.');
   }
 }
 

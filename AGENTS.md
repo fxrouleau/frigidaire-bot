@@ -73,6 +73,11 @@ The repository is structured as follows:
         yarn check
         ```
 
+### Tooling Notes
+
+- If `yarn install` fails due to cache or permission errors (e.g., EPERM when copying into the Yarn cache), request elevated permissions and rerun with a project-local cache, e.g. `set YARN_CACHE_FOLDER=.yarn\\cache && yarn config set enableGlobalCache false && yarn install`. Do this instead of adding ambient type hacks or skipping installs.
+- After any change (even small ones), run both `yarn build` and `yarn check` before handoff to ensure build, type, and lint health.
+
 ### Key Architectural Patterns
 
 -   **Event-Driven**: The bot's logic is organized around Discord gateway events (e.g., `MessageCreate`). Each event is handled in its own dedicated file within the `src/events/` directory, which promotes modularity and separation of concerns.
