@@ -98,6 +98,23 @@ function buildContentParts(msg: Message): InputContentPart[] {
   return contentParts;
 }
 
+function buildUserContentParts(msg: Message): InputContentPart[] {
+  const authorLabel = msg.member?.displayName || msg.author.username;
+  const trimmed = msg.content?.trim();
+  const baseText = trimmed ? `${authorLabel}: ${trimmed}` : `${authorLabel}:`;
+  const parts: InputContentPart[] = [{ type: 'input_text', text: baseText }];
+
+  if (msg.attachments.size > 0) {
+    for (const attachment of msg.attachments.values()) {
+      if (attachment.contentType?.startsWith('image/') && attachment.url) {
+        parts.push({ type: 'input_image', image_url: attachment.url });
+      }
+    }
+  }
+
+  return ensureTextContent(parts);
+}
+
 function extractResponseText(response: { output_text?: string; output?: OpenAIResponseOutputItem[] }):
   | string
   | undefined {
@@ -271,7 +288,6 @@ module.exports = {
           .reverse()
           .filter((msg) => !msg.author.bot || msg.author.id === message.client.user.id)
           .map((msg) => {
-            const authorName = msg.member?.displayName || msg.author.displayName;
             const isAssistant = msg.author.id === message.client.user.id;
 
             if (isAssistant) {
@@ -282,7 +298,7 @@ module.exports = {
             }
 
             // For user messages, construct a multi-part content array to support images
-            const content = ensureTextContent(buildContentParts(msg));
+            const content = buildUserContentParts(msg);
 
             return {
               role: 'user',
@@ -313,7 +329,7 @@ Provide one clear response (no multiple versions). The current time is ${new Dat
 
       // Add the new user message (with potential images) to the local history
       const currentAuthorName = message.member?.displayName || message.author.displayName;
-      const userMessageContent = ensureTextContent(buildContentParts(message));
+      const userMessageContent = buildUserContentParts(message);
 
       localHistory.push({
         role: 'user',
