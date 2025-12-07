@@ -72,7 +72,7 @@ export class GeminiProvider implements AiProvider {
       .map((t) => ({
         name: t.name,
         description: t.description,
-        parameters: t.parameters as FunctionDeclaration['parameters'],
+        parameters: this.stripAdditionalProperties(t.parameters) as FunctionDeclaration['parameters'],
       }));
 
     const model = client.getGenerativeModel({
@@ -242,5 +242,18 @@ export class GeminiProvider implements AiProvider {
       }
     }
     return { toolCalls: calls, thoughtSignatures };
+  }
+
+  private stripAdditionalProperties<T>(schema: T): T {
+    if (schema === null || typeof schema !== 'object') {
+      return schema;
+    }
+    if (Array.isArray(schema)) {
+      return schema.map((item) => this.stripAdditionalProperties(item)) as unknown as T;
+    }
+    const entries = Object.entries(schema as Record<string, unknown>)
+      .filter(([key]) => key !== 'additionalProperties')
+      .map(([key, value]) => [key, this.stripAdditionalProperties(value)]);
+    return Object.fromEntries(entries) as T;
   }
 }
