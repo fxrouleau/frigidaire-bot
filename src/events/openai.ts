@@ -79,16 +79,6 @@ const tools: ResponseCreateParamsBase['tools'] = [
 const conversationHistory: Record<string, { timestamp: number; history: ConversationItem[] }> = {};
 const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
-/**
- * Sanitize a string to be a valid OpenAI `name` property.
- * The `name` property can contain a-z, A-Z, 0-9, and underscores, with a maximum length of 64 characters.
- * @param name The name to sanitize.
- * @returns The sanitized name.
- */
-function sanitizeName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 64);
-}
-
 function buildContentParts(msg: Message): InputContentPart[] {
   const contentParts: InputContentPart[] = [];
 
@@ -297,7 +287,6 @@ module.exports = {
             return {
               role: 'user',
               content,
-              name: sanitizeName(authorName),
             } as ResponseInputItem;
           });
 
@@ -329,7 +318,6 @@ Provide one clear response (no multiple versions). The current time is ${new Dat
       localHistory.push({
         role: 'user',
         content: userMessageContent,
-        name: sanitizeName(currentAuthorName),
       } as ResponseInputItem);
 
       try {
