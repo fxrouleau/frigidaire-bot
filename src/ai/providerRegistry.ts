@@ -1,7 +1,7 @@
 import * as process from 'node:process';
 import { logger } from '../logger';
-import type { AiProvider } from './types';
 import { OpenAIProvider } from './providers/openaiProvider';
+import type { AiProvider } from './types';
 
 const providers = new Map<string, AiProvider>();
 const channelProviders = new Map<string, string>();
@@ -40,7 +40,10 @@ export function getProviderForChannel(channelId: string): AiProvider | undefined
   return getProvider(providerId);
 }
 
-export function setProviderForChannel(channelId: string, providerId: string): { provider?: AiProvider; error?: string } {
+export function setProviderForChannel(
+  channelId: string,
+  providerId: string,
+): { provider?: AiProvider; error?: string } {
   ensureProvidersRegistered();
   if (!providers.has(providerId)) {
     return { error: `Provider "${providerId}" is not registered.` };

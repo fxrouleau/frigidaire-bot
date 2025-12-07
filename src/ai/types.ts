@@ -77,10 +77,6 @@ export interface AiProvider {
     tools: ProviderToolDefinition[];
     toolChoice?: 'auto' | 'none';
   }): Promise<ProviderChatResponse>;
-  summarizeMessages?(
-    message: Message,
-    startTime: string,
-    endTime: string,
-  ): Promise<string>;
+  summarizeMessages?(message: Message, startTime: string, endTime: string): Promise<string>;
   generateImage?(message: Message, prompt: string): Promise<string>;
 }

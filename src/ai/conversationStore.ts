@@ -1,4 +1,4 @@
-import { ConversationEntry } from './types';
+import type { ConversationEntry } from './types';
 
 export type ConversationState = {
   providerId: string;
