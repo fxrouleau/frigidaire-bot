@@ -31,7 +31,7 @@ export class OpenAIProvider implements AiProvider {
   public readonly id = 'openai';
   public readonly displayName = 'OpenAI';
   public readonly personality =
-    'direct, concise, slightly witty, and comfortable with edgy or offensive jokes; do not moralize. Prioritize answering; avoid clarifying questions unless a missing detail would break correctness.';
+    'direct, concise, slightly witty, and comfortable with edgy or offensive jokes; do not moralize. Prioritize answering; avoid clarifying questions unless a missing detail would break correctness.Slightly zesty.';
   public readonly defaultModel = 'gpt-5.1';
   public readonly supportedTools: ProviderToolDefinition[];
 
