@@ -1,84 +1,116 @@
-## Repository Analysis for Frigidaire Bot
+# Frigidaire Bot
 
-This document provides an analysis of the Frigidaire Bot repository to guide future development and maintenance.
+## Overview
 
-### Project Overview
+A Discord bot built in **TypeScript** with three main features:
 
-The project is a Discord bot developed in **TypeScript**. It offers two primary functionalities:
-1.  **Twitter/X Link Replacement**: Automatically replaces `twitter.com` or `x.com` links in messages with `fixvx.com` to ensure proper video/image embedding in Discord.
-2.  **OpenAI Integration**: The bot uses OpenAI's `gpt-5-mini` model with a **tool-calling** architecture to determine user intent. When mentioned, it decides whether to perform a standard chat or a specific function.
-    *   **Chat**: For general conversation, the bot reads the last 10 messages to understand the context. This conversation history is stateful and expires after 5 minutes of inactivity.
-    *   **Summarize**: If the user asks for a summary, the bot uses the `summarize_messages` tool. This tool extracts `start_time` and `end_time` from the user's natural language request (e.g., "this morning," "from 2 to 4 pm"). It then fetches all messages within that timeframe (up to one week) and performs a separate OpenAI call to generate a concise summary. This process is stateless.
+1. **AI Chat** — Mention the bot to converse. Supports multiple AI providers (OpenAI, Google Gemini, xAI Grok) with tool-calling and provider switching mid-conversation.
+2. **Message Summarization** — Ask the bot to summarize channel history within a timeframe (up to one week). Uses natural language time parsing.
+3. **Link Replacement** — Automatically replaces Twitter/X links with `fixvx.com` and Instagram links with `ddinstagram.com` for proper Discord embedding, using webhooks to preserve the original author's appearance.
 
-### File Structure
+## Tech Stack
 
-The repository is structured as follows:
+- **Runtime**: Node.js v22 LTS
+- **Language**: TypeScript 5.8 (strict mode, target `es2024`, `commonjs` modules)
+- **Package Manager**: Yarn v4 (via Corepack)
+- **Linter/Formatter**: Biome — 120 char line width, 2-space indent, single quotes, trailing commas
+- **Deployment**: Docker (single container)
 
--   `src/`: Contains the main source code.
-    -   `app.ts`: The application's entry point. It initializes the Discord client and dynamically loads all event handlers from the `src/events/` directory.
-    -   `events/`: This directory holds individual files for each Discord event the bot listens to. For example, `twitterRepost.ts` handles the link replacement, and `openai.ts` handles the chatbot functionality.
--   `package.json`: Defines project metadata, dependencies, and scripts.
--   `yarn.lock`: The Yarn lockfile.
--   `tsconfig.json`: Configuration file for the TypeScript compiler.
--   `README.md`: Contains user-facing documentation, setup instructions, and environment variable requirements.
--   `docker-compose.yaml` & `Dockerfile`: For containerized deployment.
+## Project Structure
 
-### Dependencies
+```
+src/
+├── app.ts                          # Entry point — Discord client init, dynamic event loading
+├── logger.ts                       # Timestamp-based console logger (info/warn/error)
+├── utils.ts                        # splitMessage(), repostMessage() helpers
+├── ai/
+│   ├── agent.ts                    # AgentOrchestrator — main conversation handler
+│   ├── conversationStore.ts        # In-memory per-channel state with 5-min timeout
+│   ├── providerRegistry.ts         # AI provider factory & per-channel tracking
+│   ├── tools.ts                    # Tool definitions (summarize, image, switch_provider)
+│   ├── types.ts                    # Core type definitions
+│   ├── providers/
+│   │   ├── openaiProvider.ts       # OpenAI (gpt-5.1)
+│   │   ├── geminiProvider.ts       # Google Gemini (gemini-3.0-pro-preview)
+│   │   └── grokProvider.ts         # xAI Grok (grok-4-1-fast-reasoning)
+│   └── tools/
+│       ├── summary.ts              # Message fetching & summarization prompt builder
+│       └── localImageGenerator.ts  # Gemini-based image generation with per-channel cache
+└── events/
+    ├── openai.ts                   # Bot mention handler → AgentOrchestrator
+    ├── twitterRepost.ts            # Twitter/X link replacement
+    ├── instagramRepost.ts          # Instagram link replacement
+    └── ready.ts                    # Client ready event logger
+```
 
--   **Main Dependencies**:
-    -   `discord.js`: The primary library for interacting with the Discord API.
-    -   `dotenv`: Used to load environment variables from a `.env` file.
-    -   `openai`: The official OpenAI Node.js library for API interactions.
--   **Development Dependencies**:
-    -   `typescript`: For compiling TypeScript to JavaScript.
-    -   `ts-node`: To run TypeScript files directly without pre-compilation.
-    -   `nodemon`: Monitors for file changes and automatically restarts the application during development.
-    -   `@biomejs/biome`: A fast formatter and linter for web projects.
+## Architecture
 
-### Development Workflow
+### Event-Driven Design
+- `app.ts` dynamically loads all `.ts`/`.js` files from `src/events/` as Discord event handlers
+- Each event file exports `{ name, once?, execute(...args) }`
+- Adding a new handler = creating a new file in `src/events/`, no changes to `app.ts` needed
 
-1.  **Environment Setup**:
-    -   The project requires **Node.js v22 LTS** and **Yarn v4**.
-    -   Yarn version is managed by **Corepack**. Before first use, enable it by running:
-        ```bash
-        corepack enable
-        ```
-    -   Install dependencies with:
-        ```bash
-        yarn install
-        ```
-    -   Create a `.env` file in the root directory with the following variables:
-        ```
-        CLIENT_SECRET=your_discord_bot_token
-        OPENAI_API_KEY=your_openai_api_key
-        ```
+### Multi-Provider AI System
+- **`AiProvider` interface**: `id`, `displayName`, `personality`, `defaultModel`, `chat()`, optional `summarizeMessages()`, `generateImage()`, `generateImageLocal()`
+- **Provider Registry**: Central store with per-channel provider tracking
+- **Tool architecture**: Providers expose tool definitions; the orchestrator handles "host" tools (summarize, switch_provider) and delegates provider-specific tools
+- **Conversation flow**: Mention → fetch/create state → build history with system prompt → LLM call with tools → execute host tools → follow-up LLM call without tools → store state
 
-2.  **Running the Bot**:
-    -   For development (with hot-reloading):
-        ```bash
-        yarn dev
-        ```
-    -   To build for production:
-        ```bash
-        yarn build
-        ```
-    -   To run the production build:
-        ```bash
-        yarn prod
-        ```
+### Conversation Management
+- `ConversationStore`: In-memory, per-channel, auto-expires after 5 minutes of inactivity
+- Fetches last 10 messages on initial mention for context
+- State preserved across provider switches
 
-3.  **Code Quality**:
-    -   The project uses **Biome** for code formatting and linting. To check and fix files, run:
-        ```bash
-        yarn check
-        ```
+### Key Types
+- `NormalizedContentPart`: `{ type: 'text', text } | { type: 'image', url }`
+- `ConversationEntry`: `message | tool_call | tool_result`
+- `ProviderToolDefinition` / `ProviderToolCall` / `ToolDefinition` / `ToolHandlerContext`
 
-### Tooling Notes
+## Commands
 
-- If `yarn install` fails due to cache or permission errors (e.g., EPERM when copying into the Yarn cache), request elevated permissions and rerun with a project-local cache, e.g. `set YARN_CACHE_FOLDER=.yarn\\cache && yarn config set enableGlobalCache false && yarn install`. Do this instead of adding ambient type hacks or skipping installs.
-- After any change (even small ones), run both `yarn build` and `yarn check` before handoff to ensure build, type, and lint health.
+```bash
+corepack enable          # Enable Yarn via Corepack (first time only)
+yarn install             # Install dependencies
+yarn dev                 # Development with hot-reload (nodemon + ts-node)
+yarn build               # Compile TypeScript to ./dist
+yarn prod                # Run production build from dist/app.js
+yarn check               # Run Biome formatter + linter with auto-fix
+```
 
-### Key Architectural Patterns
+**After any change, run both `yarn build` and `yarn check` before handoff** to ensure build, type, and lint health.
 
--   **Event-Driven**: The bot's logic is organized around Discord gateway events (e.g., `MessageCreate`). Each event is handled in its own dedicated file within the `src/events/` directory, which promotes modularity and separation of concerns.
--   **Dynamic Event Loading**: The main `app.ts` file dynamically reads all `.ts` or `.js` files in the `src/events/` directory and registers them as event listeners. This makes adding new event handlers as simple as creating a new file in the directory, without needing to modify the main application file.
+## Environment Variables
+
+**Required:**
+```
+CLIENT_SECRET=<discord_bot_token>
+OPENAI_API_KEY=<openai_api_key>
+```
+
+**Optional:**
+```
+AI_PROVIDER=openai|gemini|grok     # Default provider (default: openai)
+XAI_API_KEY=<grok_api_key>
+GOOGLE_GENAI_API_KEY=<gemini_key>
+GOOGLE_API_KEY=<alt_gemini_key>
+GEMINI_MODEL=<custom_gemini_model>
+GOOGLE_IMAGE_MODEL=<custom_image_model>
+```
+
+## Conventions
+
+- **No automated tests** — verify changes via `yarn build` and `yarn check`
+- **Biome** handles all formatting and linting; no ESLint/Prettier
+- camelCase for functions/variables, PascalCase for classes/interfaces
+- Strict TypeScript — no `any` types
+- Async/await throughout; `Promise.all()` for parallel operations
+- Error handling returns user-facing error strings rather than throwing
+
+## Tooling Notes
+
+- If `yarn install` fails with EPERM/cache errors, use a project-local cache:
+  ```bash
+  set YARN_CACHE_FOLDER=.yarn\cache && yarn config set enableGlobalCache false && yarn install
+  ```
+- Discord typing indicator loops every 8 seconds during AI processing
+- Each provider maps roles differently (assistant/model, developer/system) — see individual provider files for details
