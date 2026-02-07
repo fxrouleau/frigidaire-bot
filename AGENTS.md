@@ -37,7 +37,7 @@ src/
 │       ├── summary.ts              # Message fetching & summarization prompt builder
 │       └── localImageGenerator.ts  # Gemini-based image generation with per-channel cache
 └── events/
-    ├── openai.ts                   # Bot mention handler → AgentOrchestrator
+    ├── aiChat.ts                   # Bot mention handler → AgentOrchestrator
     ├── twitterRepost.ts            # Twitter/X link replacement
     ├── instagramRepost.ts          # Instagram link replacement
     └── ready.ts                    # Client ready event logger
