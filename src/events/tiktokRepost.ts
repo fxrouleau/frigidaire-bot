@@ -2,11 +2,11 @@ import { type BaseGuildTextChannel, ChannelType, Events, type Message } from 'di
 import { logger } from '../logger';
 import { repostMessage } from '../utils';
 
-const re = /(https?:\/\/(?:www\.)?instagram\.com\/(?:p|reel|tv)\/\S+)/;
+const re = /(https?:\/\/(?:www\.)?(?:vm\.)?tiktok\.com\/\S+)/;
 
 const replaceString = (input: string) => {
   return input.replace(re, (match, p1) => {
-    const replacedDomain = p1.replace(/instagram\.com/, 'zzinstagram.com');
+    const replacedDomain = p1.replace(/tiktok\.com/, 'tnktok.com');
     return match.replace(p1, replacedDomain).replace(/\?.*/, '');
   });
 };
@@ -14,15 +14,13 @@ const replaceString = (input: string) => {
 module.exports = {
   name: Events.MessageCreate,
   async execute(message: Message) {
-    // Quick sanity checks
     if (message.author.bot) return;
     if (message.channel.type !== ChannelType.GuildText) return;
 
-    // Check if the message contains an Instagram link
-    const instagramLink = message.content.match(re);
-    if (instagramLink !== null) {
-      logger.info(`Found instagram link in message ${message.id}. Replacing...`);
-      const newMessage = message.content.replace(instagramLink[0], replaceString(instagramLink[0]));
+    const tiktokLink = message.content.match(re);
+    if (tiktokLink !== null) {
+      logger.info(`Found TikTok link in message ${message.id}. Replacing...`);
+      const newMessage = message.content.replace(tiktokLink[0], replaceString(tiktokLink[0]));
       await repostMessage(message, newMessage);
     }
   },
