@@ -61,6 +61,22 @@ Respond with JSON only: {"respond": true/false, "reason": "brief explanation"}`;
       model: 'anthropic/claude-haiku-4-5',
       max_tokens: 100,
       temperature: 0,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'gate_decision',
+          strict: true,
+          schema: {
+            type: 'object',
+            properties: {
+              respond: { type: 'boolean' },
+              reason: { type: 'string' },
+            },
+            required: ['respond', 'reason'],
+            additionalProperties: false,
+          },
+        },
+      },
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
