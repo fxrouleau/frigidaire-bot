@@ -88,7 +88,10 @@ Respond with JSON only: {"respond": true/false, "reason": "brief explanation"}`;
     const text = response.choices[0]?.message?.content?.trim();
     if (!text) return { shouldRespond: false, reason: 'empty response' };
 
-    const parsed = JSON.parse(text) as { respond: boolean; reason: string };
+    // Strip markdown code blocks if present (fallback for when response_format doesn't work)
+    const jsonText = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
+
+    const parsed = JSON.parse(jsonText) as { respond: boolean; reason: string };
     return { shouldRespond: parsed.respond, reason: parsed.reason };
   } catch (error) {
     logger.warn('Gate classifier error, failing closed:', error);
