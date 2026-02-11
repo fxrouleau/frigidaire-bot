@@ -28,6 +28,16 @@ export async function classifyMessage(message: Message): Promise<GateResult> {
     const botName = message.client.user.displayName;
     const authorName = message.member?.displayName || message.author.username;
 
+    // Pre-filter: If message is ONLY user mentions with minimal/no text, never respond
+    const contentWithoutMentions = message.content.replace(/<@!?\d+>/g, '').trim();
+    if (contentWithoutMentions.length < 3) {
+      return { shouldRespond: false, reason: 'message is just mentions with no content' };
+    }
+
+    // Pre-filter: If message contains user mentions but bot isn't explicitly named, be very skeptical
+    const hasUserMentions = /<@!?\d+>/.test(message.content);
+    const botNameInMessage = message.content.toLowerCase().includes(botName.toLowerCase());
+
     let replyContext = '';
     if (message.reference?.messageId) {
       try {
@@ -40,17 +50,29 @@ export async function classifyMessage(message: Message): Promise<GateResult> {
       }
     }
 
-    const systemPrompt = `You are a gate classifier for a Discord bot named "${botName}". Your job is to decide whether the bot should respond to a message.
+    const systemPrompt = `You are a gate classifier for a Discord bot named "${botName}".
 
-The bot should respond when:
-- The message is a reply to one of the bot's messages
-- The message clearly addresses the bot by name
-- The message is clearly directed at the bot
+Your ONLY job: decide if this SPECIFIC message is trying to get the bot to respond or do something.
 
-The bot should NOT respond when:
-- The message is general chat between users
-- The message mentions the bot's name only in passing
-- The message is a reply to another user's message
+DEFAULT TO FALSE. Be extremely conservative. Only return true if you're 100% certain the user wants the bot to participate in THIS message.
+
+Return TRUE only when:
+- User directly asks the bot a question ("${botName}, what time is it?")
+- User gives the bot a command ("${botName} summarize this convo")
+- User explicitly solicits the bot's input ("hey ${botName}, thoughts?")
+
+Return FALSE when:
+- Message is ONLY an @mention of someone else — NO BOT INVOLVEMENT AT ALL
+- Message is talking ABOUT the bot, not TO it ("the bot is being weird", "why did the bot answer")
+- Message is general chat/banter between users ("lol", "yeah", "ok", "im in")
+- Message is a reply to another user (unless explicitly asking the bot too)
+- User is asking someone else a question
+- The bot's name appears but isn't being addressed ("I used the bot earlier")
+- You have ANY doubt whatsoever — default to FALSE
+
+${hasUserMentions && !botNameInMessage ? 'IMPORTANT: This message contains @mentions of other users but does NOT mention the bot by name. Unless the message is CLEARLY a command/question for the bot, return FALSE.' : ''}
+
+The bot is already triggered by explicit @mentions and replies, so this classifier should ONLY catch natural language directed specifically at the bot without @mentions.
 
 Respond with JSON only: {"respond": true/false, "reason": "brief explanation"}`;
 
@@ -89,7 +111,10 @@ Respond with JSON only: {"respond": true/false, "reason": "brief explanation"}`;
     if (!text) return { shouldRespond: false, reason: 'empty response' };
 
     // Strip markdown code blocks if present (fallback for when response_format doesn't work)
-    const jsonText = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
+    const jsonText = text
+      .replace(/^```(?:json)?\n?/i, '')
+      .replace(/\n?```$/i, '')
+      .trim();
 
     const parsed = JSON.parse(jsonText) as { respond: boolean; reason: string };
     return { shouldRespond: parsed.respond, reason: parsed.reason };
