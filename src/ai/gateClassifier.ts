@@ -23,20 +23,43 @@ function getClient(): OpenAI {
   return client;
 }
 
+/**
+ * Common names/nicknames users might use to address the bot.
+ * Checked case-insensitively with word boundaries against the message content.
+ */
+const BOT_ALIASES = ['frigidaire', 'fridge', 'fridge bot', 'fridgebot', 'bot'];
+
+function contentAddressesBot(content: string, botName: string): boolean {
+  const lower = content.toLowerCase();
+  if (lower.includes(botName.toLowerCase())) return true;
+  return BOT_ALIASES.some((alias) => {
+    // Word-boundary check so "robot", "about", etc. don't match
+    const re = new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    return re.test(content);
+  });
+}
+
 export async function classifyMessage(message: Message): Promise<GateResult> {
   try {
     const botName = message.client.user.displayName;
     const authorName = message.member?.displayName || message.author.username;
 
-    // Pre-filter: If message is ONLY user mentions with minimal/no text, never respond
+    // Strip Discord mentions to get the actual text content
     const contentWithoutMentions = message.content.replace(/<@!?\d+>/g, '').trim();
+
+    // Pre-filter: No real text content -> skip
     if (contentWithoutMentions.length < 3) {
       return { shouldRespond: false, reason: 'message is just mentions with no content' };
     }
 
-    // Pre-filter: If message contains user mentions but bot isn't explicitly named, be very skeptical
+    // Pre-filter: Check if the text addresses the bot by name or nickname
+    const mentionsBot = contentAddressesBot(contentWithoutMentions, botName);
+
+    // If message @mentions other users but doesn't reference the bot at all, bail early
     const hasUserMentions = /<@!?\d+>/.test(message.content);
-    const botNameInMessage = message.content.toLowerCase().includes(botName.toLowerCase());
+    if (hasUserMentions && !mentionsBot) {
+      return { shouldRespond: false, reason: 'mentions other users but not the bot' };
+    }
 
     let replyContext = '';
     if (message.reference?.messageId) {
@@ -44,39 +67,32 @@ export async function classifyMessage(message: Message): Promise<GateResult> {
         const repliedTo = await message.channel.messages.fetch(message.reference.messageId);
         const isBotReply = repliedTo.author.id === message.client.user.id;
         const replyAuthor = repliedTo.member?.displayName || repliedTo.author.username;
-        replyContext = `This message is a reply to a message by ${replyAuthor}${isBotReply ? ' (the bot)' : ''}: "${repliedTo.content.slice(0, 200)}"`;
+        replyContext = `[Reply to ${replyAuthor}${isBotReply ? ' (the bot)' : ''}: "${repliedTo.content.slice(0, 200)}"]`;
       } catch {
         // Couldn't fetch the referenced message, proceed without context
       }
     }
 
-    const systemPrompt = `You are a gate classifier for a Discord bot named "${botName}".
+    const aliasListStr = [botName, ...BOT_ALIASES].map((a) => `"${a}"`).join(', ');
 
-Your ONLY job: decide if this SPECIFIC message is trying to get the bot to respond or do something.
+    const systemPrompt = `You classify whether a Discord message is directed AT a bot named "${botName}" (also called ${aliasListStr}).
 
-DEFAULT TO FALSE. Be extremely conservative. Only return true if you're 100% certain the user wants the bot to participate in THIS message.
+Respond with JSON: {"respond": true/false, "reason": "brief"}
 
-Return TRUE only when:
-- User directly asks the bot a question ("${botName}, what time is it?")
-- User gives the bot a command ("${botName} summarize this convo")
-- User explicitly solicits the bot's input ("hey ${botName}, thoughts?")
+TRUE — the user is talking TO the bot:
+- "bot what time is it" -> true
+- "fridge bot summarize the chat" -> true
+- "hey bot, thoughts?" -> true
 
-Return FALSE when:
-- Message is ONLY an @mention of someone else — NO BOT INVOLVEMENT AT ALL
-- Message is talking ABOUT the bot, not TO it ("the bot is being weird", "why did the bot answer")
-- Message is general chat/banter between users ("lol", "yeah", "ok", "im in")
-- Message is a reply to another user (unless explicitly asking the bot too)
-- User is asking someone else a question
-- The bot's name appears but isn't being addressed ("I used the bot earlier")
-- You have ANY doubt whatsoever — default to FALSE
+FALSE — the user is NOT talking to the bot:
+- "lol the bot is broken" (talking ABOUT it) -> false
+- "yeah I agree" (general chat) -> false
+- "nice one bot" (reaction, not a request) -> false
+- "@someone what do you think" (talking to someone else) -> false
 
-${hasUserMentions && !botNameInMessage ? 'IMPORTANT: This message contains @mentions of other users but does NOT mention the bot by name. Unless the message is CLEARLY a command/question for the bot, return FALSE.' : ''}
+Default to false if unsure.`;
 
-The bot is already triggered by explicit @mentions and replies, so this classifier should ONLY catch natural language directed specifically at the bot without @mentions.
-
-Respond with JSON only: {"respond": true/false, "reason": "brief explanation"}`;
-
-    const userPrompt = `${replyContext ? `${replyContext}\n\n` : ''}Author: ${authorName}\nMessage: ${message.content}`;
+    const userPrompt = `${replyContext ? `${replyContext}\n` : ''}${authorName}: ${message.content}`;
 
     const openai = getClient();
     const response = await openai.chat.completions.create({
