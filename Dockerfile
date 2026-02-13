@@ -16,7 +16,7 @@ WORKDIR /app
 ARG NODE_ENV=production
 
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/package.json /app/yarn.lock /app/.yarnrn.yml ./
+COPY --from=build /app/package.json /app/yarn.lock /app/.yarnrc.yml ./
 COPY --from=build /app/node_modules/better-sqlite3 ./node_modules/better-sqlite3
 
 RUN yarn workspaces focus --production
