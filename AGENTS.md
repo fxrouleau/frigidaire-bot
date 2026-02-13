@@ -12,7 +12,7 @@ A Discord bot built in **TypeScript** with three main features:
 
 - **Runtime**: Node.js v22 LTS
 - **Language**: TypeScript 5.8 (strict mode, target `es2024`, `commonjs` modules)
-- **Package Manager**: Yarn v4 (via Corepack)
+- **Package Manager**: Yarn v4 (via Corepack, node-modules linker)
 - **Linter/Formatter**: Biome — 120 char line width, 2-space indent, single quotes, trailing commas
 - **Deployment**: Docker (single container)
 

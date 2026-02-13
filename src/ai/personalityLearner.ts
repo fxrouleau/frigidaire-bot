@@ -1,6 +1,7 @@
 import * as process from 'node:process';
 import { ChannelType, type Client, type Collection, type Message, type TextChannel } from 'discord.js';
 import OpenAI from 'openai';
+import type { ChatCompletionContentPart } from 'openai/resources/chat/completions';
 import { logger } from '../logger';
 import type { MemoryStore } from './memory/memoryStore';
 
@@ -72,6 +73,8 @@ export class PersonalityLearner {
 
     if (channelsToProcess.length === 0) return;
 
+    logger.info(`PersonalityLearner: Observation cycle started — ${channelsToProcess.length} active channel(s)`);
+
     const openai = this.getClient();
     if (!openai) {
       logger.warn('PersonalityLearner: No OPENROUTER_API_KEY, skipping observation.');
@@ -98,14 +101,36 @@ export class PersonalityLearner {
         const humanMessages = [...messages.values()].filter((msg) => !msg.author.bot).reverse();
 
         if (humanMessages.length < this.minMessages) {
-          // Not enough messages to justify an API call
+          logger.info(
+            `PersonalityLearner: Skipping channel ${channelId} — only ${humanMessages.length}/${this.minMessages} messages`,
+          );
           continue;
         }
 
-        // Format messages for the learner
+        logger.info(
+          `PersonalityLearner: Processing ${humanMessages.length} messages from channel ${channelId} (#${textChannel.name})`,
+        );
+
+        // Build multimodal content blocks from messages
+        const imageUrls: string[] = [];
         const formattedMessages = humanMessages
           .map((msg) => {
             const name = msg.member?.displayName || msg.author.username;
+            // Collect image URLs from attachments
+            for (const attachment of msg.attachments.values()) {
+              if (attachment.contentType?.startsWith('image/')) {
+                imageUrls.push(attachment.url);
+              }
+            }
+            // Collect image URLs from embeds
+            for (const embed of msg.embeds) {
+              if (embed.image?.url) {
+                imageUrls.push(embed.image.url);
+              }
+              if (embed.thumbnail?.url) {
+                imageUrls.push(embed.thumbnail.url);
+              }
+            }
             return `[${name}] ${msg.content}`;
           })
           .join('\n');
@@ -126,12 +151,12 @@ Extract ONLY things worth remembering long-term:
 - Server-wide culture, in-jokes, recurring themes — attribute to "server"
 - Strong opinions or preferences someone expressed — attribute to the person who said it
 - Notable events, plans, or milestones
+- Shared images that reveal interests, context, or personality — attribute to the person who shared them
 
 Do NOT extract:
 - Transient small talk or greetings
 - Anything already known (see existing memories below)
 - Generic observations ("people were chatting", "active conversation")
-- Content from links/URLs — only analyze typed text
 - Things about someone based on what OTHERS said about them — only first-hand statements
 
 Existing memories (avoid duplicates):
@@ -143,13 +168,24 @@ ${formattedMessages}
 Respond ONLY with a JSON array, or [] if nothing worth remembering:
 [{"category": "fact|preference|personality|event|vibe", "subject": "DisplayName|server", "content": "concise observation"}]`;
 
-        const learnerModel = process.env.LEARNER_MODEL || 'anthropic/claude-haiku-4-5';
+        // Build multimodal content: text prompt first, then any images
+        const contentParts: ChatCompletionContentPart[] = [{ type: 'text', text: analysisPrompt }];
+        for (const url of imageUrls) {
+          contentParts.push({ type: 'image_url', image_url: { url } });
+        }
+
+        if (imageUrls.length > 0) {
+          logger.info(`PersonalityLearner: Including ${imageUrls.length} images from channel ${channelId}`);
+        }
+
+        const learnerModel = process.env.LEARNER_MODEL || 'qwen/qwen3-vl-235b-a22b-instruct';
+        logger.info(`PersonalityLearner: Sending request to ${learnerModel} for channel ${channelId}`);
 
         const response = await openai.chat.completions.create({
           model: learnerModel,
           max_tokens: 1024,
           temperature: 0.3,
-          messages: [{ role: 'user', content: analysisPrompt }],
+          messages: [{ role: 'user', content: contentParts }],
           // @ts-expect-error OpenRouter-specific field
           provider: { zdr: true },
         });
@@ -194,6 +230,8 @@ Respond ONLY with a JSON array, or [] if nothing worth remembering:
 
         if (observations.length > 0) {
           logger.info(`PersonalityLearner: Saved ${observations.length} observations from channel ${channelId}`);
+        } else {
+          logger.info(`PersonalityLearner: No new observations from channel ${channelId}`);
         }
 
         // Update last observed message ID (newest message in the batch)
