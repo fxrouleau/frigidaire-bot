@@ -84,7 +84,6 @@ export class OpenRouterProvider implements AiProvider {
       provider: {
         zdr: true,
         sort: 'throughput',
-        quantizations: ['fp16', 'bf16'],
       },
     });
 
@@ -110,7 +109,6 @@ export class OpenRouterProvider implements AiProvider {
         provider: {
           zdr: true,
           sort: 'throughput',
-          quantizations: ['fp16', 'bf16'],
         },
       });
 
