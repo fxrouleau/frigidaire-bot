@@ -92,9 +92,7 @@ export class PersonalityLearner {
         if (messages.size === 0) continue;
 
         // Filter out bot messages
-        const humanMessages = [...messages.values()]
-          .filter((msg) => !msg.author.bot)
-          .reverse();
+        const humanMessages = [...messages.values()].filter((msg) => !msg.author.bot).reverse();
 
         if (humanMessages.length < this.minMessages) {
           // Not enough messages to justify an API call

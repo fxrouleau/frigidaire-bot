@@ -39,7 +39,9 @@ function getSession(channelId: string): ImageSession | undefined {
   return session;
 }
 
-export function extractImageFromResponse(response: OpenAI.ChatCompletion): { base64: string; text?: string } | undefined {
+export function extractImageFromResponse(
+  response: OpenAI.ChatCompletion,
+): { base64: string; text?: string } | undefined {
   const message = response.choices[0]?.message;
   if (!message) return undefined;
 
