@@ -241,3 +241,6 @@ dist
 # and uncomment the following lines
 # .pnp.*
 
+# SQLite data directory
+data/
+

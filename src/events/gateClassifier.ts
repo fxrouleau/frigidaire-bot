@@ -5,6 +5,7 @@ import * as process from 'node:process';
 import { Events, type Message } from 'discord.js';
 import { agent } from '../ai/agentInstance';
 import { classifyMessage } from '../ai/gateClassifier';
+import { personalityLearner } from '../ai/learnerInstance';
 import { logger } from '../logger';
 
 module.exports = {
@@ -12,6 +13,10 @@ module.exports = {
   async execute(message: Message) {
     if (!process.env.OPENROUTER_API_KEY) return;
     if (message.author.bot) return;
+
+    // Track channel activity for personality learner (zero cost — just Set.add)
+    personalityLearner.trackActivity(message.channel.id);
+
     if (message.mentions.users.has(message.client.user.id)) return;
     if (!message.content.trim()) return;
 

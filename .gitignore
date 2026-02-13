@@ -257,4 +257,7 @@ dist
 # SvelteKit build / generate output
 .svelte-kit
 
+# SQLite data directory
+data/
+
 # End of https://www.toptal.com/developers/gitignore/api/jetbrains+all,node,git

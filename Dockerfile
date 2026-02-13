@@ -1,5 +1,8 @@
 FROM node:22-alpine AS build
 
+# Required for better-sqlite3 native compilation
+RUN apk add --no-cache python3 make g++
+
 RUN corepack enable yarn
 WORKDIR /app
 
@@ -16,5 +19,12 @@ ARG NODE_ENV=production
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json /app/yarn.lock ./
 
+# better-sqlite3 compiled native addon
+COPY --from=build /app/node_modules/better-sqlite3 ./node_modules/better-sqlite3
+
 RUN yarn workspaces focus --production
+
+# Ensure data directory exists for SQLite
+RUN mkdir -p /app/data
+
 CMD yarn prod

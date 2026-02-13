@@ -1,0 +1,236 @@
+import * as crypto from 'node:crypto';
+import * as process from 'node:process';
+import { AttachmentBuilder, type Message } from 'discord.js';
+import OpenAI from 'openai';
+import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
+import { logger } from '../../logger';
+import { toolDefinitions } from '../tools';
+import { prepareSummaryPrompt } from '../tools/summary';
+import type {
+  AiProvider,
+  ConversationEntry,
+  NormalizedContentPart,
+  ProviderChatResponse,
+  ProviderToolCall,
+  ProviderToolDefinition,
+} from '../types';
+
+type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail: 'auto' } };
+
+export class OpenRouterProvider implements AiProvider {
+  public readonly id = 'openrouter';
+  public readonly displayName = 'OpenRouter';
+  public readonly personality = '';
+  public readonly defaultModel: string;
+  public readonly supportedTools: ProviderToolDefinition[];
+
+  private readonly client: OpenAI;
+
+  constructor() {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      throw new Error('OPENROUTER_API_KEY is required');
+    }
+
+    this.client = new OpenAI({
+      apiKey,
+      baseURL: 'https://openrouter.ai/api/v1',
+      defaultHeaders: {
+        'X-Title': 'Frigidaire Bot',
+      },
+    });
+
+    this.defaultModel = process.env.CHAT_MODEL || 'deepseek/deepseek-v3.2:nitro';
+
+    this.supportedTools = toolDefinitions.map(
+      (tool) =>
+        ({
+          name: tool.name,
+          type: 'function',
+          description: tool.description,
+          parameters: tool.parameters,
+          hostHandled: true,
+        }) satisfies ProviderToolDefinition,
+    );
+  }
+
+  async chat(input: {
+    messages: ConversationEntry[];
+    tools: ProviderToolDefinition[];
+    toolChoice?: 'auto' | 'none';
+    thoughts?: unknown;
+  }): Promise<ProviderChatResponse> {
+    const messages = input.messages.map((entry) => this.toOpenAIMessage(entry));
+
+    const tools: OpenAI.ChatCompletionTool[] = input.tools
+      .filter((t) => t.type === 'function')
+      .map((t) => ({
+        type: 'function' as const,
+        function: {
+          name: t.name,
+          description: t.description ?? '',
+          parameters: t.parameters ?? {},
+        },
+      }));
+
+    const response = await this.client.chat.completions.create({
+      model: this.defaultModel,
+      messages,
+      tools: tools.length > 0 ? tools : undefined,
+      tool_choice: input.toolChoice === 'none' ? 'none' : 'auto',
+      // @ts-expect-error OpenRouter-specific field
+      provider: {
+        zdr: true,
+        sort: 'throughput',
+        quantizations: ['fp16', 'bf16'],
+      },
+    });
+
+    return this.parseResponse(response);
+  }
+
+  async summarizeMessages(message: Message, startTime: string, endTime: string): Promise<string> {
+    try {
+      const prepared = await prepareSummaryPrompt(message, startTime, endTime);
+      if (prepared.error) return prepared.error;
+
+      if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
+        await message.channel.sendTyping();
+      }
+
+      const response = await this.client.chat.completions.create({
+        model: this.defaultModel,
+        messages: [
+          { role: 'system', content: 'You are an expert at summarizing conversations.' },
+          { role: 'user', content: prepared.prompt },
+        ],
+        // @ts-expect-error OpenRouter-specific field
+        provider: {
+          zdr: true,
+          sort: 'throughput',
+          quantizations: ['fp16', 'bf16'],
+        },
+      });
+
+      const text = response.choices[0]?.message?.content?.trim();
+      return text || 'I was unable to generate a summary.';
+    } catch (error) {
+      logger.error('Error in summarizeMessages (openrouter):', error);
+      return 'An error occurred while trying to summarize the messages.';
+    }
+  }
+
+  async generateImageLocal(message: Message, prompt: string, options?: { refinePrevious?: boolean }): Promise<string> {
+    const { generateLocalImage } = await import('../tools/localImageGenerator');
+    return generateLocalImage(message, prompt, { refinePrevious: options?.refinePrevious });
+  }
+
+  private toOpenAIMessage(entry: ConversationEntry): ChatCompletionMessageParam {
+    if (entry.kind === 'message') {
+      if (entry.role === 'assistant') {
+        const text = entry.content.map((p) => (p.type === 'text' ? p.text : `[image]: ${p.url}`)).join('\n');
+        return { role: 'assistant', content: text };
+      }
+
+      if (entry.role === 'developer' || entry.role === 'system') {
+        const text = entry.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
+        return { role: 'system', content: text };
+      }
+
+      // user message
+      const parts = this.buildContentParts(entry.content);
+      if (parts.length === 1 && parts[0].type === 'text') {
+        return { role: 'user', content: parts[0].text };
+      }
+      return { role: 'user', content: parts };
+    }
+
+    if (entry.kind === 'tool_call') {
+      return {
+        role: 'assistant',
+        tool_calls: [
+          {
+            id: entry.id,
+            type: 'function',
+            function: {
+              name: entry.name,
+              arguments: JSON.stringify(entry.arguments),
+            },
+          },
+        ],
+      };
+    }
+
+    // tool_result
+    return {
+      role: 'tool',
+      tool_call_id: entry.id,
+      content: entry.content,
+    };
+  }
+
+  private buildContentParts(content: NormalizedContentPart[]): ChatContentPart[] {
+    if (content.length === 0) return [{ type: 'text', text: '' }];
+    return content.map((part) => {
+      if (part.type === 'image') {
+        return { type: 'image_url' as const, image_url: { url: part.url, detail: 'auto' as const } };
+      }
+      return { type: 'text' as const, text: part.text };
+    });
+  }
+
+  private parseResponse(response: OpenAI.ChatCompletion): ProviderChatResponse {
+    const choice = response.choices[0];
+    const msg = choice?.message;
+    const text = msg?.content?.trim() || undefined;
+    const toolCalls = this.extractToolCalls(msg);
+    const outputEntries: ConversationEntry[] = [];
+
+    if (toolCalls.length > 0) {
+      for (const call of toolCalls) {
+        outputEntries.push({
+          kind: 'tool_call',
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+        });
+      }
+    }
+
+    if (text) {
+      outputEntries.push({
+        kind: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text }],
+      });
+    }
+
+    return { text, toolCalls, outputEntries, raw: response };
+  }
+
+  private extractToolCalls(message: OpenAI.ChatCompletionMessage | undefined): ProviderToolCall[] {
+    if (!message?.tool_calls) return [];
+
+    return message.tool_calls
+      .filter((call): call is OpenAI.ChatCompletionMessageToolCall & { type: 'function' } => call.type === 'function')
+      .map((call) => {
+        let args: Record<string, unknown> = {};
+        try {
+          const parsed = JSON.parse(call.function.arguments);
+          if (parsed && typeof parsed === 'object') {
+            args = parsed as Record<string, unknown>;
+          }
+        } catch {
+          logger.warn(`Failed to parse tool arguments for ${call.function.name}`);
+        }
+
+        return {
+          id: call.id || crypto.randomUUID(),
+          name: call.function.name,
+          arguments: args,
+        };
+      });
+  }
+}

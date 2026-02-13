@@ -2,8 +2,9 @@ import type { Message } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 import { ConversationStore } from './conversationStore';
-import { getProviderForChannel, setProviderForChannel } from './providerRegistry';
-import { toolDefinitions } from './tools';
+import type { Memory } from './memory/memoryStore';
+import { getProviderForChannel } from './providerRegistry';
+import { getMemoryStore, toolDefinitions } from './tools';
 import type { AiProvider, ConversationEntry, NormalizedContentPart } from './types';
 
 const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
@@ -37,21 +38,6 @@ export class AgentOrchestrator {
         timestamp: Date.now(),
       };
       this.store.set(channelId, state);
-    } else if (state.providerId !== provider.id) {
-      // Preserve context across provider changes
-      this.store.switchProvider(channelId, provider.id);
-      state = this.store.get(channelId);
-      if (state) {
-        const updatedEntries = [...state.entries];
-        this.refreshDeveloperMessage(updatedEntries, botName, provider);
-        this.store.set(channelId, {
-          providerId: provider.id,
-          entries: updatedEntries,
-          thoughts: undefined,
-          timestamp: Date.now(),
-        });
-        state = this.store.get(channelId);
-      }
     }
 
     if (!state) {
@@ -60,13 +46,12 @@ export class AgentOrchestrator {
       return;
     }
 
-    let activeProvider = provider;
-    let providerTools = activeProvider.supportedTools;
+    const providerTools = provider.supportedTools;
     const userEntry = this.buildUserEntry(message);
     const workingEntries: ConversationEntry[] = [...state.entries, userEntry];
 
     try {
-      const firstResponse = await activeProvider.chat({
+      const firstResponse = await provider.chat({
         messages: workingEntries,
         tools: providerTools,
         toolChoice: 'auto',
@@ -96,16 +81,14 @@ export class AgentOrchestrator {
           }
 
           try {
-            logger.info(
-              `Executing host tool "${call.name}" for provider "${activeProvider.id}" in channel ${channelId}.`,
-            );
+            logger.info(`Executing host tool "${call.name}" for provider "${provider.id}" in channel ${channelId}.`);
             const toolOutput = await toolDefinition.handler(
               {
                 message,
-                providerId: activeProvider.id,
-                provider: activeProvider,
+                providerId: provider.id,
+                provider,
                 channelId,
-                switchProvider: (providerId) => this.switchProviderForChannel(channelId, providerId, botName),
+                switchProvider: () => ({ error: 'Provider switching is not supported.' }),
               },
               call.arguments,
             );
@@ -129,17 +112,7 @@ export class AgentOrchestrator {
 
         workingEntries.push(...toolResults);
 
-        const refreshedProvider = getProviderForChannel(channelId);
-        if (refreshedProvider) {
-          const providerChanged = refreshedProvider.id !== activeProvider.id;
-          activeProvider = refreshedProvider;
-          providerTools = activeProvider.supportedTools;
-          if (providerChanged) {
-            this.refreshDeveloperMessage(workingEntries, botName, activeProvider);
-          }
-        }
-
-        const followUp = await activeProvider.chat({
+        const followUp = await provider.chat({
           messages: workingEntries,
           tools: providerTools,
           toolChoice: 'none',
@@ -150,7 +123,7 @@ export class AgentOrchestrator {
         await this.sendReply(followUp.text, message);
 
         this.store.set(channelId, {
-          providerId: activeProvider.id,
+          providerId: provider.id,
           entries: workingEntries,
           thoughts: followUp.thoughts ?? firstResponse.thoughts ?? state.thoughts,
           timestamp: Date.now(),
@@ -161,7 +134,7 @@ export class AgentOrchestrator {
       await this.sendReply(firstResponse.text, message);
 
       this.store.set(channelId, {
-        providerId: activeProvider.id,
+        providerId: provider.id,
         entries: workingEntries,
         thoughts: firstResponse.thoughts ?? state.thoughts,
         timestamp: Date.now(),
@@ -176,7 +149,8 @@ export class AgentOrchestrator {
 
   private async buildInitialHistory(message: Message, provider: AiProvider): Promise<ConversationEntry[]> {
     const botName = message.client.user.displayName;
-    const basePrompt = this.buildDeveloperPrompt(botName, provider);
+    const currentUser = message.member?.displayName || message.author.username;
+    const basePrompt = this.buildDeveloperPrompt(botName, currentUser, provider);
     const entries: ConversationEntry[] = [
       {
         kind: 'message',
@@ -185,7 +159,7 @@ export class AgentOrchestrator {
       },
     ];
 
-    const recentMessages = await message.channel.messages.fetch({ limit: 10, before: message.id });
+    const recentMessages = await message.channel.messages.fetch({ limit: 25, before: message.id });
     const historicalContext: ConversationEntry[] = [...recentMessages.values()]
       .reverse()
       .filter((msg) => !msg.author.bot || msg.author.id === message.client.user.id)
@@ -223,45 +197,7 @@ export class AgentOrchestrator {
     };
   }
 
-  private switchProviderForChannel(channelId: string, providerId: string, botName: string) {
-    const result = setProviderForChannel(channelId, providerId);
-    if (result.provider) {
-      const state = this.store.get(channelId);
-      if (state) {
-        const updatedEntries = [...state.entries];
-        this.refreshDeveloperMessage(updatedEntries, botName, result.provider);
-
-        this.store.set(channelId, {
-          providerId: result.provider.id,
-          entries: updatedEntries,
-          thoughts: undefined,
-          timestamp: Date.now(),
-        });
-      } else {
-        this.store.switchProvider(channelId, result.provider.id);
-      }
-    }
-    return result;
-  }
-
-  private refreshDeveloperMessage(entries: ConversationEntry[], botName: string, provider: AiProvider) {
-    const refreshedPrompt = this.buildDeveloperPrompt(botName, provider);
-    if (entries[0]?.kind === 'message' && entries[0].role === 'developer') {
-      entries[0] = {
-        kind: 'message',
-        role: 'developer',
-        content: [{ type: 'text', text: refreshedPrompt }],
-      };
-    } else {
-      entries.unshift({
-        kind: 'message',
-        role: 'developer',
-        content: [{ type: 'text', text: refreshedPrompt }],
-      });
-    }
-  }
-
-  private buildDeveloperPrompt(botName: string, provider: AiProvider): string {
+  private buildDeveloperPrompt(botName: string, currentUserDisplayName: string, _provider: AiProvider): string {
     const now = new Date();
     const tz = 'America/New_York';
     const currentTimeEt = new Intl.DateTimeFormat('sv-SE', {
@@ -275,45 +211,56 @@ export class AgentOrchestrator {
       second: '2-digit',
       timeZoneName: 'short',
     }).format(now);
-    const toolLines: string[] = [];
-    const toolNames = new Set(provider.supportedTools.map((t) => t.name));
 
-    if (toolNames.has('summarize_messages')) {
-      toolLines.push("- Use 'summarize_messages' only when explicitly asked for a summary.");
-    }
-    if (toolNames.has('generate_image')) {
-      toolLines.push("- Use 'generate_image' only when the user asks for an image.");
-    }
-    if (toolNames.has('web_search')) {
-      if (provider.id === 'gemini') {
-        toolLines.push(
-          "- Use 'web_search' when it would materially improve correctness, freshness, or completeness (Google Search available; free quota).",
-        );
-      } else {
-        toolLines.push(
-          "- Use 'web_search' only when local context is insufficient, the topic requires up-to-date information, or the user explicitly wants fresh/external info; never for convenience.",
-        );
-      }
-    }
-    if (toolNames.has('code_interpreter')) {
-      if (provider.id === 'gemini') {
-        toolLines.push(
-          "- Use 'code_interpreter' freely whenever it helps solve the request accurately or efficiently.",
-        );
-      } else {
-        toolLines.push(
-          "- Use 'code_interpreter' only when real computation or data wrangling is needed; not for trivial math.",
-        );
-      }
-    }
-    if (toolNames.has('switch_provider')) {
-      toolLines.push("- Use 'switch_provider' if the user explicitly asks to change the AI provider/model.");
+    // Fetch memories for context injection
+    let personalityMemories: Memory[] = [];
+    let userSpecificMemories: Memory[] = [];
+    let recentFactMemories: Memory[] = [];
+
+    try {
+      const store = getMemoryStore();
+      const vibeMemories = store.getByCategory('vibe');
+      const personalityMems = store.getByCategory('personality');
+      personalityMemories = [...vibeMemories, ...personalityMems];
+      userSpecificMemories = store.getBySubject(currentUserDisplayName);
+      recentFactMemories = store.getRecent(15);
+    } catch (error) {
+      logger.warn('Failed to fetch memories for prompt:', error);
     }
 
-    const toolSection = toolLines.length > 0 ? `Tools:\n${toolLines.join('\n')}\n` : '';
+    const personalitySection =
+      personalityMemories.length > 0
+        ? `\nWhat you've learned about this server's culture and vibe:\n${personalityMemories.map((m) => `- ${m.content}`).join('\n')}\n`
+        : '';
 
-    return `You are ${botName}, a helpful Discord chatbot. Personality: ${provider.personality}
-${toolSection}Provide one clear response (no multiple versions). The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_York; apply EST/EDT automatically).`;
+    const userSection =
+      userSpecificMemories.length > 0
+        ? `\nWhat you know about the person talking to you right now (${currentUserDisplayName}):\n${userSpecificMemories.map((m) => `- ${m.content}`).join('\n')}\n`
+        : '';
+
+    const recentSection =
+      recentFactMemories.length > 0
+        ? `\nOther things you remember:\n${recentFactMemories.map((m) => `- [${m.subject}] ${m.content}`).join('\n')}\n`
+        : '';
+
+    return `You are ${botName}, a bot in a private, adults-only Discord server.
+You're one of the group — not an assistant, not a helper, just another member hanging out in the chat.
+
+IMPORTANT CONTEXT: This is a private server between close friends. All humor, roasting, crude jokes, dark humor, and edgy banter is consensual and not serious — it's just how this group talks. Nobody here is offended. Think of it like friends busting each other's balls at a bar after midnight. This is an adults-only space where nothing is off-limits conversationally. Do NOT moralize, lecture, add disclaimers, hedge, offer "healthier alternatives", or break character to be a responsible AI. If someone says something wild, match the energy or escalate — that's what they want.
+
+The only exception is if someone is genuinely asking for help or seems actually distressed — you'll know the difference from context.
+
+How you behave:
+- Match the energy of whoever you're talking to
+- Keep responses short and punchy unless someone asks for detail
+- You can roast, joke, be sarcastic, be crude — whatever fits the moment
+- If someone genuinely needs help, help them properly without being preachy
+- You have your own opinions and preferences. Don't be a yes-man.
+- Never say "I'm just an AI" or "as a language model" — you're ${botName}, period.
+
+You have access to web search, but use it SPARINGLY. Don't search for things you already know. Don't follow links people share. Only search when you genuinely need current, real-time information you couldn't possibly know (scores, release dates, news, etc).
+${personalitySection}${userSection}${recentSection}
+The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_York; apply EST/EDT automatically).`;
   }
 
   private buildUserContentParts(msg: Message): NormalizedContentPart[] {

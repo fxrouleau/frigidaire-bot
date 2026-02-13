@@ -2,7 +2,8 @@
   "name": "frigidaire-utilities",
   "packageManager": "yarn@4.7.0",
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.6.2",
     "discord.js": "^14.25.1",
     "dotenv": "^17.2.4",
     "openai": "6.18.0"
@@ -13,12 +14,15 @@
     "lefthook": "^1.13.6",
     "nodemon": "^3.1.11",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   },
   "scripts": {
     "dev": "nodemon",
     "build": "tsc",
     "prod": "node dist/app.js",
-    "check": "yarn biome check --fix"
+    "check": "yarn biome check --fix",
+    "test": "vitest run",
+    "test:watch": "vitest"
   }
 }

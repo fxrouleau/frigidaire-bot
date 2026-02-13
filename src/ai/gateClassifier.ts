@@ -27,9 +27,9 @@ function getClient(): OpenAI {
  * Common names/nicknames users might use to address the bot.
  * Checked case-insensitively with word boundaries against the message content.
  */
-const BOT_ALIASES = ['frigidaire', 'fridge', 'fridge bot', 'fridgebot', 'bot'];
+export const BOT_ALIASES = ['frigidaire', 'fridge', 'fridge bot', 'fridgebot', 'bot'];
 
-function contentAddressesBot(content: string, botName: string): boolean {
+export function contentAddressesBot(content: string, botName: string): boolean {
   const lower = content.toLowerCase();
   if (lower.includes(botName.toLowerCase())) return true;
   return BOT_ALIASES.some((alias) => {

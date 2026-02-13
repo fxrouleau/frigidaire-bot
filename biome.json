@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": ["node_modules", ".yarn", ".pnp.*", ".vscode", ".idea", ".DS_Store"]
+    "ignore": ["node_modules", ".yarn", ".pnp.*", ".vscode", ".idea", ".DS_Store", "src/**/*.test.ts"]
   },
   "formatter": {
     "enabled": true,

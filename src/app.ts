@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import * as process from 'node:process';
 import { Client, GatewayIntentBits } from 'discord.js';
 import * as dotenv from 'dotenv';
+import { personalityLearner } from './ai/learnerInstance';
+import { getMemoryStore } from './ai/tools';
 import { logger } from './logger';
 
 dotenv.config();
@@ -23,4 +25,21 @@ for (const file of eventFiles) {
     client.on(event.name, (...args) => event.execute(...args));
   }
 }
+
+// Run memory compaction on startup
+try {
+  const store = getMemoryStore();
+  const result = store.compact();
+  if (result.removed > 0) {
+    logger.info(`Memory compaction on startup: removed ${result.removed} duplicate memories.`);
+  }
+} catch (error) {
+  logger.warn('Memory compaction on startup failed:', error);
+}
+
+// Start personality learner after Discord client is ready
+client.once('ready', () => {
+  personalityLearner.start(client);
+});
+
 client.login(process.env.CLIENT_SECRET);
