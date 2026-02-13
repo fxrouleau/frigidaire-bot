@@ -271,6 +271,80 @@ describe('compact()', () => {
   });
 });
 
+describe('new self-improvement categories', () => {
+  it('stores and retrieves capability_gap category', () => {
+    store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot process PDF attachments' });
+    const results = store.getByCategory('capability_gap');
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toBe('Cannot process PDF attachments');
+  });
+
+  it('stores and retrieves pain_point category', () => {
+    store.save({ category: 'pain_point', subject: 'bot', content: 'Responds when nobody asked' });
+    const results = store.getByCategory('pain_point');
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toBe('Responds when nobody asked');
+  });
+
+  it('stores and retrieves feature_request category', () => {
+    store.save({ category: 'feature_request', subject: 'bot', content: 'Add reminder functionality' });
+    const results = store.getByCategory('feature_request');
+    expect(results).toHaveLength(1);
+  });
+
+  it('stores and retrieves improvement_idea category', () => {
+    store.save({ category: 'improvement_idea', subject: 'bot', content: 'Use shorter responses in meme channels' });
+    const results = store.getByCategory('improvement_idea');
+    expect(results).toHaveLength(1);
+  });
+
+  it('stores and retrieves tool_error category', () => {
+    store.save({ category: 'tool_error', subject: 'bot', content: 'Image generation failed', source: 'self-diagnosis' });
+    const results = store.getByCategory('tool_error');
+    expect(results).toHaveLength(1);
+    expect(results[0].source).toBe('self-diagnosis');
+  });
+
+  it('stores and retrieves parse_failure category', () => {
+    store.save({ category: 'parse_failure', subject: 'bot', content: 'Empty LLM response', source: 'self-diagnosis' });
+    const results = store.getByCategory('parse_failure');
+    expect(results).toHaveLength(1);
+  });
+
+  it('search() finds new category content via FTS', () => {
+    store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot process custom Discord emojis' });
+    const results = store.search('emojis');
+    expect(results).toHaveLength(1);
+    expect(results[0].category).toBe('capability_gap');
+  });
+
+  it('getBySubject("bot") returns self-diagnosis entries', () => {
+    store.save({ category: 'tool_error', subject: 'bot', content: 'Error in image tool' });
+    store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot read links' });
+    store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+
+    const botResults = store.getBySubject('bot');
+    expect(botResults).toHaveLength(2);
+    expect(botResults.every((r) => r.subject === 'bot')).toBe(true);
+  });
+
+  it('compact() works across new categories', () => {
+    const id1 = store.save({ category: 'tool_error', subject: 'bot', content: 'Image generation tool failed unexpectedly' });
+    const id2 = store.save({ category: 'tool_error', subject: 'bot', content: 'Something totally different happened in summary' });
+
+    // Make them overlap via raw SQL
+    // @ts-expect-error accessing private db for test setup
+    store.db
+      .prepare("UPDATE memories SET content = 'Image generation tool failed unexpectedly again' WHERE id = ?")
+      .run(id2);
+
+    const result = store.compact();
+    expect(result.removed).toBeGreaterThanOrEqual(1);
+    const active = store.getAllActive();
+    expect(active).toHaveLength(1);
+  });
+});
+
 describe('learner state', () => {
   it('getLastObserved() returns null for unknown channels', () => {
     expect(store.getLastObserved('unknown-channel')).toBeNull();

@@ -1,7 +1,7 @@
 import * as process from 'node:process';
 import OpenAI from 'openai';
 import { logger } from '../logger';
-import { MemoryStore } from './memory/memoryStore';
+import { type Memory, MemoryStore } from './memory/memoryStore';
 import type { ToolDefinition, ToolHandlerContext } from './types';
 
 let memoryStore: MemoryStore | undefined;
@@ -237,6 +237,152 @@ const webSearchTool: ToolDefinition = {
   },
 };
 
+const queryLongTermMemoryTool: ToolDefinition = {
+  name: 'query_long_term_memory',
+  description:
+    'Search long-term memory broadly. Use for open-ended questions like "what do you know about X", "tell me about Y", "memories about Z". Searches by subject name, topic keywords, and category. Returns a comprehensive view.',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: "What to search for — a person's name, a topic, an event, etc.",
+      },
+      category: {
+        type: 'string',
+        enum: ['fact', 'preference', 'personality', 'event', 'vibe', 'all'],
+        description: 'Optional category filter. Use "all" or omit to search everything.',
+      },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+    const store = getMemoryStore();
+    const query = String(args.query ?? '');
+    const category = args.category && args.category !== 'all' ? String(args.category) : undefined;
+
+    const results: Memory[] = [];
+    const seenIds = new Set<number>();
+
+    // 1. Search by subject (exact match on the query as a name)
+    const subjectResults = store.getBySubject(query, 20);
+    for (const r of subjectResults) {
+      if (category && r.category !== category) continue;
+      if (!seenIds.has(r.id)) {
+        seenIds.add(r.id);
+        results.push(r);
+      }
+    }
+
+    // 2. FTS search for topic/keyword matches
+    try {
+      const ftsResults = store.search(query, 20);
+      for (const r of ftsResults) {
+        if (category && r.category !== category) continue;
+        if (!seenIds.has(r.id)) {
+          seenIds.add(r.id);
+          results.push(r);
+        }
+      }
+    } catch {
+      // FTS may fail on certain query patterns
+    }
+
+    // 3. If category specified and few results, also get all by category
+    if (category && results.length < 5) {
+      const catResults = store.getByCategory(category, 20);
+      for (const r of catResults) {
+        if (!seenIds.has(r.id)) {
+          seenIds.add(r.id);
+          results.push(r);
+        }
+      }
+    }
+
+    if (results.length === 0) {
+      return `No memories found for "${query}".`;
+    }
+
+    const formatted = results
+      .slice(0, 25)
+      .map((m) => `[${m.category}] ${m.subject}: ${m.content} (updated: ${m.updated_at})`)
+      .join('\n');
+
+    return `Found ${results.length} memories:\n${formatted}`;
+  },
+};
+
+const SELF_DIAGNOSIS_CATEGORIES = [
+  'capability_gap',
+  'pain_point',
+  'feature_request',
+  'improvement_idea',
+  'parse_failure',
+  'tool_error',
+  'missing_context',
+  'unrecognized_content',
+];
+
+const querySelfDiagnosisTool: ToolDefinition = {
+  name: 'query_self_diagnosis',
+  description:
+    'Check what the bot has been struggling with or what could be improved. Use when asked "what have you been struggling with?", "what should we improve?", "any issues lately?", "what are your pain points?".',
+  parameters: {
+    type: 'object',
+    properties: {
+      category: {
+        type: 'string',
+        enum: [
+          'capability_gap',
+          'pain_point',
+          'feature_request',
+          'improvement_idea',
+          'parse_failure',
+          'tool_error',
+          'all',
+        ],
+        description: 'Filter by type of issue. Use "all" to see everything.',
+      },
+      limit: {
+        type: 'number',
+        description: 'Max results to return. Default 15.',
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+    const store = getMemoryStore();
+    const category = args.category && args.category !== 'all' ? String(args.category) : undefined;
+    const limit = Number(args.limit ?? 15);
+
+    let results: Memory[] = [];
+
+    if (category) {
+      results = store.getByCategory(category, limit);
+    } else {
+      for (const cat of SELF_DIAGNOSIS_CATEGORIES) {
+        const catResults = store.getByCategory(cat, limit);
+        results.push(...catResults);
+      }
+      results.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+      results = results.slice(0, limit);
+    }
+
+    // Filter to only bot-related subjects
+    results = results.filter((r) => r.subject === 'bot' || r.subject === 'server');
+
+    if (results.length === 0) {
+      return "No self-diagnosis data found yet. The bot hasn't logged any issues or improvement ideas.";
+    }
+
+    const formatted = results.map((m) => `[${m.category}] ${m.content} (${m.updated_at})`).join('\n');
+
+    return `Self-diagnosis (${results.length} entries):\n${formatted}`;
+  },
+};
+
 export const toolDefinitions: ToolDefinition[] = [
   summarizeTool,
   imageTool,
@@ -244,4 +390,6 @@ export const toolDefinitions: ToolDefinition[] = [
   recallMemoriesTool,
   forgetMemoryTool,
   webSearchTool,
+  queryLongTermMemoryTool,
+  querySelfDiagnosisTool,
 ];
