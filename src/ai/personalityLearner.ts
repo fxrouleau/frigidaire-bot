@@ -19,12 +19,16 @@ export class PersonalityLearner {
   private readonly minMessages: number;
   private timer: NodeJS.Timeout | undefined;
   private readonly activeChannels = new Set<string>();
+  private readonly ignoredChannels: Set<string>;
   private client: OpenAI | undefined;
 
   constructor(store: MemoryStore, intervalMs?: number) {
     this.store = store;
     this.intervalMs = intervalMs ?? (Number(process.env.LEARNING_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
     this.minMessages = Number(process.env.MIN_MESSAGES_FOR_OBSERVATION) || DEFAULT_MIN_MESSAGES;
+    this.ignoredChannels = new Set(
+      (process.env.LEARNER_IGNORE_CHANNELS || '').split(',').filter(Boolean)
+    );
   }
 
   start(discordClient: Client): void {
@@ -48,6 +52,7 @@ export class PersonalityLearner {
   }
 
   trackActivity(channelId: string): void {
+    if (this.ignoredChannels.has(channelId)) return;
     this.activeChannels.add(channelId);
   }
 
