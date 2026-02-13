@@ -26,9 +26,7 @@ export class PersonalityLearner {
     this.store = store;
     this.intervalMs = intervalMs ?? (Number(process.env.LEARNING_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
     this.minMessages = Number(process.env.MIN_MESSAGES_FOR_OBSERVATION) || DEFAULT_MIN_MESSAGES;
-    this.ignoredChannels = new Set(
-      (process.env.LEARNER_IGNORE_CHANNELS || '').split(',').filter(Boolean)
-    );
+    this.ignoredChannels = new Set((process.env.LEARNER_IGNORE_CHANNELS || '').split(',').filter(Boolean));
   }
 
   start(discordClient: Client): void {
