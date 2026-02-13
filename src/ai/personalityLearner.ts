@@ -111,29 +111,31 @@ export class PersonalityLearner {
           `PersonalityLearner: Processing ${humanMessages.length} messages from channel ${channelId} (#${textChannel.name})`,
         );
 
-        // Build multimodal content blocks from messages
-        const imageUrls: string[] = [];
-        const formattedMessages = humanMessages
-          .map((msg) => {
-            const name = msg.member?.displayName || msg.author.username;
-            // Collect image URLs from attachments
-            for (const attachment of msg.attachments.values()) {
-              if (attachment.contentType?.startsWith('image/')) {
-                imageUrls.push(attachment.url);
-              }
+        // Build interleaved content parts: text + images per message
+        const contentParts: ChatCompletionContentPart[] = [];
+        let imageCount = 0;
+        for (const msg of humanMessages) {
+          const name = msg.member?.displayName || msg.author.username;
+          contentParts.push({ type: 'text', text: `[${name}] ${msg.content}` });
+          // Inline image parts from attachments
+          for (const attachment of msg.attachments.values()) {
+            if (attachment.contentType?.startsWith('image/')) {
+              contentParts.push({ type: 'image_url', image_url: { url: attachment.url } });
+              imageCount++;
             }
-            // Collect image URLs from embeds
-            for (const embed of msg.embeds) {
-              if (embed.image?.url) {
-                imageUrls.push(embed.image.url);
-              }
-              if (embed.thumbnail?.url) {
-                imageUrls.push(embed.thumbnail.url);
-              }
+          }
+          // Inline image parts from embeds
+          for (const embed of msg.embeds) {
+            if (embed.image?.url) {
+              contentParts.push({ type: 'image_url', image_url: { url: embed.image.url } });
+              imageCount++;
             }
-            return `[${name}] ${msg.content}`;
-          })
-          .join('\n');
+            if (embed.thumbnail?.url) {
+              contentParts.push({ type: 'image_url', image_url: { url: embed.thumbnail.url } });
+              imageCount++;
+            }
+          }
+        }
 
         // Get existing memories to avoid duplicates
         const existingMemories = this.store.getAllActive();
@@ -144,6 +146,7 @@ export class PersonalityLearner {
 
         const analysisPrompt = `You are analyzing a Discord conversation to extract observations for a bot's long-term memory.
 There are MULTIPLE people in this conversation. Pay attention to WHO says what — attribute observations to the correct person by their display name.
+Images appear directly after the message that shared them — attribute each image to that person.
 
 Extract ONLY things worth remembering long-term:
 - Facts about specific users (jobs, interests, real names, locations) — attribute to that person
@@ -162,20 +165,16 @@ Do NOT extract:
 Existing memories (avoid duplicates):
 ${existingMemoriesSummary}
 
-Messages:
-${formattedMessages}
+The conversation messages and any shared images follow as separate content parts below.
 
 Respond ONLY with a JSON array, or [] if nothing worth remembering:
 [{"category": "fact|preference|personality|event|vibe", "subject": "DisplayName|server", "content": "concise observation"}]`;
 
-        // Build multimodal content: text prompt first, then any images
-        const contentParts: ChatCompletionContentPart[] = [{ type: 'text', text: analysisPrompt }];
-        for (const url of imageUrls) {
-          contentParts.push({ type: 'image_url', image_url: { url } });
-        }
+        // Prepend instruction text, then interleaved message + image parts follow
+        contentParts.unshift({ type: 'text', text: analysisPrompt });
 
-        if (imageUrls.length > 0) {
-          logger.info(`PersonalityLearner: Including ${imageUrls.length} images from channel ${channelId}`);
+        if (imageCount > 0) {
+          logger.info(`PersonalityLearner: Including ${imageCount} images from channel ${channelId}`);
         }
 
         const learnerModel = process.env.LEARNER_MODEL || 'qwen/qwen3-vl-235b-a22b-instruct';
