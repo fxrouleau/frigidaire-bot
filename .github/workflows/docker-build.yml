@@ -1,0 +1,44 @@
+name: Docker Build CI
+
+on:
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Enable Corepack
+      run: corepack enable yarn
+
+    - name: Install dependencies
+      run: yarn install
+
+    - name: Lint
+      run: yarn check
+
+    - name: Build
+      run: yarn build
+
+    - name: Test
+      run: yarn test
+
+    - name: Gitleaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Semgrep
+      uses: semgrep/semgrep-action@v1
+      with:
+        config: .semgrep/
+
+    - name: Docker build
+      run: docker build .

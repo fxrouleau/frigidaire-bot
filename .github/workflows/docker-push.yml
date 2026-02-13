@@ -39,14 +39,22 @@ jobs:
       - name: Test
         run: yarn test
 
+      - name: Generate tags
+        id: tags
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE_TAG=$(date +%Y%m%d)
+          echo "date_tag=${DATE_TAG}" >> $GITHUB_OUTPUT
+          echo "sha_tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ vars.DOCKER_USERNAME }}/frigidaire-bot
           tags: |
-            type=raw,value={{ date 'YYYYMMDD' }}
-            type=sha
+            type=raw,value=${{ steps.tags.outputs.date_tag }}
+            type=raw,value=sha-${{ steps.tags.outputs.sha_tag }}
             type=raw,value=latest
 
       - name: DockerHub Login

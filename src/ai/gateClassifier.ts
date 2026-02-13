@@ -39,10 +39,14 @@ export function contentAddressesBot(content: string, botName: string): boolean {
   });
 }
 
-export async function classifyMessage(message: Message): Promise<GateResult> {
+export async function classifyMessage(
+  message: Message,
+  options?: { hasActiveConversation?: boolean },
+): Promise<GateResult> {
   try {
     const botName = message.client.user.displayName;
     const authorName = message.member?.displayName || message.author.username;
+    const activeConversation = options?.hasActiveConversation ?? false;
 
     // Strip Discord mentions to get the actual text content
     const contentWithoutMentions = message.content.replace(/<@!?\d+>/g, '').trim();
@@ -75,6 +79,15 @@ export async function classifyMessage(message: Message): Promise<GateResult> {
 
     const aliasListStr = [botName, ...BOT_ALIASES].map((a) => `"${a}"`).join(', ');
 
+    const activeConversationContext = activeConversation
+      ? `\nIMPORTANT: The bot "${botName}" recently responded in this channel and there is an active conversation. Follow-up questions, reactions, or responses that are clearly continuing a conversation with the bot should be classified as TRUE, even without directly naming the bot. Examples:
+- Bot just explained something -> "wait what do you mean?" -> true (follow-up)
+- Bot just answered a question -> "and what about the other one?" -> true (follow-up)
+- Bot just responded -> "lmao" -> false (just a reaction, not asking for more)
+- Bot recently talked but someone starts a new unrelated topic with others -> false
+Use context to judge whether the message is continuing the conversation with the bot or starting a separate discussion.\n`
+      : '';
+
     const systemPrompt = `You classify whether a Discord message is directed AT a bot named "${botName}" (also called ${aliasListStr}).
 
 Respond with JSON: {"respond": true/false, "reason": "brief"}
@@ -89,7 +102,7 @@ FALSE — the user is NOT talking to the bot:
 - "yeah I agree" (general chat) -> false
 - "nice one bot" (reaction, not a request) -> false
 - "@someone what do you think" (talking to someone else) -> false
-
+${activeConversationContext}
 Default to false if unsure.`;
 
     const userPrompt = `${replyContext ? `${replyContext}\n` : ''}${authorName}: ${message.content}`;

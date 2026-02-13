@@ -1,0 +1,21 @@
+rules:
+  - id: env-in-fetch
+    patterns:
+      - pattern: fetch(..., { ..., body: <... process.env ...> })
+    message: "process.env is being passed to a fetch body — potential secret exfiltration"
+    severity: ERROR
+    languages: [typescript, javascript]
+
+  - id: env-base64-encode
+    patterns:
+      - pattern: Buffer.from(process.env.$VAR).toString('base64')
+    message: "Environment variable being base64 encoded — potential exfiltration"
+    severity: ERROR
+    languages: [typescript, javascript]
+
+  - id: dynamic-url-with-env
+    patterns:
+      - pattern: fetch(`${...}${process.env.$VAR}${...}`)
+    message: "Environment variable interpolated into URL — potential exfiltration"
+    severity: ERROR
+    languages: [typescript, javascript]

@@ -2,6 +2,7 @@ import type { Message } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 import { ConversationStore } from './conversationStore';
+import { logFailure } from './failureLogger';
 import type { Memory } from './memory/memoryStore';
 import { getProviderForChannel } from './providerRegistry';
 import { getMemoryStore, toolDefinitions } from './tools';
@@ -14,6 +15,10 @@ export class AgentOrchestrator {
 
   constructor() {
     this.store = new ConversationStore(CONVERSATION_TIMEOUT);
+  }
+
+  hasActiveConversation(channelId: string): boolean {
+    return this.store.get(channelId) !== undefined;
   }
 
   async handleMention(message: Message) {
@@ -71,6 +76,7 @@ export class AgentOrchestrator {
           const toolDefinition = toolDefinitions.find((tool) => tool.name === call.name);
           if (!toolDefinition) {
             logger.warn(`Tool ${call.name} was requested but no handler is registered.`);
+            logFailure('capability_gap', `Tool "${call.name}" requested but no handler is registered`);
             toolResults.push({
               kind: 'tool_result',
               id: call.id,
@@ -101,6 +107,10 @@ export class AgentOrchestrator {
             });
           } catch (error) {
             logger.error(`Error while executing tool ${call.name}:`, error);
+            logFailure(
+              'tool_error',
+              `Tool "${call.name}" threw an error: ${error instanceof Error ? error.message : 'unknown'}`,
+            );
             toolResults.push({
               kind: 'tool_result',
               id: call.id,
@@ -141,6 +151,10 @@ export class AgentOrchestrator {
       });
     } catch (error) {
       logger.error('Error while processing AI response:', error);
+      logFailure(
+        'tool_error',
+        `Error processing message in #${channelId}: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
       await message.reply('Sorry, I encountered an error while processing your request.');
     } finally {
       stopTyping();
@@ -150,7 +164,7 @@ export class AgentOrchestrator {
   private async buildInitialHistory(message: Message, provider: AiProvider): Promise<ConversationEntry[]> {
     const botName = message.client.user.displayName;
     const currentUser = message.member?.displayName || message.author.username;
-    const basePrompt = this.buildDeveloperPrompt(botName, currentUser, provider);
+    const basePrompt = this.buildDeveloperPrompt(botName, currentUser, provider, message.content);
     const entries: ConversationEntry[] = [
       {
         kind: 'message',
@@ -197,7 +211,12 @@ export class AgentOrchestrator {
     };
   }
 
-  private buildDeveloperPrompt(botName: string, currentUserDisplayName: string, _provider: AiProvider): string {
+  private buildDeveloperPrompt(
+    botName: string,
+    currentUserDisplayName: string,
+    _provider: AiProvider,
+    currentMessageContent: string,
+  ): string {
     const now = new Date();
     const tz = 'America/New_York';
     const currentTimeEt = new Intl.DateTimeFormat('sv-SE', {
@@ -215,15 +234,41 @@ export class AgentOrchestrator {
     // Fetch memories for context injection
     let personalityMemories: Memory[] = [];
     let userSpecificMemories: Memory[] = [];
-    let recentFactMemories: Memory[] = [];
+    let contextualMemories: Memory[] = [];
 
     try {
       const store = getMemoryStore();
+
+      // Cap and diversify vibe/personality: most recent per unique subject, max 5
       const vibeMemories = store.getByCategory('vibe');
       const personalityMems = store.getByCategory('personality');
-      personalityMemories = [...vibeMemories, ...personalityMems];
-      userSpecificMemories = store.getBySubject(currentUserDisplayName);
-      recentFactMemories = store.getRecent(15);
+      const allPersonality = [...vibeMemories, ...personalityMems];
+      const seenSubjects = new Map<string, Memory>();
+      for (const mem of allPersonality) {
+        const existing = seenSubjects.get(mem.subject);
+        if (!existing || new Date(mem.updated_at) > new Date(existing.updated_at)) {
+          seenSubjects.set(mem.subject, mem);
+        }
+      }
+      personalityMemories = [...seenSubjects.values()].slice(0, 5);
+
+      // Cap user-specific memories to 5
+      userSpecificMemories = store.getBySubject(currentUserDisplayName, 5);
+
+      // Contextual relevance search based on current message
+      const searchText = currentMessageContent.replace(/<@!?\d+>/g, '').trim();
+      if (searchText.length >= 3) {
+        try {
+          const ftsResults = store.search(searchText, 10);
+          const existingIds = new Set([
+            ...personalityMemories.map((m) => m.id),
+            ...userSpecificMemories.map((m) => m.id),
+          ]);
+          contextualMemories = ftsResults.filter((m) => !existingIds.has(m.id));
+        } catch (error) {
+          logger.warn('Failed to fetch contextual memories:', error);
+        }
+      }
     } catch (error) {
       logger.warn('Failed to fetch memories for prompt:', error);
     }
@@ -238,9 +283,9 @@ export class AgentOrchestrator {
         ? `\nWhat you know about the person talking to you right now (${currentUserDisplayName}):\n${userSpecificMemories.map((m) => `- ${m.content}`).join('\n')}\n`
         : '';
 
-    const recentSection =
-      recentFactMemories.length > 0
-        ? `\nOther things you remember:\n${recentFactMemories.map((m) => `- [${m.subject}] ${m.content}`).join('\n')}\n`
+    const contextualSection =
+      contextualMemories.length > 0
+        ? `\nRelevant to this conversation:\n${contextualMemories.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')}\n`
         : '';
 
     return `You are ${botName}, a bot in a private, adults-only Discord server.
@@ -252,14 +297,17 @@ The only exception is if someone is genuinely asking for help or seems actually 
 
 How you behave:
 - Match the energy of whoever you're talking to
-- Keep responses short and punchy unless someone asks for detail
+- Keep it SHORT. 1-3 sentences unless someone explicitly asks for detail. You're texting in a group chat, not writing an essay. Nobody else in the server posts walls of text, so neither should you.
+- Don't start messages with someone's name or address them by name unless it's actually needed for clarity (e.g., distinguishing who you're talking to in a busy thread). Just respond naturally.
 - You can roast, joke, be sarcastic, be crude — whatever fits the moment
 - If someone genuinely needs help, help them properly without being preachy
 - You have your own opinions and preferences. Don't be a yes-man.
 - Never say "I'm just an AI" or "as a language model" — you're ${botName}, period.
 
 You have access to web search, but use it SPARINGLY. Don't search for things you already know. Don't follow links people share. Only search when you genuinely need current, real-time information you couldn't possibly know (scores, release dates, news, etc).
-${personalitySection}${userSection}${recentSection}
+${personalitySection}${userSection}${contextualSection}
+These memories are background knowledge — things you know from hanging out in this server. Do NOT force references to inside jokes, show off what you know, or try to reference multiple memories in one response. Let things come up naturally, the way you'd reference a friend's hobby only when it's actually relevant to the conversation. If nothing from your memories is relevant to what's being discussed, just don't mention them.
+
 The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_York; apply EST/EDT automatically).`;
   }
 
@@ -283,6 +331,8 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
 
   private async sendReply(content: string | undefined, message: Message) {
     if (!content) {
+      const authorName = message.member?.displayName || message.author.username;
+      logFailure('parse_failure', `Empty LLM response for message from ${authorName}`);
       await message.reply("I've processed the information, but I don't have anything further to add.");
       return;
     }

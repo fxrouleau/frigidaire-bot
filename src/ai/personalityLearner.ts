@@ -8,11 +8,29 @@ import type { MemoryStore } from './memory/memoryStore';
 const DEFAULT_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_MIN_MESSAGES = 5;
 
-type Observation = {
-  category: 'fact' | 'preference' | 'personality' | 'event' | 'vibe';
+export type ObservationCategory =
+  | 'fact'
+  | 'preference'
+  | 'personality'
+  | 'event'
+  | 'vibe'
+  | 'capability_gap'
+  | 'pain_point'
+  | 'feature_request'
+  | 'improvement_idea';
+
+export type Observation = {
+  category: ObservationCategory;
   subject: string;
   content: string;
 };
+
+const SELF_IMPROVEMENT_CATEGORIES: ObservationCategory[] = [
+  'capability_gap',
+  'pain_point',
+  'feature_request',
+  'improvement_idea',
+];
 
 export class PersonalityLearner {
   private readonly store: MemoryStore;
@@ -67,6 +85,69 @@ export class PersonalityLearner {
     return this.client;
   }
 
+  /**
+   * Sends content parts to an LLM, parses the JSON response, and saves valid observations.
+   * Returns the number of observations saved.
+   */
+  private async analyzeAndSave(
+    openai: OpenAI,
+    model: string,
+    contentParts: ChatCompletionContentPart[],
+    channelId: string,
+    source: string,
+    label: string,
+  ): Promise<number> {
+    logger.info(`${label}: Sending request to ${model} for channel ${channelId}`);
+
+    const response = await openai.chat.completions.create({
+      model,
+      max_tokens: 1024,
+      temperature: 0.3,
+      messages: [{ role: 'user', content: contentParts }],
+      // @ts-expect-error OpenRouter-specific field
+      provider: { zdr: true },
+    });
+
+    const text = response.choices[0]?.message?.content?.trim();
+    if (!text) return 0;
+
+    // Parse JSON response, with regex fallback
+    let observations: Observation[] = [];
+    try {
+      observations = JSON.parse(text) as Observation[];
+    } catch {
+      const match = text.match(/\[[\s\S]*\]/);
+      if (match) {
+        try {
+          observations = JSON.parse(match[0]) as Observation[];
+        } catch {
+          logger.warn(`${label}: Failed to parse JSON for channel ${channelId}. Raw: ${text.slice(0, 200)}`);
+          return 0;
+        }
+      } else {
+        logger.warn(`${label}: No JSON array found for channel ${channelId}. Raw: ${text.slice(0, 200)}`);
+        return 0;
+      }
+    }
+
+    if (!Array.isArray(observations)) return 0;
+
+    let saved = 0;
+    for (const obs of observations) {
+      if (obs.category && obs.subject && obs.content) {
+        this.store.save({
+          category: obs.category,
+          subject: obs.subject,
+          content: obs.content,
+          source,
+        });
+        saved++;
+      }
+    }
+
+    return saved;
+  }
+
   private async observe(discordClient: Client): Promise<void> {
     const channelsToProcess = [...this.activeChannels];
     this.activeChannels.clear();
@@ -80,6 +161,9 @@ export class PersonalityLearner {
       logger.warn('PersonalityLearner: No OPENROUTER_API_KEY, skipping observation.');
       return;
     }
+
+    const botName = discordClient.user?.displayName ?? 'Frigidaire';
+    const selfImprovementEnabled = (process.env.SELF_IMPROVEMENT_ENABLED ?? 'true') !== 'false';
 
     for (const channelId of channelsToProcess) {
       try {
@@ -112,39 +196,43 @@ export class PersonalityLearner {
         );
 
         // Build interleaved content parts: text + images per message
-        const contentParts: ChatCompletionContentPart[] = [];
+        const messageParts: ChatCompletionContentPart[] = [];
         let imageCount = 0;
         for (const msg of humanMessages) {
           const name = msg.member?.displayName || msg.author.username;
-          contentParts.push({ type: 'text', text: `[${name}] ${msg.content}` });
+          messageParts.push({ type: 'text', text: `[${name}] ${msg.content}` });
           // Inline image parts from attachments
           for (const attachment of msg.attachments.values()) {
             if (attachment.contentType?.startsWith('image/')) {
-              contentParts.push({ type: 'image_url', image_url: { url: attachment.url } });
+              messageParts.push({ type: 'image_url', image_url: { url: attachment.url } });
               imageCount++;
             }
           }
           // Inline image parts from embeds
           for (const embed of msg.embeds) {
             if (embed.image?.url) {
-              contentParts.push({ type: 'image_url', image_url: { url: embed.image.url } });
+              messageParts.push({ type: 'image_url', image_url: { url: embed.image.url } });
               imageCount++;
             }
             if (embed.thumbnail?.url) {
-              contentParts.push({ type: 'image_url', image_url: { url: embed.thumbnail.url } });
+              messageParts.push({ type: 'image_url', image_url: { url: embed.thumbnail.url } });
               imageCount++;
             }
           }
         }
 
-        // Get existing memories to avoid duplicates
+        if (imageCount > 0) {
+          logger.info(`PersonalityLearner: Including ${imageCount} images from channel ${channelId}`);
+        }
+
+        // --- Pass 1: Personality analysis ---
         const existingMemories = this.store.getAllActive();
         const existingMemoriesSummary =
           existingMemories.length > 0
             ? existingMemories.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')
             : '(none yet)';
 
-        const analysisPrompt = `You are analyzing a Discord conversation to extract observations for a bot's long-term memory.
+        const personalityPrompt = `You are analyzing a Discord conversation to extract observations for a bot's long-term memory.
 There are MULTIPLE people in this conversation. Pay attention to WHO says what — attribute observations to the correct person by their display name.
 Images appear directly after the message that shared them — attribute each image to that person.
 
@@ -170,67 +258,88 @@ The conversation messages and any shared images follow as separate content parts
 Respond ONLY with a JSON array, or [] if nothing worth remembering:
 [{"category": "fact|preference|personality|event|vibe", "subject": "DisplayName|server", "content": "concise observation"}]`;
 
-        // Prepend instruction text, then interleaved message + image parts follow
-        contentParts.unshift({ type: 'text', text: analysisPrompt });
-
-        if (imageCount > 0) {
-          logger.info(`PersonalityLearner: Including ${imageCount} images from channel ${channelId}`);
-        }
+        const personalityParts: ChatCompletionContentPart[] = [
+          { type: 'text', text: personalityPrompt },
+          ...messageParts,
+        ];
 
         const learnerModel = process.env.LEARNER_MODEL || 'qwen/qwen3-vl-235b-a22b-instruct';
-        logger.info(`PersonalityLearner: Sending request to ${learnerModel} for channel ${channelId}`);
+        const personalitySaved = await this.analyzeAndSave(
+          openai,
+          learnerModel,
+          personalityParts,
+          channelId,
+          'observation',
+          'PersonalityLearner',
+        );
 
-        const response = await openai.chat.completions.create({
-          model: learnerModel,
-          max_tokens: 1024,
-          temperature: 0.3,
-          messages: [{ role: 'user', content: contentParts }],
-          // @ts-expect-error OpenRouter-specific field
-          provider: { zdr: true },
-        });
-
-        const text = response.choices[0]?.message?.content?.trim();
-        if (!text) continue;
-
-        // Parse JSON response, with regex fallback
-        let observations: Observation[] = [];
-        try {
-          observations = JSON.parse(text) as Observation[];
-        } catch {
-          // Try regex fallback to extract JSON array
-          const match = text.match(/\[[\s\S]*\]/);
-          if (match) {
-            try {
-              observations = JSON.parse(match[0]) as Observation[];
-            } catch {
-              logger.warn(
-                `PersonalityLearner: Failed to parse JSON for channel ${channelId}. Raw: ${text.slice(0, 200)}`,
-              );
-              continue;
-            }
-          } else {
-            logger.warn(`PersonalityLearner: No JSON array found for channel ${channelId}. Raw: ${text.slice(0, 200)}`);
-            continue;
-          }
-        }
-
-        if (!Array.isArray(observations)) continue;
-
-        for (const obs of observations) {
-          if (obs.category && obs.subject && obs.content) {
-            this.store.save({
-              category: obs.category,
-              subject: obs.subject,
-              content: obs.content,
-              source: 'observation',
-            });
-          }
-        }
-
-        if (observations.length > 0) {
-          logger.info(`PersonalityLearner: Saved ${observations.length} observations from channel ${channelId}`);
+        if (personalitySaved > 0) {
+          logger.info(`PersonalityLearner: Saved ${personalitySaved} observations from channel ${channelId}`);
         } else {
           logger.info(`PersonalityLearner: No new observations from channel ${channelId}`);
+        }
+
+        // --- Pass 2: Self-improvement analysis (optional) ---
+        if (selfImprovementEnabled) {
+          try {
+            const existingSelfImprovement = SELF_IMPROVEMENT_CATEGORIES.flatMap((cat) =>
+              this.store.getByCategory(cat, 20),
+            );
+            const existingSelfImprovementSummary =
+              existingSelfImprovement.length > 0
+                ? existingSelfImprovement.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')
+                : '(none yet)';
+
+            const selfImprovementPrompt = `You are analyzing a Discord conversation from the perspective of a bot called "${botName}" that participates in this server. Your job is to identify ways the bot could improve itself.
+
+Look for:
+- capability_gap: Things the bot was asked to do but couldn't, or content it couldn't process (e.g., "the bot couldn't read that link", "fridge didn't understand the image", custom emojis treated as unknown text)
+- pain_point: User frustrations with the bot's behavior (e.g., "the bot keeps responding when nobody asked it", "its summaries are too long", "it forgot what we talked about")
+- feature_request: Things users explicitly or implicitly wish the bot could do (e.g., "it would be cool if fridge could...", "can the bot do X?", someone manually doing something the bot could automate)
+- improvement_idea: Patterns suggesting the bot could be better (e.g., the bot gives verbose answers in a channel that prefers short messages, users consistently rephrase questions the bot misunderstood)
+
+Do NOT extract:
+- Things the bot already does well
+- General conversation unrelated to bot interaction
+- Transient complaints that are just jokes or roasting (use context to judge — friends roasting the bot vs genuine frustration)
+- Anything already in existing observations (below)
+
+Bot name: "${botName}" (also called "fridge", "fridge bot", "bot")
+
+Existing self-improvement observations (avoid duplicates):
+${existingSelfImprovementSummary}
+
+Messages follow as separate content parts below.
+
+Respond ONLY with a JSON array, or [] if nothing actionable:
+[{"category": "capability_gap|pain_point|feature_request|improvement_idea", "subject": "bot|server|DisplayName", "content": "concise, actionable observation"}]`;
+
+            const selfImprovementParts: ChatCompletionContentPart[] = [
+              { type: 'text', text: selfImprovementPrompt },
+              ...messageParts,
+            ];
+
+            const selfImprovementModel =
+              process.env.SELF_IMPROVEMENT_MODEL || process.env.LEARNER_MODEL || 'qwen/qwen3-vl-235b-a22b-instruct';
+            const selfImprovementSaved = await this.analyzeAndSave(
+              openai,
+              selfImprovementModel,
+              selfImprovementParts,
+              channelId,
+              'self-improvement',
+              'SelfImprovementLearner',
+            );
+
+            if (selfImprovementSaved > 0) {
+              logger.info(
+                `SelfImprovementLearner: Saved ${selfImprovementSaved} observations from channel ${channelId}`,
+              );
+            } else {
+              logger.info(`SelfImprovementLearner: No new observations from channel ${channelId}`);
+            }
+          } catch (error) {
+            logger.warn('SelfImprovementLearner: Self-improvement pass failed, continuing:', error);
+          }
         }
 
         // Update last observed message ID (newest message in the batch)
