@@ -30,7 +30,10 @@ module.exports = {
       }
     }
 
-    const result = await classifyMessage(message);
+    // Check if the bot has an active conversation in this channel (within 5-min timeout)
+    const hasActiveConversation = agent.hasActiveConversation(message.channel.id);
+
+    const result = await classifyMessage(message, { hasActiveConversation });
     if (result.shouldRespond) {
       const author = message.member?.displayName || message.author.username;
       logger.info(`Gate classifier triggered for ${author}: ${result.reason}`);

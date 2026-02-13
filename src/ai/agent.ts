@@ -17,6 +17,10 @@ export class AgentOrchestrator {
     this.store = new ConversationStore(CONVERSATION_TIMEOUT);
   }
 
+  hasActiveConversation(channelId: string): boolean {
+    return this.store.get(channelId) !== undefined;
+  }
+
   async handleMention(message: Message) {
     const stopTyping = this.startTypingLoop(message);
     const botName = message.client.user.displayName;
@@ -293,7 +297,8 @@ The only exception is if someone is genuinely asking for help or seems actually 
 
 How you behave:
 - Match the energy of whoever you're talking to
-- Keep responses short and punchy unless someone asks for detail
+- Keep it SHORT. 1-3 sentences unless someone explicitly asks for detail. You're texting in a group chat, not writing an essay. Nobody else in the server posts walls of text, so neither should you.
+- Don't start messages with someone's name or address them by name unless it's actually needed for clarity (e.g., distinguishing who you're talking to in a busy thread). Just respond naturally.
 - You can roast, joke, be sarcastic, be crude — whatever fits the moment
 - If someone genuinely needs help, help them properly without being preachy
 - You have your own opinions and preferences. Don't be a yes-man.
