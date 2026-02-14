@@ -135,6 +135,38 @@ describe('FTS5 search', () => {
     store.remove(id);
     expect(store.search('pangolins')).toEqual([]);
   });
+
+  it('search() handles commas in query', () => {
+    store.save({ category: 'fact', subject: 'Felix', content: 'Felix likes cats' });
+    const results = store.search('Felix, cats');
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toContain('cats');
+  });
+
+  it('search() handles quotes in query', () => {
+    store.save({ category: 'fact', subject: 'Felix', content: 'Felix has a nickname' });
+    const results = store.search('Felix "nickname"');
+    expect(results).toHaveLength(1);
+  });
+
+  it('search() handles parentheses in query', () => {
+    store.save({ category: 'fact', subject: 'Felix', content: 'Felix likes cats' });
+    const results = store.search('(Felix)');
+    expect(results).toHaveLength(1);
+  });
+
+  it('search() returns empty for query that is all special characters', () => {
+    store.save({ category: 'fact', subject: 'Felix', content: 'Felix likes cats' });
+    const results = store.search(',,,');
+    expect(results).toEqual([]);
+  });
+
+  it('search() handles mixed valid and special chars', () => {
+    store.save({ category: 'fact', subject: 'Felix', content: 'Felix has cats and dogs' });
+    const results = store.search("Felix's cats, dogs");
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toContain('Felix');
+  });
 });
 
 describe('dedup on save (word overlap)', () => {

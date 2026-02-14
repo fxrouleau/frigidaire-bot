@@ -120,9 +120,16 @@ export class OpenRouterProvider implements AiProvider {
     }
   }
 
-  async generateImageLocal(message: Message, prompt: string, options?: { refinePrevious?: boolean }): Promise<string> {
+  async generateImageLocal(
+    message: Message,
+    prompt: string,
+    options?: { refinePrevious?: boolean; sourceImageUrl?: string },
+  ): Promise<string> {
     const { generateLocalImage } = await import('../tools/localImageGenerator');
-    return generateLocalImage(message, prompt, { refinePrevious: options?.refinePrevious });
+    return generateLocalImage(message, prompt, {
+      refinePrevious: options?.refinePrevious,
+      sourceImageUrl: options?.sourceImageUrl,
+    });
   }
 
   private toOpenAIMessage(entry: ConversationEntry): ChatCompletionMessageParam {

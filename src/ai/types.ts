@@ -85,5 +85,9 @@ export interface AiProvider {
   }): Promise<ProviderChatResponse>;
   summarizeMessages?(message: Message, startTime: string, endTime: string): Promise<string>;
   generateImage?(message: Message, prompt: string): Promise<string>;
-  generateImageLocal?(message: Message, prompt: string, options?: { refinePrevious?: boolean }): Promise<string>;
+  generateImageLocal?(
+    message: Message,
+    prompt: string,
+    options?: { refinePrevious?: boolean; sourceImageUrl?: string },
+  ): Promise<string>;
 }
