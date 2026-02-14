@@ -88,10 +88,11 @@ export function extractImageFromResponse(
 export async function generateLocalImage(
   message: Message,
   prompt: string,
-  options?: { refinePrevious?: boolean },
+  options?: { refinePrevious?: boolean; sourceImageUrl?: string },
 ): Promise<string> {
   try {
     const shouldRefine = options?.refinePrevious ?? false;
+    const sourceImageUrl = options?.sourceImageUrl;
     const channelId = message.channel.id;
     const session = getSession(channelId);
 
@@ -110,6 +111,17 @@ export async function generateLocalImage(
     if (shouldRefine && session) {
       // Multi-turn: include previous conversation + new edit instruction
       messages = [...session.conversationHistory, { role: 'user', content: prompt }];
+    } else if (sourceImageUrl) {
+      // New image with source reference — include the source image alongside the prompt
+      messages = [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: sourceImageUrl } },
+            { type: 'text', text: prompt },
+          ],
+        },
+      ];
     } else {
       // New image
       messages = [{ role: 'user', content: prompt }];

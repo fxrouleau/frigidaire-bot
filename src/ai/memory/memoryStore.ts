@@ -118,6 +118,9 @@ export class MemoryStore {
   }
 
   search(query: string, limit = 20): Memory[] {
+    const sanitized = this.sanitizeFtsQuery(query);
+    if (!sanitized) return [];
+
     return this.db
       .prepare(
         `SELECT m.* FROM memories m
@@ -126,7 +129,16 @@ export class MemoryStore {
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(query, limit) as Memory[];
+      .all(sanitized, limit) as Memory[];
+  }
+
+  private sanitizeFtsQuery(query: string): string {
+    // Strip FTS5 operator/special characters and apostrophes (token boundaries)
+    const stripped = query.replace(/["',()\{\}\*:^~@!#$%&+\-]/g, ' ');
+    // Split on whitespace, filter empty/single-char fragments
+    const terms = stripped.split(/\s+/).filter((t) => t.length > 1);
+    if (terms.length === 0) return '';
+    return terms.map((t) => `"${t}"`).join(' ');
   }
 
   getBySubject(subject: string, limit = 20): Memory[] {

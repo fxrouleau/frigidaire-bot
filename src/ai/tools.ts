@@ -60,6 +60,11 @@ const imageTool: ToolDefinition = {
         type: 'boolean',
         description: 'If true, refine the most recently generated image for this channel.',
       },
+      source_image_url: {
+        type: 'string',
+        description:
+          'URL of an image from the conversation to use as reference/source for the generation. Pass this when the user wants to transform, edit, or reference an existing image.',
+      },
     },
     required: ['prompt', 'refine_previous'],
     additionalProperties: false,
@@ -67,9 +72,10 @@ const imageTool: ToolDefinition = {
   handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const prompt = String(args.prompt ?? '');
     const refinePrevious = Boolean(args.refine_previous ?? false);
+    const sourceImageUrl = args.source_image_url ? String(args.source_image_url) : undefined;
 
     if (ctx.provider.generateImageLocal) {
-      return ctx.provider.generateImageLocal(ctx.message, prompt, { refinePrevious });
+      return ctx.provider.generateImageLocal(ctx.message, prompt, { refinePrevious, sourceImageUrl });
     }
 
     if (ctx.provider.generateImage) {
