@@ -3,10 +3,12 @@
   "packageManager": "yarn@4.7.0",
   "dependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "@types/sharp": "^0.31.1",
     "better-sqlite3": "^12.6.2",
     "discord.js": "^14.25.1",
     "dotenv": "^17.2.4",
-    "openai": "6.18.0"
+    "openai": "6.18.0",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
