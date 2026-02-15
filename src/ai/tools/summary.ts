@@ -1,4 +1,5 @@
 import type { Collection, Message } from 'discord.js';
+import { formatTimestampET } from '../utils';
 
 export type SummaryPrep = {
   prompt: string;
@@ -51,7 +52,10 @@ export async function prepareSummaryPrompt(message: Message, startTime: string, 
 
   const formattedMessages = messagesForSummary
     .reverse()
-    .map((msg) => `${msg.member?.displayName || msg.author.username}: ${msg.content}`)
+    .map((msg) => {
+      const ts = formatTimestampET(msg.createdAt);
+      return `[${ts}] ${msg.member?.displayName || msg.author.username}: ${msg.content}`;
+    })
     .join('\n');
 
   const prompt = `Provide a concise summary of the key topics and events from this Discord chat:\n\n${formattedMessages}`;

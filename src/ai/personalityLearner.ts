@@ -4,6 +4,7 @@ import OpenAI from 'openai';
 import type { ChatCompletionContentPart } from 'openai/resources/chat/completions';
 import { logger } from '../logger';
 import type { MemoryStore } from './memory/memoryStore';
+import { formatTimestampET } from './utils';
 
 const DEFAULT_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_MIN_MESSAGES = 5;
@@ -200,7 +201,8 @@ export class PersonalityLearner {
         let imageCount = 0;
         for (const msg of humanMessages) {
           const name = msg.member?.displayName || msg.author.username;
-          messageParts.push({ type: 'text', text: `[${name}] ${msg.content}` });
+          const ts = formatTimestampET(msg.createdAt);
+          messageParts.push({ type: 'text', text: `[${ts}] [${name}] ${msg.content}` });
           // Inline image parts from attachments
           for (const attachment of msg.attachments.values()) {
             if (attachment.contentType?.startsWith('image/')) {
