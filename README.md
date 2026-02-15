@@ -10,7 +10,7 @@ This is a bot that I've created for personal use on a discord server with friend
             - `@Frigidaire Bot can you summarize the conversation from 3am to 6am today?`
             - `@Frigidaire Bot give me a summary of yesterday's chat.`
 
-    The conversation history for the chat feature is shared among all users in the channel and will be maintained for up to 5 minutes of inactivity before being reset.
+    The conversation history for the chat feature is shared among all users in the channel and will be maintained for up to 15 minutes of inactivity before being reset.
 
 ## Docker Compose
 If you want to just use the bot easily without downloading this repository, you can use the following docker-compose template:

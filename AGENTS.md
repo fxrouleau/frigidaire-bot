@@ -57,7 +57,7 @@ src/
 - **Conversation flow**: Mention → fetch/create state → build history with system prompt → LLM call with tools → execute host tools → follow-up LLM call without tools → store state
 
 ### Conversation Management
-- `ConversationStore`: In-memory, per-channel, auto-expires after 5 minutes of inactivity
+- `ConversationStore`: In-memory, per-channel, auto-expires after 15 minutes of inactivity
 - Fetches last 10 messages on initial mention for context
 - State preserved across provider switches
 
@@ -95,6 +95,7 @@ GOOGLE_GENAI_API_KEY=<gemini_key>
 GOOGLE_API_KEY=<alt_gemini_key>
 GEMINI_MODEL=<custom_gemini_model>
 GOOGLE_IMAGE_MODEL=<custom_image_model>
+CONVERSATION_TIMEOUT_MS=<ms>       # Conversation context timeout (default: 900000 / 15 min)
 ```
 
 ## Conventions

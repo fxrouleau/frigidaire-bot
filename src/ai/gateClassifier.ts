@@ -77,6 +77,27 @@ export async function classifyMessage(
       }
     }
 
+    // Fetch recent channel messages for context
+    let recentContext = '';
+    try {
+      const recentMessages = await message.channel.messages.fetch({ limit: 8, before: message.id });
+      const formatted = [...recentMessages.values()]
+        .reverse()
+        .map((msg) => {
+          const name =
+            msg.author.id === message.client.user.id
+              ? `${botName} (bot)`
+              : msg.member?.displayName || msg.author.username;
+          return `${name}: ${msg.content.slice(0, 150)}`;
+        })
+        .join('\n');
+      if (formatted) {
+        recentContext = formatted;
+      }
+    } catch {
+      // Non-critical, proceed without context
+    }
+
     const aliasListStr = [botName, ...BOT_ALIASES].map((a) => `"${a}"`).join(', ');
 
     const activeConversationContext = activeConversation
@@ -103,14 +124,16 @@ FALSE — the user is NOT talking to the bot:
 - "nice one bot" (reaction, not a request) -> false
 - "@someone what do you think" (talking to someone else) -> false
 ${activeConversationContext}
+Recent channel messages may be included for context. If the bot recently responded and the new message looks like a follow-up, classify as true.
+
 Default to false if unsure.`;
 
-    const userPrompt = `${replyContext ? `${replyContext}\n` : ''}${authorName}: ${message.content}`;
+    const userPrompt = `${recentContext ? `Recent messages:\n${recentContext}\n\n` : ''}${replyContext ? `${replyContext}\n` : ''}New message:\n${authorName}: ${message.content}`;
 
     const openai = getClient();
     const response = await openai.chat.completions.create({
       model: 'anthropic/claude-haiku-4-5',
-      max_tokens: 100,
+      max_tokens: 150,
       temperature: 0,
       response_format: {
         type: 'json_schema',
