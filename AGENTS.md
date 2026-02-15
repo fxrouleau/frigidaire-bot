@@ -108,23 +108,24 @@ GOOGLE_IMAGE_MODEL=<custom_image_model>
 
 ## Tooling Notes
 
+- `CLAUDE.md` is a symlink to `AGENTS.md` — they are the same file. Git tracks it as `AGENTS.md`.
 - If `yarn install` fails with EPERM/cache errors, use a project-local cache:
   ```bash
   set YARN_CACHE_FOLDER=.yarn\cache && yarn config set enableGlobalCache false && yarn install
   ```
-- **Cloud / Claude Code on the web**: Corepack cannot download Yarn v4 in sandboxed cloud environments (network restrictions). Use npm as a fallback for installing dependencies and running scripts:
+- **Cloud / Claude Code on the web**: Corepack cannot download Yarn v4 directly (the proxy blocks `repo.yarnpkg.com`), but **Yarn v4 is still accessible** via npm. Use npm as a fallback for installing dependencies and running scripts:
   ```bash
   npm install && npx tsc && npx biome check --fix src/
   ```
   Also set `LEFTHOOK=0` when committing, since the pre-commit hook depends on Yarn.
   **Do NOT commit `package-lock.json`** — it is a side effect of using npm and should be left unstaged.
-  **When adding/removing packages** (changes to `package.json`), you must also commit an updated `yarn.lock`. Since Corepack is blocked, get Yarn v4 via npm to generate it:
+  **When adding/removing packages** (changes to `package.json`), you must also commit an updated `yarn.lock`. Get Yarn v4 via npm to generate it properly:
   ```bash
   npm pack @yarnpkg/cli-dist@4.7.0 && mkdir -p /tmp/yarn-setup && tar -xzf yarnpkg-cli-dist-4.7.0.tgz -C /tmp/yarn-setup
   git checkout -- yarn.lock   # restore original before updating
   node /tmp/yarn-setup/package/bin/yarn.js install
   rm -f yarnpkg-cli-dist-4.7.0.tgz
   ```
-  This produces a proper Yarn v4 lockfile that passes CI `--immutable` checks.
+  This produces a proper Yarn v4 lockfile that passes CI `--immutable` checks. Always commit `yarn.lock` alongside `package.json` when dependencies change.
 - Discord typing indicator loops every 8 seconds during AI processing
 - Each provider maps roles differently (assistant/model, developer/system) — see individual provider files for details
