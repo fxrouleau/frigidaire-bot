@@ -3,6 +3,7 @@ import * as process from 'node:process';
 import { AttachmentBuilder, type Message } from 'discord.js';
 import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
+import sharp from 'sharp';
 import { logger } from '../../logger';
 import { toolDefinitions } from '../tools';
 import { prepareSummaryPrompt } from '../tools/summary';
@@ -196,6 +197,7 @@ export class OpenRouterProvider implements AiProvider {
     if (url.startsWith('data:')) return url;
 
     const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
+    const MAX_DIMENSION = 1568;
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
       if (!response.ok) {
@@ -209,10 +211,24 @@ export class OpenRouterProvider implements AiProvider {
         return undefined;
       }
 
-      const buffer = Buffer.from(await response.arrayBuffer());
+      let buffer: Buffer = Buffer.from(await response.arrayBuffer());
       if (buffer.byteLength > MAX_SIZE) {
         logger.warn(`Image too large (${buffer.byteLength} bytes), skipping: ${url}`);
         return undefined;
+      }
+
+      try {
+        const image = sharp(buffer);
+        const metadata = await image.metadata();
+        const width = metadata.width ?? 0;
+        const height = metadata.height ?? 0;
+
+        if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+          logger.info(`Resizing image from ${width}x${height} (max ${MAX_DIMENSION}px): ${url}`);
+          buffer = await image.resize({ width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'inside' }).png().toBuffer();
+        }
+      } catch (resizeError) {
+        logger.warn(`Failed to resize image, using original: ${url}`, resizeError);
       }
 
       const contentType = response.headers.get('content-type') || 'image/png';
