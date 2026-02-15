@@ -7,6 +7,7 @@ import type { Memory } from './memory/memoryStore';
 import { getProviderForChannel } from './providerRegistry';
 import { getMemoryStore, toolDefinitions } from './tools';
 import type { AiProvider, ConversationEntry, NormalizedContentPart } from './types';
+import { formatTimestampET } from './utils';
 
 const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
@@ -315,7 +316,8 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
     const parts: NormalizedContentPart[] = [];
     const authorLabel = msg.member?.displayName || msg.author.username;
     const trimmed = msg.content?.trim();
-    const baseText = trimmed ? `${authorLabel}: ${trimmed}` : `${authorLabel}:`;
+    const ts = formatTimestampET(msg.createdAt);
+    const baseText = trimmed ? `[${ts}] ${authorLabel}: ${trimmed}` : `[${ts}] ${authorLabel}:`;
     parts.push({ type: 'text', text: baseText });
 
     if (msg.attachments.size > 0) {
