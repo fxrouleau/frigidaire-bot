@@ -14,7 +14,9 @@ const client = new Client({
 });
 
 const eventsPath = path.join(__dirname, 'events');
-const eventFiles = fs.readdirSync(eventsPath).filter((file) => file.endsWith('.ts') || file.endsWith('.js'));
+const eventFiles = fs
+  .readdirSync(eventsPath)
+  .filter((file) => (file.endsWith('.ts') || file.endsWith('.js')) && !file.includes('.test.'));
 
 for (const file of eventFiles) {
   const filePath = path.join(eventsPath, file);
