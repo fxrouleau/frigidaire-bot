@@ -2,9 +2,9 @@ import { type BaseGuildTextChannel, ChannelType, Events, type Message } from 'di
 import { logger } from '../logger';
 import { repostMessage } from '../utils';
 
-const re = /(https?:\/\/(twitter|x)\.com\/.+\/status\/\S+)/;
+export const re = /(https?:\/\/(?:[a-z0-9-]+\.)?(twitter|x)\.com\/[\w]+\/status\/\S+)/;
 
-const replaceString = (input: string) => {
+export const replaceString = (input: string) => {
   return input.replace(re, (match, p1) => {
     const replacedDomain = p1.replace(/(twitter\.com|x\.com)/, 'fixvx.com');
     return match.replace(p1, replacedDomain).replace(/\?.*/, '');

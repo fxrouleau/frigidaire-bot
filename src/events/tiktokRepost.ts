@@ -2,9 +2,9 @@ import { type BaseGuildTextChannel, ChannelType, Events, type Message } from 'di
 import { logger } from '../logger';
 import { repostMessage } from '../utils';
 
-const re = /(https?:\/\/(?:www\.)?(?:vm\.)?tiktok\.com\/\S+)/;
+export const re = /(https?:\/\/(?:[a-z0-9-]+\.)*?tiktok\.com\/\S+)/;
 
-const replaceString = (input: string) => {
+export const replaceString = (input: string) => {
   return input.replace(re, (match, p1) => {
     const replacedDomain = p1.replace(/tiktok\.com/, 'tnktok.com');
     return match.replace(p1, replacedDomain).replace(/\?.*/, '');

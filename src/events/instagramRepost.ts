@@ -2,9 +2,9 @@ import { type BaseGuildTextChannel, ChannelType, Events, type Message } from 'di
 import { logger } from '../logger';
 import { repostMessage } from '../utils';
 
-const re = /(https?:\/\/(?:www\.)?instagram\.com\/(?:p|reel|tv)\/\S+)/;
+export const re = /(https?:\/\/(?:[a-z0-9-]+\.)?instagram\.com\/(?:p|reels?|tv)\/\S+)/;
 
-const replaceString = (input: string) => {
+export const replaceString = (input: string) => {
   return input.replace(re, (match, p1) => {
     const replacedDomain = p1.replace(/instagram\.com/, 'zzinstagram.com');
     return match.replace(p1, replacedDomain).replace(/\?.*/, '');
