@@ -117,5 +117,6 @@ GOOGLE_IMAGE_MODEL=<custom_image_model>
   npm install && npx tsc && npx biome check --fix src/
   ```
   Also set `LEFTHOOK=0` when committing, since the pre-commit hook depends on Yarn.
+  **Do NOT commit `package-lock.json` or changes to `yarn.lock`** — these are side effects of using npm locally and should be left unstaged. Only commit your actual source changes.
 - Discord typing indicator loops every 8 seconds during AI processing
 - Each provider maps roles differently (assistant/model, developer/system) — see individual provider files for details
