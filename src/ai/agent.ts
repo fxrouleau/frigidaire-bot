@@ -131,6 +131,7 @@ export class AgentOrchestrator {
         });
 
         workingEntries.push(...followUp.outputEntries);
+        stopTyping();
         await this.sendReply(followUp.text, message);
 
         this.store.set(channelId, {
@@ -142,6 +143,7 @@ export class AgentOrchestrator {
         return;
       }
 
+      stopTyping();
       await this.sendReply(firstResponse.text, message);
 
       this.store.set(channelId, {
@@ -156,7 +158,19 @@ export class AgentOrchestrator {
         'tool_error',
         `Error processing message in #${channelId}: ${error instanceof Error ? error.message : 'unknown'}`,
       );
-      await message.reply('Sorry, I encountered an error while processing your request.');
+      stopTyping();
+      try {
+        await message.reply('Sorry, I encountered an error while processing your request.');
+      } catch (replyError) {
+        logger.warn('Failed to reply with error message, falling back to channel.send():', replyError);
+        try {
+          if ('send' in message.channel) {
+            await message.channel.send('Sorry, I encountered an error while processing your request.');
+          }
+        } catch (sendError) {
+          logger.error('Failed to send error message to channel:', sendError);
+        }
+      }
     } finally {
       stopTyping();
     }
@@ -335,13 +349,28 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
     if (!content) {
       const authorName = message.member?.displayName || message.author.username;
       logFailure('parse_failure', `Empty LLM response for message from ${authorName}`);
-      await message.reply("I've processed the information, but I don't have anything further to add.");
+      await this.safeSend(message, "I've processed the information, but I don't have anything further to add.");
       return;
     }
 
     const chunks = splitMessage(content);
     for (const chunk of chunks) {
-      await message.reply(chunk);
+      await this.safeSend(message, chunk);
+    }
+  }
+
+  private async safeSend(message: Message, content: string): Promise<void> {
+    try {
+      await message.reply(content);
+    } catch (error: unknown) {
+      const isReplyError =
+        error instanceof Error && 'code' in error && (error as Record<string, unknown>).code === 50035;
+      if (isReplyError && 'send' in message.channel) {
+        logger.warn('Cannot reply to this message (system/webhook message), falling back to channel.send()');
+        await message.channel.send(content);
+      } else if (!isReplyError) {
+        throw error;
+      }
     }
   }
 
