@@ -112,11 +112,19 @@ GOOGLE_IMAGE_MODEL=<custom_image_model>
   ```bash
   set YARN_CACHE_FOLDER=.yarn\cache && yarn config set enableGlobalCache false && yarn install
   ```
-- **Cloud / Claude Code on the web**: Corepack cannot download Yarn v4 in sandboxed cloud environments (network restrictions). Use npm as a fallback:
+- **Cloud / Claude Code on the web**: Corepack cannot download Yarn v4 in sandboxed cloud environments (network restrictions). Use npm as a fallback for installing dependencies and running scripts:
   ```bash
   npm install && npx tsc && npx biome check --fix src/
   ```
   Also set `LEFTHOOK=0` when committing, since the pre-commit hook depends on Yarn.
-  **Do NOT commit `package-lock.json` or changes to `yarn.lock`** — these are side effects of using npm locally and should be left unstaged. Only commit your actual source changes. This applies even when adding new packages to `package.json` — the `yarn.lock` will be updated properly when `yarn install` runs in an environment with Yarn v4.
+  **Do NOT commit `package-lock.json`** — it is a side effect of using npm and should be left unstaged.
+  **When adding/removing packages** (changes to `package.json`), you must also commit an updated `yarn.lock`. Since Corepack is blocked, get Yarn v4 via npm to generate it:
+  ```bash
+  npm pack @yarnpkg/cli-dist@4.7.0 && mkdir -p /tmp/yarn-setup && tar -xzf yarnpkg-cli-dist-4.7.0.tgz -C /tmp/yarn-setup
+  git checkout -- yarn.lock   # restore original before updating
+  node /tmp/yarn-setup/package/bin/yarn.js install
+  rm -f yarnpkg-cli-dist-4.7.0.tgz
+  ```
+  This produces a proper Yarn v4 lockfile that passes CI `--immutable` checks.
 - Discord typing indicator loops every 8 seconds during AI processing
 - Each provider maps roles differently (assistant/model, developer/system) — see individual provider files for details
