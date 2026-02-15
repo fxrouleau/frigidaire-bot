@@ -62,7 +62,7 @@ export class OpenRouterProvider implements AiProvider {
     toolChoice?: 'auto' | 'none';
     thoughts?: unknown;
   }): Promise<ProviderChatResponse> {
-    const messages = input.messages.map((entry) => this.toOpenAIMessage(entry));
+    const messages = await Promise.all(input.messages.map((entry) => this.toOpenAIMessage(entry)));
 
     const tools: OpenAI.ChatCompletionTool[] = input.tools
       .filter((t) => t.type === 'function')
@@ -132,7 +132,7 @@ export class OpenRouterProvider implements AiProvider {
     });
   }
 
-  private toOpenAIMessage(entry: ConversationEntry): ChatCompletionMessageParam {
+  private async toOpenAIMessage(entry: ConversationEntry): Promise<ChatCompletionMessageParam> {
     if (entry.kind === 'message') {
       if (entry.role === 'assistant') {
         const text = entry.content.map((p) => (p.type === 'text' ? p.text : `[image]: ${p.url}`)).join('\n');
@@ -145,7 +145,7 @@ export class OpenRouterProvider implements AiProvider {
       }
 
       // user message
-      const parts = this.buildContentParts(entry.content);
+      const parts = await this.buildContentParts(entry.content);
       if (parts.length === 1 && parts[0].type === 'text') {
         return { role: 'user', content: parts[0].text };
       }
@@ -176,14 +176,52 @@ export class OpenRouterProvider implements AiProvider {
     };
   }
 
-  private buildContentParts(content: NormalizedContentPart[]): ChatContentPart[] {
+  private async buildContentParts(content: NormalizedContentPart[]): Promise<ChatContentPart[]> {
     if (content.length === 0) return [{ type: 'text', text: '' }];
-    return content.map((part) => {
+    const parts: ChatContentPart[] = [];
+    for (const part of content) {
       if (part.type === 'image') {
-        return { type: 'image_url' as const, image_url: { url: part.url, detail: 'auto' as const } };
+        const dataUri = await this.fetchImageAsBase64(part.url);
+        if (dataUri) {
+          parts.push({ type: 'image_url', image_url: { url: dataUri, detail: 'auto' } });
+        }
+      } else {
+        parts.push({ type: 'text', text: part.text });
       }
-      return { type: 'text' as const, text: part.text };
-    });
+    }
+    return parts.length > 0 ? parts : [{ type: 'text', text: '' }];
+  }
+
+  private async fetchImageAsBase64(url: string): Promise<string | undefined> {
+    if (url.startsWith('data:')) return url;
+
+    const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) {
+        logger.warn(`Failed to fetch image (HTTP ${response.status}): ${url}`);
+        return undefined;
+      }
+
+      const contentLength = response.headers.get('content-length');
+      if (contentLength && Number.parseInt(contentLength, 10) > MAX_SIZE) {
+        logger.warn(`Image too large (${contentLength} bytes), skipping: ${url}`);
+        return undefined;
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.byteLength > MAX_SIZE) {
+        logger.warn(`Image too large (${buffer.byteLength} bytes), skipping: ${url}`);
+        return undefined;
+      }
+
+      const contentType = response.headers.get('content-type') || 'image/png';
+      const mimeType = contentType.split(';')[0].trim();
+      return `data:${mimeType};base64,${buffer.toString('base64')}`;
+    } catch (error) {
+      logger.warn(`Failed to download image for base64 conversion: ${url}`, error);
+      return undefined;
+    }
   }
 
   private parseResponse(response: OpenAI.ChatCompletion): ProviderChatResponse {
