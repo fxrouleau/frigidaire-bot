@@ -1,3 +1,4 @@
+import * as process from 'node:process';
 import type { Message } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
@@ -9,7 +10,7 @@ import { getMemoryStore, toolDefinitions } from './tools';
 import type { AiProvider, ConversationEntry, NormalizedContentPart } from './types';
 import { formatTimestampET } from './utils';
 
-const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+const CONVERSATION_TIMEOUT = Number(process.env.CONVERSATION_TIMEOUT_MS) || 15 * 60 * 1000; // 15 minutes
 
 export class AgentOrchestrator {
   private readonly store: ConversationStore;
