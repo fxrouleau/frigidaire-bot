@@ -109,7 +109,7 @@ export class PersonalityLearner {
       provider: { zdr: true },
     });
 
-    const text = response.choices[0]?.message?.content?.trim();
+    const text = response.choices?.[0]?.message?.content?.trim();
     if (!text) return 0;
 
     // Parse JSON response, with regex fallback

@@ -217,6 +217,7 @@ export class OpenRouterProvider implements AiProvider {
         return undefined;
       }
 
+      let resized = false;
       try {
         const image = sharp(buffer);
         const metadata = await image.metadata();
@@ -226,13 +227,15 @@ export class OpenRouterProvider implements AiProvider {
         if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
           logger.info(`Resizing image from ${width}x${height} (max ${MAX_DIMENSION}px): ${url}`);
           buffer = await image.resize({ width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'inside' }).png().toBuffer();
+          resized = true;
         }
       } catch (resizeError) {
         logger.warn(`Failed to resize image, using original: ${url}`, resizeError);
       }
 
-      const contentType = response.headers.get('content-type') || 'image/png';
-      const mimeType = contentType.split(';')[0].trim();
+      const mimeType = resized
+        ? 'image/png'
+        : (response.headers.get('content-type') || 'image/png').split(';')[0].trim();
       return `data:${mimeType};base64,${buffer.toString('base64')}`;
     } catch (error) {
       logger.warn(`Failed to download image for base64 conversion: ${url}`, error);

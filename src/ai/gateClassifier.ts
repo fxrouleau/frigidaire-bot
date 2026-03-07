@@ -155,8 +155,8 @@ Default to false if unsure.`;
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      // @ts-expect-error OpenRouter-specific field for zero data retention
-      provider: { zdr: true },
+      // @ts-expect-error OpenRouter-specific fields
+      provider: { zdr: true, ignore: ['Amazon Bedrock'] },
     });
 
     const text = response.choices[0]?.message?.content?.trim();
