@@ -260,4 +260,7 @@ dist
 # SQLite data directory
 data/
 
+# npm lockfile (project uses Yarn v4; package-lock.json is a side effect of npm fallback)
+package-lock.json
+
 # End of https://www.toptal.com/developers/gitignore/api/jetbrains+all,node,git
