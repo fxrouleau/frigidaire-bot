@@ -55,6 +55,14 @@ export class OpenRouterProvider implements AiProvider {
           hostHandled: true,
         }) satisfies ProviderToolDefinition,
     );
+
+    // Add native web search — handled by the model itself, not the host
+    this.supportedTools.push({
+      name: 'web_search',
+      type: 'web_search',
+      description: 'Search the web for current information.',
+      hostHandled: false,
+    });
   }
 
   async chat(input: {
@@ -65,7 +73,7 @@ export class OpenRouterProvider implements AiProvider {
   }): Promise<ProviderChatResponse> {
     const messages = await this.toOpenAIMessages(input.messages);
 
-    const tools: OpenAI.ChatCompletionTool[] = input.tools
+    const functionTools: OpenAI.ChatCompletionTool[] = input.tools
       .filter((t) => t.type === 'function')
       .map((t) => ({
         type: 'function' as const,
@@ -76,10 +84,17 @@ export class OpenRouterProvider implements AiProvider {
         },
       }));
 
+    const hasWebSearch = input.tools.some((t) => t.type === 'web_search');
+
+    const allTools: unknown[] = [...functionTools];
+    if (hasWebSearch) {
+      allTools.push({ type: 'web_search_20250305', name: 'web_search' });
+    }
+
     const response = await this.client.chat.completions.create({
       model: this.defaultModel,
       messages,
-      tools: tools.length > 0 ? tools : undefined,
+      tools: allTools.length > 0 ? (allTools as OpenAI.ChatCompletionTool[]) : undefined,
       tool_choice: input.toolChoice === 'none' ? 'none' : 'auto',
       // @ts-expect-error OpenRouter-specific field
       provider: {

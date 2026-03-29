@@ -1,5 +1,3 @@
-import * as process from 'node:process';
-import OpenAI from 'openai';
 import { logger } from '../logger';
 import { type Memory, MemoryStore } from './memory/memoryStore';
 import type { ToolDefinition, ToolHandlerContext } from './types';
@@ -179,65 +177,6 @@ const forgetMemoryTool: ToolDefinition = {
   },
 };
 
-let searchClient: OpenAI | undefined;
-
-function getSearchClient(): OpenAI | undefined {
-  if (!process.env.OPENROUTER_API_KEY) return undefined;
-  if (!searchClient) {
-    searchClient = new OpenAI({
-      apiKey: process.env.OPENROUTER_API_KEY,
-      baseURL: 'https://openrouter.ai/api/v1',
-      defaultHeaders: { 'X-Title': 'Frigidaire Bot' },
-    });
-  }
-  return searchClient;
-}
-
-const webSearchTool: ToolDefinition = {
-  name: 'web_search',
-  description:
-    "Search the web for current information. Use SPARINGLY — only when you genuinely need real-time data you couldn't possibly know (live scores, recent news, release dates, etc).",
-  parameters: {
-    type: 'object',
-    properties: {
-      query: { type: 'string', description: 'The search query.' },
-    },
-    required: ['query'],
-    additionalProperties: false,
-  },
-  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
-    const query = String(args.query ?? '');
-    const client = getSearchClient();
-    if (!client) {
-      return 'Web search is not available (missing API key).';
-    }
-
-    try {
-      // Use a small model with web search tool through OpenRouter
-      const response = await client.chat.completions.create({
-        model: 'google/gemini-2.5-flash',
-        max_tokens: 1024,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a search assistant. Return concise, factual results for the query. No commentary.',
-          },
-          { role: 'user', content: query },
-        ],
-        // @ts-expect-error OpenRouter-specific field — enable web search plugin
-        plugins: [{ id: 'web' }],
-        provider: { zdr: true },
-      });
-
-      const text = response.choices[0]?.message?.content?.trim();
-      return text || 'No search results found.';
-    } catch (error) {
-      logger.error('Web search failed:', error);
-      return 'Web search failed.';
-    }
-  },
-};
-
 const queryLongTermMemoryTool: ToolDefinition = {
   name: 'query_long_term_memory',
   description:
@@ -390,7 +329,6 @@ export const toolDefinitions: ToolDefinition[] = [
   rememberFactTool,
   recallMemoriesTool,
   forgetMemoryTool,
-  webSearchTool,
   queryLongTermMemoryTool,
   querySelfDiagnosisTool,
 ];
