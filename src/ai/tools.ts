@@ -146,12 +146,7 @@ const recallMemoriesTool: ToolDefinition = {
     }
 
     if (results.length === 0) {
-      // Fall back to recent memories
-      results = store.getRecent(10);
-    }
-
-    if (results.length === 0) {
-      return 'No memories found.';
+      return 'No memories found matching that query.';
     }
 
     return results
