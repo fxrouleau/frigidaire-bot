@@ -77,6 +77,8 @@ export class AgentOrchestrator {
         workingEntries.push(...toolResults);
 
         const MAX_TOOL_ROUNDS = 3;
+        const MAX_TOOL_INVOCATIONS = 50;
+        let totalInvocations = hostHandledCalls.length;
         let lastThoughts = firstResponse.thoughts ?? state.thoughts;
         let finalResponse: ProviderChatResponse | undefined;
 
@@ -98,6 +100,21 @@ export class AgentOrchestrator {
 
           if (roundToolCalls.length === 0) {
             finalResponse = roundResponse;
+            break;
+          }
+
+          totalInvocations += roundToolCalls.length;
+          if (totalInvocations > MAX_TOOL_INVOCATIONS) {
+            logger.warn(`Tool invocation limit (${MAX_TOOL_INVOCATIONS}) exceeded in channel ${channelId}, forcing text response.`);
+            const forcedResponse = await provider.chat({
+              messages: workingEntries,
+              tools: providerTools,
+              toolChoice: 'none',
+              thoughts: lastThoughts,
+            });
+            workingEntries.push(...forcedResponse.outputEntries);
+            finalResponse = forcedResponse;
+            lastThoughts = forcedResponse.thoughts ?? lastThoughts;
             break;
           }
 
