@@ -1,5 +1,5 @@
 import * as process from 'node:process';
-import type { Message } from 'discord.js';
+import { type Message, StickerFormatType } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 import { ConversationStore } from './conversationStore';
@@ -359,10 +359,33 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
     const baseText = trimmed ? `[${ts}] ${authorLabel}: ${trimmed}` : `[${ts}] ${authorLabel}:`;
     parts.push({ type: 'text', text: baseText });
 
+    // Extract custom emoji images so the model can "see" them
+    const customEmojiRegex = /<a?:(\w+):(\d+)>/g;
+    let emojiMatch: RegExpExecArray | null;
+    while ((emojiMatch = customEmojiRegex.exec(msg.content ?? '')) !== null) {
+      const [, , emojiId] = emojiMatch;
+      const isAnimated = emojiMatch[0].startsWith('<a:');
+      const ext = isAnimated ? 'gif' : 'png';
+      const emojiUrl = `https://cdn.discordapp.com/emojis/${emojiId}.${ext}?size=96&quality=lossless`;
+      parts.push({ type: 'image', url: emojiUrl });
+    }
+
     if (msg.attachments.size > 0) {
       for (const attachment of msg.attachments.values()) {
         if (attachment.contentType?.startsWith('image/') && attachment.url) {
           parts.push({ type: 'image', url: attachment.url });
+        }
+      }
+    }
+
+    // Include sticker images so the model can see them
+    if (msg.stickers.size > 0) {
+      for (const sticker of msg.stickers.values()) {
+        if (sticker.format === StickerFormatType.Lottie) {
+          parts.push({ type: 'text', text: `[sticker: ${sticker.name}]` });
+        } else {
+          const stickerUrl = `https://media.discordapp.net/stickers/${sticker.id}.png?size=320`;
+          parts.push({ type: 'image', url: stickerUrl });
         }
       }
     }
