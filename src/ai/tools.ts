@@ -1,5 +1,3 @@
-import * as process from 'node:process';
-import OpenAI from 'openai';
 import { logger } from '../logger';
 import { type Memory, MemoryStore } from './memory/memoryStore';
 import type { ToolDefinition, ToolHandlerContext } from './types';
@@ -130,7 +128,7 @@ const recallMemoriesTool: ToolDefinition = {
     const query = String(args.query ?? '');
     const subject = args.subject ? String(args.subject) : undefined;
 
-    let results = subject ? store.getBySubject(subject) : [];
+    const results = subject ? store.getBySubject(subject) : [];
 
     // Also search via FTS
     try {
@@ -146,12 +144,7 @@ const recallMemoriesTool: ToolDefinition = {
     }
 
     if (results.length === 0) {
-      // Fall back to recent memories
-      results = store.getRecent(10);
-    }
-
-    if (results.length === 0) {
-      return 'No memories found.';
+      return 'No memories found matching that query.';
     }
 
     return results
@@ -181,65 +174,6 @@ const forgetMemoryTool: ToolDefinition = {
     }
     store.deactivate(id);
     return `Memory #${id} has been forgotten.`;
-  },
-};
-
-let searchClient: OpenAI | undefined;
-
-function getSearchClient(): OpenAI | undefined {
-  if (!process.env.OPENROUTER_API_KEY) return undefined;
-  if (!searchClient) {
-    searchClient = new OpenAI({
-      apiKey: process.env.OPENROUTER_API_KEY,
-      baseURL: 'https://openrouter.ai/api/v1',
-      defaultHeaders: { 'X-Title': 'Frigidaire Bot' },
-    });
-  }
-  return searchClient;
-}
-
-const webSearchTool: ToolDefinition = {
-  name: 'web_search',
-  description:
-    "Search the web for current information. Use SPARINGLY — only when you genuinely need real-time data you couldn't possibly know (live scores, recent news, release dates, etc).",
-  parameters: {
-    type: 'object',
-    properties: {
-      query: { type: 'string', description: 'The search query.' },
-    },
-    required: ['query'],
-    additionalProperties: false,
-  },
-  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
-    const query = String(args.query ?? '');
-    const client = getSearchClient();
-    if (!client) {
-      return 'Web search is not available (missing API key).';
-    }
-
-    try {
-      // Use a small model with web search tool through OpenRouter
-      const response = await client.chat.completions.create({
-        model: 'google/gemini-2.5-flash',
-        max_tokens: 1024,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a search assistant. Return concise, factual results for the query. No commentary.',
-          },
-          { role: 'user', content: query },
-        ],
-        // @ts-expect-error OpenRouter-specific field — enable web search plugin
-        plugins: [{ id: 'web' }],
-        provider: { zdr: true },
-      });
-
-      const text = response.choices[0]?.message?.content?.trim();
-      return text || 'No search results found.';
-    } catch (error) {
-      logger.error('Web search failed:', error);
-      return 'Web search failed.';
-    }
   },
 };
 
@@ -366,18 +300,18 @@ const querySelfDiagnosisTool: ToolDefinition = {
     let results: Memory[] = [];
 
     if (category) {
-      results = store.getByCategory(category, limit);
+      results = store.getByCategory(category, limit * 3);
     } else {
       for (const cat of SELF_DIAGNOSIS_CATEGORIES) {
-        const catResults = store.getByCategory(cat, limit);
+        const catResults = store.getByCategory(cat, limit * 3);
         results.push(...catResults);
       }
-      results.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-      results = results.slice(0, limit);
     }
 
-    // Filter to only bot-related subjects
+    // Filter to only bot-related subjects FIRST, then sort and slice
     results = results.filter((r) => r.subject === 'bot' || r.subject === 'server');
+    results.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+    results = results.slice(0, limit);
 
     if (results.length === 0) {
       return "No self-diagnosis data found yet. The bot hasn't logged any issues or improvement ideas.";
@@ -395,7 +329,6 @@ export const toolDefinitions: ToolDefinition[] = [
   rememberFactTool,
   recallMemoriesTool,
   forgetMemoryTool,
-  webSearchTool,
   queryLongTermMemoryTool,
   querySelfDiagnosisTool,
 ];

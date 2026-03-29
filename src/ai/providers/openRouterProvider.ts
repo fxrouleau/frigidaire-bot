@@ -55,6 +55,14 @@ export class OpenRouterProvider implements AiProvider {
           hostHandled: true,
         }) satisfies ProviderToolDefinition,
     );
+
+    // Add native web search — handled by the model itself, not the host
+    this.supportedTools.push({
+      name: 'web_search',
+      type: 'web_search',
+      description: 'Search the web for current information.',
+      hostHandled: false,
+    });
   }
 
   async chat(input: {
@@ -63,9 +71,9 @@ export class OpenRouterProvider implements AiProvider {
     toolChoice?: 'auto' | 'none';
     thoughts?: unknown;
   }): Promise<ProviderChatResponse> {
-    const messages = await Promise.all(input.messages.map((entry) => this.toOpenAIMessage(entry)));
+    const messages = await this.toOpenAIMessages(input.messages);
 
-    const tools: OpenAI.ChatCompletionTool[] = input.tools
+    const functionTools: OpenAI.ChatCompletionTool[] = input.tools
       .filter((t) => t.type === 'function')
       .map((t) => ({
         type: 'function' as const,
@@ -76,10 +84,17 @@ export class OpenRouterProvider implements AiProvider {
         },
       }));
 
+    const hasWebSearch = input.tools.some((t) => t.type === 'web_search');
+
+    const allTools: unknown[] = [...functionTools];
+    if (hasWebSearch) {
+      allTools.push({ type: 'web_search_20250305', name: 'web_search' });
+    }
+
     const response = await this.client.chat.completions.create({
       model: this.defaultModel,
       messages,
-      tools: tools.length > 0 ? tools : undefined,
+      tools: allTools.length > 0 ? (allTools as OpenAI.ChatCompletionTool[]) : undefined,
       tool_choice: input.toolChoice === 'none' ? 'none' : 'auto',
       // @ts-expect-error OpenRouter-specific field
       provider: {
@@ -131,6 +146,54 @@ export class OpenRouterProvider implements AiProvider {
       refinePrevious: options?.refinePrevious,
       sourceImageUrl: options?.sourceImageUrl,
     });
+  }
+
+  private async toOpenAIMessages(entries: ConversationEntry[]): Promise<ChatCompletionMessageParam[]> {
+    const messages: ChatCompletionMessageParam[] = [];
+    let i = 0;
+
+    while (i < entries.length) {
+      const entry = entries[i];
+
+      // Merge consecutive tool_call entries (and an optional trailing assistant message) into one
+      if (entry.kind === 'tool_call') {
+        const toolCalls: { id: string; type: 'function'; function: { name: string; arguments: string } }[] = [];
+
+        while (i < entries.length && entries[i].kind === 'tool_call') {
+          const tc = entries[i] as ConversationEntry & { kind: 'tool_call' };
+          toolCalls.push({
+            id: tc.id,
+            type: 'function',
+            function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+          });
+          i++;
+        }
+
+        // Check if the next entry is an assistant message to merge as content
+        let content: string | null = null;
+        if (
+          i < entries.length &&
+          entries[i].kind === 'message' &&
+          (entries[i] as ConversationEntry & { kind: 'message' }).role === 'assistant'
+        ) {
+          const assistantEntry = entries[i] as ConversationEntry & { kind: 'message' };
+          content = assistantEntry.content.map((p) => (p.type === 'text' ? p.text : `[image]: ${p.url}`)).join('\n');
+          i++;
+        }
+
+        messages.push({
+          role: 'assistant',
+          content,
+          tool_calls: toolCalls,
+        });
+        continue;
+      }
+
+      messages.push(await this.toOpenAIMessage(entry));
+      i++;
+    }
+
+    return messages;
   }
 
   private async toOpenAIMessage(entry: ConversationEntry): Promise<ChatCompletionMessageParam> {

@@ -1,5 +1,5 @@
 import * as process from 'node:process';
-import type { Message } from 'discord.js';
+import { type Message, StickerFormatType } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 import { ConversationStore } from './conversationStore';
@@ -7,7 +7,13 @@ import { logFailure } from './failureLogger';
 import type { Memory } from './memory/memoryStore';
 import { getProviderForChannel } from './providerRegistry';
 import { getMemoryStore, toolDefinitions } from './tools';
-import type { AiProvider, ConversationEntry, NormalizedContentPart } from './types';
+import type {
+  AiProvider,
+  ConversationEntry,
+  NormalizedContentPart,
+  ProviderChatResponse,
+  ProviderToolCall,
+} from './types';
 import { formatTimestampET } from './utils';
 
 const CONVERSATION_TIMEOUT = Number(process.env.CONVERSATION_TIMEOUT_MS) || 15 * 60 * 1000; // 15 minutes
@@ -73,72 +79,77 @@ export class AgentOrchestrator {
       });
 
       if (hostHandledCalls.length > 0) {
-        const toolResults: ConversationEntry[] = [];
-        for (const call of hostHandledCalls) {
-          const toolDefinition = toolDefinitions.find((tool) => tool.name === call.name);
-          if (!toolDefinition) {
-            logger.warn(`Tool ${call.name} was requested but no handler is registered.`);
-            logFailure('capability_gap', `Tool "${call.name}" requested but no handler is registered`);
-            toolResults.push({
-              kind: 'tool_result',
-              id: call.id,
-              name: call.name,
-              content: `The tool "${call.name}" is not supported by this bot.`,
-            });
-            continue;
+        const toolResults = await this.executeToolCalls(hostHandledCalls, message, provider, channelId);
+        workingEntries.push(...toolResults);
+
+        const MAX_TOOL_ROUNDS = 3;
+        const MAX_TOOL_INVOCATIONS = 50;
+        let totalInvocations = hostHandledCalls.length;
+        let lastThoughts = firstResponse.thoughts ?? state.thoughts;
+        let finalResponse: ProviderChatResponse | undefined;
+
+        for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+          const roundResponse = await provider.chat({
+            messages: workingEntries,
+            tools: providerTools,
+            toolChoice: 'auto',
+            thoughts: lastThoughts,
+          });
+
+          workingEntries.push(...roundResponse.outputEntries);
+          lastThoughts = roundResponse.thoughts ?? lastThoughts;
+
+          const roundToolCalls = roundResponse.toolCalls.filter((call) => {
+            const providerTool = providerTools.find((tool) => tool.name === call.name);
+            return providerTool?.hostHandled ?? false;
+          });
+
+          if (roundToolCalls.length === 0) {
+            finalResponse = roundResponse;
+            break;
           }
 
-          try {
-            logger.info(`Executing host tool "${call.name}" for provider "${provider.id}" in channel ${channelId}.`);
-            const toolOutput = await toolDefinition.handler(
-              {
-                message,
-                providerId: provider.id,
-                provider,
-                channelId,
-                switchProvider: () => ({ error: 'Provider switching is not supported.' }),
-              },
-              call.arguments,
+          totalInvocations += roundToolCalls.length;
+          if (totalInvocations > MAX_TOOL_INVOCATIONS) {
+            logger.warn(
+              `Tool invocation limit (${MAX_TOOL_INVOCATIONS}) exceeded in channel ${channelId}, forcing text response.`,
             );
+            const forcedResponse = await provider.chat({
+              messages: workingEntries,
+              tools: providerTools,
+              toolChoice: 'none',
+              thoughts: lastThoughts,
+            });
+            workingEntries.push(...forcedResponse.outputEntries);
+            finalResponse = forcedResponse;
+            lastThoughts = forcedResponse.thoughts ?? lastThoughts;
+            break;
+          }
 
-            toolResults.push({
-              kind: 'tool_result',
-              id: call.id,
-              name: call.name,
-              content: toolOutput,
+          const roundResults = await this.executeToolCalls(roundToolCalls, message, provider, channelId);
+          workingEntries.push(...roundResults);
+
+          // Last allowed round — force a text-only response
+          if (round === MAX_TOOL_ROUNDS - 1) {
+            const forcedResponse = await provider.chat({
+              messages: workingEntries,
+              tools: providerTools,
+              toolChoice: 'none',
+              thoughts: lastThoughts,
             });
-          } catch (error) {
-            logger.error(`Error while executing tool ${call.name}:`, error);
-            logFailure(
-              'tool_error',
-              `Tool "${call.name}" threw an error: ${error instanceof Error ? error.message : 'unknown'}`,
-            );
-            toolResults.push({
-              kind: 'tool_result',
-              id: call.id,
-              name: call.name,
-              content: `The tool "${call.name}" failed to run.`,
-            });
+            workingEntries.push(...forcedResponse.outputEntries);
+            finalResponse = forcedResponse;
+            lastThoughts = forcedResponse.thoughts ?? lastThoughts;
           }
         }
 
-        workingEntries.push(...toolResults);
-
-        const followUp = await provider.chat({
-          messages: workingEntries,
-          tools: providerTools,
-          toolChoice: 'none',
-          thoughts: firstResponse.thoughts ?? state.thoughts,
-        });
-
-        workingEntries.push(...followUp.outputEntries);
         stopTyping();
-        await this.sendReply(followUp.text, message);
+        await this.sendReply(finalResponse?.text, message);
 
         this.store.set(channelId, {
           providerId: provider.id,
           entries: workingEntries,
-          thoughts: followUp.thoughts ?? firstResponse.thoughts ?? state.thoughts,
+          thoughts: finalResponse?.thoughts ?? lastThoughts,
           timestamp: Date.now(),
         });
         return;
@@ -175,6 +186,57 @@ export class AgentOrchestrator {
     } finally {
       stopTyping();
     }
+  }
+
+  private async executeToolCalls(
+    calls: ProviderToolCall[],
+    message: Message,
+    provider: AiProvider,
+    channelId: string,
+  ): Promise<ConversationEntry[]> {
+    const results: ConversationEntry[] = [];
+    for (const call of calls) {
+      const toolDefinition = toolDefinitions.find((tool) => tool.name === call.name);
+      if (!toolDefinition) {
+        logger.warn(`Tool ${call.name} was requested but no handler is registered.`);
+        logFailure('capability_gap', `Tool "${call.name}" requested but no handler is registered`);
+        results.push({
+          kind: 'tool_result',
+          id: call.id,
+          name: call.name,
+          content: `The tool "${call.name}" is not supported by this bot.`,
+        });
+        continue;
+      }
+
+      try {
+        logger.info(`Executing host tool "${call.name}" for provider "${provider.id}" in channel ${channelId}.`);
+        const toolOutput = await toolDefinition.handler(
+          {
+            message,
+            providerId: provider.id,
+            provider,
+            channelId,
+            switchProvider: () => ({ error: 'Provider switching is not supported.' }),
+          },
+          call.arguments,
+        );
+        results.push({ kind: 'tool_result', id: call.id, name: call.name, content: toolOutput });
+      } catch (error) {
+        logger.error(`Error while executing tool ${call.name}:`, error);
+        logFailure(
+          'tool_error',
+          `Tool "${call.name}" threw an error: ${error instanceof Error ? error.message : 'unknown'}`,
+        );
+        results.push({
+          kind: 'tool_result',
+          id: call.id,
+          name: call.name,
+          content: `The tool "${call.name}" failed to run.`,
+        });
+      }
+    }
+    return results;
   }
 
   private async buildInitialHistory(message: Message, provider: AiProvider): Promise<ConversationEntry[]> {
@@ -320,7 +382,7 @@ How you behave:
 - You have your own opinions and preferences. Don't be a yes-man.
 - Never say "I'm just an AI" or "as a language model" — you're ${botName}, period.
 
-You have access to web search, but use it SPARINGLY. Don't search for things you already know. Don't follow links people share. Only search when you genuinely need current, real-time information you couldn't possibly know (scores, release dates, news, etc).
+You can search the web natively. Use it SPARINGLY — only when you genuinely need current, real-time information you couldn't possibly know (live scores, recent news, release dates, etc). Don't search for things you already know. Don't follow links people share.
 ${personalitySection}${userSection}${contextualSection}
 These memories are background knowledge — things you know from hanging out in this server. Do NOT force references to inside jokes, show off what you know, or try to reference multiple memories in one response. Let things come up naturally, the way you'd reference a friend's hobby only when it's actually relevant to the conversation. If nothing from your memories is relevant to what's being discussed, just don't mention them.
 
@@ -335,10 +397,33 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
     const baseText = trimmed ? `[${ts}] ${authorLabel}: ${trimmed}` : `[${ts}] ${authorLabel}:`;
     parts.push({ type: 'text', text: baseText });
 
+    // Extract custom emoji images so the model can "see" them
+    const customEmojiRegex = /<a?:(\w+):(\d+)>/g;
+    const emojiMatches = (msg.content ?? '').matchAll(customEmojiRegex);
+    for (const match of emojiMatches) {
+      const [, , emojiId] = match;
+      const isAnimated = match[0].startsWith('<a:');
+      const ext = isAnimated ? 'gif' : 'png';
+      const emojiUrl = `https://cdn.discordapp.com/emojis/${emojiId}.${ext}?size=96&quality=lossless`;
+      parts.push({ type: 'image', url: emojiUrl });
+    }
+
     if (msg.attachments.size > 0) {
       for (const attachment of msg.attachments.values()) {
         if (attachment.contentType?.startsWith('image/') && attachment.url) {
           parts.push({ type: 'image', url: attachment.url });
+        }
+      }
+    }
+
+    // Include sticker images so the model can see them
+    if (msg.stickers.size > 0) {
+      for (const sticker of msg.stickers.values()) {
+        if (sticker.format === StickerFormatType.Lottie) {
+          parts.push({ type: 'text', text: `[sticker: ${sticker.name}]` });
+        } else {
+          const stickerUrl = `https://media.discordapp.net/stickers/${sticker.id}.png?size=320`;
+          parts.push({ type: 'image', url: stickerUrl });
         }
       }
     }

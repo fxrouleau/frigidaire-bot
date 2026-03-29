@@ -17,16 +17,21 @@ type ImageSession = {
 const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const sessions = new Map<string, ImageSession>();
 
+let imageClient: OpenAI | undefined;
+
 function getImageClient(): OpenAI {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    throw new Error('OPENROUTER_API_KEY is required for image generation.');
+  if (!imageClient) {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      throw new Error('OPENROUTER_API_KEY is required for image generation.');
+    }
+    imageClient = new OpenAI({
+      apiKey,
+      baseURL: 'https://openrouter.ai/api/v1',
+      defaultHeaders: { 'X-Title': 'Frigidaire Bot' },
+    });
   }
-  return new OpenAI({
-    apiKey,
-    baseURL: 'https://openrouter.ai/api/v1',
-    defaultHeaders: { 'X-Title': 'Frigidaire Bot' },
-  });
+  return imageClient;
 }
 
 function getSession(channelId: string): ImageSession | undefined {
