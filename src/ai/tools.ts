@@ -149,7 +149,10 @@ const recallMemoriesTool: ToolDefinition = {
 
     return results
       .slice(0, 20)
-      .map((m) => `[id:${m.id}] [${m.category}] ${m.subject}: ${m.content}`)
+      .map(
+        (m) =>
+          `[id:${m.id}] [${m.category}] ${m.subject}: ${m.content} (saved: ${m.created_at}, updated: ${m.updated_at})`,
+      )
       .join('\n');
   },
 };
@@ -246,7 +249,7 @@ const queryLongTermMemoryTool: ToolDefinition = {
 
     const formatted = results
       .slice(0, 25)
-      .map((m) => `[${m.category}] ${m.subject}: ${m.content} (updated: ${m.updated_at})`)
+      .map((m) => `[${m.category}] ${m.subject}: ${m.content} (saved: ${m.created_at}, updated: ${m.updated_at})`)
       .join('\n');
 
     return `Found ${results.length} memories:\n${formatted}`;
