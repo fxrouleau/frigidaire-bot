@@ -128,7 +128,7 @@ const recallMemoriesTool: ToolDefinition = {
     const query = String(args.query ?? '');
     const subject = args.subject ? String(args.subject) : undefined;
 
-    let results = subject ? store.getBySubject(subject) : [];
+    const results = subject ? store.getBySubject(subject) : [];
 
     // Also search via FTS
     try {

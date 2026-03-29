@@ -7,7 +7,13 @@ import { logFailure } from './failureLogger';
 import type { Memory } from './memory/memoryStore';
 import { getProviderForChannel } from './providerRegistry';
 import { getMemoryStore, toolDefinitions } from './tools';
-import type { AiProvider, ConversationEntry, NormalizedContentPart, ProviderChatResponse, ProviderToolCall } from './types';
+import type {
+  AiProvider,
+  ConversationEntry,
+  NormalizedContentPart,
+  ProviderChatResponse,
+  ProviderToolCall,
+} from './types';
 import { formatTimestampET } from './utils';
 
 const CONVERSATION_TIMEOUT = Number(process.env.CONVERSATION_TIMEOUT_MS) || 15 * 60 * 1000; // 15 minutes
@@ -105,7 +111,9 @@ export class AgentOrchestrator {
 
           totalInvocations += roundToolCalls.length;
           if (totalInvocations > MAX_TOOL_INVOCATIONS) {
-            logger.warn(`Tool invocation limit (${MAX_TOOL_INVOCATIONS}) exceeded in channel ${channelId}, forcing text response.`);
+            logger.warn(
+              `Tool invocation limit (${MAX_TOOL_INVOCATIONS}) exceeded in channel ${channelId}, forcing text response.`,
+            );
             const forcedResponse = await provider.chat({
               messages: workingEntries,
               tools: providerTools,
@@ -192,7 +200,12 @@ export class AgentOrchestrator {
       if (!toolDefinition) {
         logger.warn(`Tool ${call.name} was requested but no handler is registered.`);
         logFailure('capability_gap', `Tool "${call.name}" requested but no handler is registered`);
-        results.push({ kind: 'tool_result', id: call.id, name: call.name, content: `The tool "${call.name}" is not supported by this bot.` });
+        results.push({
+          kind: 'tool_result',
+          id: call.id,
+          name: call.name,
+          content: `The tool "${call.name}" is not supported by this bot.`,
+        });
         continue;
       }
 
@@ -211,8 +224,16 @@ export class AgentOrchestrator {
         results.push({ kind: 'tool_result', id: call.id, name: call.name, content: toolOutput });
       } catch (error) {
         logger.error(`Error while executing tool ${call.name}:`, error);
-        logFailure('tool_error', `Tool "${call.name}" threw an error: ${error instanceof Error ? error.message : 'unknown'}`);
-        results.push({ kind: 'tool_result', id: call.id, name: call.name, content: `The tool "${call.name}" failed to run.` });
+        logFailure(
+          'tool_error',
+          `Tool "${call.name}" threw an error: ${error instanceof Error ? error.message : 'unknown'}`,
+        );
+        results.push({
+          kind: 'tool_result',
+          id: call.id,
+          name: call.name,
+          content: `The tool "${call.name}" failed to run.`,
+        });
       }
     }
     return results;
@@ -378,10 +399,10 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
 
     // Extract custom emoji images so the model can "see" them
     const customEmojiRegex = /<a?:(\w+):(\d+)>/g;
-    let emojiMatch: RegExpExecArray | null;
-    while ((emojiMatch = customEmojiRegex.exec(msg.content ?? '')) !== null) {
-      const [, , emojiId] = emojiMatch;
-      const isAnimated = emojiMatch[0].startsWith('<a:');
+    const emojiMatches = (msg.content ?? '').matchAll(customEmojiRegex);
+    for (const match of emojiMatches) {
+      const [, , emojiId] = match;
+      const isAnimated = match[0].startsWith('<a:');
       const ext = isAnimated ? 'gif' : 'png';
       const emojiUrl = `https://cdn.discordapp.com/emojis/${emojiId}.${ext}?size=96&quality=lossless`;
       parts.push({ type: 'image', url: emojiUrl });
