@@ -7,7 +7,7 @@ import { logFailure } from './failureLogger';
 import type { Memory } from './memory/memoryStore';
 import { getProviderForChannel } from './providerRegistry';
 import { getMemoryStore, toolDefinitions } from './tools';
-import type { AiProvider, ConversationEntry, NormalizedContentPart } from './types';
+import type { AiProvider, ConversationEntry, NormalizedContentPart, ProviderChatResponse, ProviderToolCall } from './types';
 import { formatTimestampET } from './utils';
 
 const CONVERSATION_TIMEOUT = Number(process.env.CONVERSATION_TIMEOUT_MS) || 15 * 60 * 1000; // 15 minutes
@@ -73,72 +73,58 @@ export class AgentOrchestrator {
       });
 
       if (hostHandledCalls.length > 0) {
-        const toolResults: ConversationEntry[] = [];
-        for (const call of hostHandledCalls) {
-          const toolDefinition = toolDefinitions.find((tool) => tool.name === call.name);
-          if (!toolDefinition) {
-            logger.warn(`Tool ${call.name} was requested but no handler is registered.`);
-            logFailure('capability_gap', `Tool "${call.name}" requested but no handler is registered`);
-            toolResults.push({
-              kind: 'tool_result',
-              id: call.id,
-              name: call.name,
-              content: `The tool "${call.name}" is not supported by this bot.`,
-            });
-            continue;
+        const toolResults = await this.executeToolCalls(hostHandledCalls, message, provider, channelId);
+        workingEntries.push(...toolResults);
+
+        const MAX_TOOL_ROUNDS = 3;
+        let lastThoughts = firstResponse.thoughts ?? state.thoughts;
+        let finalResponse: ProviderChatResponse | undefined;
+
+        for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+          const roundResponse = await provider.chat({
+            messages: workingEntries,
+            tools: providerTools,
+            toolChoice: 'auto',
+            thoughts: lastThoughts,
+          });
+
+          workingEntries.push(...roundResponse.outputEntries);
+          lastThoughts = roundResponse.thoughts ?? lastThoughts;
+
+          const roundToolCalls = roundResponse.toolCalls.filter((call) => {
+            const providerTool = providerTools.find((tool) => tool.name === call.name);
+            return providerTool?.hostHandled ?? false;
+          });
+
+          if (roundToolCalls.length === 0) {
+            finalResponse = roundResponse;
+            break;
           }
 
-          try {
-            logger.info(`Executing host tool "${call.name}" for provider "${provider.id}" in channel ${channelId}.`);
-            const toolOutput = await toolDefinition.handler(
-              {
-                message,
-                providerId: provider.id,
-                provider,
-                channelId,
-                switchProvider: () => ({ error: 'Provider switching is not supported.' }),
-              },
-              call.arguments,
-            );
+          const roundResults = await this.executeToolCalls(roundToolCalls, message, provider, channelId);
+          workingEntries.push(...roundResults);
 
-            toolResults.push({
-              kind: 'tool_result',
-              id: call.id,
-              name: call.name,
-              content: toolOutput,
+          // Last allowed round — force a text-only response
+          if (round === MAX_TOOL_ROUNDS - 1) {
+            const forcedResponse = await provider.chat({
+              messages: workingEntries,
+              tools: providerTools,
+              toolChoice: 'none',
+              thoughts: lastThoughts,
             });
-          } catch (error) {
-            logger.error(`Error while executing tool ${call.name}:`, error);
-            logFailure(
-              'tool_error',
-              `Tool "${call.name}" threw an error: ${error instanceof Error ? error.message : 'unknown'}`,
-            );
-            toolResults.push({
-              kind: 'tool_result',
-              id: call.id,
-              name: call.name,
-              content: `The tool "${call.name}" failed to run.`,
-            });
+            workingEntries.push(...forcedResponse.outputEntries);
+            finalResponse = forcedResponse;
+            lastThoughts = forcedResponse.thoughts ?? lastThoughts;
           }
         }
 
-        workingEntries.push(...toolResults);
-
-        const followUp = await provider.chat({
-          messages: workingEntries,
-          tools: providerTools,
-          toolChoice: 'none',
-          thoughts: firstResponse.thoughts ?? state.thoughts,
-        });
-
-        workingEntries.push(...followUp.outputEntries);
         stopTyping();
-        await this.sendReply(followUp.text, message);
+        await this.sendReply(finalResponse?.text, message);
 
         this.store.set(channelId, {
           providerId: provider.id,
           entries: workingEntries,
-          thoughts: followUp.thoughts ?? firstResponse.thoughts ?? state.thoughts,
+          thoughts: finalResponse?.thoughts ?? lastThoughts,
           timestamp: Date.now(),
         });
         return;
@@ -175,6 +161,44 @@ export class AgentOrchestrator {
     } finally {
       stopTyping();
     }
+  }
+
+  private async executeToolCalls(
+    calls: ProviderToolCall[],
+    message: Message,
+    provider: AiProvider,
+    channelId: string,
+  ): Promise<ConversationEntry[]> {
+    const results: ConversationEntry[] = [];
+    for (const call of calls) {
+      const toolDefinition = toolDefinitions.find((tool) => tool.name === call.name);
+      if (!toolDefinition) {
+        logger.warn(`Tool ${call.name} was requested but no handler is registered.`);
+        logFailure('capability_gap', `Tool "${call.name}" requested but no handler is registered`);
+        results.push({ kind: 'tool_result', id: call.id, name: call.name, content: `The tool "${call.name}" is not supported by this bot.` });
+        continue;
+      }
+
+      try {
+        logger.info(`Executing host tool "${call.name}" for provider "${provider.id}" in channel ${channelId}.`);
+        const toolOutput = await toolDefinition.handler(
+          {
+            message,
+            providerId: provider.id,
+            provider,
+            channelId,
+            switchProvider: () => ({ error: 'Provider switching is not supported.' }),
+          },
+          call.arguments,
+        );
+        results.push({ kind: 'tool_result', id: call.id, name: call.name, content: toolOutput });
+      } catch (error) {
+        logger.error(`Error while executing tool ${call.name}:`, error);
+        logFailure('tool_error', `Tool "${call.name}" threw an error: ${error instanceof Error ? error.message : 'unknown'}`);
+        results.push({ kind: 'tool_result', id: call.id, name: call.name, content: `The tool "${call.name}" failed to run.` });
+      }
+    }
+    return results;
   }
 
   private async buildInitialHistory(message: Message, provider: AiProvider): Promise<ConversationEntry[]> {
