@@ -1,5 +1,4 @@
-import { MemoryStore } from './memory/memoryStore';
 import { PersonalityLearner } from './personalityLearner';
+import { getMemoryStore } from './tools';
 
-const store = new MemoryStore();
-export const personalityLearner = new PersonalityLearner(store);
+export const personalityLearner = new PersonalityLearner(getMemoryStore());
