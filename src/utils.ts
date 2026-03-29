@@ -19,15 +19,33 @@ export function splitMessage(text: string, maxLength = 2000): string[] {
   const lines = text.split('\n');
 
   for (const line of lines) {
+    // If the line itself exceeds maxLength, hard-split it into pieces
+    if (line.length > maxLength) {
+      // Flush current chunk first
+      if (currentChunk.length > 0) {
+        chunks.push(currentChunk);
+        currentChunk = '';
+      }
+      for (let i = 0; i < line.length; i += maxLength) {
+        chunks.push(line.slice(i, i + maxLength));
+      }
+      continue;
+    }
+
     if (currentChunk.length + line.length + 1 > maxLength) {
-      chunks.push(currentChunk);
+      if (currentChunk.length > 0) {
+        chunks.push(currentChunk);
+      }
       currentChunk = '';
     }
     currentChunk += (currentChunk.length > 0 ? '\n' : '') + line;
   }
-  chunks.push(currentChunk); // Add the last chunk
 
-  return chunks;
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks.filter((c) => c.length > 0);
 }
 
 /**
