@@ -361,18 +361,18 @@ const querySelfDiagnosisTool: ToolDefinition = {
     let results: Memory[] = [];
 
     if (category) {
-      results = store.getByCategory(category, limit);
+      results = store.getByCategory(category, limit * 3);
     } else {
       for (const cat of SELF_DIAGNOSIS_CATEGORIES) {
-        const catResults = store.getByCategory(cat, limit);
+        const catResults = store.getByCategory(cat, limit * 3);
         results.push(...catResults);
       }
-      results.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-      results = results.slice(0, limit);
     }
 
-    // Filter to only bot-related subjects
+    // Filter to only bot-related subjects FIRST, then sort and slice
     results = results.filter((r) => r.subject === 'bot' || r.subject === 'server');
+    results.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+    results = results.slice(0, limit);
 
     if (results.length === 0) {
       return "No self-diagnosis data found yet. The bot hasn't logged any issues or improvement ideas.";
