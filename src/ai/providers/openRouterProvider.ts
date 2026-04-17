@@ -100,6 +100,7 @@ export class OpenRouterProvider implements AiProvider {
       provider: {
         zdr: true,
         sort: 'throughput',
+        ignore: ['Amazon Bedrock'],
       },
     });
 
@@ -125,6 +126,7 @@ export class OpenRouterProvider implements AiProvider {
         provider: {
           zdr: true,
           sort: 'throughput',
+          ignore: ['Amazon Bedrock'],
         },
       });
 
