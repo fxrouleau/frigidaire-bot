@@ -88,7 +88,7 @@ export class OpenRouterProvider implements AiProvider {
 
     const allTools: unknown[] = [...functionTools];
     if (hasWebSearch) {
-      allTools.push({ type: 'web_search_20250305', name: 'web_search' });
+      allTools.push({ type: 'openrouter:web_search' });
     }
 
     const response = await this.client.chat.completions.create({
@@ -100,7 +100,6 @@ export class OpenRouterProvider implements AiProvider {
       provider: {
         zdr: true,
         sort: 'throughput',
-        ignore: ['Amazon Bedrock'],
       },
     });
 
@@ -126,7 +125,6 @@ export class OpenRouterProvider implements AiProvider {
         provider: {
           zdr: true,
           sort: 'throughput',
-          ignore: ['Amazon Bedrock'],
         },
       });
 
