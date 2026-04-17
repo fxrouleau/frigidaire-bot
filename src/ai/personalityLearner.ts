@@ -125,6 +125,30 @@ export class PersonalityLearner {
     this.activeChannels.add(channelId);
   }
 
+  private buildRelevantMemoriesSummary(subjectsInBatch: Set<string>): string {
+    // Fetch memories keyed on who actually participated in this batch, plus server-wide
+    // and bot-subject context. Avoids dumping all ~1000 memories into every prompt.
+    const seen = new Set<number>();
+    const chunks: string[] = [];
+
+    const push = (rows: { id: number; category: string; subject: string; content: string }[]) => {
+      for (const m of rows) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        chunks.push(`- [${m.category}] ${m.subject}: ${m.content}`);
+      }
+    };
+
+    const PER_SUBJECT_LIMIT = 25;
+    for (const subject of subjectsInBatch) {
+      push(this.store.getBySubject(subject, PER_SUBJECT_LIMIT));
+    }
+    push(this.store.getBySubject('server', 25));
+
+    if (chunks.length === 0) return '(none yet)';
+    return chunks.join('\n');
+  }
+
   private formatLearnerIdentitiesSection(): string {
     const identities = this.store.getAllIdentities().filter((i) => i.active !== 0);
     if (identities.length === 0) return '';
@@ -305,45 +329,64 @@ export class PersonalityLearner {
         }
 
         // --- Pass 1: Personality analysis ---
-        const existingMemories = this.store.getAllActive();
-        const existingMemoriesSummary =
-          existingMemories.length > 0
-            ? existingMemories.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')
-            : '(none yet)';
+        const subjectsInBatch = new Set<string>();
+        for (const msg of humanMessages) {
+          const name = msg.member?.displayName || msg.author.username;
+          if (name) subjectsInBatch.add(name);
+        }
 
+        const existingMemoriesSummary = this.buildRelevantMemoriesSummary(subjectsInBatch);
         const identitiesSection = this.formatLearnerIdentitiesSection();
 
-        const personalityPrompt = `You are analyzing a Discord conversation to extract observations for a bot's long-term memory.
-There are MULTIPLE people in this conversation. Every human message is labeled as [timestamp] [DisplayName (id:DISCORD_USER_ID)] message-content.
-Attribute observations to the correct person BY THEIR DISPLAY NAME for the "subject" field, and also include their Discord ID in "subject_user_id" when the observation is about a specific person (not "server" or "bot"). The ID is the stable key — display names can change, IDs cannot.
-Images appear directly after the message that shared them — attribute each image to that person.
+        const personalityPrompt = `You are extracting atomic long-term memories from a Discord conversation.
+Messages are labeled: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Images appear after the message that shared them.
 
-Extract ONLY things worth remembering long-term:
-- Facts about specific users (jobs, interests, locations) — attribute to that person
-- Individual humor styles and communication preferences — attribute to that person
-- Server-wide culture, in-jokes, recurring themes — attribute to "server" (omit subject_user_id)
-- Strong opinions or preferences someone expressed — attribute to the person who said it
-- Notable events, plans, or milestones
-- Shared images that reveal interests, context, or personality — attribute to the person who shared them
+OUTPUT RULES (the most important part):
+1. Each "content" field MUST be ≤80 characters. One atomic fact per row. If you notice two things, emit two observations.
+2. Write as if editing Wikipedia infobox fields, not a personality essay. Use plain declarative sentences.
+3. FORBIDDEN phrases — do NOT use any of these or similar editorializing:
+   - "reinforcing his pattern of ..."
+   - "continuing his pattern of ..."
+   - "boundary-pushing" / "edgy" / "absurdist" / "self-deprecating" as summary adjectives
+   - "reflecting interest in ..."
+   - "indicating a/his/her ..."
+   - "suggesting a preference for ..."
+   Describe what someone DID or IS, not what it signals or reinforces.
+4. Skip if already known (see existing memories below). "Already known" means the same fact with different wording, examples, or emojis. If you'd write a 5th version of "Jason uses racially charged humor", DON'T.
+5. Attribute each observation to the correct person BY DISPLAY NAME in "subject", and include their Discord ID in "subject_user_id" (person-subjects only — omit for "server" or "bot").
 
-Do NOT extract:
-- Transient small talk or greetings
-- Anything already known (see existing memories below)
-- Generic observations ("people were chatting", "active conversation")
-- Things about someone based on what OTHERS said about them — only first-hand statements
-- Real names, aliases, or nicknames someone reveals about themselves — those go in identity_updates (see below), NOT in observations
+WHAT TO EXTRACT:
+- Durable facts: jobs, locations, hobbies, relationships, platforms someone uses
+- Strong preferences or opinions (stated clearly, not casual reactions)
+- Server-wide culture: in-jokes, running bits, group dynamics (subject="server")
+- Notable events, plans, milestones
+- Images that reveal durable interests (not one-off reactions)
 
-IDENTITY UPDATES: If someone reveals or is consistently called by a real name / alias / nickname in this conversation, output an entry in "identity_updates" keyed on their Discord ID. Use "irl_name" for a real name (e.g., "Derrick"), and "aliases_add" for nicknames. Only include identity updates when you have direct evidence.
+WHAT NOT TO EXTRACT:
+- Small talk, greetings, reactions to the current moment
+- Personality restatements of a known pattern
+- Things only inferred from what others say about them — only first-hand evidence
+- Real names, aliases, or nicknames — those go in identity_updates, never in observations
+
+GOOD vs BAD examples:
+  GOOD: {"category":"fact","subject":"Jason","subject_user_id":"456","content":"Still plays on PS4."}
+  BAD:  {"category":"fact","subject":"Jason","content":"Mentioned he is still using a PS4, indicating a preference for older gaming hardware."}
+
+  GOOD: {"category":"personality","subject":"Jason","subject_user_id":"456","content":"Edgy humor, often with <:trolle:...> reactions."}
+  BAD:  {"category":"personality","subject":"Jason","content":"Uses absurdist, boundary-pushing humor by sharing a joke ... reinforcing his pattern of edgy commentary."}
+
+  GOOD: {"category":"vibe","subject":"server","content":"Group in-joke: Dillon cast as the villain."}
+  BAD:  {"category":"vibe","subject":"server","content":"Group frequently engages in playful teasing of Dillon in a boundary-pushing manner."}
+
+IDENTITY UPDATES: If someone reveals or is consistently called by a real name / alias / nickname, add an entry in "identity_updates" keyed on their Discord ID. Use "irl_name" for a real name ("Derrick"), "aliases_add" for nicknames. Direct evidence only.
 ${identitiesSection}
-Existing memories (avoid duplicates):
+Existing memories (skip if semantically covered):
 ${existingMemoriesSummary}
-
-The conversation messages and any shared images follow as separate content parts below.
 
 Respond ONLY with a JSON object. If nothing worth saving, respond with {"observations": []}.
 {
   "observations": [
-    {"category": "fact|preference|personality|event|vibe", "subject": "DisplayName|server", "subject_user_id": "discord-id-if-person", "content": "concise observation"}
+    {"category": "fact|preference|personality|event|vibe", "subject": "DisplayName|server", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char statement"}
   ],
   "identity_updates": [
     {"discord_user_id": "123", "irl_name": "Derrick", "aliases_add": ["Derek", "D"]}
@@ -377,39 +420,47 @@ Respond ONLY with a JSON object. If nothing worth saving, respond with {"observa
         if (selfImprovementEnabled) {
           try {
             const existingSelfImprovement = SELF_IMPROVEMENT_CATEGORIES.flatMap((cat) =>
-              this.store.getByCategory(cat, 20),
+              this.store.getByCategory(cat, 60),
             );
             const existingSelfImprovementSummary =
               existingSelfImprovement.length > 0
                 ? existingSelfImprovement.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')
                 : '(none yet)';
 
-            const selfImprovementPrompt = `You are analyzing a Discord conversation from the perspective of a bot called "${botName}" that participates in this server. Your job is to identify ways the bot could improve itself.
-Every human message is labeled as [timestamp] [DisplayName (id:DISCORD_USER_ID)] message-content.
+            const selfImprovementPrompt = `You are looking for bot self-improvement signals in a Discord conversation for a bot called "${botName}".
+Messages: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Bot name: "${botName}" (also "fridge", "fridge bot", "bot").
 
-Look for:
-- capability_gap: Things the bot was asked to do but couldn't, or content it couldn't process (e.g., "the bot couldn't read that link", "fridge didn't understand the image", custom emojis treated as unknown text)
-- pain_point: User frustrations with the bot's behavior (e.g., "the bot keeps responding when nobody asked it", "its summaries are too long", "it forgot what we talked about")
-- feature_request: Things users explicitly or implicitly wish the bot could do (e.g., "it would be cool if fridge could...", "can the bot do X?", someone manually doing something the bot could automate)
-- improvement_idea: Patterns suggesting the bot could be better (e.g., the bot gives verbose answers in a channel that prefers short messages, users consistently rephrase questions the bot misunderstood)
+OUTPUT RULES:
+1. Each "content" MUST be ≤80 characters. One atomic issue per row.
+2. Plain declarative sentences. NO boilerplate like "bot should offer a simple, context-aware fallback response (e.g., '...')". Just state the gap.
+3. STRONG dedup rule: if the issue is already in existing observations with a different example (different URL, different emoji, different GIF), DO NOT save it. A new YouTube link example of an already-documented YouTube-link gap is NOT a new observation.
+4. Only save when the issue is NEW or notably more severe than existing entries.
 
-Do NOT extract:
+Categories:
+- capability_gap: Bot couldn't process something users wanted it to (link, attachment, emoji type, etc.)
+- pain_point: User frustration with bot behavior (too verbose, responds when not asked, forgets context, etc.)
+- feature_request: Explicit user wish for a missing feature
+- improvement_idea: Concrete behavioral tweak (shorter responses in channel X, better emoji use, etc.)
+
+DO NOT SAVE:
 - Things the bot already does well
-- General conversation unrelated to bot interaction
-- Transient complaints that are just jokes or roasting (use context to judge — friends roasting the bot vs genuine frustration)
-- Anything already in existing observations (below)
+- Jokey roasting (friends ribbing the bot is not a pain_point)
+- Re-statements of known limitations with new examples (see rule 3)
 
-Bot name: "${botName}" (also called "fridge", "fridge bot", "bot")
+GOOD vs BAD examples:
+  GOOD: {"category":"capability_gap","subject":"bot","content":"Cannot read restaurant receipts for bill splitting."}
+  BAD:  {"category":"capability_gap","subject":"bot","content":"Bot cannot interpret or respond to restaurant receipts (e.g., Cocodak receipt) even when users share them for group expense tracking, treating them as unprocessable media instead of acknowledging their financial, culinary, or social relevance."}
 
-Existing self-improvement observations (avoid duplicates):
+  GOOD: {"category":"pain_point","subject":"bot","content":"Responses too long for meme-channel pace."}
+  BAD:  {"category":"improvement_idea","subject":"bot","content":"Bot should default to clean, consistent formatting (e.g., bullet points, @mentions, aligned tables) for financial splits unless explicitly overridden, to reduce user frustration and improve usability during group expense coordination."}
+
+Existing self-improvement observations (skip anything semantically covered):
 ${existingSelfImprovementSummary}
-
-Messages follow as separate content parts below.
 
 Respond ONLY with a JSON object. If nothing actionable, respond with {"observations": []}.
 {
   "observations": [
-    {"category": "capability_gap|pain_point|feature_request|improvement_idea", "subject": "bot|server|DisplayName", "subject_user_id": "discord-id-if-person", "content": "concise, actionable observation"}
+    {"category": "capability_gap|pain_point|feature_request|improvement_idea", "subject": "bot|server|DisplayName", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char issue"}
   ]
 }`;
 
