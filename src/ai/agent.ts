@@ -250,7 +250,7 @@ export class AgentOrchestrator {
     const recentMessages = await message.channel.messages.fetch({ limit: 25, before: message.id });
     const historicalContext: ConversationEntry[] = [...recentMessages.values()]
       .reverse()
-      .filter((msg) => !msg.author.bot || msg.author.id === message.client.user.id)
+      .filter((msg) => !msg.author.bot || msg.author.id === message.client.user.id || msg.webhookId !== null)
       .map((msg) => {
         const isAssistant = msg.author.id === message.client.user.id;
 
@@ -411,6 +411,21 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
         if (attachment.contentType?.startsWith('image/') && attachment.url) {
           parts.push({ type: 'image', url: attachment.url });
         }
+      }
+    }
+
+    for (const embed of msg.embeds) {
+      const imageUrl = embed.image?.url || embed.thumbnail?.url;
+      if (imageUrl) {
+        parts.push({ type: 'image', url: imageUrl });
+      }
+      const fields: string[] = [];
+      if (embed.author?.name) fields.push(`author=${embed.author.name}`);
+      if (embed.title) fields.push(`title=${embed.title}`);
+      if (embed.description) fields.push(`description=${embed.description}`);
+      if (embed.url) fields.push(`url=${embed.url}`);
+      if (fields.length > 0) {
+        parts.push({ type: 'text', text: `[embed: ${fields.join(' | ')}]` });
       }
     }
 
