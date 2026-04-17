@@ -398,3 +398,118 @@ describe('learner state', () => {
     expect(rows).toHaveLength(1);
   });
 });
+
+describe('subject_user_id (soft-FK to identities)', () => {
+  it('save() defaults subject_user_id to null when omitted', () => {
+    const id = store.save({ category: 'fact', subject: 'Wheezer', content: 'Likes cats' });
+    const row = store.getAllActive().find((m) => m.id === id);
+    expect(row?.subject_user_id).toBeNull();
+  });
+
+  it('save() persists subject_user_id when provided', () => {
+    const id = store.save({
+      category: 'fact',
+      subject: 'Wheezer',
+      content: 'Likes cats',
+      subject_user_id: '123',
+    });
+    const row = store.getAllActive().find((m) => m.id === id);
+    expect(row?.subject_user_id).toBe('123');
+  });
+});
+
+describe('identities', () => {
+  it('getIdentityById() returns undefined for unknown IDs', () => {
+    expect(store.getIdentityById('unknown-id')).toBeUndefined();
+  });
+
+  it('upsertIdentity() creates a new row with canonical_name equal to display_name', () => {
+    store.upsertIdentity('123', 'Wheezer');
+    const identity = store.getIdentityById('123');
+    expect(identity).toBeDefined();
+    expect(identity?.display_name).toBe('Wheezer');
+    expect(identity?.canonical_name).toBe('Wheezer');
+    expect(identity?.irl_name).toBeNull();
+    expect(identity?.aliases).toEqual([]);
+  });
+
+  it('upsertIdentity() updates display_name but preserves canonical_name on rename', () => {
+    store.upsertIdentity('123', 'Wheezer');
+    store.upsertIdentity('123', 'wheezyboy2');
+
+    const identity = store.getIdentityById('123');
+    expect(identity?.display_name).toBe('wheezyboy2');
+    expect(identity?.canonical_name).toBe('Wheezer');
+  });
+
+  it('upsertIdentity() is idempotent when display_name unchanged', () => {
+    store.upsertIdentity('123', 'Wheezer');
+    const first = store.getIdentityById('123');
+    const firstUpdated = first?.updated_at;
+
+    // Same name — should not bump updated_at
+    store.upsertIdentity('123', 'Wheezer');
+    const second = store.getIdentityById('123');
+    expect(second?.updated_at).toBe(firstUpdated);
+  });
+
+  it('updateIdentityMeta() returns false for unknown IDs', () => {
+    expect(store.updateIdentityMeta('unknown-id', { irl_name: 'Ghost' })).toBe(false);
+  });
+
+  it('updateIdentityMeta() sets irl_name on a known identity', () => {
+    store.upsertIdentity('123', 'Wheezer');
+    const changed = store.updateIdentityMeta('123', { irl_name: 'Derrick' });
+    expect(changed).toBe(true);
+    expect(store.getIdentityById('123')?.irl_name).toBe('Derrick');
+  });
+
+  it('updateIdentityMeta() returns false when irl_name is identical', () => {
+    store.upsertIdentity('123', 'Wheezer');
+    store.updateIdentityMeta('123', { irl_name: 'Derrick' });
+    expect(store.updateIdentityMeta('123', { irl_name: 'Derrick' })).toBe(false);
+  });
+
+  it('updateIdentityMeta() ignores empty irl_name strings', () => {
+    store.upsertIdentity('123', 'Wheezer');
+    const changed = store.updateIdentityMeta('123', { irl_name: '   ' });
+    expect(changed).toBe(false);
+    expect(store.getIdentityById('123')?.irl_name).toBeNull();
+  });
+
+  it('updateIdentityMeta() appends aliases and dedupes', () => {
+    store.upsertIdentity('123', 'Wheezer');
+
+    store.updateIdentityMeta('123', { aliases_add: ['Derek', 'D'] });
+    expect(store.getIdentityById('123')?.aliases).toEqual(['Derek', 'D']);
+
+    // Duplicate alias should not re-append
+    const changed = store.updateIdentityMeta('123', { aliases_add: ['Derek', 'D-man'] });
+    expect(changed).toBe(true);
+    expect(store.getIdentityById('123')?.aliases).toEqual(['Derek', 'D', 'D-man']);
+  });
+
+  it('updateIdentityMeta() returns false when no meaningful aliases are added', () => {
+    store.upsertIdentity('123', 'Wheezer');
+    store.updateIdentityMeta('123', { aliases_add: ['Derek'] });
+    expect(store.updateIdentityMeta('123', { aliases_add: ['Derek'] })).toBe(false);
+    expect(store.updateIdentityMeta('123', { aliases_add: ['   '] })).toBe(false);
+  });
+
+  it('getAllIdentities() returns rows ordered by canonical_name', () => {
+    store.upsertIdentity('2', 'Zack');
+    store.upsertIdentity('1', 'Anna');
+    store.upsertIdentity('3', 'Mike');
+
+    const all = store.getAllIdentities();
+    expect(all.map((i) => i.canonical_name)).toEqual(['Anna', 'Mike', 'Zack']);
+  });
+
+  it('getAllIdentities() returns parsed aliases', () => {
+    store.upsertIdentity('1', 'Anna');
+    store.updateIdentityMeta('1', { aliases_add: ['Annie', 'A'] });
+
+    const [identity] = store.getAllIdentities();
+    expect(identity.aliases).toEqual(['Annie', 'A']);
+  });
+});

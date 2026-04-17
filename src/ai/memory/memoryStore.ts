@@ -13,6 +13,7 @@ export type Memory = {
   created_at: string;
   updated_at: string;
   active: number;
+  subject_user_id: string | null;
 };
 
 type MemoryInput = {
@@ -20,6 +21,23 @@ type MemoryInput = {
   subject: string;
   content: string;
   source?: string;
+  subject_user_id?: string;
+};
+
+export type Identity = {
+  discord_user_id: string;
+  display_name: string;
+  canonical_name: string;
+  irl_name: string | null;
+  aliases: string[];
+  first_seen_at: string;
+  updated_at: string;
+  active: number;
+};
+
+export type IdentityMetaUpdate = {
+  irl_name?: string;
+  aliases_add?: string[];
 };
 
 export class MemoryStore {
@@ -58,7 +76,25 @@ export class MemoryStore {
         last_message_id TEXT NOT NULL,
         last_observed_at TEXT DEFAULT (datetime('now'))
       );
+
+      CREATE TABLE IF NOT EXISTS identities (
+        discord_user_id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        canonical_name TEXT NOT NULL,
+        irl_name TEXT,
+        aliases TEXT NOT NULL DEFAULT '[]',
+        first_seen_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        active INTEGER DEFAULT 1
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_identities_canonical_name ON identities(canonical_name);
+      CREATE INDEX IF NOT EXISTS idx_identities_active ON identities(active);
     `);
+
+    // Additive migrations for existing databases
+    this.addColumnIfMissing('memories', 'subject_user_id', 'TEXT');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject_user_id ON memories(subject_user_id);');
 
     // FTS5 virtual table — created separately to handle already-exists gracefully
     try {
@@ -103,8 +139,14 @@ export class MemoryStore {
     }
 
     const result = this.db
-      .prepare('INSERT INTO memories (category, subject, content, source) VALUES (?, ?, ?, ?)')
-      .run(memory.category, memory.subject, memory.content, memory.source ?? 'conversation');
+      .prepare('INSERT INTO memories (category, subject, content, source, subject_user_id) VALUES (?, ?, ?, ?, ?)')
+      .run(
+        memory.category,
+        memory.subject,
+        memory.content,
+        memory.source ?? 'conversation',
+        memory.subject_user_id ?? null,
+      );
 
     const newId = Number(result.lastInsertRowid);
 
@@ -248,5 +290,88 @@ export class MemoryStore {
          ON CONFLICT(channel_id) DO UPDATE SET last_message_id = ?, last_observed_at = datetime('now')`,
       )
       .run(channelId, messageId, messageId);
+  }
+
+  // Identity methods
+  upsertIdentity(discordUserId: string, displayName: string): void {
+    // Insert if new (canonical_name = displayName at time of first seen); otherwise refresh display_name.
+    this.db
+      .prepare(
+        `INSERT INTO identities (discord_user_id, display_name, canonical_name, first_seen_at, updated_at)
+         VALUES (?, ?, ?, datetime('now'), datetime('now'))
+         ON CONFLICT(discord_user_id) DO UPDATE SET
+           display_name = excluded.display_name,
+           updated_at = CASE WHEN identities.display_name = excluded.display_name THEN identities.updated_at ELSE datetime('now') END`,
+      )
+      .run(discordUserId, displayName, displayName);
+  }
+
+  updateIdentityMeta(discordUserId: string, update: IdentityMetaUpdate): boolean {
+    const existing = this.getIdentityById(discordUserId);
+    if (!existing) return false;
+
+    let nextIrl = existing.irl_name;
+    let nextAliases = existing.aliases;
+    let changed = false;
+
+    if (update.irl_name !== undefined && update.irl_name.trim() !== '' && update.irl_name !== existing.irl_name) {
+      nextIrl = update.irl_name.trim();
+      changed = true;
+    }
+
+    if (update.aliases_add && update.aliases_add.length > 0) {
+      const seen = new Set(existing.aliases);
+      const additions = update.aliases_add.map((a) => a.trim()).filter((a) => a.length > 0 && !seen.has(a));
+      if (additions.length > 0) {
+        nextAliases = [...existing.aliases, ...additions];
+        changed = true;
+      }
+    }
+
+    if (!changed) return false;
+
+    this.db
+      .prepare(
+        `UPDATE identities
+         SET irl_name = ?, aliases = ?, updated_at = datetime('now')
+         WHERE discord_user_id = ?`,
+      )
+      .run(nextIrl, JSON.stringify(nextAliases), discordUserId);
+
+    return true;
+  }
+
+  getIdentityById(discordUserId: string): Identity | undefined {
+    const row = this.db.prepare('SELECT * FROM identities WHERE discord_user_id = ?').get(discordUserId) as
+      | (Omit<Identity, 'aliases'> & { aliases: string })
+      | undefined;
+
+    if (!row) return undefined;
+    return { ...row, aliases: this.parseAliases(row.aliases) };
+  }
+
+  getAllIdentities(): Identity[] {
+    const rows = this.db.prepare('SELECT * FROM identities ORDER BY canonical_name ASC').all() as (Omit<
+      Identity,
+      'aliases'
+    > & { aliases: string })[];
+
+    return rows.map((row) => ({ ...row, aliases: this.parseAliases(row.aliases) }));
+  }
+
+  private parseAliases(raw: string | null): string[] {
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private addColumnIfMissing(table: string, column: string, columnDef: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (columns.some((c) => c.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${columnDef};`);
   }
 }

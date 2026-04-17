@@ -23,7 +23,19 @@ export type ObservationCategory =
 export type Observation = {
   category: ObservationCategory;
   subject: string;
+  subject_user_id?: string;
   content: string;
+};
+
+export type IdentityUpdate = {
+  discord_user_id: string;
+  irl_name?: string;
+  aliases_add?: string[];
+};
+
+type LearnerOutput = {
+  observations: Observation[];
+  identity_updates?: IdentityUpdate[];
 };
 
 const SELF_IMPROVEMENT_CATEGORIES: ObservationCategory[] = [
@@ -32,6 +44,45 @@ const SELF_IMPROVEMENT_CATEGORIES: ObservationCategory[] = [
   'feature_request',
   'improvement_idea',
 ];
+
+export function parseLearnerOutput(raw: string): LearnerOutput | undefined {
+  const tryParse = (candidate: string): LearnerOutput | undefined => {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) {
+        return { observations: parsed as Observation[] };
+      }
+      if (parsed && typeof parsed === 'object' && Array.isArray(parsed.observations)) {
+        return {
+          observations: parsed.observations as Observation[],
+          identity_updates: Array.isArray(parsed.identity_updates)
+            ? (parsed.identity_updates as IdentityUpdate[])
+            : undefined,
+        };
+      }
+    } catch {
+      // fall through
+    }
+    return undefined;
+  };
+
+  const direct = tryParse(raw);
+  if (direct) return direct;
+
+  const objectMatch = raw.match(/\{[\s\S]*\}/);
+  if (objectMatch) {
+    const fromObject = tryParse(objectMatch[0]);
+    if (fromObject) return fromObject;
+  }
+
+  const arrayMatch = raw.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    const fromArray = tryParse(arrayMatch[0]);
+    if (fromArray) return fromArray;
+  }
+
+  return undefined;
+}
 
 export class PersonalityLearner {
   private readonly store: MemoryStore;
@@ -74,6 +125,21 @@ export class PersonalityLearner {
     this.activeChannels.add(channelId);
   }
 
+  private formatLearnerIdentitiesSection(): string {
+    const identities = this.store.getAllIdentities().filter((i) => i.active !== 0);
+    if (identities.length === 0) return '';
+
+    const lines = identities.map((i) => {
+      const namePart =
+        i.canonical_name === i.display_name ? i.canonical_name : `${i.canonical_name} (now: ${i.display_name})`;
+      const irlPart = i.irl_name ? ` — IRL: ${i.irl_name}` : '';
+      const aliasPart = i.aliases.length > 0 ? `. Also called: ${i.aliases.join(', ')}` : '';
+      return `- ${namePart} (id:${i.discord_user_id})${irlPart}${aliasPart}`;
+    });
+
+    return `\nKnown server identities (Discord ID → canonical name). Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${lines.join('\n')}\n`;
+  }
+
   private getClient(): OpenAI | undefined {
     if (!process.env.OPENROUTER_API_KEY) return undefined;
     if (!this.client) {
@@ -87,8 +153,8 @@ export class PersonalityLearner {
   }
 
   /**
-   * Sends content parts to an LLM, parses the JSON response, and saves valid observations.
-   * Returns the number of observations saved.
+   * Sends content parts to an LLM, parses the JSON response, and saves valid observations +
+   * identity updates. Returns counts of what was saved.
    */
   private async analyzeAndSave(
     openai: OpenAI,
@@ -97,12 +163,12 @@ export class PersonalityLearner {
     channelId: string,
     source: string,
     label: string,
-  ): Promise<number> {
+  ): Promise<{ observations: number; identityUpdates: number }> {
     logger.info(`${label}: Sending request to ${model} for channel ${channelId}`);
 
     const response = await openai.chat.completions.create({
       model,
-      max_tokens: 1024,
+      max_tokens: 1536,
       temperature: 0.3,
       messages: [{ role: 'user', content: contentParts }],
       // @ts-expect-error OpenRouter-specific field
@@ -110,43 +176,39 @@ export class PersonalityLearner {
     });
 
     const text = response.choices?.[0]?.message?.content?.trim();
-    if (!text) return 0;
+    if (!text) return { observations: 0, identityUpdates: 0 };
 
-    // Parse JSON response, with regex fallback
-    let observations: Observation[] = [];
-    try {
-      observations = JSON.parse(text) as Observation[];
-    } catch {
-      const match = text.match(/\[[\s\S]*\]/);
-      if (match) {
-        try {
-          observations = JSON.parse(match[0]) as Observation[];
-        } catch {
-          logger.warn(`${label}: Failed to parse JSON for channel ${channelId}. Raw: ${text.slice(0, 200)}`);
-          return 0;
-        }
-      } else {
-        logger.warn(`${label}: No JSON array found for channel ${channelId}. Raw: ${text.slice(0, 200)}`);
-        return 0;
-      }
+    const parsed = parseLearnerOutput(text);
+    if (!parsed) {
+      logger.warn(`${label}: Failed to parse JSON for channel ${channelId}. Raw: ${text.slice(0, 200)}`);
+      return { observations: 0, identityUpdates: 0 };
     }
 
-    if (!Array.isArray(observations)) return 0;
-
-    let saved = 0;
-    for (const obs of observations) {
+    let observations = 0;
+    for (const obs of parsed.observations) {
       if (obs.category && obs.subject && obs.content) {
         this.store.save({
           category: obs.category,
           subject: obs.subject,
           content: obs.content,
           source,
+          subject_user_id: obs.subject_user_id,
         });
-        saved++;
+        observations++;
       }
     }
 
-    return saved;
+    let identityUpdates = 0;
+    for (const update of parsed.identity_updates ?? []) {
+      if (!update.discord_user_id) continue;
+      const changed = this.store.updateIdentityMeta(update.discord_user_id, {
+        irl_name: update.irl_name,
+        aliases_add: update.aliases_add,
+      });
+      if (changed) identityUpdates++;
+    }
+
+    return { observations, identityUpdates };
   }
 
   private async observe(discordClient: Client): Promise<void> {
@@ -196,13 +258,28 @@ export class PersonalityLearner {
           `PersonalityLearner: Processing ${humanMessages.length} messages from channel ${channelId} (#${textChannel.name})`,
         );
 
+        // Mechanically upsert identities for every observed author (safety net — the
+        // identityTracker event may have missed messages during downtime).
+        for (const msg of humanMessages) {
+          if (msg.webhookId) continue;
+          const name = msg.member?.displayName || msg.author.username;
+          if (name) {
+            try {
+              this.store.upsertIdentity(msg.author.id, name);
+            } catch (error) {
+              logger.warn('PersonalityLearner: upsertIdentity failed:', error);
+            }
+          }
+        }
+
         // Build interleaved content parts: text + images per message
         const messageParts: ChatCompletionContentPart[] = [];
         let imageCount = 0;
         for (const msg of humanMessages) {
           const name = msg.member?.displayName || msg.author.username;
           const ts = formatTimestampET(msg.createdAt);
-          messageParts.push({ type: 'text', text: `[${ts}] [${name}] ${msg.content}` });
+          const idSuffix = !msg.webhookId && !msg.author.bot ? ` (id:${msg.author.id})` : '';
+          messageParts.push({ type: 'text', text: `[${ts}] [${name}${idSuffix}] ${msg.content}` });
           // Inline image parts from attachments
           for (const attachment of msg.attachments.values()) {
             if (attachment.contentType?.startsWith('image/')) {
@@ -234,14 +311,17 @@ export class PersonalityLearner {
             ? existingMemories.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')
             : '(none yet)';
 
+        const identitiesSection = this.formatLearnerIdentitiesSection();
+
         const personalityPrompt = `You are analyzing a Discord conversation to extract observations for a bot's long-term memory.
-There are MULTIPLE people in this conversation. Pay attention to WHO says what — attribute observations to the correct person by their display name.
+There are MULTIPLE people in this conversation. Every human message is labeled as [timestamp] [DisplayName (id:DISCORD_USER_ID)] message-content.
+Attribute observations to the correct person BY THEIR DISPLAY NAME for the "subject" field, and also include their Discord ID in "subject_user_id" when the observation is about a specific person (not "server" or "bot"). The ID is the stable key — display names can change, IDs cannot.
 Images appear directly after the message that shared them — attribute each image to that person.
 
 Extract ONLY things worth remembering long-term:
-- Facts about specific users (jobs, interests, real names, locations) — attribute to that person
+- Facts about specific users (jobs, interests, locations) — attribute to that person
 - Individual humor styles and communication preferences — attribute to that person
-- Server-wide culture, in-jokes, recurring themes — attribute to "server"
+- Server-wide culture, in-jokes, recurring themes — attribute to "server" (omit subject_user_id)
 - Strong opinions or preferences someone expressed — attribute to the person who said it
 - Notable events, plans, or milestones
 - Shared images that reveal interests, context, or personality — attribute to the person who shared them
@@ -251,14 +331,24 @@ Do NOT extract:
 - Anything already known (see existing memories below)
 - Generic observations ("people were chatting", "active conversation")
 - Things about someone based on what OTHERS said about them — only first-hand statements
+- Real names, aliases, or nicknames someone reveals about themselves — those go in identity_updates (see below), NOT in observations
 
+IDENTITY UPDATES: If someone reveals or is consistently called by a real name / alias / nickname in this conversation, output an entry in "identity_updates" keyed on their Discord ID. Use "irl_name" for a real name (e.g., "Derrick"), and "aliases_add" for nicknames. Only include identity updates when you have direct evidence.
+${identitiesSection}
 Existing memories (avoid duplicates):
 ${existingMemoriesSummary}
 
 The conversation messages and any shared images follow as separate content parts below.
 
-Respond ONLY with a JSON array, or [] if nothing worth remembering:
-[{"category": "fact|preference|personality|event|vibe", "subject": "DisplayName|server", "content": "concise observation"}]`;
+Respond ONLY with a JSON object. If nothing worth saving, respond with {"observations": []}.
+{
+  "observations": [
+    {"category": "fact|preference|personality|event|vibe", "subject": "DisplayName|server", "subject_user_id": "discord-id-if-person", "content": "concise observation"}
+  ],
+  "identity_updates": [
+    {"discord_user_id": "123", "irl_name": "Derrick", "aliases_add": ["Derek", "D"]}
+  ]
+}`;
 
         const personalityParts: ChatCompletionContentPart[] = [
           { type: 'text', text: personalityPrompt },
@@ -266,7 +356,7 @@ Respond ONLY with a JSON array, or [] if nothing worth remembering:
         ];
 
         const learnerModel = process.env.LEARNER_MODEL || 'qwen/qwen3-vl-235b-a22b-instruct';
-        const personalitySaved = await this.analyzeAndSave(
+        const personalityResult = await this.analyzeAndSave(
           openai,
           learnerModel,
           personalityParts,
@@ -275,8 +365,10 @@ Respond ONLY with a JSON array, or [] if nothing worth remembering:
           'PersonalityLearner',
         );
 
-        if (personalitySaved > 0) {
-          logger.info(`PersonalityLearner: Saved ${personalitySaved} observations from channel ${channelId}`);
+        if (personalityResult.observations > 0 || personalityResult.identityUpdates > 0) {
+          logger.info(
+            `PersonalityLearner: Saved ${personalityResult.observations} observations, ${personalityResult.identityUpdates} identity updates from channel ${channelId}`,
+          );
         } else {
           logger.info(`PersonalityLearner: No new observations from channel ${channelId}`);
         }
@@ -293,6 +385,7 @@ Respond ONLY with a JSON array, or [] if nothing worth remembering:
                 : '(none yet)';
 
             const selfImprovementPrompt = `You are analyzing a Discord conversation from the perspective of a bot called "${botName}" that participates in this server. Your job is to identify ways the bot could improve itself.
+Every human message is labeled as [timestamp] [DisplayName (id:DISCORD_USER_ID)] message-content.
 
 Look for:
 - capability_gap: Things the bot was asked to do but couldn't, or content it couldn't process (e.g., "the bot couldn't read that link", "fridge didn't understand the image", custom emojis treated as unknown text)
@@ -313,8 +406,12 @@ ${existingSelfImprovementSummary}
 
 Messages follow as separate content parts below.
 
-Respond ONLY with a JSON array, or [] if nothing actionable:
-[{"category": "capability_gap|pain_point|feature_request|improvement_idea", "subject": "bot|server|DisplayName", "content": "concise, actionable observation"}]`;
+Respond ONLY with a JSON object. If nothing actionable, respond with {"observations": []}.
+{
+  "observations": [
+    {"category": "capability_gap|pain_point|feature_request|improvement_idea", "subject": "bot|server|DisplayName", "subject_user_id": "discord-id-if-person", "content": "concise, actionable observation"}
+  ]
+}`;
 
             const selfImprovementParts: ChatCompletionContentPart[] = [
               { type: 'text', text: selfImprovementPrompt },
@@ -323,7 +420,7 @@ Respond ONLY with a JSON array, or [] if nothing actionable:
 
             const selfImprovementModel =
               process.env.SELF_IMPROVEMENT_MODEL || process.env.LEARNER_MODEL || 'qwen/qwen3-vl-235b-a22b-instruct';
-            const selfImprovementSaved = await this.analyzeAndSave(
+            const selfImprovementResult = await this.analyzeAndSave(
               openai,
               selfImprovementModel,
               selfImprovementParts,
@@ -332,9 +429,9 @@ Respond ONLY with a JSON array, or [] if nothing actionable:
               'SelfImprovementLearner',
             );
 
-            if (selfImprovementSaved > 0) {
+            if (selfImprovementResult.observations > 0) {
               logger.info(
-                `SelfImprovementLearner: Saved ${selfImprovementSaved} observations from channel ${channelId}`,
+                `SelfImprovementLearner: Saved ${selfImprovementResult.observations} observations from channel ${channelId}`,
               );
             } else {
               logger.info(`SelfImprovementLearner: No new observations from channel ${channelId}`);
