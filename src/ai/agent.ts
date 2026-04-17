@@ -25,10 +25,6 @@ export class AgentOrchestrator {
     this.store = new ConversationStore(CONVERSATION_TIMEOUT);
   }
 
-  hasActiveConversation(channelId: string): boolean {
-    return this.store.get(channelId) !== undefined;
-  }
-
   async handleMention(message: Message) {
     const stopTyping = this.startTypingLoop(message);
     const botName = message.client.user.displayName;
