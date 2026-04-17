@@ -307,7 +307,14 @@ export class OpenRouterProvider implements AiProvider {
   }
 
   private parseResponse(response: OpenAI.ChatCompletion): ProviderChatResponse {
-    const choice = response.choices[0];
+    const choices = response?.choices;
+    if (!Array.isArray(choices) || choices.length === 0) {
+      const maybeError = (response as unknown as { error?: unknown })?.error;
+      const snapshot = JSON.stringify(response ?? null).slice(0, 2000);
+      logger.error('OpenRouter returned response with no choices', { error: maybeError, snapshot });
+      throw new Error(`OpenRouter returned no choices${maybeError ? `: ${JSON.stringify(maybeError)}` : ''}`);
+    }
+    const choice = choices[0];
     const msg = choice?.message;
     const text = msg?.content?.trim() || undefined;
     const toolCalls = this.extractToolCalls(msg);
