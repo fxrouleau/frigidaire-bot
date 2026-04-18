@@ -40,6 +40,21 @@ export type IdentityMetaUpdate = {
   aliases_add?: string[];
 };
 
+export type EmojiRow = {
+  id: string;
+  name: string;
+  animated: number;
+  caption: string | null;
+  captioned_at: string | null;
+  active: number;
+};
+
+type EmojiUpsertInput = {
+  id: string;
+  name: string;
+  animated: boolean;
+};
+
 export class MemoryStore {
   private readonly db: Database.Database;
 
@@ -90,6 +105,17 @@ export class MemoryStore {
 
       CREATE INDEX IF NOT EXISTS idx_identities_canonical_name ON identities(canonical_name);
       CREATE INDEX IF NOT EXISTS idx_identities_active ON identities(active);
+
+      CREATE TABLE IF NOT EXISTS emojis (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        animated INTEGER NOT NULL DEFAULT 0,
+        caption TEXT,
+        captioned_at TEXT,
+        active INTEGER DEFAULT 1
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_emojis_active ON emojis(active);
     `);
 
     // Additive migrations for existing databases
@@ -367,6 +393,50 @@ export class MemoryStore {
     } catch {
       return [];
     }
+  }
+
+  // Emoji methods
+  upsertEmoji(emoji: EmojiUpsertInput): { inserted: boolean; nameChanged: boolean } {
+    const existing = this.db.prepare('SELECT name, active FROM emojis WHERE id = ?').get(emoji.id) as
+      | { name: string; active: number }
+      | undefined;
+
+    if (!existing) {
+      this.db
+        .prepare('INSERT INTO emojis (id, name, animated, active) VALUES (?, ?, ?, 1)')
+        .run(emoji.id, emoji.name, emoji.animated ? 1 : 0);
+      return { inserted: true, nameChanged: false };
+    }
+
+    const nameChanged = existing.name !== emoji.name;
+    if (nameChanged || existing.active !== 1) {
+      this.db
+        .prepare('UPDATE emojis SET name = ?, animated = ?, active = 1 WHERE id = ?')
+        .run(emoji.name, emoji.animated ? 1 : 0, emoji.id);
+    }
+    return { inserted: false, nameChanged };
+  }
+
+  setEmojiCaption(id: string, caption: string): void {
+    this.db.prepare("UPDATE emojis SET caption = ?, captioned_at = datetime('now') WHERE id = ?").run(caption, id);
+  }
+
+  deactivateEmoji(id: string): void {
+    this.db.prepare('UPDATE emojis SET active = 0 WHERE id = ?').run(id);
+  }
+
+  getEmojiById(id: string): EmojiRow | undefined {
+    return this.db.prepare('SELECT * FROM emojis WHERE id = ?').get(id) as EmojiRow | undefined;
+  }
+
+  getUsableEmojis(): EmojiRow[] {
+    return this.db.prepare('SELECT * FROM emojis WHERE active = 1 ORDER BY name ASC').all() as EmojiRow[];
+  }
+
+  getEmojisNeedingCaption(): EmojiRow[] {
+    return this.db
+      .prepare("SELECT * FROM emojis WHERE active = 1 AND (caption IS NULL OR caption = '')")
+      .all() as EmojiRow[];
   }
 
   private addColumnIfMissing(table: string, column: string, columnDef: string): void {

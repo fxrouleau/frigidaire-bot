@@ -513,3 +513,82 @@ describe('identities', () => {
     expect(identity.aliases).toEqual(['Annie', 'A']);
   });
 });
+
+describe('emojis', () => {
+  it('upsertEmoji() inserts a new row as active with null caption', () => {
+    const result = store.upsertEmoji({ id: '111', name: 'ratirlPickle', animated: false });
+    expect(result.inserted).toBe(true);
+    expect(result.nameChanged).toBe(false);
+
+    const row = store.getEmojiById('111');
+    expect(row?.name).toBe('ratirlPickle');
+    expect(row?.animated).toBe(0);
+    expect(row?.active).toBe(1);
+    expect(row?.caption).toBeNull();
+  });
+
+  it('upsertEmoji() preserves caption when re-upserting with same name', () => {
+    store.upsertEmoji({ id: '111', name: 'ratirlPickle', animated: false });
+    store.setEmojiCaption('111', 'green pickle for absurdity');
+
+    const result = store.upsertEmoji({ id: '111', name: 'ratirlPickle', animated: false });
+    expect(result.inserted).toBe(false);
+    expect(result.nameChanged).toBe(false);
+    expect(store.getEmojiById('111')?.caption).toBe('green pickle for absurdity');
+  });
+
+  it('upsertEmoji() reports nameChanged when the name differs', () => {
+    store.upsertEmoji({ id: '111', name: 'oldName', animated: false });
+    const result = store.upsertEmoji({ id: '111', name: 'newName', animated: false });
+    expect(result.inserted).toBe(false);
+    expect(result.nameChanged).toBe(true);
+    expect(store.getEmojiById('111')?.name).toBe('newName');
+  });
+
+  it('upsertEmoji() reactivates a previously deactivated emoji', () => {
+    store.upsertEmoji({ id: '111', name: 'pickle', animated: false });
+    store.deactivateEmoji('111');
+    expect(store.getEmojiById('111')?.active).toBe(0);
+
+    store.upsertEmoji({ id: '111', name: 'pickle', animated: false });
+    expect(store.getEmojiById('111')?.active).toBe(1);
+  });
+
+  it('setEmojiCaption() updates caption and sets captioned_at', () => {
+    store.upsertEmoji({ id: '111', name: 'pickle', animated: false });
+    store.setEmojiCaption('111', 'a cartoon pickle');
+
+    const row = store.getEmojiById('111');
+    expect(row?.caption).toBe('a cartoon pickle');
+    expect(row?.captioned_at).toBeTruthy();
+  });
+
+  it('deactivateEmoji() sets active=0 without hard delete', () => {
+    store.upsertEmoji({ id: '111', name: 'pickle', animated: false });
+    store.deactivateEmoji('111');
+
+    expect(store.getEmojiById('111')?.active).toBe(0);
+    expect(store.getUsableEmojis()).toEqual([]);
+  });
+
+  it('getUsableEmojis() returns only active emojis, ordered by name', () => {
+    store.upsertEmoji({ id: '1', name: 'zebra', animated: false });
+    store.upsertEmoji({ id: '2', name: 'apple', animated: true });
+    store.upsertEmoji({ id: '3', name: 'mango', animated: false });
+    store.deactivateEmoji('2');
+
+    const usable = store.getUsableEmojis();
+    expect(usable.map((e) => e.name)).toEqual(['mango', 'zebra']);
+  });
+
+  it('getEmojisNeedingCaption() returns active uncaptioned emojis', () => {
+    store.upsertEmoji({ id: '1', name: 'a', animated: false });
+    store.upsertEmoji({ id: '2', name: 'b', animated: false });
+    store.upsertEmoji({ id: '3', name: 'c', animated: false });
+    store.setEmojiCaption('2', 'caption for b');
+    store.deactivateEmoji('3');
+
+    const needing = store.getEmojisNeedingCaption();
+    expect(needing.map((e) => e.id)).toEqual(['1']);
+  });
+});

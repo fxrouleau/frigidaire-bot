@@ -4,7 +4,7 @@ import { logger } from '../logger';
 import { splitMessage } from '../utils';
 import { ConversationStore } from './conversationStore';
 import { logFailure } from './failureLogger';
-import type { Identity, Memory } from './memory/memoryStore';
+import type { EmojiRow, Identity, Memory } from './memory/memoryStore';
 import { getProviderForChannel } from './providerRegistry';
 import { getMemoryStore, toolDefinitions } from './tools';
 import type {
@@ -305,16 +305,18 @@ export class AgentOrchestrator {
       timeZoneName: 'short',
     }).format(now);
 
-    // Fetch memories and identities for context injection
+    // Fetch memories, identities, and emojis for context injection
     let personalityMemories: Memory[] = [];
     let userSpecificMemories: Memory[] = [];
     let contextualMemories: Memory[] = [];
     let identities: Identity[] = [];
+    let usableEmojis: EmojiRow[] = [];
 
     try {
       const store = getMemoryStore();
 
       identities = store.getAllIdentities().filter((i) => i.active !== 0);
+      usableEmojis = store.getUsableEmojis();
 
       // Cap and diversify vibe/personality: most recent per unique subject, max 5
       const vibeMemories = store.getByCategory('vibe');
@@ -351,6 +353,7 @@ export class AgentOrchestrator {
     }
 
     const identitiesSection = this.formatIdentitiesSection(identities);
+    const emojisSection = this.formatEmojisSection(usableEmojis);
 
     const personalitySection =
       personalityMemories.length > 0
@@ -384,7 +387,7 @@ How you behave:
 - Never say "I'm just an AI" or "as a language model" — you're ${botName}, period.
 
 You can search the web natively. Use it SPARINGLY — only when you genuinely need current, real-time information you couldn't possibly know (live scores, recent news, release dates, etc). Don't search for things you already know. Don't follow links people share.
-${identitiesSection}${personalitySection}${userSection}${contextualSection}
+${identitiesSection}${emojisSection}${personalitySection}${userSection}${contextualSection}
 These memories are background knowledge — things you know from hanging out in this server. Do NOT force references to inside jokes, show off what you know, or try to reference multiple memories in one response. Let things come up naturally, the way you'd reference a friend's hobby only when it's actually relevant to the conversation. If nothing from your memories is relevant to what's being discussed, just don't mention them.
 
 MEMORY: You have a long-term memory system. Use the remember_fact tool when something genuinely important comes up — real names, jobs, major life events, strong preferences, or things someone would expect you to remember next time. Do NOT save every little thing; skip small talk, throwaway opinions, and mundane details. Think of what you'd actually remember about a friend after a night out — the big stuff, not every sentence. If someone corrects a fact you know, save the updated version.
@@ -404,6 +407,18 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
     });
 
     return `\n=== SERVER PEOPLE ===\n${lines.join('\n')}\n`;
+  }
+
+  private formatEmojisSection(emojis: EmojiRow[]): string {
+    if (emojis.length === 0) return '';
+
+    const lines = emojis.map((e) => {
+      const syntax = e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`;
+      const captionPart = e.caption ? ` — ${e.caption}` : '';
+      return `- ${syntax}${captionPart}`;
+    });
+
+    return `\n=== EMOJIS YOU CAN USE ===\nOnly these server emojis are usable in your replies. Paste them in the exact syntax shown.\n${lines.join('\n')}\n`;
   }
 
   private buildUserContentParts(msg: Message): NormalizedContentPart[] {

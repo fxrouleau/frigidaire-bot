@@ -164,6 +164,19 @@ export class PersonalityLearner {
     return `\nKnown server identities (Discord ID → canonical name). Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${lines.join('\n')}\n`;
   }
 
+  private formatLearnerEmojisSection(): string {
+    const emojis = this.store.getUsableEmojis();
+    if (emojis.length === 0) return '';
+
+    const lines = emojis.map((e) => {
+      const syntax = e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`;
+      const captionPart = e.caption ? ` — ${e.caption}` : '';
+      return `- ${syntax}${captionPart}`;
+    });
+
+    return `\nKnown server custom emojis (the bot can see/interpret these — do NOT log capability_gap entries claiming otherwise):\n${lines.join('\n')}\n`;
+  }
+
   private getClient(): OpenAI | undefined {
     if (!process.env.OPENROUTER_API_KEY) return undefined;
     if (!this.client) {
@@ -337,6 +350,7 @@ export class PersonalityLearner {
 
         const existingMemoriesSummary = this.buildRelevantMemoriesSummary(subjectsInBatch);
         const identitiesSection = this.formatLearnerIdentitiesSection();
+        const emojisSection = this.formatLearnerEmojisSection();
 
         const personalityPrompt = `You are extracting atomic long-term memories from a Discord conversation.
 Messages are labeled: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Images appear after the message that shared them.
@@ -379,7 +393,7 @@ GOOD vs BAD examples:
   BAD:  {"category":"vibe","subject":"server","content":"Group frequently engages in playful teasing of Dillon in a boundary-pushing manner."}
 
 IDENTITY UPDATES: If someone reveals or is consistently called by a real name / alias / nickname, add an entry in "identity_updates" keyed on their Discord ID. Use "irl_name" for a real name ("Derrick"), "aliases_add" for nicknames. Direct evidence only.
-${identitiesSection}
+${identitiesSection}${emojisSection}
 Existing memories (skip if semantically covered):
 ${existingMemoriesSummary}
 
@@ -446,6 +460,7 @@ DO NOT SAVE:
 - Things the bot already does well
 - Jokey roasting (friends ribbing the bot is not a pain_point)
 - Re-statements of known limitations with new examples (see rule 3)
+- Custom emoji interpretation — the bot CAN see custom server emojis (see list injected in the personality prompt). Do NOT log capability_gap entries claiming the bot can't read them.
 
 GOOD vs BAD examples:
   GOOD: {"category":"capability_gap","subject":"bot","content":"Cannot read restaurant receipts for bill splitting."}
