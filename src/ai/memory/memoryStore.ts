@@ -450,6 +450,11 @@ export class MemoryStore {
     return result.changes > 0;
   }
 
+  clearAllEmojiCaptions(): number {
+    const result = this.db.prepare('UPDATE emojis SET caption = NULL, captioned_at = NULL').run();
+    return result.changes;
+  }
+
   getEmojisNeedingCaption(): EmojiRow[] {
     return this.db
       .prepare("SELECT * FROM emojis WHERE active = 1 AND (caption IS NULL OR caption = '')")

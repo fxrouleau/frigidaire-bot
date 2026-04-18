@@ -626,6 +626,35 @@ describe('emojis', () => {
     expect(store.getEmojiById('1')?.use_count).toBe(0);
   });
 
+  it('clearAllEmojiCaptions() nulls caption and captioned_at across all rows', () => {
+    store.upsertEmoji({ id: '1', name: 'a', animated: false });
+    store.upsertEmoji({ id: '2', name: 'b', animated: false });
+    store.setEmojiCaption('1', 'caption for a');
+    store.setEmojiCaption('2', 'caption for b');
+
+    const cleared = store.clearAllEmojiCaptions();
+    expect(cleared).toBe(2);
+
+    expect(store.getEmojiById('1')?.caption).toBeNull();
+    expect(store.getEmojiById('1')?.captioned_at).toBeNull();
+    expect(store.getEmojiById('2')?.caption).toBeNull();
+    expect(store.getEmojiById('2')?.captioned_at).toBeNull();
+  });
+
+  it('clearAllEmojiCaptions() preserves other fields', () => {
+    store.upsertEmoji({ id: '1', name: 'a', animated: true });
+    store.setEmojiCaption('1', 'original caption');
+    store.incrementEmojiUsage('1', 5);
+
+    store.clearAllEmojiCaptions();
+
+    const row = store.getEmojiById('1');
+    expect(row?.name).toBe('a');
+    expect(row?.animated).toBe(1);
+    expect(row?.use_count).toBe(5);
+    expect(row?.active).toBe(1);
+  });
+
   it('getUsableEmojis() orders by use_count desc, then name asc', () => {
     store.upsertEmoji({ id: '1', name: 'banana', animated: false });
     store.upsertEmoji({ id: '2', name: 'apple', animated: false });

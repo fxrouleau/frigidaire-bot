@@ -2,7 +2,11 @@ import * as process from 'node:process';
 import OpenAI from 'openai';
 import { logger } from '../logger';
 
-const DEFAULT_CAPTION_MODEL = 'qwen/qwen3-vl-235b-a22b-instruct';
+// Opus over Qwen here because Qwen3-VL, despite being a strong generalist vision model,
+// had no grasp of Twitch/meme-emote culture — it just kept describing every Pepe variant
+// as "green frog with wide eyes" regardless of whether it was monkaW, pepega, or FeelsGoodMan.
+// The captions are one-shot per emoji and cached forever, so paying Opus rates here is pennies.
+const DEFAULT_CAPTION_MODEL = 'anthropic/claude-opus-4.7';
 
 let cachedClient: OpenAI | undefined;
 
@@ -47,7 +51,7 @@ export async function captionEmoji(params: {
   try {
     const response = await openai.chat.completions.create({
       model,
-      max_tokens: 120,
+      max_tokens: 160,
       temperature: 0.2,
       messages: [
         {
@@ -55,13 +59,35 @@ export async function captionEmoji(params: {
           content: [
             {
               type: 'text',
-              text: `Describe this Discord custom emoji named "${params.name}" in ≤70 characters.
-Format: "<visual description>; for <emotion or situation it's used for>".
-Be blunt and concrete. No preamble, no quotes, just the description.
-Examples:
-- green pickle Rick face; for absurdity or dismay
-- troll face with raised eyebrow; for provocation or baiting
-- smoking cigar meme; for cocky self-satisfaction`,
+              text: `You are captioning a Discord custom emoji for a chat bot's system prompt. The emoji's name is "${params.name}".
+
+IMPORTANT: Most custom Discord emojis come from Twitch/streaming culture, anime fandoms, League of Legends, game-specific memes. The NAME usually carries more meaning than the image alone, because the cultural usage defines what the emote signals. Common families you should recognize by name:
+- monkaS / monkaW / monkaX / monkaGIGA: panic, fear, nervousness, sweating through something
+- pepega / Pepega: stupidity, foolishness — a mocking reaction
+- POGGERS / PogChamp / Pog: hype, excitement, "let's go"
+- OMEGALUL / LULW / LUL: extreme laughter
+- FeelsGoodMan / FeelsBadMan / peepoHappy / peepoSad: Pepe content/sad/happy/crying
+- AYAYA / FeelsKoroneMan: anime hype / otaku reactions
+- 5Head / galaxybrain / Pepega (opposite): big-brain vs small-brain takes
+- Kappa: sarcasm
+- PauseChamp: anticipation / "wait for it"
+- KEKW / KEK: laughter (generally)
+- ratirl*: Rat IRL streamer family (varies wildly by variant — use image)
+- Based / BasedCigar: cocky approval, "based"
+- trolle / trollface: provocation, trolling
+
+If the name matches a known emote family, use the CULTURAL meaning — do NOT default to generic "green frog with wide eyes" just because a lot of these use Pepe as a base. Different Pepes mean very different things.
+
+If the name is original / server-specific / unclear, describe based on the image.
+
+OUTPUT: one line, ≤80 characters, format "<brief visual>; for <emotion or situation>". No preamble, no quotes, no trailing period. Examples:
+- "sweating Pepe, wide anxious eyes; for panic, shock, bad vibes"
+- "smug content Pepe; for satisfaction, wholesome approval"
+- "distorted laughing face; for extreme laughter"
+- "Pepe with goofy grin; for stupidity, foolish takes"
+- "hype wide-eyed face; for excitement, pog moments"
+
+Now caption "${params.name}":`,
             },
             { type: 'image_url', image_url: { url: imageUrl } },
           ],
