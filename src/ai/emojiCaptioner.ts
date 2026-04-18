@@ -48,11 +48,15 @@ export async function captionEmoji(params: {
   const model = params.model ?? process.env.EMOJI_CAPTION_MODEL ?? DEFAULT_CAPTION_MODEL;
   const imageUrl = emojiCdnUrl(params.id, params.animated);
 
+  logger.info(`emojiCaptioner: requesting caption for ${params.name} (${params.id}) via ${model}`);
+
   try {
     const response = await openai.chat.completions.create({
       model,
       max_tokens: 160,
       temperature: 0.2,
+      // @ts-expect-error OpenRouter-specific provider-routing hint — matches learner config
+      provider: { zdr: true },
       messages: [
         {
           role: 'user',
@@ -96,12 +100,15 @@ Now caption "${params.name}":`,
     });
 
     const text = response.choices?.[0]?.message?.content?.trim();
-    if (!text) return undefined;
+    if (!text) {
+      logger.warn(`emojiCaptioner: empty response for ${params.name} (${params.id}) from ${model}`);
+      return undefined;
+    }
 
     // Strip wrapping quotes if the model added them despite instructions.
     return text.replace(/^["']|["']$/g, '').slice(0, 120);
   } catch (error) {
-    logger.warn(`emojiCaptioner: failed to caption ${params.name} (${params.id}):`, error);
+    logger.warn(`emojiCaptioner: failed to caption ${params.name} (${params.id}) via ${model}:`, error);
     return undefined;
   }
 }
