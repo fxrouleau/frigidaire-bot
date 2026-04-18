@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import * as process from 'node:process';
 import { Client, GatewayIntentBits } from 'discord.js';
 import * as dotenv from 'dotenv';
-// import { personalityLearner } from './ai/learnerInstance';
+import { personalityLearner } from './ai/learnerInstance';
 import { getMemoryStore } from './ai/tools';
 import { logger } from './logger';
 
@@ -46,8 +46,8 @@ try {
 }
 
 // Start personality learner after Discord client is ready
-// client.once('ready', () => {
-//   personalityLearner.start(client);
-// });
+client.once('ready', () => {
+  personalityLearner.start(client);
+});
 
 client.login(process.env.CLIENT_SECRET);
