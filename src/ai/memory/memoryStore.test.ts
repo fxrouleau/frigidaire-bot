@@ -591,4 +591,51 @@ describe('emojis', () => {
     const needing = store.getEmojisNeedingCaption();
     expect(needing.map((e) => e.id)).toEqual(['1']);
   });
+
+  it('upsertEmoji() defaults use_count to 0 and last_used_at to null', () => {
+    store.upsertEmoji({ id: '1', name: 'a', animated: false });
+    const row = store.getEmojiById('1');
+    expect(row?.use_count).toBe(0);
+    expect(row?.last_used_at).toBeNull();
+  });
+
+  it('incrementEmojiUsage() bumps counter and sets last_used_at on active emoji', () => {
+    store.upsertEmoji({ id: '1', name: 'a', animated: false });
+    const changed = store.incrementEmojiUsage('1');
+    expect(changed).toBe(true);
+
+    const row = store.getEmojiById('1');
+    expect(row?.use_count).toBe(1);
+    expect(row?.last_used_at).toBeTruthy();
+  });
+
+  it('incrementEmojiUsage() accepts a custom delta', () => {
+    store.upsertEmoji({ id: '1', name: 'a', animated: false });
+    store.incrementEmojiUsage('1', 3);
+    expect(store.getEmojiById('1')?.use_count).toBe(3);
+  });
+
+  it('incrementEmojiUsage() is a no-op for unknown emoji IDs', () => {
+    expect(store.incrementEmojiUsage('does-not-exist')).toBe(false);
+  });
+
+  it('incrementEmojiUsage() is a no-op for deactivated emojis', () => {
+    store.upsertEmoji({ id: '1', name: 'a', animated: false });
+    store.deactivateEmoji('1');
+    expect(store.incrementEmojiUsage('1')).toBe(false);
+    expect(store.getEmojiById('1')?.use_count).toBe(0);
+  });
+
+  it('getUsableEmojis() orders by use_count desc, then name asc', () => {
+    store.upsertEmoji({ id: '1', name: 'banana', animated: false });
+    store.upsertEmoji({ id: '2', name: 'apple', animated: false });
+    store.upsertEmoji({ id: '3', name: 'cherry', animated: false });
+
+    store.incrementEmojiUsage('3', 5); // cherry: 5
+    store.incrementEmojiUsage('1', 2); // banana: 2
+    // apple: 0 (ties broken by name asc)
+
+    const ordered = store.getUsableEmojis().map((e) => e.name);
+    expect(ordered).toEqual(['cherry', 'banana', 'apple']);
+  });
 });

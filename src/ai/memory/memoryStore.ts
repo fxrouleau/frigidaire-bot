@@ -47,6 +47,8 @@ export type EmojiRow = {
   caption: string | null;
   captioned_at: string | null;
   active: number;
+  use_count: number;
+  last_used_at: string | null;
 };
 
 type EmojiUpsertInput = {
@@ -112,7 +114,9 @@ export class MemoryStore {
         animated INTEGER NOT NULL DEFAULT 0,
         caption TEXT,
         captioned_at TEXT,
-        active INTEGER DEFAULT 1
+        active INTEGER DEFAULT 1,
+        use_count INTEGER NOT NULL DEFAULT 0,
+        last_used_at TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_emojis_active ON emojis(active);
@@ -121,6 +125,8 @@ export class MemoryStore {
     // Additive migrations for existing databases
     this.addColumnIfMissing('memories', 'subject_user_id', 'TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject_user_id ON memories(subject_user_id);');
+    this.addColumnIfMissing('emojis', 'use_count', 'INTEGER NOT NULL DEFAULT 0');
+    this.addColumnIfMissing('emojis', 'last_used_at', 'TEXT');
 
     // FTS5 virtual table — created separately to handle already-exists gracefully
     try {
@@ -430,7 +436,18 @@ export class MemoryStore {
   }
 
   getUsableEmojis(): EmojiRow[] {
-    return this.db.prepare('SELECT * FROM emojis WHERE active = 1 ORDER BY name ASC').all() as EmojiRow[];
+    return this.db
+      .prepare('SELECT * FROM emojis WHERE active = 1 ORDER BY use_count DESC, name ASC')
+      .all() as EmojiRow[];
+  }
+
+  incrementEmojiUsage(id: string, by = 1): boolean {
+    const result = this.db
+      .prepare(
+        "UPDATE emojis SET use_count = use_count + ?, last_used_at = datetime('now') WHERE id = ? AND active = 1",
+      )
+      .run(by, id);
+    return result.changes > 0;
   }
 
   getEmojisNeedingCaption(): EmojiRow[] {

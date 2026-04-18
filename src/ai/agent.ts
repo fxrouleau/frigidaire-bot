@@ -424,7 +424,7 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
       return `- ${syntax}${captionPart}`;
     });
 
-    return `\n=== EMOJIS YOU CAN USE ===\nOnly these server emojis are usable in your replies. Paste them in the exact syntax shown.\n${lines.join('\n')}\n`;
+    return `\n=== EMOJIS YOU CAN USE ===\nOnly these server emojis are usable in your replies. Paste them in the exact syntax shown. Listed most-used first — prefer emojis near the top; the rarely-used ones near the bottom are usually neglected for a reason.\n${lines.join('\n')}\n`;
   }
 
   private buildUserContentParts(msg: Message): NormalizedContentPart[] {
