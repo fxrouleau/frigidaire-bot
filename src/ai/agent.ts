@@ -3,6 +3,7 @@ import { type Message, StickerFormatType } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 import { ConversationStore } from './conversationStore';
+import { writeErrorCapture } from './debugCapture';
 import { logFailure } from './failureLogger';
 import type { EmojiRow, Identity, Memory } from './memory/memoryStore';
 import { getProviderForChannel } from './providerRegistry';
@@ -13,22 +14,41 @@ import type {
   NormalizedContentPart,
   ProviderChatResponse,
   ProviderToolCall,
+  ToolDefinition,
 } from './types';
 import { formatTimestampET } from './utils';
 
 const CONVERSATION_TIMEOUT = Number(process.env.CONVERSATION_TIMEOUT_MS) || 15 * 60 * 1000; // 15 minutes
+const MAX_TOOL_ROUNDS = Number(process.env.MAX_TOOL_ROUNDS) || 10;
+const MAX_TOOL_INVOCATIONS = Number(process.env.MAX_TOOL_INVOCATIONS) || 50;
+
+export type AgentOrchestratorOptions = {
+  resolveProvider?: (channelId: string) => AiProvider | undefined;
+  tools?: ToolDefinition[];
+  timeoutMs?: number;
+  maxToolRounds?: number;
+  maxToolInvocations?: number;
+};
 
 export class AgentOrchestrator {
   private readonly store: ConversationStore;
+  private readonly resolveProvider: (channelId: string) => AiProvider | undefined;
+  private readonly tools: ToolDefinition[];
+  private readonly maxToolRounds: number;
+  private readonly maxToolInvocations: number;
 
-  constructor() {
-    this.store = new ConversationStore(CONVERSATION_TIMEOUT);
+  constructor(opts: AgentOrchestratorOptions = {}) {
+    this.store = new ConversationStore(opts.timeoutMs ?? CONVERSATION_TIMEOUT);
+    this.resolveProvider = opts.resolveProvider ?? getProviderForChannel;
+    this.tools = opts.tools ?? toolDefinitions;
+    this.maxToolRounds = opts.maxToolRounds ?? MAX_TOOL_ROUNDS;
+    this.maxToolInvocations = opts.maxToolInvocations ?? MAX_TOOL_INVOCATIONS;
   }
 
   async handleMention(message: Message) {
     const stopTyping = this.startTypingLoop(message);
     const botName = message.client.user.displayName;
-    const provider = getProviderForChannel(message.channel.id);
+    const provider = this.resolveProvider(message.channel.id);
     if (!provider) {
       stopTyping();
       await message.reply('No AI provider is configured for this bot.');
@@ -78,13 +98,11 @@ export class AgentOrchestrator {
         const toolResults = await this.executeToolCalls(hostHandledCalls, message, provider, channelId);
         workingEntries.push(...toolResults);
 
-        const MAX_TOOL_ROUNDS = 3;
-        const MAX_TOOL_INVOCATIONS = 50;
         let totalInvocations = hostHandledCalls.length;
         let lastThoughts = firstResponse.thoughts ?? state.thoughts;
         let finalResponse: ProviderChatResponse | undefined;
 
-        for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        for (let round = 0; round < this.maxToolRounds; round++) {
           const roundResponse = await provider.chat({
             messages: workingEntries,
             tools: providerTools,
@@ -106,9 +124,9 @@ export class AgentOrchestrator {
           }
 
           totalInvocations += roundToolCalls.length;
-          if (totalInvocations > MAX_TOOL_INVOCATIONS) {
+          if (totalInvocations > this.maxToolInvocations) {
             logger.warn(
-              `Tool invocation limit (${MAX_TOOL_INVOCATIONS}) exceeded in channel ${channelId}, forcing text response.`,
+              `Tool invocation limit (${this.maxToolInvocations}) exceeded in channel ${channelId}, forcing text response.`,
             );
             const forcedResponse = await provider.chat({
               messages: workingEntries,
@@ -126,7 +144,7 @@ export class AgentOrchestrator {
           workingEntries.push(...roundResults);
 
           // Last allowed round — force a text-only response
-          if (round === MAX_TOOL_ROUNDS - 1) {
+          if (round === this.maxToolRounds - 1) {
             const forcedResponse = await provider.chat({
               messages: workingEntries,
               tools: providerTools,
@@ -166,6 +184,16 @@ export class AgentOrchestrator {
         'tool_error',
         `Error processing message in #${channelId}: ${error instanceof Error ? error.message : 'unknown'}`,
       );
+      const capturePath = writeErrorCapture({
+        channelId,
+        model: provider.defaultModel,
+        error,
+        conversationEntries: workingEntries,
+        thoughts: state.thoughts,
+      });
+      if (capturePath) {
+        logger.info(`Error capture written to ${capturePath}`);
+      }
       stopTyping();
       try {
         await message.reply('Sorry, I encountered an error while processing your request.');
@@ -192,7 +220,7 @@ export class AgentOrchestrator {
   ): Promise<ConversationEntry[]> {
     const results: ConversationEntry[] = [];
     for (const call of calls) {
-      const toolDefinition = toolDefinitions.find((tool) => tool.name === call.name);
+      const toolDefinition = this.tools.find((tool) => tool.name === call.name);
       if (!toolDefinition) {
         logger.warn(`Tool ${call.name} was requested but no handler is registered.`);
         logFailure('capability_gap', `Tool "${call.name}" requested but no handler is registered`);

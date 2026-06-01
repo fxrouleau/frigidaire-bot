@@ -20,6 +20,12 @@ type ChatContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string; detail: 'auto' } };
 
+export type OpenRouterProviderOptions = {
+  client?: OpenAI;
+  model?: string;
+  routing?: Record<string, unknown>;
+};
+
 export class OpenRouterProvider implements AiProvider {
   public readonly id = 'openrouter';
   public readonly displayName = 'OpenRouter';
@@ -28,22 +34,28 @@ export class OpenRouterProvider implements AiProvider {
   public readonly supportedTools: ProviderToolDefinition[];
 
   private readonly client: OpenAI;
+  private readonly routing: Record<string, unknown>;
 
-  constructor() {
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      throw new Error('OPENROUTER_API_KEY is required');
+  constructor(opts: OpenRouterProviderOptions = {}) {
+    if (opts.client) {
+      this.client = opts.client;
+    } else {
+      const apiKey = process.env.OPENROUTER_API_KEY;
+      if (!apiKey) {
+        throw new Error('OPENROUTER_API_KEY is required');
+      }
+
+      this.client = new OpenAI({
+        apiKey,
+        baseURL: 'https://openrouter.ai/api/v1',
+        defaultHeaders: {
+          'X-Title': 'Frigidaire Bot',
+        },
+      });
     }
 
-    this.client = new OpenAI({
-      apiKey,
-      baseURL: 'https://openrouter.ai/api/v1',
-      defaultHeaders: {
-        'X-Title': 'Frigidaire Bot',
-      },
-    });
-
-    this.defaultModel = process.env.CHAT_MODEL || 'deepseek/deepseek-v3.2:nitro';
+    this.defaultModel = opts.model ?? (process.env.CHAT_MODEL || 'deepseek/deepseek-v3.2:nitro');
+    this.routing = opts.routing ?? { zdr: true, sort: 'throughput' };
 
     this.supportedTools = toolDefinitions.map(
       (tool) =>
@@ -97,13 +109,10 @@ export class OpenRouterProvider implements AiProvider {
       tools: allTools.length > 0 ? (allTools as OpenAI.ChatCompletionTool[]) : undefined,
       tool_choice: input.toolChoice === 'none' ? 'none' : 'auto',
       // @ts-expect-error OpenRouter-specific field
-      provider: {
-        zdr: true,
-        sort: 'throughput',
-      },
+      provider: this.routing,
     });
 
-    return this.parseResponse(response);
+    return parseOpenRouterResponse(response);
   }
 
   async summarizeMessages(message: Message, startTime: string, endTime: string): Promise<string> {
@@ -122,10 +131,7 @@ export class OpenRouterProvider implements AiProvider {
           { role: 'user', content: prepared.prompt },
         ],
         // @ts-expect-error OpenRouter-specific field
-        provider: {
-          zdr: true,
-          sort: 'throughput',
-        },
+        provider: this.routing,
       });
 
       const text = response.choices[0]?.message?.content?.trim();
@@ -305,64 +311,68 @@ export class OpenRouterProvider implements AiProvider {
       return undefined;
     }
   }
+}
 
-  private parseResponse(response: OpenAI.ChatCompletion): ProviderChatResponse {
-    const choices = response?.choices;
-    if (!Array.isArray(choices) || choices.length === 0) {
-      const maybeError = (response as unknown as { error?: unknown })?.error;
-      const snapshot = JSON.stringify(response ?? null).slice(0, 2000);
-      logger.error('OpenRouter returned response with no choices', { error: maybeError, snapshot });
-      throw new Error(`OpenRouter returned no choices${maybeError ? `: ${JSON.stringify(maybeError)}` : ''}`);
-    }
-    const choice = choices[0];
-    const msg = choice?.message;
-    const text = msg?.content?.trim() || undefined;
-    const toolCalls = this.extractToolCalls(msg);
-    const outputEntries: ConversationEntry[] = [];
+export function extractToolCalls(message: OpenAI.ChatCompletionMessage | undefined): ProviderToolCall[] {
+  if (!message?.tool_calls) return [];
 
-    if (toolCalls.length > 0) {
-      for (const call of toolCalls) {
-        outputEntries.push({
-          kind: 'tool_call',
-          id: call.id,
-          name: call.name,
-          arguments: call.arguments,
-        });
-      }
-    }
-
-    if (text) {
-      outputEntries.push({
-        kind: 'message',
-        role: 'assistant',
-        content: [{ type: 'text', text }],
-      });
-    }
-
-    return { text, toolCalls, outputEntries, raw: response };
-  }
-
-  private extractToolCalls(message: OpenAI.ChatCompletionMessage | undefined): ProviderToolCall[] {
-    if (!message?.tool_calls) return [];
-
-    return message.tool_calls
-      .filter((call): call is OpenAI.ChatCompletionMessageToolCall & { type: 'function' } => call.type === 'function')
-      .map((call) => {
-        let args: Record<string, unknown> = {};
-        try {
-          const parsed = JSON.parse(call.function.arguments);
-          if (parsed && typeof parsed === 'object') {
-            args = parsed as Record<string, unknown>;
-          }
-        } catch {
-          logger.warn(`Failed to parse tool arguments for ${call.function.name}`);
+  return message.tool_calls
+    .filter((call): call is OpenAI.ChatCompletionMessageToolCall & { type: 'function' } => call.type === 'function')
+    .map((call) => {
+      let args: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(call.function.arguments);
+        if (parsed && typeof parsed === 'object') {
+          args = parsed as Record<string, unknown>;
         }
+      } catch {
+        logger.warn(`Failed to parse tool arguments for ${call.function.name}`);
+      }
 
-        return {
-          id: call.id || crypto.randomUUID(),
-          name: call.function.name,
-          arguments: args,
-        };
-      });
+      return {
+        id: call.id || crypto.randomUUID(),
+        name: call.function.name,
+        arguments: args,
+      };
+    });
+}
+
+export function parseOpenRouterResponse(response: OpenAI.ChatCompletion): ProviderChatResponse {
+  const choices = response?.choices;
+  if (!Array.isArray(choices) || choices.length === 0) {
+    const maybeError = (response as unknown as { error?: unknown })?.error;
+    const snapshot = JSON.stringify(response ?? null).slice(0, 2000);
+    logger.error('OpenRouter returned response with no choices', { error: maybeError, snapshot });
+    const error: Error & { rawResponse?: unknown } = new Error(
+      `OpenRouter returned no choices${maybeError ? `: ${JSON.stringify(maybeError)}` : ''}`,
+    );
+    error.rawResponse = response;
+    throw error;
   }
+  const choice = choices[0];
+  const msg = choice?.message;
+  const text = msg?.content?.trim() || undefined;
+  const toolCalls = extractToolCalls(msg);
+  const outputEntries: ConversationEntry[] = [];
+
+  if (toolCalls.length > 0) {
+    for (const call of toolCalls) {
+      outputEntries.push({
+        kind: 'tool_call',
+        id: call.id,
+        name: call.name,
+        arguments: call.arguments,
+      });
+    }
+  }
+
+  if (text) {
+    outputEntries.push({
+      kind: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+    });
+  }
+
+  return { text, toolCalls, outputEntries, raw: response };
 }

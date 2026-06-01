@@ -11,6 +11,11 @@ export function getMemoryStore(): MemoryStore {
   return memoryStore;
 }
 
+/** Test-only: lets tests point the shared memory store at an isolated instance (e.g. ':memory:'). */
+export function setMemoryStoreForTesting(store: MemoryStore | undefined): void {
+  memoryStore = store;
+}
+
 const summarizeTool: ToolDefinition = {
   name: 'summarize_messages',
   description:
