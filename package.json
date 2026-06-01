@@ -24,7 +24,11 @@
     "build": "tsc",
     "prod": "node dist/app.js",
     "check": "yarn biome check --fix",
+    "check:ci": "yarn biome check",
+    "typecheck": "tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:live": "vitest run src/ai/providers/openRouterProvider.live.test.ts",
+    "replay": "ts-node src/test-support/replayCli.ts"
   }
 }

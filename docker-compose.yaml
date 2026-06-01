@@ -3,5 +3,24 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: prod
     environment:
       - CLIENT_SECRET=${CLIENT_SECRET}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+    volumes:
+      - ./data:/app/data
+
+  test:
+    profiles: [dev]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    user: node
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - RUN_LIVE=${RUN_LIVE:-}
+      - DEBUG_CAPTURE=${DEBUG_CAPTURE:-}

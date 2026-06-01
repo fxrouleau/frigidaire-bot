@@ -7,7 +7,16 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": ["node_modules", ".yarn", ".pnp.*", ".vscode", ".idea", ".DS_Store", "src/**/*.test.ts"]
+    "ignore": [
+      "node_modules",
+      ".yarn",
+      ".pnp.*",
+      ".vscode",
+      ".idea",
+      ".DS_Store",
+      "src/**/*.test.ts",
+      "src/test-support/fixtures"
+    ]
   },
   "formatter": {
     "enabled": true,
