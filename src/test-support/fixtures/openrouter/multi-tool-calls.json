@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "description": "Two tool_calls in one assistant message: remember_fact + recall_memories.",
+  "status": 200,
+  "request": {
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "messages": [{ "role": "user", "content": "Remember I like cats, and what else do you know about cats?" }]
+  },
+  "response": {
+    "id": "gen-test-multi-001",
+    "object": "chat.completion",
+    "created": 1735689600,
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_001",
+              "type": "function",
+              "function": {
+                "name": "remember_fact",
+                "arguments": "{\"category\":\"fact\",\"subject\":\"TestUser\",\"content\":\"Test user likes cats\"}"
+              }
+            },
+            {
+              "id": "call_002",
+              "type": "function",
+              "function": {
+                "name": "recall_memories",
+                "arguments": "{\"query\":\"cats\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 31,
+      "completion_tokens": 40,
+      "total_tokens": 71
+    }
+  }
+}

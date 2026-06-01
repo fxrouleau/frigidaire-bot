@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "description": "Assistant message with BOTH content text and a tool_call.",
+  "status": 200,
+  "request": {
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "messages": [{ "role": "user", "content": "Remember I like cats" }]
+  },
+  "response": {
+    "id": "gen-test-textandtool-001",
+    "object": "chat.completion",
+    "created": 1735689600,
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Let me remember that.",
+          "tool_calls": [
+            {
+              "id": "call_001",
+              "type": "function",
+              "function": {
+                "name": "remember_fact",
+                "arguments": "{\"category\":\"fact\",\"subject\":\"TestUser\",\"content\":\"Test user likes cats\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 14,
+      "completion_tokens": 26,
+      "total_tokens": 40
+    }
+  }
+}

@@ -1,5 +1,14 @@
+import type { Message } from 'discord.js';
 import { describe, expect, it } from 'vitest';
+import { createFakeMessage } from '../test-support/fakeDiscord';
+import * as twitterModule from './twitterRepost';
 import { re, replaceString } from './twitterRepost';
+
+// The handler is `module.exports = { name, execute }`; it surfaces as the namespace's
+// `default` member under Vitest/Vite. `re`/`replaceString` are real named exports.
+const twitterEvent = (twitterModule as unknown as {
+  default: { name: string; execute: (message: Message) => Promise<void> };
+}).default;
 
 describe('twitterRepost', () => {
   describe('regex matching', () => {
@@ -59,6 +68,54 @@ describe('twitterRepost', () => {
       expect(replaceString('https://www.twitter.com/user/status/123')).toBe(
         'https://www.fixvx.com/user/status/123',
       );
+    });
+  });
+
+  describe('execute (webhook repost flow)', () => {
+    it('reposts a matching twitter link via webhook with the domain replaced', async () => {
+      const fake = createFakeMessage({
+        content: 'check this https://twitter.com/user/status/123',
+      });
+
+      await twitterEvent.execute(fake.message);
+
+      expect(fake.recorders.createWebhook.calls).toHaveLength(1);
+      expect(fake.recorders.delete.calls).toHaveLength(1);
+      expect(fake.webhooks).toHaveLength(1);
+
+      const hook = fake.webhooks[0];
+      expect(hook.send.calls).toHaveLength(1);
+      expect(hook.send.calls[0][0]).toBe('check this https://fixvx.com/user/status/123');
+      expect(hook.delete.calls).toHaveLength(1);
+    });
+
+    it('reposts x.com links too', async () => {
+      const fake = createFakeMessage({ content: 'https://x.com/user/status/999' });
+
+      await twitterEvent.execute(fake.message);
+
+      expect(fake.webhooks[0].send.calls[0][0]).toBe('https://fixvx.com/user/status/999');
+    });
+
+    it('does nothing when there is no matching link', async () => {
+      const fake = createFakeMessage({ content: 'just a normal message with no links' });
+
+      await twitterEvent.execute(fake.message);
+
+      expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+      expect(fake.recorders.delete.calls).toHaveLength(0);
+    });
+
+    it('ignores bot-authored messages even with a matching link', async () => {
+      const fake = createFakeMessage({
+        authorIsBot: true,
+        content: 'https://twitter.com/user/status/123',
+      });
+
+      await twitterEvent.execute(fake.message);
+
+      expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+      expect(fake.recorders.delete.calls).toHaveLength(0);
     });
   });
 });

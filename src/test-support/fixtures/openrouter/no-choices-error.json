@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "description": "HTTP 200 but the body has an error envelope and NO choices array (real OpenRouter/Bedrock failure shape).",
+  "status": 200,
+  "request": {
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "messages": [{ "role": "user", "content": "Hello" }]
+  },
+  "response": {
+    "error": {
+      "message": "Provider returned error",
+      "code": 502,
+      "metadata": {
+        "provider_name": "amazon-bedrock"
+      }
+    },
+    "user_id": "org-123"
+  }
+}
