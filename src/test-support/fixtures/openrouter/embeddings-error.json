@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "description": "HTTP 500 from the embeddings endpoint with an error body; the SDK should raise an APIError.",
+  "status": 500,
+  "request": {
+    "model": "qwen/qwen3-embedding-8b",
+    "input": ["Felix: Felix loves pizza"],
+    "encoding_format": "float",
+    "provider": { "zdr": true }
+  },
+  "response": {
+    "error": {
+      "message": "Internal Server Error",
+      "code": 500
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "description": "OpenRouter embeddings response: two un-normalized float vectors (the provider must L2-normalize them).",
+  "status": 200,
+  "request": {
+    "model": "qwen/qwen3-embedding-8b",
+    "input": ["Felix: Felix loves pizza", "weather: It was sunny in Montreal today"],
+    "encoding_format": "float",
+    "provider": { "zdr": true }
+  },
+  "response": {
+    "object": "list",
+    "data": [
+      {
+        "object": "embedding",
+        "index": 0,
+        "embedding": [3, 4, 0, 0, 0, 0, 0, 0]
+      },
+      {
+        "object": "embedding",
+        "index": 1,
+        "embedding": [0, 0, 5, 12, 0, 0, 0, 0]
+      }
+    ],
+    "model": "qwen/qwen3-embedding-8b",
+    "usage": {
+      "prompt_tokens": 14,
+      "total_tokens": 14
+    }
+  }
+}
