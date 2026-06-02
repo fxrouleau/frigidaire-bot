@@ -105,7 +105,7 @@ const rememberFactTool: ToolDefinition = {
   },
   handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const store = getMemoryStore();
-    const id = store.save({
+    const id = await store.save({
       category: String(args.category ?? 'fact'),
       subject: String(args.subject ?? 'general'),
       content: String(args.content ?? ''),

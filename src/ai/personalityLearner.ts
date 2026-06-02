@@ -224,7 +224,7 @@ export class PersonalityLearner {
     let observations = 0;
     for (const obs of parsed.observations) {
       if (obs.category && obs.subject && obs.content) {
-        this.store.save({
+        await this.store.save({
           category: obs.category,
           subject: obs.subject,
           content: obs.content,
