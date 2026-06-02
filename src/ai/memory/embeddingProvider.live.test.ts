@@ -11,16 +11,29 @@
 //    embed call would fail (= permanent FTS fallback). That must fail HERE, loudly, not silently in prod.
 //  - The calibration test prints the real cosine values the model produces for related / near-duplicate /
 //    unrelated memory pairs — the data used to tune MEMORY_RELEVANCE_THRESHOLD (default 0.35) and
-//    MEMORY_DEDUP_THRESHOLD (default 0.88). Grep the output for "CALIBRATION".
+//    MEMORY_DEDUP_THRESHOLD (default 0.88). It repeats the same measurements on MRL-truncated copies of
+//    the fetched vectors (2048 / 1024 dims, no extra API calls) to see whether qwen3's Matryoshka
+//    truncation preserves related/unrelated separation — if it does, a follow-up can add
+//    EMBEDDING_DIMENSIONS support for a 4x storage/compute cut. Grep the output for "CALIBRATION".
 import { describe, expect, it } from 'vitest';
 import { OpenRouterEmbeddingProvider } from './embeddingProvider';
-import { cosineSimilarity, dot } from './vectorMath';
+import { cosineSimilarity, dot, normalize } from './vectorMath';
 
 const RUN_LIVE = process.env.RUN_LIVE === '1' && !!process.env.OPENROUTER_API_KEY;
 const LIVE_TIMEOUT = 60_000;
 
+// MRL (Matryoshka) truncation levels to measure alongside the model's full dimensionality.
+// Levels >= the full dimensionality are skipped automatically (e.g. when EMBEDDING_MODEL is a small model).
+const MRL_TRUNCATION_DIMS = [2048, 1024];
+
 function l2Norm(v: Float32Array): number {
   return Math.sqrt(dot(v, v));
+}
+
+/** Client-side MRL truncation: keep the first `dims` components and L2-renormalize. */
+function truncate(v: Float32Array, dims: number): Float32Array {
+  if (dims >= v.length) return v;
+  return normalize(v.slice(0, dims));
 }
 
 describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, opt-in)', () => {
@@ -118,7 +131,7 @@ describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, 
   );
 
   it(
-    'prints cosine calibration values for MEMORY_RELEVANCE_THRESHOLD / MEMORY_DEDUP_THRESHOLD tuning',
+    'prints cosine calibration values at full and MRL-truncated dims for threshold tuning',
     async () => {
       const provider = new OpenRouterEmbeddingProvider();
 
@@ -135,40 +148,68 @@ describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, 
       const [query] = await provider.embed([queryText], 'query');
       const docs = await provider.embed(docTexts, 'document');
 
-      // Query vs document cosines → the search gate (MEMORY_RELEVANCE_THRESHOLD, default 0.35).
-      const similar = cosineSimilarity(query, docs[0]);
-      const dissimilar = cosineSimilarity(query, docs[1]);
-      const marginal = cosineSimilarity(query, docs[5]);
+      // The same cosine pairs, computed from (possibly MRL-truncated) copies of the fetched vectors.
+      //   query vs document    → the search gate (MEMORY_RELEVANCE_THRESHOLD, default 0.35)
+      //   document vs document → save/compact dedup (MEMORY_DEDUP_THRESHOLD, default 0.88)
+      const measurePairs = (dims: number) => {
+        const q = truncate(query, dims);
+        const d = docs.map((doc) => truncate(doc, dims));
+        return {
+          similar: cosineSimilarity(q, d[0]),
+          marginal: cosineSimilarity(q, d[5]),
+          dissimilar: cosineSimilarity(q, d[1]),
+          nearDuplicate: cosineSimilarity(d[2], d[3]),
+          relatedDistinct: cosineSimilarity(d[2], d[4]),
+          unrelated: cosineSimilarity(d[2], d[1]),
+        };
+      };
 
-      // Document vs document cosines → save/compact dedup (MEMORY_DEDUP_THRESHOLD, default 0.88).
-      const nearDuplicate = cosineSimilarity(docs[2], docs[3]);
-      const relatedDistinct = cosineSimilarity(docs[2], docs[4]);
-      const unrelated = cosineSimilarity(docs[2], docs[1]);
+      // Full dims first, then each MRL truncation level smaller than the full vector — measures whether
+      // Matryoshka truncation preserves the related/unrelated separation (no extra API calls).
+      const dimLevels = [query.length, ...MRL_TRUNCATION_DIMS.filter((dims) => dims < query.length)];
+      const measurements = dimLevels.map((dims) => ({ dims, pairs: measurePairs(dims) }));
+      const [fullMeasurement] = measurements;
 
       // Log BEFORE asserting so the calibration data is captured even if a sanity assertion fails.
       const fmt = (n: number) => n.toFixed(4);
-      console.log(`CALIBRATION similar=${fmt(similar)} dissimilar=${fmt(dissimilar)}`);
-      console.log(`CALIBRATION model=${provider.model}`);
-      console.log('CALIBRATION -- query vs document (search gate: MEMORY_RELEVANCE_THRESHOLD, default 0.35) --');
-      console.log(`CALIBRATION   query: '${queryText}'`);
-      console.log(`CALIBRATION   related          '${docTexts[0]}' -> ${fmt(similar)}`);
-      console.log(`CALIBRATION   marginal         '${docTexts[5]}' -> ${fmt(marginal)}`);
-      console.log(`CALIBRATION   unrelated        '${docTexts[1]}' -> ${fmt(dissimilar)}`);
-      console.log('CALIBRATION   (the relevance threshold should sit between related and unrelated)');
-      console.log('CALIBRATION -- document vs document (dedup: MEMORY_DEDUP_THRESHOLD, default 0.88) --');
-      console.log(`CALIBRATION   near_duplicate   '${docTexts[2]}' vs '${docTexts[3]}' -> ${fmt(nearDuplicate)}`);
-      console.log(`CALIBRATION   related_distinct '${docTexts[2]}' vs '${docTexts[4]}' -> ${fmt(relatedDistinct)}`);
-      console.log(`CALIBRATION   unrelated        '${docTexts[2]}' vs '${docTexts[1]}' -> ${fmt(unrelated)}`);
-      console.log('CALIBRATION   (the dedup threshold should sit above related_distinct and at/below near_duplicate)');
+      const full = fullMeasurement.pairs;
+      console.log(`CALIBRATION similar=${fmt(full.similar)} dissimilar=${fmt(full.dissimilar)}`);
+      console.log(`CALIBRATION model=${provider.model} full_dims=${query.length}`);
+      console.log(`CALIBRATION query: '${queryText}'`);
+      console.log(`CALIBRATION   related   '${docTexts[0]}'`);
+      console.log(`CALIBRATION   marginal  '${docTexts[5]}'`);
+      console.log(`CALIBRATION   unrelated '${docTexts[1]}'`);
+      console.log(`CALIBRATION dedup anchor: '${docTexts[2]}'`);
+      console.log(`CALIBRATION   near_duplicate   '${docTexts[3]}'`);
+      console.log(`CALIBRATION   related_distinct '${docTexts[4]}'`);
+      for (const { dims, pairs } of measurements) {
+        console.log(
+          `CALIBRATION[${dims}] query-doc (gate, default 0.35): similar=${fmt(pairs.similar)} ` +
+            `marginal=${fmt(pairs.marginal)} dissimilar=${fmt(pairs.dissimilar)} ` +
+            `separation=${fmt(pairs.similar - pairs.dissimilar)}`,
+        );
+        console.log(
+          `CALIBRATION[${dims}] doc-doc (dedup, default 0.88): near_duplicate=${fmt(pairs.nearDuplicate)} ` +
+            `related_distinct=${fmt(pairs.relatedDistinct)} unrelated=${fmt(pairs.unrelated)} ` +
+            `separation=${fmt(pairs.nearDuplicate - pairs.relatedDistinct)}`,
+        );
+      }
+      console.log('CALIBRATION the gate threshold should sit between similar and dissimilar; the dedup threshold');
+      console.log('CALIBRATION above related_distinct and at/below near_duplicate. If separation holds (does not');
+      console.log('CALIBRATION shrink) at 2048/1024, EMBEDDING_DIMENSIONS truncation is viable (4x storage cut).');
 
       // Shape-tolerant sanity only — the exact values vary by model/backend and ARE the calibration output.
-      for (const value of [similar, dissimilar, marginal, nearDuplicate, relatedDistinct, unrelated]) {
-        expect(Number.isFinite(value)).toBe(true);
-        expect(value).toBeGreaterThanOrEqual(-1.001);
-        expect(value).toBeLessThanOrEqual(1.001);
+      // Cosines must be valid at every dim level, but ordering is asserted ONLY at full dims: whether MRL
+      // truncation preserves the ordering/separation is exactly the open question being measured.
+      for (const { pairs } of measurements) {
+        for (const value of Object.values(pairs)) {
+          expect(Number.isFinite(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(-1.001);
+          expect(value).toBeLessThanOrEqual(1.001);
+        }
       }
-      expect(similar).toBeGreaterThan(dissimilar);
-      expect(nearDuplicate).toBeGreaterThan(unrelated);
+      expect(full.similar).toBeGreaterThan(full.dissimilar);
+      expect(full.nearDuplicate).toBeGreaterThan(full.unrelated);
     },
     LIVE_TIMEOUT,
   );
