@@ -83,7 +83,9 @@ export class OpenRouterEmbeddingProvider implements EmbeddingProvider {
     }
 
     // The API documents data as input-ordered, with an explicit index field — sort by it to be safe.
-    const ordered = [...data].sort((a, b) => a.index - b.index);
+    // Nullish fallback: if a backend ever omits index, every comparison is 0 - 0 and the (stable) sort
+    // preserves the response's positional order instead of going implementation-defined on NaN.
+    const ordered = [...data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
     return ordered.map((item) => {
       const embedding = item?.embedding;
       if (!Array.isArray(embedding) || embedding.length === 0) {

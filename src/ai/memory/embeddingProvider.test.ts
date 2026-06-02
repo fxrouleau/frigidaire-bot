@@ -169,6 +169,32 @@ describe('OpenRouterEmbeddingProvider response parsing', () => {
     await expect(provider.embed(['a', 'b', 'c'], 'document')).rejects.toThrow(/3 inputs/);
   });
 
+  it('preserves positional order when a backend omits the index field', async () => {
+    // Regression (skeptic finding): index-less data must not produce NaN sort comparisons — the stable
+    // sort falls back to the response's positional order.
+    const noIndexFixture: OpenRouterFixture = {
+      version: 1,
+      status: 200,
+      response: {
+        object: 'list',
+        data: [
+          { object: 'embedding', embedding: [5, 0, 0, 0, 0, 0, 0, 0] },
+          { object: 'embedding', embedding: [0, 5, 0, 0, 0, 0, 0, 0] },
+        ],
+        model: 'test-embedding-model',
+        usage: { prompt_tokens: 2, total_tokens: 2 },
+      },
+    };
+    const provider = new OpenRouterEmbeddingProvider({
+      client: createReplayClient(noIndexFixture),
+      model: 'test-embedding-model',
+    });
+
+    const [first, second] = await provider.embed(['a', 'b'], 'document');
+    expect(first[0]).toBeCloseTo(1, 5); // first input → first response entry
+    expect(second[1]).toBeCloseTo(1, 5); // second input → second response entry
+  });
+
   it('throws when a returned embedding is empty', async () => {
     const emptyVectorFixture: OpenRouterFixture = {
       version: 1,
@@ -259,6 +285,23 @@ describe('FakeEmbeddingProvider', () => {
     const fake = new FakeEmbeddingProvider();
     const [lower, upper] = await fake.embed(['felix loves pizza', 'FELIX LOVES PIZZA'], 'document');
     expect(cosineSimilarity(lower, upper)).toBeCloseTo(1, 5);
+  });
+
+  it('ignores punctuation when tokenizing (subject-prefix inputs match bare-word queries)', async () => {
+    const fake = new FakeEmbeddingProvider();
+
+    // 'Felix:' (buildEmbeddingInput's subject prefix) must hash like 'Felix', as real embedders tokenize.
+    const [withColon, bare] = await fake.embed(['Felix: loves pizza', 'Felix loves pizza'], 'document');
+    expect(cosineSimilarity(withColon, bare)).toBeCloseTo(1, 5);
+
+    // And a query containing the bare subject word now scores > 0 against a subject-prefixed document.
+    const [doc] = await fake.embed(['Felix: Felix loves pizza'], 'document');
+    const [query] = await fake.embed(['Felix'], 'query');
+    expect(cosineSimilarity(query, doc)).toBeGreaterThan(0.3);
+
+    // Unicode letters survive tokenization (not stripped along with punctuation).
+    const [accented, accentedDup] = await fake.embed(['café rencontre', 'café rencontre'], 'document');
+    expect(cosineSimilarity(accented, accentedDup)).toBeCloseTo(1, 5);
   });
 
   it('records every call with its kind', async () => {

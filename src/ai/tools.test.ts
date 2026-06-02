@@ -18,8 +18,18 @@ const stubCtx = {} as ToolHandlerContext;
 
 // Every test runs against an isolated in-memory store with the deterministic offline fake embedder —
 // the on-disk ./data/memory.db is never touched and no network/API call can ever fire.
+// Thresholds are PINNED (not defaulted) so these tests stay decoupled from the prod defaults, which
+// will be re-tuned after live calibration — same discipline as memoryStore.test.ts's makeSemanticStore().
+// The keyword-search tests here have fake cosines of ~0.378 (Zarquon) and ~0.408 (Waldo), so the
+// pinned 0.3 gate keeps them passing on their own merits regardless of where the prod default lands.
 beforeEach(() => {
-  setMemoryStoreForTesting(new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() }));
+  setMemoryStoreForTesting(
+    new MemoryStore(':memory:', {
+      embeddings: new FakeEmbeddingProvider(),
+      relevanceThreshold: 0.3,
+      dedupThreshold: 0.88,
+    }),
+  );
 });
 
 afterEach(() => {
@@ -54,7 +64,11 @@ describe('getMemoryStore test hermeticity', () => {
     await store.save({ category: 'fact', subject: 'hermeticity', content: 'must never reach the on-disk database' });
     const results = await store.search('hermeticity database');
 
-    expect(results.length).toBeGreaterThanOrEqual(0); // search works (in-memory)
+    // The auto-constructed store is embedder-less under Vitest (VITEST guard) → ungated FTS search:
+    // 'hermeticity' matches the subject column and 'database' matches content → exactly one hit.
+    // This proves the in-memory store actually works end-to-end, not just that it exists.
+    expect(results).toHaveLength(1);
+    expect(results[0].subject).toBe('hermeticity');
     expect(snapshotDataDir()).toEqual(before);
   });
 

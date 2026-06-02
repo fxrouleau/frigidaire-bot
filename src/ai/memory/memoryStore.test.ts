@@ -805,7 +805,7 @@ describe('semantic search (hybrid vector + FTS)', () => {
     const id = await semStore.save(pizzaMemory);
     await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
 
-    // Precondition (verified value 0.4364): the query is semantically close to the pizza memory.
+    // Precondition (verified value 0.5774): the query is semantically close to the pizza memory.
     expect(fakeCosine('felix favorite pizza', pizzaMemory)).toBeGreaterThan(0.3);
 
     // FTS AND-semantics misses: 'favorite' appears in no memory. Prove it on a legacy (embedder-less)
@@ -823,7 +823,7 @@ describe('semantic search (hybrid vector + FTS)', () => {
     const idPasta = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pasta' });
     await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
 
-    // Verified cosines vs the query: pizza 0.5071, pasta 0.4472, league 0.1491 (below the 0.3 gate).
+    // Verified cosines vs the query: pizza 0.5963, pasta 0.5477, league 0.1240 (below the 0.3 gate).
     // No memory contains 'likes', so the FTS leg is empty and the order is pure vector ranking.
     const results = await semStore.search('felix likes pizza and pasta');
 
@@ -841,7 +841,7 @@ describe('semantic search (hybrid vector + FTS)', () => {
     const idBoth = await semStore.save(bothLegsMemory);
     const idVectorOnly = await semStore.save(vectorOnlyMemory);
 
-    // Preconditions (verified: 0.6667 vs 0.5774): the vector-only memory is semantically CLOSER to the
+    // Preconditions (verified: 0.7746 vs 0.6963): the vector-only memory is semantically CLOSER to the
     // query, but only bothLegsMemory contains every query keyword (so only it gets the FTS-leg boost).
     const query = 'felix hobby photography';
     expect(fakeCosine(query, vectorOnlyMemory)).toBeGreaterThan(fakeCosine(query, bothLegsMemory));
@@ -864,7 +864,7 @@ describe('semantic gate (anti-pollution rule)', () => {
     };
     await semStore.save(linkMemory);
 
-    // Precondition (verified value 0.3015): 'pasta' IS a keyword hit but is below the 0.4 gate.
+    // Precondition (verified value 0.2774): 'pasta' IS a keyword hit but is below the 0.4 gate.
     expect(fakeCosine('pasta', linkMemory)).toBeLessThan(0.4);
 
     // Legacy FTS (embedder-less store) would return it...
@@ -899,7 +899,7 @@ describe('save-time semantic dedup', () => {
     const original = { category: 'fact', subject: 'Felix', content: 'Felix loves eating pizza with extra cheese on top' };
     const paraphrase = { category: 'fact', subject: 'Felix', content: 'Felix loves eating pizza with mushrooms' };
 
-    // Preconditions (verified: overlap 0.5714, cosine 0.7638): lexical dedup misses, semantic dedup hits.
+    // Preconditions (verified: overlap 0.5714, cosine 0.8018): lexical dedup misses, semantic dedup hits.
     expect(wordOverlap(original.content, paraphrase.content)).toBeLessThanOrEqual(0.6);
     expect(fakeDocCosine(original, paraphrase)).toBeGreaterThanOrEqual(0.65);
 
@@ -923,7 +923,7 @@ describe('save-time semantic dedup', () => {
     const pizza = { category: 'fact', subject: 'Felix', content: 'Felix loves eating pizza with extra cheese on top' };
     const job = { category: 'fact', subject: 'Felix', content: 'Felix works as a software engineer at a bank' };
 
-    // Precondition (verified value 0.3333): well below the dedup threshold.
+    // Precondition (verified value 0.4286): well below the dedup threshold.
     expect(fakeDocCosine(pizza, job)).toBeLessThan(0.65);
 
     const id1 = await semStore.save(pizza);
@@ -939,7 +939,7 @@ describe('save-time semantic dedup', () => {
     const felixVersion = { category: 'fact', subject: 'Felix', content: 'Felix loves eating pizza with extra cheese on top' };
     const alexVersion = { category: 'fact', subject: 'Alex', content: 'Felix loves eating pizza with extra cheese on top' };
 
-    // Precondition (verified value 0.9167): far above the threshold — only subject scoping keeps them apart.
+    // Precondition (verified value 0.9258): far above the threshold — only subject scoping keeps them apart.
     expect(fakeDocCosine(felixVersion, alexVersion)).toBeGreaterThan(0.65);
 
     const id1 = await semStore.save(felixVersion);
@@ -1001,7 +1001,7 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
 
   it('search() falls back to ungated FTS when the query embed fails', async () => {
     const { store: semStore, fake } = makeSemanticStore({ relevanceThreshold: 0.4 });
-    // This memory's cosine vs the query 'pasta' is 0.3015 — below the 0.4 gate.
+    // This memory's cosine vs the query 'pasta' is 0.2774 — below the 0.4 gate.
     await semStore.save({
       category: 'fact',
       subject: 'Felix',
@@ -1049,7 +1049,7 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
       const { store: semStore } = makeSemanticStore();
       await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
 
-      // Cosine 0.4364 < 0.99 → gated out under the env-provided threshold.
+      // Cosine 0.5774 < 0.99 → gated out under the env-provided threshold.
       expect(await semStore.search('felix favorite pizza')).toEqual([]);
     } finally {
       vi.unstubAllEnvs();
@@ -1347,7 +1347,7 @@ describe('compact() with stored vectors', () => {
     const db = semStore.db;
     db.prepare("UPDATE memories SET updated_at = datetime('now', '-1 hour') WHERE id = ?").run(idOlder);
 
-    // Heal vectors, then compact: cosine 0.7638 ≥ 0.65 → duplicates → older one deactivated.
+    // Heal vectors, then compact: cosine 0.8018 ≥ 0.65 → duplicates → older one deactivated.
     await semStore.backfillEmbeddings();
     const callsBeforeCompact = fake.calls.length;
     const result = semStore.compact();
@@ -1369,7 +1369,7 @@ describe('compact() with stored vectors', () => {
     const idB = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix enjoys watching anime shows' });
 
     // A raw edit makes their CONTENTS overlap 0.8333 (the lexical rule would call them duplicates), but
-    // their stored VECTORS still encode the original distinct meanings (cosine 0.3086 < 0.65).
+    // their stored VECTORS still encode the original distinct meanings (cosine 0.4714 < 0.65).
     // @ts-expect-error accessing private db for test setup
     const db = semStore.db;
     db.prepare('UPDATE memories SET content = ? WHERE id = ?').run('Felix loves pizza and hot dogs indeed', idB);

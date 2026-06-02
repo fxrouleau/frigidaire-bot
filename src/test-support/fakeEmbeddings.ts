@@ -40,9 +40,13 @@ export class FakeEmbeddingProvider implements EmbeddingProvider {
   /** The deterministic vector embed() would return for a text — usable directly in test assertions. */
   static vectorFor(text: string): Float32Array {
     const vector = new Float32Array(FAKE_EMBEDDING_DIMS);
+    // Split on whitespace, then strip punctuation per word (Unicode-aware: letters/digits/underscore
+    // survive). This makes 'Felix:' hash like 'Felix' — mirroring how real embedding models tokenize —
+    // so subject-prefixed inputs ("Felix: loves pizza") match queries containing the bare subject word.
     const words = text
       .toLowerCase()
       .split(/\s+/)
+      .map((word) => word.replace(/[^\p{L}\p{N}_]/gu, ''))
       .filter((word) => word.length > 0);
     for (const word of words) {
       vector[hashWordToDim(word)] += 1;
