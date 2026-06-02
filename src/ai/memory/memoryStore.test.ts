@@ -95,75 +95,75 @@ describe('CRUD basics', () => {
 describe('FTS5 search', () => {
   it('search() finds by content keyword', async () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Loves programming in TypeScript' });
-    const results = store.search('TypeScript');
+    const results = await store.search('TypeScript');
     expect(results).toHaveLength(1);
     expect(results[0].content).toContain('TypeScript');
   });
 
   it('search() finds by subject', async () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
-    const results = store.search('Felix');
+    const results = await store.search('Felix');
     expect(results).toHaveLength(1);
   });
 
   it('search() returns only active memories', async () => {
     const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
     store.deactivate(id);
-    expect(store.search('cats')).toEqual([]);
+    expect(await store.search('cats')).toEqual([]);
   });
 
   it('search() respects limit', async () => {
     await store.save({ category: 'fact', subject: 'A', content: 'Likes cats very much' });
     await store.save({ category: 'fact', subject: 'B', content: 'Also likes cats a lot' });
-    const results = store.search('cats', 1);
+    const results = await store.search('cats', 1);
     expect(results).toHaveLength(1);
   });
 
   it('search() returns empty for no matches', async () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
-    expect(store.search('dinosaurs')).toEqual([]);
+    expect(await store.search('dinosaurs')).toEqual([]);
   });
 
   it('search() stays in sync after deactivate', async () => {
     const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
     store.deactivate(id);
-    expect(store.search('pangolins')).toEqual([]);
+    expect(await store.search('pangolins')).toEqual([]);
   });
 
   it('search() stays in sync after remove', async () => {
     const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
     store.remove(id);
-    expect(store.search('pangolins')).toEqual([]);
+    expect(await store.search('pangolins')).toEqual([]);
   });
 
   it('search() handles commas in query', async () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Felix likes cats' });
-    const results = store.search('Felix, cats');
+    const results = await store.search('Felix, cats');
     expect(results).toHaveLength(1);
     expect(results[0].content).toContain('cats');
   });
 
   it('search() handles quotes in query', async () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Felix has a nickname' });
-    const results = store.search('Felix "nickname"');
+    const results = await store.search('Felix "nickname"');
     expect(results).toHaveLength(1);
   });
 
   it('search() handles parentheses in query', async () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Felix likes cats' });
-    const results = store.search('(Felix)');
+    const results = await store.search('(Felix)');
     expect(results).toHaveLength(1);
   });
 
   it('search() returns empty for query that is all special characters', async () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Felix likes cats' });
-    const results = store.search(',,,');
+    const results = await store.search(',,,');
     expect(results).toEqual([]);
   });
 
   it('search() handles mixed valid and special chars', async () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Felix has cats and dogs' });
-    const results = store.search("Felix's cats, dogs");
+    const results = await store.search("Felix's cats, dogs");
     expect(results).toHaveLength(1);
     expect(results[0].content).toContain('Felix');
   });
@@ -212,9 +212,9 @@ describe('dedup on save (word overlap)', () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Felix lives in Toronto Canada downtown' });
     await store.save({ category: 'fact', subject: 'Felix', content: 'Felix lives in Montreal Canada downtown' });
     // Old content should not be findable
-    expect(store.search('Toronto')).toEqual([]);
+    expect(await store.search('Toronto')).toEqual([]);
     // New content should be findable
-    expect(store.search('Montreal')).toHaveLength(1);
+    expect(await store.search('Montreal')).toHaveLength(1);
   });
 
   it('does NOT dedup against deactivated memories', async () => {
@@ -236,7 +236,7 @@ describe('deactivate() and remove()', () => {
   it('deactivate() removes from FTS index', async () => {
     const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
     store.deactivate(id);
-    expect(store.search('pangolins')).toEqual([]);
+    expect(await store.search('pangolins')).toEqual([]);
   });
 
   it('deactivate() is a no-op for nonexistent ids', () => {
@@ -255,7 +255,7 @@ describe('deactivate() and remove()', () => {
   it('remove() removes from FTS index', async () => {
     const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
     store.remove(id);
-    expect(store.search('pangolins')).toEqual([]);
+    expect(await store.search('pangolins')).toEqual([]);
   });
 });
 
@@ -351,11 +351,17 @@ describe('new self-improvement categories', () => {
     expect(results).toHaveLength(1);
   });
 
-  it('search() finds new category content via FTS', async () => {
+  it('search() excludes self-diagnosis categories (changed behavior: capability_gap is no longer searchable)', async () => {
+    // Self-diagnosis memories describe the bot, not the server — search() excludes them by default
+    // (SELF_DIAGNOSIS_CATEGORIES) so they can't pollute conversational recall. getByCategory() /
+    // the query_self_diagnosis tool remain their dedicated access path.
     await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot process custom Discord emojis' });
-    const results = store.search('emojis');
-    expect(results).toHaveLength(1);
-    expect(results[0].category).toBe('capability_gap');
+    const results = await store.search('emojis');
+    expect(results).toEqual([]);
+    // Still reachable via the dedicated access path
+    const byCategory = store.getByCategory('capability_gap');
+    expect(byCategory).toHaveLength(1);
+    expect(byCategory[0].content).toBe('Cannot process custom Discord emojis');
   });
 
   it('getBySubject("bot") returns self-diagnosis entries', async () => {

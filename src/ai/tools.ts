@@ -137,7 +137,7 @@ const recallMemoriesTool: ToolDefinition = {
 
     // Also search via FTS
     try {
-      const ftsResults = store.search(query, 15);
+      const ftsResults = await store.search(query, 15);
       const existingIds = new Set(results.map((r) => r.id));
       for (const r of ftsResults) {
         if (!existingIds.has(r.id)) {
@@ -225,7 +225,7 @@ const queryLongTermMemoryTool: ToolDefinition = {
 
     // 2. FTS search for topic/keyword matches
     try {
-      const ftsResults = store.search(query, 20);
+      const ftsResults = await store.search(query, 20);
       for (const r of ftsResults) {
         if (category && r.category !== category) continue;
         if (!seenIds.has(r.id)) {

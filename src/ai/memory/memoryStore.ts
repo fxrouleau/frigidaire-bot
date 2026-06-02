@@ -67,6 +67,8 @@ export type MemoryStoreOptions = {
   embeddings?: EmbeddingProvider;
   /** Cosine similarity at/above which two memories are duplicates. Default: MEMORY_DEDUP_THRESHOLD env or 0.88. */
   dedupThreshold?: number;
+  /** Minimum cosine similarity for a memory to be returned by search(). Default: MEMORY_RELEVANCE_THRESHOLD env or 0.35. */
+  relevanceThreshold?: number;
 };
 
 /** Result of the synchronous phase of save(): the durable row id, and whether it merged into an existing row. */
@@ -75,7 +77,49 @@ type LexicalSaveResult = {
   merged: boolean;
 };
 
+/** An entry in the in-memory vector cache. category/subject are immutable per memory id, so they can't go stale. */
+type CachedVector = {
+  vec: Float32Array;
+  category: string;
+  subject: string;
+};
+
 const DEFAULT_DEDUP_THRESHOLD = 0.88;
+const DEFAULT_RELEVANCE_THRESHOLD = 0.35;
+
+// Reciprocal-rank-fusion parameters for hybrid search: vector leg dominates, FTS is a booster.
+const RRF_K = 60;
+const RRF_VECTOR_WEIGHT = 1.0;
+const RRF_KEYWORD_WEIGHT = 0.5;
+
+// The semantic gate only engages when at least this fraction of searchable active memories have
+// current-model vectors. Below it (fresh DB, mid-backfill, model switch, prolonged API outage),
+// gated search would silently hide the un-embedded majority — ungated FTS is more useful and honest.
+const SEMANTIC_COVERAGE_THRESHOLD = 0.8;
+
+/**
+ * Categories that describe the bot itself (capability gaps, errors, improvement signals) rather than
+ * the server and its members. search() excludes them by default — injecting "bot can't read links"
+ * into a food conversation is pure pollution. query_self_diagnosis / getByCategory() remain their
+ * access path. Exported as the single source of truth (tools.ts imports it).
+ */
+export const SELF_DIAGNOSIS_CATEGORIES = [
+  'capability_gap',
+  'pain_point',
+  'feature_request',
+  'improvement_idea',
+  'parse_failure',
+  'tool_error',
+  'missing_context',
+  'unrecognized_content',
+] as const;
+
+const SELF_DIAGNOSIS_SET: ReadonlySet<string> = new Set(SELF_DIAGNOSIS_CATEGORIES);
+
+// Inline literal list for SQL. Safe: values are compile-time constants (no injection surface), and
+// EXPLAIN QUERY PLAN on the prod DB confirms literal vs bound params produce identical plans
+// (the exclusion is a post-join filter on PK-fetched rows; no index is involved either way).
+const SELF_DIAGNOSIS_NOT_IN = SELF_DIAGNOSIS_CATEGORIES.map((c) => `'${c}'`).join(', ');
 
 /**
  * The exact text sent to the embeddings API for a memory — stored verbatim in
@@ -96,10 +140,17 @@ export class MemoryStore {
   private readonly db: Database.Database;
   private readonly embeddings?: EmbeddingProvider;
   private readonly dedupThreshold: number;
+  private readonly relevanceThreshold: number;
   // Prepared-statement cache keyed by SQL text: each statement is compiled once and reused
   // (previously every call re-prepared its statements). Lazy so optional features (FTS5) keep
   // failing exactly where they failed before if the SQLite build lacks them.
   private readonly statements = new Map<string, Database.Statement>();
+  // In-memory cache of all ACTIVE memories' CURRENT-MODEL vectors (~16KB/memory at 4096 dims;
+  // ~30MB at real prod scale). Avoids re-reading + converting every BLOB on every search
+  // (measured: 41.6ms + ~48MB transient allocations per search without it, 16ms with it).
+  // Kept consistent write-through by upsertVector()/deleteVectors(); null ⇒ lazily reloaded on next use.
+  private vectorCache: Map<number, CachedVector> | null = null;
+  private vectorCacheModel: string | null = null;
 
   constructor(dbPath = './data/memory.db', opts: MemoryStoreOptions = {}) {
     const dir = path.dirname(dbPath);
@@ -115,6 +166,8 @@ export class MemoryStore {
 
     this.embeddings = opts.embeddings;
     this.dedupThreshold = opts.dedupThreshold ?? envNumber('MEMORY_DEDUP_THRESHOLD', DEFAULT_DEDUP_THRESHOLD);
+    this.relevanceThreshold =
+      opts.relevanceThreshold ?? envNumber('MEMORY_RELEVANCE_THRESHOLD', DEFAULT_RELEVANCE_THRESHOLD);
 
     this.init();
   }
@@ -293,31 +346,30 @@ export class MemoryStore {
     const embeddings = this.embeddings;
     if (!embeddings) return phase1.id;
 
+    const meta = { category: memory.category, subject: memory.subject };
+
     return this.runInTransaction(() => {
       // If phase 1 merged into a pre-existing row, that row IS the established memory — never delete
       // it in favor of another; just store/refresh its vector.
       if (phase1.merged) {
-        this.upsertVector(phase1.id, embeddings.model, inputText, vector);
+        this.upsertVector(phase1.id, embeddings.model, inputText, vector, meta);
         return phase1.id;
       }
 
+      // Semantic dedup against the same (category, subject) group, via the vector cache.
       // Vectors are L2-normalized, so dot product == cosine similarity.
-      const group = this.stmt(
-        `SELECT e.memory_id, e.vector FROM memory_embeddings e
-         JOIN memories m ON m.id = e.memory_id
-         WHERE e.model = ? AND m.active = 1 AND m.category = ? AND m.subject = ?`,
-      ).all(embeddings.model, memory.category, memory.subject) as { memory_id: number; vector: Buffer }[];
-
+      const cache = this.getVectorCache(embeddings.model);
       let bestId: number | undefined;
       let bestScore = Number.NEGATIVE_INFINITY;
-      for (const row of group) {
-        if (row.memory_id === phase1.id) continue;
+      for (const [id, entry] of cache) {
+        if (id === phase1.id) continue;
+        if (entry.category !== memory.category || entry.subject !== memory.subject) continue;
         // Dimension mismatch (e.g. a model changed its output size under the same id) — skip, don't blow up.
-        if (row.vector.byteLength !== vector.byteLength) continue;
-        const score = dot(vector, blobToVector(row.vector));
+        if (entry.vec.length !== vector.length) continue;
+        const score = dot(vector, entry.vec);
         if (score > bestScore) {
           bestScore = score;
-          bestId = row.memory_id;
+          bestId = id;
         }
       }
 
@@ -325,12 +377,12 @@ export class MemoryStore {
         const existing = this.stmt('SELECT content FROM memories WHERE id = ?').get(bestId) as Pick<Memory, 'content'>;
         this.updateMemoryContent(bestId, existing.content, memory);
         this.removeInCurrentTransaction(phase1.id);
-        this.upsertVector(bestId, embeddings.model, inputText, vector);
+        this.upsertVector(bestId, embeddings.model, inputText, vector, meta);
         logger.info(`Memory #${phase1.id} merged into #${bestId} (semantic dedup, cosine ${bestScore.toFixed(3)})`);
         return bestId;
       }
 
-      this.upsertVector(phase1.id, embeddings.model, inputText, vector);
+      this.upsertVector(phase1.id, embeddings.model, inputText, vector, meta);
       return phase1.id;
     });
   }
@@ -351,7 +403,96 @@ export class MemoryStore {
     );
   }
 
-  search(query: string, limit = 20): Memory[] {
+  /**
+   * Hybrid semantic + keyword search over conversational memories.
+   *
+   * Vector-primary with FTS5 as a keyword booster: legs are RRF-fused, but every returned memory must
+   * pass the semantic gate (cosine ≥ relevance threshold). FTS can boost the rank of semantically
+   * relevant memories or surface ones the vector leg ranked low — it can never introduce a memory the
+   * query isn't semantically related to.
+   *
+   * Ungated FTS fallback (legacy behavior, logged at WARN) when: no embedder is configured, the query
+   * embed fails, or current-model vector coverage is below SEMANTIC_COVERAGE_THRESHOLD (fresh DB,
+   * mid-backfill, model switch, prolonged API outage).
+   *
+   * Self-diagnosis categories are always excluded from both legs — see SELF_DIAGNOSIS_CATEGORIES.
+   */
+  async search(query: string, limit = 20): Promise<Memory[]> {
+    const ftsRows = this.searchFts(query, Math.max(limit, 50));
+
+    if (!this.embeddings) return ftsRows.slice(0, limit);
+
+    let queryVec: Float32Array;
+    try {
+      [queryVec] = await this.embeddings.embed([query], 'query');
+    } catch (error) {
+      logger.warn('Memory search: ungated FTS fallback (query embed failed):', error);
+      return ftsRows.slice(0, limit);
+    }
+
+    const cache = this.getVectorCache(this.embeddings.model);
+
+    // Coverage gate (also covers the zero-vectors case).
+    const searchableTotal = (
+      this.stmt(
+        `SELECT COUNT(*) AS n FROM memories WHERE active = 1 AND category NOT IN (${SELF_DIAGNOSIS_NOT_IN})`,
+      ).get() as { n: number }
+    ).n;
+    let searchableCovered = 0;
+    for (const entry of cache.values()) {
+      if (!SELF_DIAGNOSIS_SET.has(entry.category)) searchableCovered++;
+    }
+    if (searchableTotal === 0 || searchableCovered / searchableTotal < SEMANTIC_COVERAGE_THRESHOLD) {
+      if (searchableTotal > 0) {
+        logger.warn(
+          `Memory search: ungated FTS fallback (vector coverage ${searchableCovered}/${searchableTotal} below ${SEMANTIC_COVERAGE_THRESHOLD * 100}%)`,
+        );
+      }
+      return ftsRows.slice(0, limit);
+    }
+
+    // Vector leg: cosine over cached vectors (normalized ⇒ dot product), self-diagnosis excluded.
+    const vectorScored: { id: number; cosine: number }[] = [];
+    for (const [id, entry] of cache) {
+      if (SELF_DIAGNOSIS_SET.has(entry.category)) continue;
+      if (entry.vec.length !== queryVec.length) continue; // dims mismatch safety
+      vectorScored.push({ id, cosine: dot(queryVec, entry.vec) });
+    }
+    vectorScored.sort((a, b) => b.cosine - a.cosine);
+
+    // RRF fusion. A leg a memory is missing from contributes 0.
+    const cosineById = new Map<number, number>();
+    const fusedById = new Map<number, number>();
+    vectorScored.forEach((v, rank) => {
+      cosineById.set(v.id, v.cosine);
+      fusedById.set(v.id, (fusedById.get(v.id) ?? 0) + RRF_VECTOR_WEIGHT / (RRF_K + rank + 1));
+    });
+    ftsRows.forEach((m, rank) => {
+      fusedById.set(m.id, (fusedById.get(m.id) ?? 0) + RRF_KEYWORD_WEIGHT / (RRF_K + rank + 1));
+    });
+
+    // SEMANTIC GATE: candidates without a computable cosine (keyword-only hits on un-embedded
+    // memories) or below the relevance threshold are dropped.
+    const gatedIds = [...fusedById.keys()].filter((id) => {
+      const cosine = cosineById.get(id);
+      return cosine !== undefined && cosine >= this.relevanceThreshold;
+    });
+    gatedIds.sort((a, b) => (fusedById.get(b) ?? 0) - (fusedById.get(a) ?? 0));
+
+    // Calibration data (LOG_DEBUG=1): the top of the cosine distribution vs the gate.
+    const topCosines = vectorScored
+      .slice(0, 5)
+      .map((v) => `#${v.id}:${v.cosine.toFixed(3)}`)
+      .join(', ');
+    logger.debug(
+      `Memory search: top cosines [${topCosines}], gate=${this.relevanceThreshold}, passed=${gatedIds.length}, fts=${ftsRows.length}`,
+    );
+
+    return this.fetchMemoriesByIds(gatedIds.slice(0, limit));
+  }
+
+  /** The FTS5 keyword leg (and the ungated fallback): BM25-ranked, active-only, self-diagnosis excluded. */
+  private searchFts(query: string, limit: number): Memory[] {
     const sanitized = this.sanitizeFtsQuery(query);
     if (!sanitized) return [];
 
@@ -359,9 +500,22 @@ export class MemoryStore {
       `SELECT m.* FROM memories m
        JOIN memories_fts fts ON m.id = fts.rowid
        WHERE memories_fts MATCH ? AND m.active = 1
+         AND m.category NOT IN (${SELF_DIAGNOSIS_NOT_IN})
        ORDER BY rank
        LIMIT ?`,
     ).all(sanitized, limit) as Memory[];
+  }
+
+  /** Fetches active memory rows by id, preserving the order of the input ids. Never returns vector blobs. */
+  private fetchMemoriesByIds(ids: number[]): Memory[] {
+    if (ids.length === 0) return [];
+
+    const rows = this.stmt('SELECT * FROM memories WHERE id IN (SELECT value FROM json_each(?)) AND active = 1').all(
+      JSON.stringify(ids),
+    ) as Memory[];
+
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    return ids.map((id) => byId.get(id)).filter((m): m is Memory => m !== undefined);
   }
 
   private sanitizeFtsQuery(query: string): string {
@@ -475,8 +629,43 @@ export class MemoryStore {
 
   // ---- Embedding vector internals ----
 
-  /** Inserts or replaces the vector for (memoryId, model). Stores the exact embedded text alongside it. */
-  private upsertVector(memoryId: number, model: string, inputText: string, vector: Float32Array): void {
+  /**
+   * Returns the in-memory vector cache for the given model, cold-loading it from SQLite if needed
+   * (~32ms at real prod scale). The cache mirrors exactly: active memories × current-model vectors.
+   */
+  private getVectorCache(model: string): Map<number, CachedVector> {
+    if (this.vectorCache && this.vectorCacheModel === model) return this.vectorCache;
+
+    const rows = this.stmt(
+      `SELECT e.memory_id, e.vector, m.category, m.subject FROM memory_embeddings e
+       JOIN memories m ON m.id = e.memory_id
+       WHERE e.model = ? AND m.active = 1`,
+    ).all(model) as { memory_id: number; vector: Buffer; category: string; subject: string }[];
+
+    this.vectorCache = new Map(
+      rows.map((r) => [r.memory_id, { vec: blobToVector(r.vector), category: r.category, subject: r.subject }]),
+    );
+    this.vectorCacheModel = model;
+    return this.vectorCache;
+  }
+
+  /** Drops the vector cache; the next access reloads it from SQLite. For bulk/batch vector changes. */
+  private invalidateVectorCache(): void {
+    this.vectorCache = null;
+    this.vectorCacheModel = null;
+  }
+
+  /**
+   * Inserts or replaces the vector for (memoryId, model), storing the exact embedded text alongside it.
+   * Write-through: the in-memory cache is updated in the same call so it can never drift from the DB.
+   */
+  private upsertVector(
+    memoryId: number,
+    model: string,
+    inputText: string,
+    vector: Float32Array,
+    meta: { category: string; subject: string },
+  ): void {
     this.stmt(
       `INSERT INTO memory_embeddings (memory_id, model, dims, input_text, vector)
        VALUES (?, ?, ?, ?, ?)
@@ -486,11 +675,21 @@ export class MemoryStore {
          vector = excluded.vector,
          created_at = datetime('now')`,
     ).run(memoryId, model, vector.length, inputText, vectorToBlob(vector));
+
+    if (this.vectorCache) {
+      if (this.vectorCacheModel === model) {
+        this.vectorCache.set(memoryId, { vec: vector, category: meta.category, subject: meta.subject });
+      } else {
+        // Shouldn't happen (one model per store instance), but never leave a stale cache behind.
+        this.invalidateVectorCache();
+      }
+    }
   }
 
-  /** Deletes all stored vectors (every model) for a memory. */
+  /** Deletes all stored vectors (every model) for a memory. Write-through to the cache. */
   private deleteVectors(memoryId: number): void {
     this.stmt('DELETE FROM memory_embeddings WHERE memory_id = ?').run(memoryId);
+    this.vectorCache?.delete(memoryId);
   }
 
   // ---- Learner state methods ----

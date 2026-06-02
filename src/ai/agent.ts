@@ -266,7 +266,7 @@ export class AgentOrchestrator {
   private async buildInitialHistory(message: Message, provider: AiProvider): Promise<ConversationEntry[]> {
     const botName = message.client.user.displayName;
     const currentUser = message.member?.displayName || message.author.username;
-    const basePrompt = this.buildDeveloperPrompt(botName, currentUser, provider, message.content);
+    const basePrompt = await this.buildDeveloperPrompt(botName, currentUser, provider, message.content);
     const entries: ConversationEntry[] = [
       {
         kind: 'message',
@@ -313,12 +313,12 @@ export class AgentOrchestrator {
     };
   }
 
-  private buildDeveloperPrompt(
+  private async buildDeveloperPrompt(
     botName: string,
     currentUserDisplayName: string,
     _provider: AiProvider,
     currentMessageContent: string,
-  ): string {
+  ): Promise<string> {
     const now = new Date();
     const tz = 'America/New_York';
     const currentTimeEt = new Intl.DateTimeFormat('sv-SE', {
@@ -366,7 +366,7 @@ export class AgentOrchestrator {
       const searchText = currentMessageContent.replace(/<@!?\d+>/g, '').trim();
       if (searchText.length >= 3) {
         try {
-          const ftsResults = store.search(searchText, 10);
+          const ftsResults = await store.search(searchText, 10);
           const existingIds = new Set([
             ...personalityMemories.map((m) => m.id),
             ...userSpecificMemories.map((m) => m.id),
