@@ -45,6 +45,30 @@ try {
   logger.warn('Memory compaction on startup failed:', error);
 }
 
+// Embedding backfill: once at startup, then periodically. The periodic re-run is the self-heal for
+// memories saved while the embeddings API was down (they stay vector-less and invisible to gated
+// semantic search until a backfill picks them up) and for EMBEDDING_MODEL switches.
+try {
+  const store = getMemoryStore();
+  const backfillIntervalMs = Number(process.env.BACKFILL_INTERVAL_MS) || 30 * 60 * 1000;
+
+  const runBackfill = () =>
+    void store
+      .backfillEmbeddings()
+      .then((bf) => {
+        if (bf.embedded + bf.reembedded > 0 || bf.failed > 0) {
+          logger.info(`Backfilled embeddings: ${bf.embedded} new, ${bf.reembedded} re-embedded, ${bf.failed} failed.`);
+        }
+      })
+      .catch((error) => logger.warn('Embedding backfill failed:', error));
+
+  runBackfill();
+  // unref(): the interval must never keep the process alive on its own.
+  setInterval(runBackfill, backfillIntervalMs).unref();
+} catch (error) {
+  logger.warn('Embedding backfill setup failed:', error);
+}
+
 // Start personality learner after Discord client is ready
 client.once('ready', () => {
   personalityLearner.start(client);
