@@ -151,6 +151,8 @@ export class MemoryStore {
   // Kept consistent write-through by upsertVector()/deleteVectors(); null ⇒ lazily reloaded on next use.
   private vectorCache: Map<number, CachedVector> | null = null;
   private vectorCacheModel: string | null = null;
+  // True while a backfillEmbeddings() run is awaiting the API — prevents overlapping runs.
+  private backfillInFlight = false;
 
   constructor(dbPath = './data/memory.db', opts: MemoryStoreOptions = {}) {
     const dir = path.dirname(dbPath);
@@ -590,11 +592,30 @@ export class MemoryStore {
     return this.stmt('SELECT * FROM memories WHERE active = 1 ORDER BY updated_at DESC').all() as Memory[];
   }
 
+  /**
+   * Startup maintenance: sweeps orphaned vectors, deduplicates active memories within each
+   * (subject, category) group — semantically (cosine) when both sides have current-model vectors,
+   * lexically (word overlap) otherwise — and refreshes the query planner's statistics.
+   * Stays synchronous: it only ever uses vectors that are already stored, never the embeddings API.
+   */
   compact(): { merged: number; removed: number } {
+    // 1. Orphan-vector sweep. The FK's ON DELETE CASCADE makes hard-delete orphans impossible;
+    //    this is the backstop for deactivations and anything historical.
+    const swept = this.stmt(
+      'DELETE FROM memory_embeddings WHERE memory_id NOT IN (SELECT id FROM memories WHERE active = 1)',
+    ).run();
+    if (swept.changes > 0) {
+      logger.info(`Compact: swept ${swept.changes} orphaned vector row(s)`);
+      this.invalidateVectorCache();
+    }
+
     const allActive = this.getAllActive();
     let removed = 0;
 
-    // Group by subject + category
+    // Cosine dedup reads stored vectors via the cache (loads it once; no API calls).
+    const cache = this.embeddings ? this.getVectorCache(this.embeddings.model) : null;
+
+    // 2. Group by subject + category
     const groups = new Map<string, Memory[]>();
     for (const mem of allActive) {
       const key = `${mem.subject}::${mem.category}`;
@@ -614,17 +635,129 @@ export class MemoryStore {
 
       for (let i = 0; i < group.length; i++) {
         for (let j = i + 1; j < group.length; j++) {
-          if (wordOverlap(group[i].content, group[j].content) > 0.6) {
+          // Semantic comparison when both sides have current-model vectors; lexical fallback otherwise.
+          const vecI = cache?.get(group[i].id)?.vec;
+          const vecJ = cache?.get(group[j].id)?.vec;
+          const isDuplicate =
+            vecI && vecJ && vecI.length === vecJ.length
+              ? dot(vecI, vecJ) >= this.dedupThreshold
+              : wordOverlap(group[i].content, group[j].content) > 0.6;
+
+          if (isDuplicate) {
             // Keep newer (i), deactivate older (j)
             this.deactivate(group[j].id);
             removed++;
-            logger.info(`Compacted: deactivated memory #${group[j].id} (overlap with #${group[i].id})`);
+            logger.info(`Compacted: deactivated memory #${group[j].id} (duplicate of #${group[i].id})`);
           }
         }
       }
     }
 
+    // 3. Refresh query-planner statistics (SQLite's recommended hygiene for long-lived connections;
+    //    the prod DB has never had ANALYZE run).
+    this.db.pragma('optimize');
+
     return { merged: 0, removed };
+  }
+
+  /**
+   * Embeds every active memory that lacks a current-model vector (new memories saved during API
+   * outages, and every memory after an EMBEDDING_MODEL switch). Idempotent; safe to run at startup
+   * and on an interval. Never throws — failures are counted and retried on the next run.
+   *
+   * Expand-contract on model switches: new-model vectors are written alongside old-model ones, and
+   * old-model vectors are pruned only for memories that have a current-model vector (so rolling back
+   * EMBEDDING_MODEL is instant for anything not yet re-embedded).
+   */
+  async backfillEmbeddings(batchSize = 32): Promise<{ embedded: number; reembedded: number; failed: number }> {
+    const counts = { embedded: 0, reembedded: 0, failed: 0 };
+    const embeddings = this.embeddings;
+    if (!embeddings) return counts;
+
+    // In-flight guard: a slow API can make the startup run overlap the periodic run. Upserts are
+    // idempotent so overlap can't corrupt anything — it would only duplicate paid API calls.
+    if (this.backfillInFlight) {
+      logger.info('Embedding backfill: a run is already in progress, skipping');
+      return counts;
+    }
+    this.backfillInFlight = true;
+
+    try {
+      // Active memories lacking a current-model vector. Searchable categories first (they serve
+      // retrieval immediately); self-diagnosis last (their vectors only serve save-time dedup).
+      const rows = this.stmt(
+        `SELECT m.id, m.category, m.subject, m.content,
+                EXISTS (SELECT 1 FROM memory_embeddings e2 WHERE e2.memory_id = m.id) AS had_vector
+         FROM memories m
+         WHERE m.active = 1
+           AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id AND e.model = ?)
+         ORDER BY (CASE WHEN m.category IN (${SELF_DIAGNOSIS_NOT_IN}) THEN 1 ELSE 0 END), m.updated_at DESC`,
+      ).all(embeddings.model) as {
+        id: number;
+        category: string;
+        subject: string;
+        content: string;
+        had_vector: number;
+      }[];
+
+      if (rows.length === 0) return counts;
+      logger.info(`Embedding backfill: ${rows.length} memories need ${embeddings.model} vectors`);
+
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const batch = rows.slice(i, i + batchSize);
+        const inputs = batch.map((row) => buildEmbeddingInput(row));
+
+        try {
+          const vectors = await embeddings.embed(inputs, 'document');
+          if (vectors.length !== batch.length) {
+            throw new Error(`Embeddings API returned ${vectors.length} vectors for ${batch.length} inputs`);
+          }
+
+          this.runInTransaction(() => {
+            for (let j = 0; j < batch.length; j++) {
+              const row = batch[j];
+              // Staleness check: while we awaited the API, a concurrent save() may have changed this
+              // memory's content (its own phase-2 already embedded the new text), or it may have been
+              // deactivated/removed. Never overwrite fresher data with a stale vector.
+              const current = this.stmt('SELECT category, subject, content, active FROM memories WHERE id = ?').get(
+                row.id,
+              ) as Pick<Memory, 'category' | 'subject' | 'content' | 'active'> | undefined;
+              if (!current || current.active !== 1) continue;
+              if (buildEmbeddingInput(current) !== inputs[j]) continue;
+
+              this.upsertVector(row.id, embeddings.model, inputs[j], vectors[j], {
+                category: current.category,
+                subject: current.subject,
+              });
+              if (row.had_vector) {
+                counts.reembedded++;
+              } else {
+                counts.embedded++;
+              }
+            }
+          });
+        } catch (error) {
+          counts.failed += batch.length;
+          logger.warn(`Embedding backfill: batch of ${batch.length} failed (will retry next run):`, error);
+        }
+      }
+
+      // Contract step: prune old-model vectors for memories that now have a current-model vector.
+      const pruned = this.stmt(
+        `DELETE FROM memory_embeddings WHERE model != ?
+         AND memory_id IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)`,
+      ).run(embeddings.model, embeddings.model);
+      if (pruned.changes > 0) {
+        logger.info(`Embedding backfill: pruned ${pruned.changes} superseded old-model vector(s)`);
+        // The cache only holds current-model vectors, so pruning can't affect it — invalidate anyway
+        // as a cheap defense against that assumption ever changing.
+        this.invalidateVectorCache();
+      }
+
+      return counts;
+    } finally {
+      this.backfillInFlight = false;
+    }
   }
 
   // ---- Embedding vector internals ----
