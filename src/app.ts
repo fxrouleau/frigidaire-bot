@@ -64,7 +64,16 @@ try {
 
   runBackfill();
   // unref(): the interval must never keep the process alive on its own.
-  setInterval(runBackfill, backfillIntervalMs).unref();
+  setInterval(() => {
+    // Ephemeral TTL sweep before backfill: expired memories never waste embed calls.
+    // (Startup expiry already happens via compact() above; the sweep logs its own counts.)
+    try {
+      store.sweepExpiredMemories();
+    } catch (error) {
+      logger.warn('Ephemeral memory sweep failed:', error);
+    }
+    runBackfill();
+  }, backfillIntervalMs).unref();
 } catch (error) {
   logger.warn('Embedding backfill setup failed:', error);
 }

@@ -264,9 +264,10 @@ describe('deactivate() and remove()', () => {
 });
 
 describe('compact()', () => {
-  it('returns {removed: 0} on empty store', () => {
+  it('returns {removed: 0, expired: 0} on empty store', () => {
     // The legacy `merged` field was dropped (it was hard-coded to 0 and never used by any caller).
-    expect(store.compact()).toEqual({ removed: 0 });
+    // `expired` counts ephemeral memories deactivated by the TTL sweep (compact() step 0).
+    expect(store.compact()).toEqual({ removed: 0, expired: 0 });
   });
 
   it('deactivates older overlapping memories when same subject+category', async () => {

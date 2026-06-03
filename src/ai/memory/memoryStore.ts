@@ -69,6 +69,13 @@ export type MemoryStoreOptions = {
   dedupThreshold?: number;
   /** Minimum cosine similarity for a memory to be returned by search(). Default: MEMORY_RELEVANCE_THRESHOLD env or 0.35. */
   relevanceThreshold?: number;
+  /**
+   * Per-category TTLs in HOURS for "ephemeral" memories: sweepExpiredMemories() deactivates memories in
+   * these categories once their updated_at is older than the TTL. Categories not listed (or with a TTL
+   * of 0 or less) never expire. When omitted, defaults come from the environment:
+   * image = MEMORY_TTL_IMAGE_HOURS (24), event = MEMORY_TTL_EVENT_DAYS (14) × 24.
+   */
+  ttls?: Record<string, number>;
 };
 
 /** Result of the synchronous phase of save(): the durable row id, and whether it merged into an existing row. */
@@ -130,6 +137,21 @@ export function buildEmbeddingInput(memory: Pick<MemoryInput, 'subject' | 'conte
   return memory.subject ? `${memory.subject}: ${memory.content}` : memory.content;
 }
 
+/**
+ * Default per-category ephemeral-memory TTLs (in hours), env-overridable. Ephemeral observations
+ * ("Jason shared a photo of a hotdog", "movie night happened on Saturday") should be retrievable
+ * while fresh and then expire — they're moments, not durable facts. A TTL of 0 disables expiry
+ * for that category.
+ */
+function defaultTtls(): Record<string, number> {
+  const ttls: Record<string, number> = {};
+  const imageHours = envNumber('MEMORY_TTL_IMAGE_HOURS', 24);
+  if (imageHours > 0) ttls.image = imageHours;
+  const eventDays = envNumber('MEMORY_TTL_EVENT_DAYS', 14);
+  if (eventDays > 0) ttls.event = eventDays * 24;
+  return ttls;
+}
+
 function envNumber(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -142,6 +164,8 @@ export class MemoryStore {
   private readonly embeddings?: EmbeddingProvider;
   private readonly dedupThreshold: number;
   private readonly relevanceThreshold: number;
+  // Per-category ephemeral TTLs in hours (see MemoryStoreOptions.ttls / sweepExpiredMemories()).
+  private readonly ttls: Record<string, number>;
   // Prepared-statement cache keyed by SQL text: each statement is compiled once and reused
   // (previously every call re-prepared its statements). Lazy so optional features (FTS5) keep
   // failing exactly where they failed before if the SQLite build lacks them.
@@ -171,6 +195,7 @@ export class MemoryStore {
     this.dedupThreshold = opts.dedupThreshold ?? envNumber('MEMORY_DEDUP_THRESHOLD', DEFAULT_DEDUP_THRESHOLD);
     this.relevanceThreshold =
       opts.relevanceThreshold ?? envNumber('MEMORY_RELEVANCE_THRESHOLD', DEFAULT_RELEVANCE_THRESHOLD);
+    this.ttls = opts.ttls ?? defaultTtls();
 
     this.init();
   }
@@ -615,12 +640,60 @@ export class MemoryStore {
   }
 
   /**
-   * Startup maintenance: sweeps orphaned vectors, deduplicates active memories within each
-   * (subject, category) group — semantically (cosine) when both sides have current-model vectors,
-   * lexically (word overlap) otherwise — and refreshes the query planner's statistics.
-   * Stays synchronous: it only ever uses vectors that are already stored, never the embeddings API.
+   * Deactivates "ephemeral" memories whose per-category TTL has passed (see MemoryStoreOptions.ttls;
+   * defaults: image after 24 hours, event after 14 days).
+   *
+   * Contract:
+   * - The clock is `updated_at`, not `created_at`: a dedup-merge re-observation refreshes a memory's
+   *   freshness (a re-shared image starts a new TTL window) — expiring on created_at would deactivate
+   *   memories the learner just re-confirmed.
+   * - The boundary is strict `<`: a memory aged exactly TTL is NOT yet expired.
+   * - The comparison happens in SQLite time (datetime('now')), so tests that age rows via SQL
+   *   timestamps are deterministic.
+   * - Expiry is the existing soft-delete: deactivate() per row, which also cleans the FTS index,
+   *   deletes vectors, and updates the in-memory cache. Never a bulk UPDATE that would bypass those.
+   * - Idempotent and cheap (indexed SELECT per TTL'd category); safe to run at startup (via compact())
+   *   and on every maintenance interval.
    */
-  compact(): { removed: number } {
+  sweepExpiredMemories(): { expired: number } {
+    let expired = 0;
+    const breakdown: string[] = [];
+
+    for (const [category, ttlHours] of Object.entries(this.ttls)) {
+      // TTL of 0 (or anything non-positive/invalid) = expiry disabled for this category.
+      if (!Number.isFinite(ttlHours) || ttlHours <= 0) continue;
+
+      const rows = this.stmt(
+        "SELECT id FROM memories WHERE active = 1 AND category = ? AND updated_at < datetime('now', ?)",
+      ).all(category, `-${ttlHours} hours`) as { id: number }[];
+
+      for (const row of rows) {
+        this.deactivate(row.id);
+      }
+      if (rows.length > 0) {
+        expired += rows.length;
+        breakdown.push(`${category}: ${rows.length}`);
+      }
+    }
+
+    if (expired > 0) {
+      logger.info(`Expired ${expired} ephemeral memories past their TTL (${breakdown.join(', ')})`);
+    }
+    return { expired };
+  }
+
+  /**
+   * Startup maintenance: expires ephemeral memories, sweeps orphaned vectors, deduplicates active
+   * memories within each (subject, category) group — semantically (cosine) when both sides have
+   * current-model vectors, lexically (word overlap) otherwise — and refreshes the query planner's
+   * statistics. Stays synchronous: it only ever uses vectors that are already stored, never the
+   * embeddings API.
+   */
+  compact(): { removed: number; expired: number } {
+    // 0. Ephemeral TTL sweep first: expired memories shouldn't waste dedup cycles below, and their
+    //    vector/FTS cleanup happens inside deactivate().
+    const { expired } = this.sweepExpiredMemories();
+
     // 1. Orphan-vector sweep. The FK's ON DELETE CASCADE makes hard-delete orphans impossible;
     //    this is the backstop for deactivations and anything historical.
     const swept = this.stmt(
@@ -679,7 +752,7 @@ export class MemoryStore {
     //    the prod DB has never had ANALYZE run).
     this.db.pragma('optimize');
 
-    return { removed };
+    return { removed, expired };
   }
 
   /**
