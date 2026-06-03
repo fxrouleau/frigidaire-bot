@@ -94,7 +94,7 @@ src/
 - **The 30-day test**: only knowledge still true and useful in 30 days gets saved (jobs, preferences, relationships, habits, goals, server culture). "Someone asked/confirmed/declined/arrived/shared X" is transcription, never a memory.
 - **Ephemeral categories**: time-bound observations MUST use `event` (TTL ~14 days); image/GIF-share observations MUST use `image` (TTL ~24h). The TTL sweep expires both automatically — but only if the category is right, which is why the prompts are strict about it. An image that reveals a durable fact gets saved as `fact` instead.
 - **No re-saves**: traits/issues already in the injected existing-memories context are never saved again (save-time semantic dedup is the backstop, not the primary defense).
-- **Subject normalization**: subjects use the canonical name from the identities table (+ `subject_user_id`), never nicknames or the display-name-of-the-day — otherwise retrieval keyed on subject fragments across aliases.
+- **Subject normalization**: subjects use the person's **current display name** from the identities list (+ `subject_user_id` as the stable identity anchor), never nicknames, in-game names, or stale usernames — keeping new memories consistent with every `getBySubject()` lookup and all existing subject-keyed memories.
 - Observations stay authentic/verbatim — there is deliberately **no censoring or paraphrasing rule** for offensive content (Felix's explicit call; do not add one).
 
 **Embeddings (`src/ai/memory/embeddingProvider.ts`).** `OpenRouterEmbeddingProvider` calls OpenRouter's `/embeddings` endpoint (default model `qwen/qwen3-embedding-8b`, env `EMBEDDING_MODEL`) with the same DI pattern as the chat provider (`{ client?, model?, routing? }`). Two non-negotiables:
