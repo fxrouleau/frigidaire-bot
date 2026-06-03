@@ -719,13 +719,19 @@ afterEach(() => {
 
 /** Creates a MemoryStore backed by a FakeEmbeddingProvider, registered for automatic cleanup. */
 function makeSemanticStore(
-  opts: { relevanceThreshold?: number; dedupThreshold?: number; fake?: FakeEmbeddingProvider } = {},
+  opts: {
+    relevanceThreshold?: number;
+    dedupThreshold?: number;
+    ttls?: Record<string, number>;
+    fake?: FakeEmbeddingProvider;
+  } = {},
 ): { store: MemoryStore; fake: FakeEmbeddingProvider } {
   const fake = opts.fake ?? new FakeEmbeddingProvider();
   const semanticStore = new MemoryStore(':memory:', {
     embeddings: fake,
     relevanceThreshold: opts.relevanceThreshold,
     dedupThreshold: opts.dedupThreshold,
+    ttls: opts.ttls,
   });
   semanticStores.push(semanticStore);
   return { store: semanticStore, fake };
@@ -1444,5 +1450,202 @@ describe('compact() with stored vectors', () => {
     semStore.compact();
 
     expect(countVectorRows(semStore)).toBe(0);
+  });
+});
+
+describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
+  /**
+   * Ages a memory by rewinding BOTH updated_at and created_at via raw SQL.
+   * NOTE: SQLite date modifiers are single-unit only — '-24 hours -1 seconds' silently produces NULL —
+   * so offsets near a boundary must be expressed in a single unit (e.g. '-86401 seconds' for 24h + 1s).
+   */
+  function ageMemory(s: MemoryStore, id: number, modifier: string): void {
+    // @ts-expect-error accessing private db for test setup
+    const db = s.db;
+    db.prepare("UPDATE memories SET updated_at = datetime('now', ?), created_at = datetime('now', ?) WHERE id = ?").run(
+      modifier,
+      modifier,
+      id,
+    );
+  }
+
+  it('expires image memories past their TTL and reports the count', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 24, event: 336 } });
+    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    ageMemory(semStore, id, '-25 hours');
+
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 1 });
+    expect(semStore.getAllActive()).toEqual([]);
+  });
+
+  it('keeps memories within their TTL and expires them once past it (boundary bracket)', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 24 } });
+    const keptId = await semStore.save({ category: 'image', subject: 'Felix', content: 'Shared a cat picture from the shelter' });
+    const expiredId = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+
+    // The exact-second boundary (contract: strict <, exactly-TTL is kept) cannot be asserted
+    // deterministically against a moving clock, so these margins bracket it to within 61 seconds:
+    ageMemory(semStore, keptId, '-86340 seconds'); // 23h59m old → within TTL → kept
+    ageMemory(semStore, expiredId, '-86401 seconds'); // 24h + 1s old → past TTL → expired
+
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 1 });
+    expect(semStore.getAllActive().map((m) => m.id)).toEqual([keptId]);
+  });
+
+  it('expires event memories after their own TTL (14 days, independent of the image TTL)', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 24, event: 336 } });
+    const keptId = await semStore.save({ category: 'event', subject: 'server', content: 'Game night planned for Friday' });
+    const expiredId = await semStore.save({ category: 'event', subject: 'server', content: 'Costco run and barbecue on Sunday' });
+
+    ageMemory(semStore, keptId, '-1209540 seconds'); // 336h - 60s → within TTL → kept
+    ageMemory(semStore, expiredId, '-1209601 seconds'); // 336h + 1s → past TTL → expired
+
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 1 });
+    expect(semStore.getAllActive().map((m) => m.id)).toEqual([keptId]);
+  });
+
+  it('never expires non-ephemeral categories regardless of age', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 24, event: 336 } });
+    const ids = [
+      await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix works as a software engineer' }),
+      await semStore.save({ category: 'preference', subject: 'Felix', content: 'Felix prefers tea over coffee' }),
+      await semStore.save({ category: 'personality', subject: 'Jason', content: 'Jason has dry sarcastic humor' }),
+      await semStore.save({ category: 'vibe', subject: 'server', content: 'Server loves absurdist in-jokes' }),
+      await semStore.save({ category: 'tool_error', subject: 'bot', content: 'Image generation failed once' }),
+    ];
+    for (const id of ids) ageMemory(semStore, id, '-87600 hours'); // ~10 years
+
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 0 });
+    expect(semStore.getAllActive()).toHaveLength(5);
+  });
+
+  it('is idempotent: a second sweep expires nothing', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 24 } });
+    const id1 = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    const id2 = await semStore.save({ category: 'image', subject: 'Felix', content: 'Shared a cat picture from the shelter' });
+    ageMemory(semStore, id1, '-25 hours');
+    ageMemory(semStore, id2, '-25 hours');
+
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 2 });
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 0 });
+  });
+
+  it('expiry removes the memory from semantic search, FTS, and the vector store', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 24 }, relevanceThreshold: 0.3 });
+    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked anxiety' });
+
+    // Findable everywhere before expiry.
+    expect(countVectorRows(semStore, id)).toBe(1);
+    expect((await semStore.search('league meme')).map((m) => m.id)).toEqual([id]);
+    expect(semStore.getBySubject('Jason')).toHaveLength(1);
+
+    ageMemory(semStore, id, '-25 hours');
+    semStore.sweepExpiredMemories();
+
+    // Invisible everywhere after expiry — vectors, FTS, and subject lookup all cleaned.
+    expect(countVectorRows(semStore, id)).toBe(0);
+    expect(await semStore.search('league meme')).toEqual([]);
+    expect(semStore.getBySubject('Jason')).toEqual([]);
+  });
+
+  it('a dedup-merge re-observation refreshes the TTL clock (updated_at, not created_at)', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 24 } });
+    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked anxiety' });
+
+    // The memory is past its TTL (both timestamps aged)...
+    ageMemory(semStore, id, '-25 hours');
+
+    // ...but the same image gets re-observed before any sweep runs: lexical dedup (overlap 0.857)
+    // merges into the same id and refreshes updated_at to now. created_at stays 25 hours old.
+    const mergedId = await semStore.save({
+      category: 'image',
+      subject: 'Jason',
+      content: 'Shared a meme about League ranked anxiety again',
+    });
+    expect(mergedId).toBe(id);
+
+    // The sweep keys on updated_at → the re-observed memory is fresh again ("retrieved ephemerally").
+    // If the clock were created_at (still 25h old), this would expire — that's the discriminating case.
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 0 });
+    expect(semStore.getAllActive().map((m) => m.id)).toEqual([id]);
+  });
+
+  it('an expired memory does not block re-observation (new row, fresh TTL)', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 24 }, dedupThreshold: 0.65 });
+    const content = 'Shared a meme about League ranked anxiety';
+    const originalId = await semStore.save({ category: 'image', subject: 'Jason', content });
+    ageMemory(semStore, originalId, '-25 hours');
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 1 });
+
+    // The identical observation arrives again later: neither lexical nor semantic dedup may resurrect
+    // the expired row — it gets a brand-new id and a fresh TTL window.
+    const newId = await semStore.save({ category: 'image', subject: 'Jason', content });
+
+    expect(newId).not.toBe(originalId);
+    const active = semStore.getAllActive();
+    expect(active).toHaveLength(1);
+    expect(active[0].id).toBe(newId);
+  });
+
+  it('ttls: {} disables all expiry (DI replaces the defaults entirely)', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: {} });
+    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    ageMemory(semStore, id, '-87600 hours'); // ~10 years
+
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 0 });
+    expect(semStore.getAllActive()).toHaveLength(1);
+  });
+
+  it('a DI TTL of 0 disables expiry for that category only', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 0, event: 336 } });
+    const imageId = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    const eventId = await semStore.save({ category: 'event', subject: 'server', content: 'Game night planned for Friday' });
+    ageMemory(semStore, imageId, '-87600 hours');
+    ageMemory(semStore, eventId, '-87600 hours');
+
+    expect(semStore.sweepExpiredMemories()).toEqual({ expired: 1 });
+    expect(semStore.getAllActive().map((m) => m.id)).toEqual([imageId]);
+  });
+
+  it('reads MEMORY_TTL_IMAGE_HOURS and MEMORY_TTL_EVENT_DAYS from env when no ttls are injected', async () => {
+    vi.stubEnv('MEMORY_TTL_IMAGE_HOURS', '1'); // 1 hour
+    vi.stubEnv('MEMORY_TTL_EVENT_DAYS', '1'); // 1 day = 24 hours
+    try {
+      const { store: semStore } = makeSemanticStore(); // no ttls DI → env values apply
+      const imageId = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+      const eventId = await semStore.save({ category: 'event', subject: 'server', content: 'Game night planned for Friday' });
+      ageMemory(semStore, imageId, '-3660 seconds'); // 1h + 60s → past the 1-hour image TTL
+      ageMemory(semStore, eventId, '-86460 seconds'); // 24h + 60s → past the 1-day event TTL
+
+      expect(semStore.sweepExpiredMemories()).toEqual({ expired: 2 });
+      expect(semStore.getAllActive()).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('an env TTL of 0 disables expiry for that category', async () => {
+    vi.stubEnv('MEMORY_TTL_IMAGE_HOURS', '0');
+    try {
+      const { store: semStore } = makeSemanticStore();
+      const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+      ageMemory(semStore, id, '-87600 hours'); // ~10 years
+
+      expect(semStore.sweepExpiredMemories()).toEqual({ expired: 0 });
+      expect(semStore.getAllActive()).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('compact() runs the TTL sweep first and reports expired counts', async () => {
+    const { store: semStore } = makeSemanticStore({ ttls: { image: 24 } });
+    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    ageMemory(semStore, id, '-25 hours');
+
+    const result = semStore.compact();
+
+    expect(result).toEqual({ removed: 0, expired: 1 });
+    expect(semStore.getAllActive()).toEqual([]);
   });
 });
