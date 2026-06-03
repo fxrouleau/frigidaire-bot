@@ -122,8 +122,9 @@ const SELF_DIAGNOSIS_SET: ReadonlySet<string> = new Set(SELF_DIAGNOSIS_CATEGORIE
 const SELF_DIAGNOSIS_NOT_IN = SELF_DIAGNOSIS_CATEGORIES.map((c) => `'${c}'`).join(', ');
 
 /**
- * The exact text sent to the embeddings API for a memory — stored verbatim in
- * memory_embeddings.input_text so future model switches can re-embed deterministically.
+ * The exact text sent to the embeddings API for a memory. Stored verbatim in
+ * memory_embeddings.input_text as an audit trail of what each vector represents; re-embedding
+ * (backfill, model switches) always rebuilds this from the memory's CURRENT content.
  */
 export function buildEmbeddingInput(memory: Pick<MemoryInput, 'subject' | 'content'>): string {
   return memory.subject ? `${memory.subject}: ${memory.content}` : memory.content;
@@ -351,6 +352,21 @@ export class MemoryStore {
     const meta = { category: memory.category, subject: memory.subject };
 
     return this.runInTransaction(() => {
+      // The phase-1 row may have changed while we awaited the embeddings API: forget_memory could
+      // have deactivated/removed it, or another save() could have merged newer content into it
+      // (that save's own phase 2 embeds the newer text). Mirror backfill's staleness check — never
+      // write a vector for an inactive row or from stale text; the backfill heals any gap later.
+      const current = this.stmt('SELECT content, active FROM memories WHERE id = ?').get(phase1.id) as
+        | Pick<Memory, 'content' | 'active'>
+        | undefined;
+      if (
+        !current ||
+        current.active !== 1 ||
+        buildEmbeddingInput({ ...memory, content: current.content }) !== inputText
+      ) {
+        return phase1.id;
+      }
+
       // If phase 1 merged into a pre-existing row, that row IS the established memory — never delete
       // it in favor of another; just store/refresh its vector.
       if (phase1.merged) {
@@ -420,6 +436,12 @@ export class MemoryStore {
    * Self-diagnosis categories are always excluded from both legs — see SELF_DIAGNOSIS_CATEGORIES.
    */
   async search(query: string, limit = 20): Promise<Memory[]> {
+    // Degenerate queries (empty, whitespace, punctuation-only, single-char terms) have always
+    // returned [] (the legacy FTS path had no terms to match). Keep that contract: never spend a
+    // paid embed call on them, and never embed a near-empty string — the qwen3 instruct prefix
+    // would dominate its vector and score arbitrary memories above the relevance gate.
+    if (!this.sanitizeFtsQuery(query)) return [];
+
     const ftsRows = this.searchFts(query, Math.max(limit, 50));
 
     if (!this.embeddings) return ftsRows.slice(0, limit);
@@ -598,7 +620,7 @@ export class MemoryStore {
    * lexically (word overlap) otherwise — and refreshes the query planner's statistics.
    * Stays synchronous: it only ever uses vectors that are already stored, never the embeddings API.
    */
-  compact(): { merged: number; removed: number } {
+  compact(): { removed: number } {
     // 1. Orphan-vector sweep. The FK's ON DELETE CASCADE makes hard-delete orphans impossible;
     //    this is the backstop for deactivations and anything historical.
     const swept = this.stmt(
@@ -657,7 +679,7 @@ export class MemoryStore {
     //    the prod DB has never had ANALYZE run).
     this.db.pragma('optimize');
 
-    return { merged: 0, removed };
+    return { removed };
   }
 
   /**
@@ -700,8 +722,9 @@ export class MemoryStore {
         had_vector: number;
       }[];
 
-      if (rows.length === 0) return counts;
-      logger.info(`Embedding backfill: ${rows.length} memories need ${embeddings.model} vectors`);
+      if (rows.length > 0) {
+        logger.info(`Embedding backfill: ${rows.length} memories need ${embeddings.model} vectors`);
+      }
 
       for (let i = 0; i < rows.length; i += batchSize) {
         const batch = rows.slice(i, i + batchSize);
@@ -743,6 +766,9 @@ export class MemoryStore {
       }
 
       // Contract step: prune old-model vectors for memories that now have a current-model vector.
+      // Runs even when nothing needed embedding this run — if a previous run died between its last
+      // batch and this prune, the leftover old-model vectors are healed here instead of persisting
+      // until the next model switch.
       const pruned = this.stmt(
         `DELETE FROM memory_embeddings WHERE model != ?
          AND memory_id IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)`,

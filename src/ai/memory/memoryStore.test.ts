@@ -264,8 +264,9 @@ describe('deactivate() and remove()', () => {
 });
 
 describe('compact()', () => {
-  it('returns {merged: 0, removed: 0} on empty store', () => {
-    expect(store.compact()).toEqual({ merged: 0, removed: 0 });
+  it('returns {removed: 0} on empty store', () => {
+    // The legacy `merged` field was dropped (it was hard-coded to 0 and never used by any caller).
+    expect(store.compact()).toEqual({ removed: 0 });
   });
 
   it('deactivates older overlapping memories when same subject+category', async () => {
@@ -1040,6 +1041,21 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
   it('search() on an empty semantic store returns [] without errors', async () => {
     const { store: semStore } = makeSemanticStore();
     expect(await semStore.search('anything at all')).toEqual([]);
+  });
+
+  it('returns [] for empty, whitespace, or punctuation-only queries without calling the embeddings API', async () => {
+    const { store: semStore, fake } = makeSemanticStore({ relevanceThreshold: 0.3 });
+    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    const callsBefore = fake.calls.length;
+
+    expect(await semStore.search('')).toEqual([]);
+    expect(await semStore.search('   ')).toEqual([]);
+    expect(await semStore.search(',,,')).toEqual([]);
+
+    // The contract with teeth: queries that sanitize to nothing must never trigger a (paid) embed call.
+    // In prod the real provider wraps queries in the qwen3 instruct prefix, so embedding a blank query
+    // produces a non-zero vector that can pull arbitrary memories over the gate — the guard prevents that.
+    expect(fake.calls.length).toBe(callsBefore);
   });
 
   it('reads MEMORY_RELEVANCE_THRESHOLD from env when no threshold is injected', async () => {

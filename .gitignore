@@ -267,3 +267,6 @@ data/
 package-lock.json
 
 # End of https://www.toptal.com/developers/gitignore/api/jetbrains+all,node,git
+
+# Private prod data dumps (never commit)
+memories.zip

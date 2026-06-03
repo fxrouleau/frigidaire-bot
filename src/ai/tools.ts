@@ -141,17 +141,17 @@ const recallMemoriesTool: ToolDefinition = {
 
     const results = subject ? store.getBySubject(subject) : [];
 
-    // Also search via FTS
+    // Also run hybrid (semantic + keyword) search
     try {
-      const ftsResults = await store.search(query, 15);
+      const searchResults = await store.search(query, 15);
       const existingIds = new Set(results.map((r) => r.id));
-      for (const r of ftsResults) {
+      for (const r of searchResults) {
         if (!existingIds.has(r.id)) {
           results.push(r);
         }
       }
     } catch {
-      // FTS search may fail on certain queries; fall back to subject-only results
+      // Search may fail (e.g. embeddings and FTS both unavailable); fall back to subject-only results
     }
 
     if (results.length === 0) {

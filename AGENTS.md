@@ -61,7 +61,7 @@ src/
     ├── recorder.ts  replayCli.ts   #   call-recorder util; the `yarn replay` command
     └── fixtures/openrouter/*.json  #   committed, hand-authored OpenRouter response shapes (chat + embeddings)
 
-# Tests are colocated as src/**/*.test.ts (~320). Live tests (opt-in, paid): src/**/*.live.test.ts
+# Tests are colocated as src/**/*.test.ts (~360). Live tests (opt-in, paid): src/**/*.live.test.ts
 ```
 
 ## Architecture
@@ -217,7 +217,7 @@ For tests: `RUN_LIVE=1` enables the live smoke tests (also needs `OPENROUTER_API
 
 ## Testing
 
-- **Vitest 4**, tests colocated as `src/**/*.test.ts` (~320 tests). Convention: new code at the **OpenRouter or Discord boundary should ship with fixture/fake-based tests**.
+- **Vitest 4**, tests colocated as `src/**/*.test.ts` (~360 tests). Convention: new code at the **OpenRouter or Discord boundary should ship with fixture/fake-based tests**.
 - **Test hermeticity**: tests can never touch `./data/memory.db` or the network. `getMemoryStore()` auto-constructs an in-memory store under Vitest when nothing is injected, and `makeDefaultEmbeddingProvider()` returns `undefined` inside Vitest. Tests that need memory inject `new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() })` via `setMemoryStoreForTesting()`.
 - `src/test-support/` holds shared helpers — **excluded from the prod build** (`tsconfig.json`) but **type-checked strictly** via `tsconfig.test.json`:
   - **`fakeProvider.ts`** — `FakeProvider`, a scripted `AiProvider` for deterministic orchestration tests (multi-round tool calls, forced text, errors); records every `chat()` input. Builders: `textResponse()`, `toolCallResponse()`, `errorStep()`.
@@ -246,7 +246,7 @@ Both workflows are **containerized** — they build the `ci` Docker stage with G
 
 ## Conventions
 
-- **Tests exist (~320)** — run them (plus `typecheck` and `check`) via `docker compose` before handoff. There is no separate `yarn dev` test step.
+- **Tests exist (~360)** — run them (plus `typecheck` and `check`) via `docker compose` before handoff. There is no separate `yarn dev` test step.
 - **Biome** handles all formatting and linting (no ESLint/Prettier). It **ignores `src/**/*.test.ts`** and `src/test-support/fixtures` — tests are not formatted/linted, but `tsconfig.test.json` type-checks them strictly.
 - camelCase for functions/variables, PascalCase for classes/interfaces.
 - Strict TypeScript — no `any`.
