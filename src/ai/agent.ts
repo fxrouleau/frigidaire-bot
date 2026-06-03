@@ -452,7 +452,17 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
       return `- ${syntax}${captionPart}`;
     });
 
-    return `\n=== EMOJIS YOU CAN USE ===\nOnly these server emojis are usable in your replies. Paste them in the exact syntax shown. Listed most-used first — prefer emojis near the top; the rarely-used ones near the bottom are usually neglected for a reason.\n${lines.join('\n')}\n`;
+    // Deliberately framed around restraint: a prominent capability list with "prefer these" guidance
+    // reads to the model as an instruction to use emojis in every message (Felix's complaint).
+    return `
+=== SERVER EMOJIS (use sparingly) ===
+These are the server's custom emojis (most-used first) so you know what each one means. Usage rules:
+- MOST of your messages should have NO emoji at all. Plain text is the default — that's how everyone else here talks.
+- Drop one in only when it genuinely adds something: a reaction, a punchline, matching the moment. If you're unsure, skip it.
+- Never decorate ordinary sentences with emojis. Never use more than one per message unless you're quoting someone.
+- Only these custom emojis render properly; when you do use one, paste the exact syntax shown.
+${lines.join('\n')}
+`;
   }
 
   private buildUserContentParts(msg: Message): NormalizedContentPart[] {

@@ -65,6 +65,37 @@ describe('AgentOrchestrator.handleMention', () => {
     expect(fake.recorders.sendTyping.calls.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('injects the emoji section with restraint guidance, not use-encouragement', async () => {
+    // Seed a usable emoji so buildDeveloperPrompt includes the emoji section.
+    getMemoryStore().upsertEmoji({ id: '111222333', name: 'trolle', animated: false });
+    getMemoryStore().setEmojiCaption('111222333', 'a trollface');
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'hello' });
+
+    await orchestrator.handleMention(fake.message);
+
+    const developerEntry = provider.calls[0].messages.find(
+      (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
+    );
+    expect(developerEntry).toBeDefined();
+    const promptText = developerEntry!.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
+
+    // The emoji list itself is present (the model still needs to know what each emoji means)...
+    expect(promptText).toContain('<:trolle:111222333>');
+    expect(promptText).toContain('a trollface');
+
+    // ...framed around restraint, not capability.
+    expect(promptText).toContain('SERVER EMOJIS (use sparingly)');
+    expect(promptText).toContain('NO emoji at all');
+    expect(promptText).toContain('Never use more than one per message');
+
+    // The old use-encouraging framing must be gone.
+    expect(promptText).not.toContain('EMOJIS YOU CAN USE');
+    expect(promptText).not.toContain('prefer emojis near the top');
+  });
+
   it('executes a single tool round then replies', async () => {
     const provider = new FakeProvider([
       toolCallResponse([{ id: 't1', name: 'echo_tool', arguments: {} }]),

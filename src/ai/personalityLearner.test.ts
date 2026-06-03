@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { type Observation, type ObservationCategory, parseLearnerOutput } from './personalityLearner';
+import {
+  buildPersonalityPrompt,
+  buildSelfImprovementPrompt,
+  type Observation,
+  type ObservationCategory,
+  parseLearnerOutput,
+} from './personalityLearner';
 
 describe('Observation type', () => {
   it('accepts existing personality categories', () => {
@@ -33,6 +39,11 @@ describe('Observation type', () => {
     expect(obs4.category).toBe('improvement_idea');
   });
 
+  it('accepts the ephemeral image category (expired by the TTL sweep)', () => {
+    const obs: Observation = { category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' };
+    expect(obs.category).toBe('image');
+  });
+
   it('ObservationCategory includes all expected values', () => {
     const allCategories: ObservationCategory[] = [
       'fact',
@@ -40,12 +51,13 @@ describe('Observation type', () => {
       'personality',
       'event',
       'vibe',
+      'image',
       'capability_gap',
       'pain_point',
       'feature_request',
       'improvement_idea',
     ];
-    expect(allCategories).toHaveLength(9);
+    expect(allCategories).toHaveLength(10);
   });
 });
 
@@ -108,5 +120,88 @@ describe('parseLearnerOutput', () => {
   it('accepts empty observations array', () => {
     const parsed = parseLearnerOutput('{"observations": []}');
     expect(parsed?.observations).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prompt-rule verification: the prompts are the learner's only behavioral spec (the model does what the
+// prompt says, not what the code intends), so the key anti-junk rules are pinned here. If a rule phrase
+// is reworded, update the assertion — but removing a rule should be a deliberate, reviewed decision.
+// ---------------------------------------------------------------------------
+
+describe('buildPersonalityPrompt (memory-quality rules)', () => {
+  // Sentinel args prove the dynamic sections are interpolated into the prompt the model actually sees.
+  const prompt = buildPersonalityPrompt({
+    identitiesSection: '<<IDENTITIES_SECTION>>',
+    emojisSection: '<<EMOJIS_SECTION>>',
+    existingMemoriesSummary: '<<EXISTING_MEMORIES>>',
+  });
+
+  it('applies the 30-day durable-knowledge test (memories, not transcription)', () => {
+    expect(prompt).toContain('THE 30-DAY TEST');
+    expect(prompt).toContain('still be true and useful in 30 days');
+    expect(prompt).toContain('transcription, not a memory');
+  });
+
+  it('requires time-bound observations to use the event category (14-day TTL)', () => {
+    expect(prompt).toContain('Anything time-bound MUST be "event"');
+    expect(prompt).toContain('events expire automatically after ~2 weeks');
+  });
+
+  it('requires image/GIF shares to use the image category (24-hour TTL)', () => {
+    expect(prompt).toContain('Any observation describing an image share MUST be "image"');
+    expect(prompt).toContain('expire automatically after ~a day');
+  });
+
+  it('requires canonical-name subjects with Discord IDs (identity normalization)', () => {
+    expect(prompt).toContain('canonical name from the known server identities list');
+    expect(prompt).toContain('"subject_user_id" MUST be their Discord ID');
+  });
+
+  it('offers the full category set including image in the JSON output template', () => {
+    expect(prompt).toContain('fact|preference|personality|event|vibe|image');
+  });
+
+  it('interpolates the identities, emojis, and existing-memories sections', () => {
+    expect(prompt).toContain('<<IDENTITIES_SECTION>>');
+    expect(prompt).toContain('<<EMOJIS_SECTION>>');
+    expect(prompt).toContain('<<EXISTING_MEMORIES>>');
+  });
+
+  it('contains no content-censoring instructions (observations stay verbatim)', () => {
+    // Felix's explicit exclusion: authentic observations are kept as-is, never sanitized.
+    expect(prompt).not.toMatch(/censor/i);
+    expect(prompt).not.toMatch(/paraphras/i);
+    expect(prompt).not.toMatch(/never quote/i);
+    expect(prompt).not.toMatch(/saniti[sz]e/i);
+  });
+});
+
+describe('buildSelfImprovementPrompt (anti-junk rules)', () => {
+  const prompt = buildSelfImprovementPrompt({
+    botName: 'TestFridgeName',
+    existingSelfImprovementSummary: '<<EXISTING_SELF_IMPROVEMENT>>',
+  });
+
+  it('applies the 30-day test to self-improvement signals', () => {
+    expect(prompt).toContain('The 30-day test');
+    expect(prompt).toContain('"User shared X and got no bot response" is transcription of one moment');
+  });
+
+  it('forbids re-saving issues already covered by existing observations', () => {
+    expect(prompt).toContain('re-saving anything semantically covered there is the #1 failure mode');
+    expect(prompt).toContain('"User shared X but received no bot engagement" entries');
+  });
+
+  it('interpolates the bot name and the existing observations summary', () => {
+    expect(prompt).toContain('TestFridgeName');
+    expect(prompt).toContain('<<EXISTING_SELF_IMPROVEMENT>>');
+  });
+
+  it('contains no content-censoring instructions', () => {
+    expect(prompt).not.toMatch(/censor/i);
+    expect(prompt).not.toMatch(/paraphras/i);
+    expect(prompt).not.toMatch(/never quote/i);
+    expect(prompt).not.toMatch(/saniti[sz]e/i);
   });
 });

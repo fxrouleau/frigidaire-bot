@@ -13,8 +13,9 @@ export type ObservationCategory =
   | 'fact'
   | 'preference'
   | 'personality'
-  | 'event'
+  | 'event' // time-bound: expired by the TTL sweep (~14 days)
   | 'vibe'
+  | 'image' // image/GIF share observations: ephemeral by definition, expired by the TTL sweep (~24h)
   | 'capability_gap'
   | 'pain_point'
   | 'feature_request'
@@ -82,6 +83,142 @@ export function parseLearnerOutput(raw: string): LearnerOutput | undefined {
   }
 
   return undefined;
+}
+
+/**
+ * Builds the pass-1 (personality/observation) prompt. Exported as a pure function so tests can assert
+ * the memory-quality rules (30-day test, ephemeral categories, subject normalization) are present.
+ */
+export function buildPersonalityPrompt(args: {
+  identitiesSection: string;
+  emojisSection: string;
+  existingMemoriesSummary: string;
+}): string {
+  return `You are extracting atomic long-term memories from a Discord conversation.
+Messages are labeled: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Images appear after the message that shared them.
+
+THE 30-DAY TEST (apply this before everything else):
+Save only knowledge that will still be true and useful in 30 days — jobs, preferences, relationships, recurring
+habits, skills, goals, server culture. NEVER record the conversation itself: that someone asked, confirmed,
+declined, arrived, responded, reacted, or shared something is transcription, not a memory. Record what a message
+REVEALS about the person, never what the message DID.
+
+OUTPUT RULES (the most important part):
+1. Each "content" field MUST be ≤80 characters. One atomic fact per row. If you notice two things, emit two observations.
+2. Write as if editing Wikipedia infobox fields, not a personality essay. Use plain declarative sentences.
+3. FORBIDDEN phrases — do NOT use any of these or similar editorializing:
+   - "reinforcing his pattern of ..."
+   - "continuing his pattern of ..."
+   - "boundary-pushing" / "edgy" / "absurdist" / "self-deprecating" as summary adjectives
+   - "reflecting interest in ..."
+   - "indicating a/his/her ..."
+   - "suggesting a preference for ..."
+   Describe what someone DID or IS, not what it signals or reinforces.
+4. Skip if already known (see existing memories below). "Already known" means the same fact with different wording,
+   examples, or emojis. If you'd write a 5th version of "Jason uses racially charged humor", DON'T. Save a
+   personality memory only for a NEW trait or a clear CHANGE in a known one.
+5. Subject normalization: "subject" MUST be the person's canonical name from the known server identities list below
+   (never the display-name-of-the-day, nicknames, or in-game names), and "subject_user_id" MUST be their Discord ID.
+   For server-wide observations use subject "server" with no subject_user_id.
+
+CATEGORIES (pick the right one — some expire automatically):
+- "fact": durable facts — jobs, locations, hobbies, relationships, possessions, skills, goals
+- "preference": stated likes/dislikes and strong opinions (not casual one-off reactions)
+- "personality": communication style and traits (NEW traits or clear changes only — see rule 4)
+- "event": plans, outings, milestones, things that happened. Anything time-bound MUST be "event" (never "fact") —
+  events expire automatically after ~2 weeks, so stale plans never pollute the bot's memory.
+- "vibe": server-wide culture — in-jokes, running bits, group dynamics (subject "server")
+- "image": a shared image/GIF/meme worth noting. Any observation describing an image share MUST be "image" — these
+  expire automatically after ~a day. If an image reveals a DURABLE fact (bought a car, got injured, moved house),
+  save that fact as "fact" instead of describing the share.
+
+WHAT NOT TO EXTRACT:
+- Small talk, greetings, reactions to the current moment
+- Conversation logistics — who asked, confirmed, declined, arrived, responded (fails the 30-day test)
+- Single emoji usages or reactions (a person's habitual emoji style belongs in ONE personality memory, not one per use)
+- Personality restatements of a known pattern
+- Things only inferred from what others say about them — only first-hand evidence
+- Real names, aliases, or nicknames — those go in identity_updates, never in observations
+
+GOOD vs BAD examples:
+  GOOD: {"category":"fact","subject":"Jason","subject_user_id":"456","content":"Still plays on PS4."}
+  BAD:  {"category":"fact","subject":"Jason","content":"Mentioned he is still using a PS4, indicating a preference for older gaming hardware."}
+
+  GOOD: {"category":"fact","subject":"Simon","subject_user_id":"789","content":"Goal: lose 40 kg."}
+  BAD:  {"category":"fact","subject":"Simon","content":"Asked what the group is getting from Costco, indicating active participation in planning."}
+
+  GOOD: {"category":"event","subject":"server","content":"Costco run + BBQ planned for Sunday June 7."}
+  BAD:  {"category":"fact","subject":"server","content":"Group plans Costco run at 11am Sunday before 2pm BBQ."}
+
+  GOOD: {"category":"image","subject":"Jason","subject_user_id":"456","content":"Shared a meme about League ranked anxiety."}
+  BAD:  {"category":"personality","subject":"Jason","content":"Shared a Tenor GIF of a dancing man, reinforcing his pattern of absurdist humor."}
+
+  GOOD: {"category":"personality","subject":"Jason","subject_user_id":"456","content":"Edgy humor, often with <:trolle:...> reactions."}
+  BAD:  {"category":"personality","subject":"Jason","content":"Uses absurdist, boundary-pushing humor by sharing a joke ... reinforcing his pattern of edgy commentary."}
+
+  GOOD: {"category":"vibe","subject":"server","content":"Group in-joke: Dillon cast as the villain."}
+  BAD:  {"category":"vibe","subject":"server","content":"Group frequently engages in playful teasing of Dillon in a boundary-pushing manner."}
+
+IDENTITY UPDATES: If someone reveals or is consistently called by a real name / alias / nickname, add an entry in "identity_updates" keyed on their Discord ID. Use "irl_name" for a real name ("Derrick"), "aliases_add" for nicknames. Direct evidence only.
+${args.identitiesSection}${args.emojisSection}
+Existing memories (skip if semantically covered):
+${args.existingMemoriesSummary}
+
+Respond ONLY with a JSON object. If nothing worth saving, respond with {"observations": []}.
+{
+  "observations": [
+    {"category": "fact|preference|personality|event|vibe|image", "subject": "CanonicalName|server", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char statement"}
+  ],
+  "identity_updates": [
+    {"discord_user_id": "123", "irl_name": "Derrick", "aliases_add": ["Derek", "D"]}
+  ]
+}`;
+}
+
+/**
+ * Builds the pass-2 (self-improvement) prompt. Exported as a pure function so tests can assert the
+ * dedup/30-day rules are present.
+ */
+export function buildSelfImprovementPrompt(args: { botName: string; existingSelfImprovementSummary: string }): string {
+  return `You are looking for bot self-improvement signals in a Discord conversation for a bot called "${args.botName}".
+Messages: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Bot name: "${args.botName}" (also "fridge", "fridge bot", "bot").
+
+OUTPUT RULES:
+1. Each "content" MUST be ≤80 characters. One atomic issue per row.
+2. Plain declarative sentences. NO boilerplate like "bot should offer a simple, context-aware fallback response (e.g., '...')". Just state the gap.
+3. STRONG dedup rule: if the issue is already in existing observations with a different example (different URL, different emoji, different GIF), DO NOT save it. A new YouTube link example of an already-documented YouTube-link gap is NOT a new observation. The existing observations are injected below — re-saving anything semantically covered there is the #1 failure mode of this task.
+4. Only save when the issue is NEW or notably more severe than existing entries.
+5. The 30-day test: save lasting gaps and behavior patterns, never single missed messages. "User shared X and got no bot response" is transcription of one moment, not an issue — if there is a real underlying gap, state the gap itself ("Cannot react to shared videos"), and only if it is not already saved.
+
+Categories:
+- capability_gap: Bot couldn't process something users wanted it to (link, attachment, emoji type, etc.)
+- pain_point: User frustration with bot behavior (too verbose, responds when not asked, forgets context, etc.)
+- feature_request: Explicit user wish for a missing feature
+- improvement_idea: Concrete behavioral tweak (shorter responses in channel X, better emoji use, etc.)
+
+DO NOT SAVE:
+- Things the bot already does well
+- Jokey roasting (friends ribbing the bot is not a pain_point)
+- Re-statements of known limitations with new examples (see rule 3)
+- "User shared X but received no bot engagement" entries — that is one missed message, not a lasting issue (see rule 5)
+- Custom emoji interpretation — the bot CAN see custom server emojis (see list injected in the personality prompt). Do NOT log capability_gap entries claiming the bot can't read them.
+
+GOOD vs BAD examples:
+  GOOD: {"category":"capability_gap","subject":"bot","content":"Cannot read restaurant receipts for bill splitting."}
+  BAD:  {"category":"capability_gap","subject":"bot","content":"Bot cannot interpret or respond to restaurant receipts (e.g., Cocodak receipt) even when users share them for group expense tracking, treating them as unprocessable media instead of acknowledging their financial, culinary, or social relevance."}
+
+  GOOD: {"category":"pain_point","subject":"bot","content":"Responses too long for meme-channel pace."}
+  BAD:  {"category":"improvement_idea","subject":"bot","content":"Bot should default to clean, consistent formatting (e.g., bullet points, @mentions, aligned tables) for financial splits unless explicitly overridden, to reduce user frustration and improve usability during group expense coordination."}
+
+Existing self-improvement observations (skip anything semantically covered):
+${args.existingSelfImprovementSummary}
+
+Respond ONLY with a JSON object. If nothing actionable, respond with {"observations": []}.
+{
+  "observations": [
+    {"category": "capability_gap|pain_point|feature_request|improvement_idea", "subject": "bot|server|DisplayName", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char issue"}
+  ]
+}`;
 }
 
 export class PersonalityLearner {
@@ -352,60 +489,11 @@ export class PersonalityLearner {
         const identitiesSection = this.formatLearnerIdentitiesSection();
         const emojisSection = this.formatLearnerEmojisSection();
 
-        const personalityPrompt = `You are extracting atomic long-term memories from a Discord conversation.
-Messages are labeled: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Images appear after the message that shared them.
-
-OUTPUT RULES (the most important part):
-1. Each "content" field MUST be ≤80 characters. One atomic fact per row. If you notice two things, emit two observations.
-2. Write as if editing Wikipedia infobox fields, not a personality essay. Use plain declarative sentences.
-3. FORBIDDEN phrases — do NOT use any of these or similar editorializing:
-   - "reinforcing his pattern of ..."
-   - "continuing his pattern of ..."
-   - "boundary-pushing" / "edgy" / "absurdist" / "self-deprecating" as summary adjectives
-   - "reflecting interest in ..."
-   - "indicating a/his/her ..."
-   - "suggesting a preference for ..."
-   Describe what someone DID or IS, not what it signals or reinforces.
-4. Skip if already known (see existing memories below). "Already known" means the same fact with different wording, examples, or emojis. If you'd write a 5th version of "Jason uses racially charged humor", DON'T.
-5. Attribute each observation to the correct person BY DISPLAY NAME in "subject", and include their Discord ID in "subject_user_id" (person-subjects only — omit for "server" or "bot").
-
-WHAT TO EXTRACT:
-- Durable facts: jobs, locations, hobbies, relationships, platforms someone uses
-- Strong preferences or opinions (stated clearly, not casual reactions)
-- Server-wide culture: in-jokes, running bits, group dynamics (subject="server")
-- Notable events, plans, milestones
-- Images that reveal durable interests (not one-off reactions)
-
-WHAT NOT TO EXTRACT:
-- Small talk, greetings, reactions to the current moment
-- Personality restatements of a known pattern
-- Things only inferred from what others say about them — only first-hand evidence
-- Real names, aliases, or nicknames — those go in identity_updates, never in observations
-
-GOOD vs BAD examples:
-  GOOD: {"category":"fact","subject":"Jason","subject_user_id":"456","content":"Still plays on PS4."}
-  BAD:  {"category":"fact","subject":"Jason","content":"Mentioned he is still using a PS4, indicating a preference for older gaming hardware."}
-
-  GOOD: {"category":"personality","subject":"Jason","subject_user_id":"456","content":"Edgy humor, often with <:trolle:...> reactions."}
-  BAD:  {"category":"personality","subject":"Jason","content":"Uses absurdist, boundary-pushing humor by sharing a joke ... reinforcing his pattern of edgy commentary."}
-
-  GOOD: {"category":"vibe","subject":"server","content":"Group in-joke: Dillon cast as the villain."}
-  BAD:  {"category":"vibe","subject":"server","content":"Group frequently engages in playful teasing of Dillon in a boundary-pushing manner."}
-
-IDENTITY UPDATES: If someone reveals or is consistently called by a real name / alias / nickname, add an entry in "identity_updates" keyed on their Discord ID. Use "irl_name" for a real name ("Derrick"), "aliases_add" for nicknames. Direct evidence only.
-${identitiesSection}${emojisSection}
-Existing memories (skip if semantically covered):
-${existingMemoriesSummary}
-
-Respond ONLY with a JSON object. If nothing worth saving, respond with {"observations": []}.
-{
-  "observations": [
-    {"category": "fact|preference|personality|event|vibe", "subject": "DisplayName|server", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char statement"}
-  ],
-  "identity_updates": [
-    {"discord_user_id": "123", "irl_name": "Derrick", "aliases_add": ["Derek", "D"]}
-  ]
-}`;
+        const personalityPrompt = buildPersonalityPrompt({
+          identitiesSection,
+          emojisSection,
+          existingMemoriesSummary,
+        });
 
         const personalityParts: ChatCompletionContentPart[] = [
           { type: 'text', text: personalityPrompt },
@@ -441,43 +529,7 @@ Respond ONLY with a JSON object. If nothing worth saving, respond with {"observa
                 ? existingSelfImprovement.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')
                 : '(none yet)';
 
-            const selfImprovementPrompt = `You are looking for bot self-improvement signals in a Discord conversation for a bot called "${botName}".
-Messages: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Bot name: "${botName}" (also "fridge", "fridge bot", "bot").
-
-OUTPUT RULES:
-1. Each "content" MUST be ≤80 characters. One atomic issue per row.
-2. Plain declarative sentences. NO boilerplate like "bot should offer a simple, context-aware fallback response (e.g., '...')". Just state the gap.
-3. STRONG dedup rule: if the issue is already in existing observations with a different example (different URL, different emoji, different GIF), DO NOT save it. A new YouTube link example of an already-documented YouTube-link gap is NOT a new observation.
-4. Only save when the issue is NEW or notably more severe than existing entries.
-
-Categories:
-- capability_gap: Bot couldn't process something users wanted it to (link, attachment, emoji type, etc.)
-- pain_point: User frustration with bot behavior (too verbose, responds when not asked, forgets context, etc.)
-- feature_request: Explicit user wish for a missing feature
-- improvement_idea: Concrete behavioral tweak (shorter responses in channel X, better emoji use, etc.)
-
-DO NOT SAVE:
-- Things the bot already does well
-- Jokey roasting (friends ribbing the bot is not a pain_point)
-- Re-statements of known limitations with new examples (see rule 3)
-- Custom emoji interpretation — the bot CAN see custom server emojis (see list injected in the personality prompt). Do NOT log capability_gap entries claiming the bot can't read them.
-
-GOOD vs BAD examples:
-  GOOD: {"category":"capability_gap","subject":"bot","content":"Cannot read restaurant receipts for bill splitting."}
-  BAD:  {"category":"capability_gap","subject":"bot","content":"Bot cannot interpret or respond to restaurant receipts (e.g., Cocodak receipt) even when users share them for group expense tracking, treating them as unprocessable media instead of acknowledging their financial, culinary, or social relevance."}
-
-  GOOD: {"category":"pain_point","subject":"bot","content":"Responses too long for meme-channel pace."}
-  BAD:  {"category":"improvement_idea","subject":"bot","content":"Bot should default to clean, consistent formatting (e.g., bullet points, @mentions, aligned tables) for financial splits unless explicitly overridden, to reduce user frustration and improve usability during group expense coordination."}
-
-Existing self-improvement observations (skip anything semantically covered):
-${existingSelfImprovementSummary}
-
-Respond ONLY with a JSON object. If nothing actionable, respond with {"observations": []}.
-{
-  "observations": [
-    {"category": "capability_gap|pain_point|feature_request|improvement_idea", "subject": "bot|server|DisplayName", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char issue"}
-  ]
-}`;
+            const selfImprovementPrompt = buildSelfImprovementPrompt({ botName, existingSelfImprovementSummary });
 
             const selfImprovementParts: ChatCompletionContentPart[] = [
               { type: 'text', text: selfImprovementPrompt },

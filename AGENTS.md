@@ -70,7 +70,7 @@ src/
 - `app.ts` dynamically loads every non-`.test` `.ts`/`.js` file from `src/events/` as a Discord event handler.
 - Each event file exports `{ name, once?, execute(...args) }`.
 - Adding a handler = creating a file in `src/events/`; no changes to `app.ts` needed.
-- On startup `app.ts` also runs memory compaction, kicks off the embedding backfill (then re-runs it every `BACKFILL_INTERVAL_MS` as a self-heal), and starts the personality learner once the client is ready.
+- On startup `app.ts` also runs memory compaction (which includes the ephemeral TTL sweep), kicks off the embedding backfill, re-runs the sweep + backfill every `BACKFILL_INTERVAL_MS` as a self-heal, and starts the personality learner once the client is ready.
 
 ### Single-Provider AI System
 - **`AiProvider` interface** (`src/ai/types.ts`): `id`, `displayName`, `personality`, `defaultModel`, `supportedTools`, `chat()`, plus optional `summarizeMessages()` / `generateImage()` / `generateImageLocal()`.
@@ -80,7 +80,7 @@ src/
 ### Conversation Flow (`AgentOrchestrator.handleMention`)
 1. Resolve the provider; start the typing loop.
 2. Fetch/create per-channel state (on first mention, seed history from the last ~25 messages).
-3. Build the developer/system prompt (persona + injected memories/identities/usable emojis + current ET time) and the new user entry.
+3. Build the developer/system prompt (persona + injected memories/identities/usable emojis + current ET time) and the new user entry. The emoji section is framed for restraint ("use sparingly" — most messages should have no emoji at all), not as a capability list.
 4. Call `chat()` with `tool_choice: auto`. Execute any **host-handled** tool calls, append results, and loop (`chat()` → execute) for up to `MAX_TOOL_ROUNDS` rounds / `MAX_TOOL_INVOCATIONS` total tool calls. On the last allowed round, or once the invocation cap is exceeded, force a text-only response (`tool_choice: none`).
 5. Send the reply (split into Discord-sized chunks), persist updated state.
 - Constructor accepts DI options `{ resolveProvider, tools, timeoutMs, maxToolRounds, maxToolInvocations }` purely to make the loop testable.
@@ -89,6 +89,13 @@ src/
 
 - `MemoryStore` (`./data/memory.db`): memories (+ FTS5 index + embedding vectors), server-member identities, emoji rows (name/caption/use-count), and learner state. The prompt builder injects capped, relevance-ranked memories each turn.
 - `PersonalityLearner` runs on an interval (off-mention) to record server "vibe" memories and, optionally, bot self-improvement signals. Emojis are reconciled to the DB on startup and captioned by a vision model.
+
+**Learner prompt rules (what gets saved).** The learner's prompts enforce durable-knowledge-over-transcription — these rules exist because the original prompts filled the prod DB with per-message logging (see the memory curation report):
+- **The 30-day test**: only knowledge still true and useful in 30 days gets saved (jobs, preferences, relationships, habits, goals, server culture). "Someone asked/confirmed/declined/arrived/shared X" is transcription, never a memory.
+- **Ephemeral categories**: time-bound observations MUST use `event` (TTL ~14 days); image/GIF-share observations MUST use `image` (TTL ~24h). The TTL sweep expires both automatically — but only if the category is right, which is why the prompts are strict about it. An image that reveals a durable fact gets saved as `fact` instead.
+- **No re-saves**: traits/issues already in the injected existing-memories context are never saved again (save-time semantic dedup is the backstop, not the primary defense).
+- **Subject normalization**: subjects use the canonical name from the identities table (+ `subject_user_id`), never nicknames or the display-name-of-the-day — otherwise retrieval keyed on subject fragments across aliases.
+- Observations stay authentic/verbatim — there is deliberately **no censoring or paraphrasing rule** for offensive content (Felix's explicit call; do not add one).
 
 **Embeddings (`src/ai/memory/embeddingProvider.ts`).** `OpenRouterEmbeddingProvider` calls OpenRouter's `/embeddings` endpoint (default model `qwen/qwen3-embedding-8b`, env `EMBEDDING_MODEL`) with the same DI pattern as the chat provider (`{ client?, model?, routing? }`). Two non-negotiables:
 - **ZDR routing**: every embeddings request sends `provider: { zdr: true }` — memory text is the same private content the chat path protects. Never ship an embedding path without it.
@@ -109,7 +116,9 @@ src/
 
 **Backfill (`MemoryStore.backfillEmbeddings()`).** Idempotent, batched (32/request): embeds every active memory lacking a current-model vector. Runs at startup and every `BACKFILL_INTERVAL_MS` (app.ts), healing memories saved during API outages and re-embedding everything after an `EMBEDDING_MODEL` switch (expand-contract: old-model vectors are pruned per-memory only once the new-model vector exists).
 
-**Compaction (`MemoryStore.compact()`, sync, startup).** Sweeps orphaned vectors, dedups within (subject, category) groups — by cosine when both sides have stored vectors, word-overlap otherwise — and refreshes query-planner stats. Operational notes (measured at real prod scale, ~2k memories): the cosine pass costs ~1s of synchronous startup time; the DB file grows from ~1MB to ~32MB once vectors are backfilled; and cosine dedup only kicks in from the **second** startup after first deploy (the first compact() runs before any vectors exist).
+**Compaction (`MemoryStore.compact()`, sync, startup).** Expires ephemeral memories (see below), sweeps orphaned vectors, dedups within (subject, category) groups — by cosine when both sides have stored vectors, word-overlap otherwise — and refreshes query-planner stats. Operational notes (measured at real prod scale, ~2k memories): the cosine pass costs ~1s of synchronous startup time; the DB file grows from ~1MB to ~32MB once vectors are backfilled; and cosine dedup only kicks in from the **second** startup after first deploy (the first compact() runs before any vectors exist).
+
+**Ephemeral memory TTL (`MemoryStore.sweepExpiredMemories()`).** Image and event memories are moments, not durable facts — they expire (soft-delete via `deactivate()`: FTS index, vectors, and the in-memory cache are all cleaned; reversible) once their `updated_at` is older than the per-category TTL (image: 24h, event: 14 days; env-configurable, 0 disables). The clock is `updated_at`, so a dedup-merge re-observation restarts the TTL window; the boundary is strict (`<`). Runs as step 0 of `compact()` (startup) and in the periodic maintenance interval in app.ts (before each backfill, so expiring memories never waste embed calls). First-deploy note: every pre-existing image/event memory already past its TTL expires on the first sweep (~250 rows in today's prod DB — the same rows the curation pass deactivates); set the TTL env vars to 0 before first boot to opt out.
 
 ### Memory schema & model-switch runbook
 
@@ -210,6 +219,8 @@ MEMORY_RELEVANCE_THRESHOLD=<0..1>    # Search semantic gate: min cosine to retur
 MEMORY_DEDUP_THRESHOLD=<0..1>        # Save/compact dedup: cosine at/above which memories merge (default: 0.88)
 EMBEDDING_QUERY_INSTRUCTION=<text>   # Override the qwen3 query instruct task description
 BACKFILL_INTERVAL_MS=<ms>            # Periodic embedding backfill/self-heal interval (default: 1800000 / 30 min)
+MEMORY_TTL_IMAGE_HOURS=<n>           # Ephemeral TTL: image memories expire n hours after last update (default: 24; 0 disables)
+MEMORY_TTL_EVENT_DAYS=<n>            # Ephemeral TTL: event memories expire n days after last update (default: 14; 0 disables)
 LOG_DEBUG=<1>                        # Enable debug logging (per-search cosine score distributions for threshold calibration)
 ```
 
