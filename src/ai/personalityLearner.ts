@@ -9,17 +9,34 @@ import { formatTimestampET } from './utils';
 const DEFAULT_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_MIN_MESSAGES = 5;
 
-export type ObservationCategory =
-  | 'fact'
-  | 'preference'
-  | 'personality'
-  | 'event' // time-bound: expired by the TTL sweep (~14 days)
-  | 'vibe'
-  | 'image' // image/GIF share observations: ephemeral by definition, expired by the TTL sweep (~24h)
-  | 'capability_gap'
-  | 'pain_point'
-  | 'feature_request'
-  | 'improvement_idea';
+// Single source of truth for valid categories — a runtime value (not just a type) because the TTL
+// sweep keys on exact category strings: a hallucinated category from the LLM ('Image', 'meme') would
+// create a memory that never expires. analyzeAndSave() validates against this list before saving.
+const OBSERVATION_CATEGORIES = [
+  'fact',
+  'preference',
+  'personality',
+  'event', // time-bound: expired by the TTL sweep (~14 days)
+  'vibe',
+  'image', // image/GIF share observations: ephemeral by definition, expired by the TTL sweep (~24h)
+  'capability_gap',
+  'pain_point',
+  'feature_request',
+  'improvement_idea',
+] as const;
+
+export type ObservationCategory = (typeof OBSERVATION_CATEGORIES)[number];
+
+/**
+ * Normalizes an LLM-emitted category string (trim + lowercase) and validates it against the known
+ * categories. Returns undefined for anything that isn't a real category — callers drop the observation.
+ */
+export function normalizeObservationCategory(raw: string): ObservationCategory | undefined {
+  const normalized = raw.trim().toLowerCase();
+  return (OBSERVATION_CATEGORIES as readonly string[]).includes(normalized)
+    ? (normalized as ObservationCategory)
+    : undefined;
+}
 
 export type Observation = {
   category: ObservationCategory;
@@ -117,9 +134,10 @@ OUTPUT RULES (the most important part):
 4. Skip if already known (see existing memories below). "Already known" means the same fact with different wording,
    examples, or emojis. If you'd write a 5th version of "Jason uses racially charged humor", DON'T. Save a
    personality memory only for a NEW trait or a clear CHANGE in a known one.
-5. Subject normalization: "subject" MUST be the person's canonical name from the known server identities list below
-   (never the display-name-of-the-day, nicknames, or in-game names), and "subject_user_id" MUST be their Discord ID.
-   For server-wide observations use subject "server" with no subject_user_id.
+5. Subject normalization: "subject" MUST be the person's CURRENT display name — when an identities entry below
+   reads "oldname (now: CurrentName)", use CurrentName; otherwise use the name as shown. Never use nicknames,
+   in-game names, or old usernames. "subject_user_id" MUST be their Discord ID — it is the stable identity anchor
+   even when display names change. For server-wide observations use subject "server" with no subject_user_id.
 
 CATEGORIES (pick the right one — some expire automatically):
 - "fact": durable facts — jobs, locations, hobbies, relationships, possessions, skills, goals
@@ -167,7 +185,7 @@ ${args.existingMemoriesSummary}
 Respond ONLY with a JSON object. If nothing worth saving, respond with {"observations": []}.
 {
   "observations": [
-    {"category": "fact|preference|personality|event|vibe|image", "subject": "CanonicalName|server", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char statement"}
+    {"category": "fact|preference|personality|event|vibe|image", "subject": "CurrentDisplayName|server", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char statement"}
   ],
   "identity_updates": [
     {"discord_user_id": "123", "irl_name": "Derrick", "aliases_add": ["Derek", "D"]}
@@ -360,16 +378,24 @@ export class PersonalityLearner {
 
     let observations = 0;
     for (const obs of parsed.observations) {
-      if (obs.category && obs.subject && obs.content) {
-        await this.store.save({
-          category: obs.category,
-          subject: obs.subject,
-          content: obs.content,
-          source,
-          subject_user_id: obs.subject_user_id,
-        });
-        observations++;
+      if (!obs.category || !obs.subject || !obs.content) continue;
+
+      // Runtime whitelist: the parser doesn't validate categories, and the TTL sweep keys on exact
+      // strings — an invented category would silently produce a never-expiring memory.
+      const category = normalizeObservationCategory(obs.category);
+      if (!category) {
+        logger.warn(`${label}: Dropping observation with unknown category '${obs.category}': ${obs.content}`);
+        continue;
       }
+
+      await this.store.save({
+        category,
+        subject: obs.subject,
+        content: obs.content,
+        source,
+        subject_user_id: obs.subject_user_id,
+      });
+      observations++;
     }
 
     let identityUpdates = 0;

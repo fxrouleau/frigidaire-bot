@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildPersonalityPrompt,
   buildSelfImprovementPrompt,
+  normalizeObservationCategory,
   type Observation,
   type ObservationCategory,
   parseLearnerOutput,
@@ -58,6 +59,40 @@ describe('Observation type', () => {
       'improvement_idea',
     ];
     expect(allCategories).toHaveLength(10);
+  });
+});
+
+describe('normalizeObservationCategory (runtime whitelist)', () => {
+  it('accepts every valid category as-is', () => {
+    const valid: ObservationCategory[] = [
+      'fact',
+      'preference',
+      'personality',
+      'event',
+      'vibe',
+      'image',
+      'capability_gap',
+      'pain_point',
+      'feature_request',
+      'improvement_idea',
+    ];
+    for (const category of valid) {
+      expect(normalizeObservationCategory(category)).toBe(category);
+    }
+  });
+
+  it('normalizes case and whitespace drift from the LLM', () => {
+    expect(normalizeObservationCategory('Image')).toBe('image');
+    expect(normalizeObservationCategory('EVENT')).toBe('event');
+    expect(normalizeObservationCategory('  fact ')).toBe('fact');
+  });
+
+  it('rejects hallucinated categories (they would bypass the TTL sweep)', () => {
+    expect(normalizeObservationCategory('meme')).toBeUndefined();
+    expect(normalizeObservationCategory('images')).toBeUndefined();
+    expect(normalizeObservationCategory('observation')).toBeUndefined();
+    expect(normalizeObservationCategory('')).toBeUndefined();
+    expect(normalizeObservationCategory('fact;DROP TABLE memories')).toBeUndefined();
   });
 });
 
@@ -153,9 +188,15 @@ describe('buildPersonalityPrompt (memory-quality rules)', () => {
     expect(prompt).toContain('expire automatically after ~a day');
   });
 
-  it('requires canonical-name subjects with Discord IDs (identity normalization)', () => {
-    expect(prompt).toContain('canonical name from the known server identities list');
+  it('requires current-display-name subjects with Discord IDs (identity normalization)', () => {
+    // Subjects key on the CURRENT display name (consistent with every getBySubject() lookup and all
+    // existing prod memories); subject_user_id is the stable identity anchor across name changes.
+    expect(prompt).toContain("MUST be the person's CURRENT display name");
+    expect(prompt).toContain('(now: CurrentName)');
     expect(prompt).toContain('"subject_user_id" MUST be their Discord ID');
+    // The earlier canonical-name keying is gone — prod canonical names are stale first-seen usernames
+    // ('gigacheese', 'chinkichanga'), and keying on them would split the memory keyspace.
+    expect(prompt).not.toContain('canonical name from the known server identities list');
   });
 
   it('offers the full category set including image in the JSON output template', () => {

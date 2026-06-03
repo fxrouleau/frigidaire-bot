@@ -98,7 +98,7 @@ const imageTool: ToolDefinition = {
 const rememberFactTool: ToolDefinition = {
   name: 'remember_fact',
   description:
-    'Save something to long-term memory. Categories: "fact" (names, jobs, locations), "preference" (likes/dislikes), "personality" (communication style), "event" (something that happened), "vibe" (server culture, in-jokes).',
+    'Save something to long-term memory. Categories: "fact" (names, jobs, locations), "preference" (likes/dislikes), "personality" (communication style), "event" (something that happened — expires automatically after ~2 weeks; use "fact" for anything that should be remembered permanently), "vibe" (server culture, in-jokes).',
   parameters: {
     type: 'object',
     properties: {

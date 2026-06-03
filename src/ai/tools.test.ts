@@ -259,6 +259,15 @@ describe('query_self_diagnosis tool', () => {
   });
 });
 
+describe('remember_fact tool', () => {
+  it('warns the model that event memories expire and facts are permanent', () => {
+    // Regression (incremental review): without this, the chat model can save a user's explicit
+    // "remember that X happened" as an 'event' that silently disappears after the ~14-day TTL.
+    expect(rememberFactTool!.description).toContain('expires automatically');
+    expect(rememberFactTool!.description).toContain('use "fact" for anything that should be remembered permanently');
+  });
+});
+
 describe('remember_fact + recall_memories round trip', () => {
   it('saves via remember_fact and finds it via recall_memories', async () => {
     const saveResult = await rememberFactTool!.handler(stubCtx, {
