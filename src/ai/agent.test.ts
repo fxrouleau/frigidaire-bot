@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeMessage } from '../test-support/fakeDiscord';
+import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
 import { FakeProvider, errorStep, textResponse, toolCallResponse } from '../test-support/fakeProvider';
 import { AgentOrchestrator } from './agent';
 import { loadErrorCapture } from './debugCapture';
@@ -310,5 +311,179 @@ describe('AgentOrchestrator.handleMention', () => {
 
     expect(fake1.recorders.messagesFetch.calls).toHaveLength(1);
     expect(fake2.recorders.messagesFetch.calls).toHaveLength(1);
+  });
+});
+
+function developerPromptText(provider: FakeProvider): string {
+  const developerEntry = provider.calls[0].messages.find(
+    (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
+  );
+  return developerEntry?.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n') ?? '';
+}
+
+function lastUserText(provider: FakeProvider): string {
+  const userEntries = provider.calls[0].messages.filter(
+    (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'user',
+  );
+  const last = userEntries.at(-1);
+  return last?.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n') ?? '';
+}
+
+function lastQuery(embeddings: FakeEmbeddingProvider): string {
+  const queryCalls = embeddings.calls.filter((c) => c.kind === 'query');
+  expect(queryCalls.length).toBeGreaterThan(0);
+  return queryCalls.at(-1)!.texts[0];
+}
+
+// Discord ids are numeric snowflakes; the mention regex matches `\d+` only (as the original strip
+// regex did), so tests must use numeric ids.
+const BOT_ID = '900000000000000001';
+const WHEEZER_ID = '137738554762592257';
+const SPEAKER_ID = '111111111111111111';
+const STRANGER_ID = '222222222222222222';
+
+describe('AgentOrchestrator @-mention resolution', () => {
+  it('resolves a mentioned user into the semantic-search query instead of stripping them', async () => {
+    const embeddings = new FakeEmbeddingProvider();
+    setMemoryStoreForTesting(new MemoryStore(':memory:', { embeddings }));
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({
+      content: `whats up with <@${WHEEZER_ID}>`,
+      botUserId: BOT_ID,
+      mentionedUsers: [{ id: WHEEZER_ID, displayName: 'Wheezer' }],
+    });
+
+    await orchestrator.handleMention(fake.message);
+
+    const query = lastQuery(embeddings);
+    expect(query).toContain('@Wheezer');
+    expect(query).not.toContain('<@');
+  });
+
+  it('falls back to the identities table when a mention has no live display data', async () => {
+    const embeddings = new FakeEmbeddingProvider();
+    const store = new MemoryStore(':memory:', { embeddings });
+    store.upsertIdentity(WHEEZER_ID, 'Wheezer');
+    setMemoryStoreForTesting(store);
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    // mentionedUserIds populates mentions.users with a bare entry (no display name), forcing the
+    // identities-table fallback.
+    const fake = createFakeMessage({
+      content: `hows <@${WHEEZER_ID}> doing`,
+      botUserId: BOT_ID,
+      mentionedUserIds: [WHEEZER_ID],
+    });
+
+    await orchestrator.handleMention(fake.message);
+
+    expect(lastQuery(embeddings)).toContain('@Wheezer');
+  });
+
+  it("strips the bot's own trigger mention from the query", async () => {
+    const embeddings = new FakeEmbeddingProvider();
+    setMemoryStoreForTesting(new MemoryStore(':memory:', { embeddings }));
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({
+      content: `<@${BOT_ID}> what is the weather`,
+      botUserId: BOT_ID,
+      mentionedUserIds: [BOT_ID],
+    });
+
+    await orchestrator.handleMention(fake.message);
+
+    const query = lastQuery(embeddings);
+    expect(query).toBe('what is the weather');
+    expect(query).not.toContain(BOT_ID);
+    expect(query).not.toContain('@');
+  });
+
+  it("strips an unknown mention (no live data, no identity) — today's behavior", async () => {
+    const embeddings = new FakeEmbeddingProvider();
+    setMemoryStoreForTesting(new MemoryStore(':memory:', { embeddings }));
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({
+      content: `what about <@${STRANGER_ID}> then`,
+      botUserId: BOT_ID,
+      mentionedUserIds: [STRANGER_ID],
+    });
+
+    await orchestrator.handleMention(fake.message);
+
+    const query = lastQuery(embeddings);
+    expect(query).toBe('what about then');
+    expect(query).not.toContain('<@');
+    expect(query).not.toContain(STRANGER_ID);
+  });
+
+  it('injects subject memories for a mentioned user', async () => {
+    // High relevance gate so the contextual-search leg returns nothing and the dedicated mentioned
+    // pull is the only thing that can surface Wheezer's memory.
+    const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider(), relevanceThreshold: 0.99 });
+    await store.save({ category: 'fact', subject: 'Wheezer', content: 'plays valorant every night' });
+    setMemoryStoreForTesting(store);
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({
+      content: `whats up with <@${WHEEZER_ID}>`,
+      botUserId: BOT_ID,
+      mentionedUsers: [{ id: WHEEZER_ID, displayName: 'Wheezer' }],
+    });
+
+    await orchestrator.handleMention(fake.message);
+
+    const promptText = developerPromptText(provider);
+    expect(promptText).toContain('What you know about others mentioned in this message:');
+    expect(promptText).toContain('- Wheezer: plays valorant every night');
+  });
+
+  it('excludes the bot and the speaker from the mentioned-subjects pull', async () => {
+    const store = new MemoryStore(':memory:');
+    await store.save({ category: 'fact', subject: 'Frigidaire', content: 'is a fridge' });
+    await store.save({ category: 'fact', subject: 'Speaker', content: 'speaker fact' });
+    setMemoryStoreForTesting(store);
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({
+      content: `hey <@${BOT_ID}> and <@${SPEAKER_ID}>`,
+      botUserId: BOT_ID,
+      authorId: SPEAKER_ID,
+      authorDisplayName: 'Speaker',
+      mentionedUsers: [
+        { id: BOT_ID, displayName: 'Frigidaire' },
+        { id: SPEAKER_ID, displayName: 'Speaker' },
+      ],
+    });
+
+    await orchestrator.handleMention(fake.message);
+
+    expect(developerPromptText(provider)).not.toContain('others mentioned in this message');
+  });
+
+  it('resolves mention tokens in the model-visible user message text', async () => {
+    setMemoryStoreForTesting(new MemoryStore(':memory:'));
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({
+      content: `yo <@${WHEEZER_ID}> you up`,
+      botUserId: BOT_ID,
+      mentionedUsers: [{ id: WHEEZER_ID, displayName: 'Wheezer' }],
+    });
+
+    await orchestrator.handleMention(fake.message);
+
+    const userText = lastUserText(provider);
+    expect(userText).toContain('@Wheezer');
+    expect(userText).not.toContain('<@');
   });
 });
