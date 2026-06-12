@@ -119,6 +119,24 @@ describe('AgentOrchestrator.handleMention', () => {
     expect(promptText).toContain('how long ago it was last confirmed');
   });
 
+  it('tells the model to forget the stale memory when a fact is corrected', async () => {
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'hello' });
+
+    await orchestrator.handleMention(fake.message);
+
+    const developerEntry = provider.calls[0].messages.find(
+      (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
+    );
+    expect(developerEntry).toBeDefined();
+    const promptText = developerEntry!.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
+
+    // The correction guidance now names forget_memory and the distinctive 'has to go' phrasing.
+    expect(promptText).toContain('forget_memory');
+    expect(promptText).toContain('has to go');
+  });
+
   it('executes a single tool round then replies', async () => {
     const provider = new FakeProvider([
       toolCallResponse([{ id: 't1', name: 'echo_tool', arguments: {} }]),

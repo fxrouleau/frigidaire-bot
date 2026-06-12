@@ -124,7 +124,7 @@ const rememberFactTool: ToolDefinition = {
 const recallMemoriesTool: ToolDefinition = {
   name: 'recall_memories',
   description:
-    'Search long-term memory. Use when someone references the past, when you need context about someone, or to check what you know before asking.',
+    'Search long-term memory. Use when someone references the past, when you need context about someone, to check what you know before asking, or to find the id of a memory you need to update or forget.',
   parameters: {
     type: 'object',
     properties: {
@@ -170,7 +170,8 @@ const recallMemoriesTool: ToolDefinition = {
 
 const forgetMemoryTool: ToolDefinition = {
   name: 'forget_memory',
-  description: 'Remove a specific memory. Call recall_memories first to find the ID.',
+  description:
+    "Remove a memory that's been superseded by a correction, is now wrong, or that someone explicitly asked you to forget. Call recall_memories first to get its id. Don't forget memories over jokes or banter.",
   parameters: {
     type: 'object',
     properties: {
