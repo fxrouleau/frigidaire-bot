@@ -1,4 +1,4 @@
-import * as process from 'node:process';
+import process from 'node:process';
 import { type Message, StickerFormatType } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';

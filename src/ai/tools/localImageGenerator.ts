@@ -1,4 +1,4 @@
-import * as process from 'node:process';
+import process from 'node:process';
 import { AttachmentBuilder, type Message } from 'discord.js';
 import OpenAI from 'openai';
 import { logger } from '../../logger';

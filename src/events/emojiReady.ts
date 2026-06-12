@@ -1,4 +1,4 @@
-import * as process from 'node:process';
+import process from 'node:process';
 import { type Client, Events, type GuildEmoji } from 'discord.js';
 import { syncEmoji } from '../ai/emojiSync';
 import { getMemoryStore } from '../ai/tools';

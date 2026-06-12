@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as process from 'node:process';
+import process from 'node:process';
 import { Client, GatewayIntentBits } from 'discord.js';
 import * as dotenv from 'dotenv';
 import { getConversationPersistence } from './ai/conversationPersistence';
