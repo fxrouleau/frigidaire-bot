@@ -223,6 +223,12 @@ export class MemoryStore {
         last_observed_at TEXT DEFAULT (datetime('now'))
       );
 
+      CREATE TABLE IF NOT EXISTS bot_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
       CREATE TABLE IF NOT EXISTS identities (
         discord_user_id TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
@@ -939,6 +945,21 @@ export class MemoryStore {
        VALUES (?, ?, datetime('now'))
        ON CONFLICT(channel_id) DO UPDATE SET last_message_id = ?, last_observed_at = datetime('now')`,
     ).run(channelId, messageId, messageId);
+  }
+
+  // ---- Generic key/value state (digest watermark, last-announced deploy sha, etc.) ----
+
+  getState(key: string): string | undefined {
+    const row = this.stmt('SELECT value FROM bot_state WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+
+  setState(key: string, value: string): void {
+    this.stmt(
+      `INSERT INTO bot_state (key, value, updated_at)
+       VALUES (?, ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+    ).run(key, value);
   }
 
   // ---- Identity methods ----

@@ -24,7 +24,7 @@ export type ErrorCapture = {
   thoughts?: unknown;
 };
 
-const MAX_CAPTURES = 50;
+export const MAX_CAPTURES = 50;
 
 export function serializeError(error: unknown): CapturedError {
   if (error instanceof Error) {

@@ -8,6 +8,7 @@ A Discord bot built in **TypeScript** that hangs out in a private server as "one
 2. **Long-Term Memory** — Persists facts, server-member identities, and emoji captions in SQLite. Retrieval is **semantic**: memories are embedded (OpenRouter embeddings API) and searched by cosine similarity, hybridized with FTS5 keyword search. Relevant memories are injected into the system prompt. A background "personality learner" observes channels off-mention to learn the server's vibe.
 3. **Message Summarization** — Ask the bot to summarize recent channel history (via the `summarize_messages` tool).
 4. **Link Replacement** — Rewrites Twitter/X (`fixvx.com`), Instagram (`zzinstagram.com`), and TikTok (`tnktok.com`) links for proper Discord embedding, reposting via webhooks to preserve the original author's appearance.
+5. **Report Channel** — When `REPORT_CHANNEL_ID` is set, the bot posts a weekly self-diagnosis digest (improvement signals, runtime-failure counts, and privacy-safe AI-error-capture stats) and a "🚀 Deployed `<sha>`" line on each new build. Both are off when `REPORT_CHANNEL_ID` is unset.
 
 ## Tech Stack
 
@@ -222,6 +223,14 @@ BACKFILL_INTERVAL_MS=<ms>            # Periodic embedding backfill/self-heal int
 MEMORY_TTL_IMAGE_HOURS=<n>           # Ephemeral TTL: image memories expire n hours after last update (default: 24; 0 disables)
 MEMORY_TTL_EVENT_DAYS=<n>            # Ephemeral TTL: event memories expire n days after last update (default: 14; 0 disables)
 LOG_DEBUG=<1>                        # Enable debug logging (per-search cosine score distributions for threshold calibration)
+
+# Report channel (self-diagnosis digest + deploy announcements):
+REPORT_CHANNEL_ID=<channel id>       # Master switch: unset => BOTH features fully off. Channel for the digest + deploy pings
+DIGEST_ENABLED=<bool>                # Weekly self-diagnosis digest (default: true). false disables just the digest
+DIGEST_PERIOD_MS=<ms>                # Min interval between digests (default: 604800000 / 7 days)
+DIGEST_CHECK_INTERVAL_MS=<ms>        # How often the digest gate is checked (default: 3600000 / 1 hour)
+DEPLOY_ANNOUNCE_ENABLED=<bool>       # "🚀 Deployed <sha>" ping on a new GIT_SHA (default: true)
+GIT_SHA=<full sha>                   # Baked into the prod image by CI; drives deploy announcements (unset => no ping)
 ```
 
 For tests: `RUN_LIVE=1` enables the live smoke tests (also needs `OPENROUTER_API_KEY`).

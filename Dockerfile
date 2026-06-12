@@ -30,6 +30,9 @@ RUN yarn build
 
 # ---- prod: final stage = default build target ----
 FROM node:26-alpine AS prod
+# Baked in by CI (docker-push.yml) so the bot can announce which commit it's running.
+ARG GIT_SHA=""
+ENV GIT_SHA=$GIT_SHA
 WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules

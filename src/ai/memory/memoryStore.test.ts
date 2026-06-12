@@ -427,6 +427,27 @@ describe('learner state', () => {
   });
 });
 
+describe('bot_state (generic key/value)', () => {
+  it('getState() returns undefined for an unknown key', () => {
+    expect(store.getState('digest:last_run_at')).toBeUndefined();
+  });
+
+  it('setState() + getState() round-trips', () => {
+    store.setState('digest:last_run_at', '2026-06-12T00:00:00.000Z');
+    expect(store.getState('digest:last_run_at')).toBe('2026-06-12T00:00:00.000Z');
+  });
+
+  it('setState() overwrites in place (upsert, no duplicate rows)', () => {
+    store.setState('deploy:last_announced_sha', 'aaaaaaa');
+    store.setState('deploy:last_announced_sha', 'bbbbbbb');
+    expect(store.getState('deploy:last_announced_sha')).toBe('bbbbbbb');
+
+    // @ts-expect-error accessing private db for verification
+    const rows = store.db.prepare('SELECT * FROM bot_state WHERE key = ?').all('deploy:last_announced_sha');
+    expect(rows).toHaveLength(1);
+  });
+});
+
 describe('subject_user_id (soft-FK to identities)', () => {
   it('save() defaults subject_user_id to null when omitted', async () => {
     const id = await store.save({ category: 'fact', subject: 'Wheezer', content: 'Likes cats' });

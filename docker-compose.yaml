@@ -4,9 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile
       target: prod
+      args:
+        GIT_SHA: "${GIT_SHA:-}"
     environment:
       - CLIENT_SECRET=${CLIENT_SECRET}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - REPORT_CHANNEL_ID=${REPORT_CHANNEL_ID:-}
     volumes:
       - ./data:/app/data
 
