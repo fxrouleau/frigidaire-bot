@@ -5,7 +5,7 @@ import { splitMessage } from '../utils';
 import { ConversationStore } from './conversationStore';
 import { writeErrorCapture } from './debugCapture';
 import { logFailure } from './failureLogger';
-import type { EmojiRow, Identity, Memory } from './memory/memoryStore';
+import type { EmojiRow, Identity, Memory, MemoryStore } from './memory/memoryStore';
 import { getProviderForChannel } from './providerRegistry';
 import { getMemoryStore, toolDefinitions } from './tools';
 import type {
@@ -21,6 +21,28 @@ import { formatRelativeAge, formatTimestampET } from './utils';
 const CONVERSATION_TIMEOUT = Number(process.env.CONVERSATION_TIMEOUT_MS) || 15 * 60 * 1000; // 15 minutes
 const MAX_TOOL_ROUNDS = Number(process.env.MAX_TOOL_ROUNDS) || 10;
 const MAX_TOOL_INVOCATIONS = Number(process.env.MAX_TOOL_INVOCATIONS) || 50;
+
+// `<@123>` / `<@!123>` user mentions (the legacy `!` is the old nickname form). Role (`<@&>`) and
+// channel (`<#>`) mentions are deliberately not matched.
+const USER_MENTION_REGEX = /<@!?(\d+)>/g;
+// Bound prompt growth: at most this many distinct mentioned users get a subject-memory pull.
+const MAX_MENTIONED_SUBJECTS = 3;
+
+/**
+ * Rewrites user-mention tokens in `text`: the bot's own ping is removed (it's the trigger, noise in
+ * every message), other ids become `@DisplayName`, and unresolved ids are dropped — matching the
+ * pre-existing strip behavior when nothing resolves. Collapses spaces a removed token leaves behind.
+ */
+function resolveMentionTokens(text: string, botUserId: string, resolve: (id: string) => string | undefined): string {
+  return text
+    .replace(USER_MENTION_REGEX, (_match, id: string) => {
+      if (id === botUserId) return '';
+      const name = resolve(id);
+      return name ? `@${name}` : '';
+    })
+    .replace(/ {2,}/g, ' ')
+    .trim();
+}
 
 export type AgentOrchestratorOptions = {
   resolveProvider?: (channelId: string) => AiProvider | undefined;
@@ -266,7 +288,7 @@ export class AgentOrchestrator {
   private async buildInitialHistory(message: Message, provider: AiProvider): Promise<ConversationEntry[]> {
     const botName = message.client.user.displayName;
     const currentUser = message.member?.displayName || message.author.username;
-    const basePrompt = await this.buildDeveloperPrompt(botName, currentUser, provider, message.content);
+    const basePrompt = await this.buildDeveloperPrompt(botName, currentUser, provider, message);
     const entries: ConversationEntry[] = [
       {
         kind: 'message',
@@ -317,7 +339,7 @@ export class AgentOrchestrator {
     botName: string,
     currentUserDisplayName: string,
     _provider: AiProvider,
-    currentMessageContent: string,
+    message: Message,
   ): Promise<string> {
     const now = new Date();
     const tz = 'America/New_York';
@@ -337,6 +359,7 @@ export class AgentOrchestrator {
     let personalityMemories: Memory[] = [];
     let userSpecificMemories: Memory[] = [];
     let contextualMemories: Memory[] = [];
+    let mentionedMemories: Memory[] = [];
     let identities: Identity[] = [];
     let usableEmojis: EmojiRow[] = [];
 
@@ -362,20 +385,25 @@ export class AgentOrchestrator {
       // Cap user-specific memories to 5
       userSpecificMemories = store.getBySubject(currentUserDisplayName, 5);
 
-      // Contextual relevance search based on current message
-      const searchText = currentMessageContent.replace(/<@!?\d+>/g, '').trim();
+      // Contextual relevance search based on current message. Resolve @-mentions to display names
+      // (rather than stripping them) so the person being asked about survives into the search query.
+      const searchText = resolveMentionTokens(message.content, message.client.user.id, (id) =>
+        this.resolveMentionDisplayName(id, message, store),
+      );
+      const existingIds = new Set([...personalityMemories.map((m) => m.id), ...userSpecificMemories.map((m) => m.id)]);
       if (searchText.length >= 3) {
         try {
           const ftsResults = await store.search(searchText, 10);
-          const existingIds = new Set([
-            ...personalityMemories.map((m) => m.id),
-            ...userSpecificMemories.map((m) => m.id),
-          ]);
           contextualMemories = ftsResults.filter((m) => !existingIds.has(m.id));
         } catch (error) {
           logger.warn('Failed to fetch contextual memories:', error);
         }
       }
+
+      // Pull subject-keyed memories for other people @-mentioned in the message, so "what's up with
+      // @Wheezer" surfaces what we know about Wheezer even when nothing keyword-matches.
+      for (const mem of contextualMemories) existingIds.add(mem.id);
+      mentionedMemories = this.collectMentionedSubjectMemories(message, store, existingIds);
     } catch (error) {
       logger.warn('Failed to fetch memories for prompt:', error);
     }
@@ -391,6 +419,11 @@ export class AgentOrchestrator {
     const userSection =
       userSpecificMemories.length > 0
         ? `\nWhat you know about the person talking to you right now (${currentUserDisplayName}):\n${userSpecificMemories.map((m) => `- ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
+        : '';
+
+    const mentionedSection =
+      mentionedMemories.length > 0
+        ? `\nWhat you know about others mentioned in this message:\n${mentionedMemories.map((m) => `- ${m.subject}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
         : '';
 
     const contextualSection =
@@ -415,7 +448,7 @@ How you behave:
 - Never say "I'm just an AI" or "as a language model" — you're ${botName}, period.
 
 You can search the web natively. Use it SPARINGLY — only when you genuinely need current, real-time information you couldn't possibly know (live scores, recent news, release dates, etc). Don't search for things you already know. Don't follow links people share.
-${identitiesSection}${emojisSection}${personalitySection}${userSection}${contextualSection}
+${identitiesSection}${emojisSection}${personalitySection}${userSection}${mentionedSection}${contextualSection}
 These memories are background knowledge — things you know from hanging out in this server. Do NOT force references to inside jokes, show off what you know, or try to reference multiple memories in one response. Let things come up naturally, the way you'd reference a friend's hobby only when it's actually relevant to the conversation. If nothing from your memories is relevant to what's being discussed, just don't mention them. Each memory is tagged with how long ago it was last confirmed; treat months-old current-state claims — what someone "still" does, owns, or plays — as possibly outdated, so hedge or ask instead of asserting them as current fact.
 
 MEMORY: You have a long-term memory system. Use the remember_fact tool when something genuinely important comes up — real names, jobs, major life events, strong preferences, or things someone would expect you to remember next time. Do NOT save every little thing; skip small talk, throwaway opinions, and mundane details. Think of what you'd actually remember about a friend after a night out — the big stuff, not every sentence. If someone corrects a fact you know, save the updated version.
@@ -427,6 +460,64 @@ The last user message in the conversation is why you're being pinged. Read it fi
 - Gap awareness: look at the timestamps. If the prior messages are hours older than the current ping AND the current message introduces something new, treat the older stuff as stale scenery, not live subject matter.
 
 The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_York; apply EST/EDT automatically).`;
+  }
+
+  /**
+   * Resolves a mentioned user's id to a display name: live guild member data first (most accurate
+   * current nickname), then the resolved User, then the identities table by discord_user_id — whose
+   * `display_name` is the exact key memories are stored under. Returns undefined when nothing knows
+   * the id, so callers fall back to stripping (today's behavior).
+   */
+  private resolveMentionDisplayName(id: string, message: Message, store: MemoryStore | undefined): string | undefined {
+    const memberName = message.mentions.members?.get(id)?.displayName;
+    if (memberName) return memberName;
+    const userName = message.mentions.users.get(id)?.displayName;
+    if (userName) return userName;
+    return store?.getIdentityById(id)?.display_name;
+  }
+
+  /**
+   * Collects subject-keyed memories for the (non-bot, non-speaker) users @-mentioned in the message.
+   * Caps the number of distinct users and dedups against memories already injected via `alreadyInjected`.
+   */
+  private collectMentionedSubjectMemories(
+    message: Message,
+    store: MemoryStore,
+    alreadyInjected: Set<number>,
+  ): Memory[] {
+    const botUserId = message.client.user.id;
+    const speakerId = message.author.id;
+    const seenIds = new Set<string>();
+    const collected: Memory[] = [];
+    let resolvedUsers = 0;
+
+    for (const match of message.content.matchAll(USER_MENTION_REGEX)) {
+      const id = match[1];
+      if (id === botUserId || id === speakerId || seenIds.has(id)) continue;
+      seenIds.add(id);
+
+      const displayName = this.resolveMentionDisplayName(id, message, store);
+      if (!displayName) continue;
+
+      for (const mem of store.getBySubject(displayName, 3)) {
+        if (alreadyInjected.has(mem.id)) continue;
+        alreadyInjected.add(mem.id);
+        collected.push(mem);
+      }
+
+      resolvedUsers++;
+      if (resolvedUsers >= MAX_MENTIONED_SUBJECTS) break;
+    }
+
+    return collected;
+  }
+
+  private safeStore(): MemoryStore | undefined {
+    try {
+      return getMemoryStore();
+    } catch {
+      return undefined;
+    }
   }
 
   private formatIdentitiesSection(identities: Identity[]): string {
@@ -468,7 +559,13 @@ ${lines.join('\n')}
   private buildUserContentParts(msg: Message): NormalizedContentPart[] {
     const parts: NormalizedContentPart[] = [];
     const authorLabel = msg.member?.displayName || msg.author.username;
-    const trimmed = msg.content?.trim();
+    // Resolve @-mentions to readable names (same logic as the search query) so the model reads
+    // "@Wheezer" rather than a raw numeric id. Only touches the store when a mention is present.
+    const rawContent = msg.content ?? '';
+    const mentionStore = rawContent.includes('<@') ? this.safeStore() : undefined;
+    const trimmed = resolveMentionTokens(rawContent, msg.client.user.id, (id) =>
+      this.resolveMentionDisplayName(id, msg, mentionStore),
+    );
     const ts = formatTimestampET(msg.createdAt);
     // Webhook reposts use the webhook's author ID (not the original user's), so omit the ID in that case.
     const idSuffix = !msg.webhookId && !msg.author.bot ? ` (id:${msg.author.id})` : '';

@@ -32,6 +32,10 @@ export type FakeMessageOptions = {
   }>;
   stickers?: Array<{ id: string; name: string; format: number }>;
   mentionedUserIds?: string[];
+  // Mentioned users with resolved display data, mirroring discord.js `message.mentions.users` /
+  // `.members`. `member: false` puts the user in `.users` only (not a guild member). When omitted,
+  // `mentionedUserIds` still populates `.users` with bare entries (no display name) for has() checks.
+  mentionedUsers?: Array<{ id: string; displayName?: string; username?: string; member?: boolean }>;
   referencedMessageId?: string | null;
   memberIsNull?: boolean;
   historyMessages?: Message[];
@@ -88,8 +92,15 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   }
 
   const mentionUsers = new Collection<string, unknown>();
+  const mentionMembers = new Collection<string, unknown>();
   for (const id of mentionedUserIds) {
-    mentionUsers.set(id, {});
+    mentionUsers.set(id, { id });
+  }
+  for (const m of opts.mentionedUsers ?? []) {
+    mentionUsers.set(m.id, { id: m.id, displayName: m.displayName, username: m.username });
+    if (m.member !== false) {
+      mentionMembers.set(m.id, { id: m.id, displayName: m.displayName });
+    }
   }
 
   const embeds = (opts.embeds ?? []).map((embed) => ({
@@ -153,7 +164,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     attachments,
     embeds,
     stickers,
-    mentions: { users: mentionUsers },
+    mentions: { users: mentionUsers, members: mentionMembers },
     reference: referencedMessageId ? { messageId: referencedMessageId } : null,
     client: {
       user: { id: botUserId, displayName: botDisplayName },
