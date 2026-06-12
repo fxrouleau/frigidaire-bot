@@ -10,8 +10,8 @@
 //  - The ZDR canary: if the default EMBEDDING_MODEL has no Zero-Data-Retention endpoints, every prod
 //    embed call would fail (= permanent FTS fallback). That must fail HERE, loudly, not silently in prod.
 //  - The calibration test prints the real cosine values the model produces for related / near-duplicate /
-//    unrelated memory pairs — the data used to tune MEMORY_RELEVANCE_THRESHOLD (default 0.35) and
-//    MEMORY_DEDUP_THRESHOLD (default 0.88). It repeats the same measurements on MRL-truncated copies of
+//    unrelated memory pairs — the data used to tune MEMORY_RELEVANCE_THRESHOLD (default 0.5) and
+//    MEMORY_DEDUP_THRESHOLD (default 0.9). It repeats the same measurements on MRL-truncated copies of
 //    the fetched vectors (2048 / 1024 dims, no extra API calls) to see whether qwen3's Matryoshka
 //    truncation preserves related/unrelated separation — if it does, a follow-up can add
 //    EMBEDDING_DIMENSIONS support for a 4x storage/compute cut. Grep the output for "CALIBRATION".
@@ -149,8 +149,8 @@ describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, 
       const docs = await provider.embed(docTexts, 'document');
 
       // The same cosine pairs, computed from (possibly MRL-truncated) copies of the fetched vectors.
-      //   query vs document    → the search gate (MEMORY_RELEVANCE_THRESHOLD, default 0.35)
-      //   document vs document → save/compact dedup (MEMORY_DEDUP_THRESHOLD, default 0.88)
+      //   query vs document    → the search gate (MEMORY_RELEVANCE_THRESHOLD, default 0.5)
+      //   document vs document → save/compact dedup (MEMORY_DEDUP_THRESHOLD, default 0.9)
       const measurePairs = (dims: number) => {
         const q = truncate(query, dims);
         const d = docs.map((doc) => truncate(doc, dims));
@@ -184,12 +184,12 @@ describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, 
       console.log(`CALIBRATION   related_distinct '${docTexts[4]}'`);
       for (const { dims, pairs } of measurements) {
         console.log(
-          `CALIBRATION[${dims}] query-doc (gate, default 0.35): similar=${fmt(pairs.similar)} ` +
+          `CALIBRATION[${dims}] query-doc (gate, default 0.5): similar=${fmt(pairs.similar)} ` +
             `marginal=${fmt(pairs.marginal)} dissimilar=${fmt(pairs.dissimilar)} ` +
             `separation=${fmt(pairs.similar - pairs.dissimilar)}`,
         );
         console.log(
-          `CALIBRATION[${dims}] doc-doc (dedup, default 0.88): near_duplicate=${fmt(pairs.nearDuplicate)} ` +
+          `CALIBRATION[${dims}] doc-doc (dedup, default 0.9): near_duplicate=${fmt(pairs.nearDuplicate)} ` +
             `related_distinct=${fmt(pairs.relatedDistinct)} unrelated=${fmt(pairs.unrelated)} ` +
             `separation=${fmt(pairs.nearDuplicate - pairs.relatedDistinct)}`,
         );

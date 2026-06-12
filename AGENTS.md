@@ -106,13 +106,13 @@ src/
 1. Embed the query; score every active memory's stored vector by cosine (in-memory vector cache, write-through).
 2. Run the FTS5 keyword leg (BM25-ranked).
 3. Fuse both legs with Reciprocal Rank Fusion (k=60; vector weight 1.0, keyword weight 0.5).
-4. **Semantic gate**: every returned memory must score cosine ≥ `MEMORY_RELEVANCE_THRESHOLD` (default 0.35). Keyword-only hits on un-embedded memories are dropped — FTS can boost rank but never introduce a semantically irrelevant result.
+4. **Semantic gate**: every returned memory must score cosine ≥ `MEMORY_RELEVANCE_THRESHOLD` (default 0.5). Keyword-only hits on un-embedded memories are dropped — FTS can boost rank but never introduce a semantically irrelevant result.
 5. **Ungated FTS fallback** (legacy behavior): no embedder configured (silent — that's normal FTS5-only mode), the query embed failed, or fewer than 80% of searchable memories have current-model vectors (fresh DB, mid-backfill, model switch). The latter two log at WARN so degraded retrieval is visible in prod logs.
 - Self-diagnosis categories (`capability_gap`, `tool_error`, …; see `SELF_DIAGNOSIS_CATEGORIES`) are excluded from search entirely — they're reachable only via `query_self_diagnosis`, whose output carries `[id:N]` prefixes so `forget_memory` works on them.
 
 **Save (`MemoryStore.save()`, async).** Two phases:
 1. *Synchronous* (before any `await`): lexical word-overlap dedup + INSERT/UPDATE + FTS sync in one transaction. The row is durable when this returns — fire-and-forget callers (`failureLogger`) and tests that read back immediately stay correct.
-2. *Async, best-effort*: embed the memory, run semantic dedup (cosine ≥ `MEMORY_DEDUP_THRESHOLD`, default 0.88, within the same category+subject group), store the vector. A semantic duplicate **merges into the existing memory id** (ids are user-visible via `recall_memories`/`forget_memory`). Failures here never lose the memory — the backfill heals missing vectors later.
+2. *Async, best-effort*: embed the memory, run semantic dedup (cosine ≥ `MEMORY_DEDUP_THRESHOLD`, default 0.9, within the same category+subject group), store the vector. A semantic duplicate **merges into the existing memory id** (ids are user-visible via `recall_memories`/`forget_memory`). Failures here never lose the memory — the backfill heals missing vectors later.
 
 **Backfill (`MemoryStore.backfillEmbeddings()`).** Idempotent, batched (32/request): embeds every active memory lacking a current-model vector. Runs at startup and every `BACKFILL_INTERVAL_MS` (app.ts), healing memories saved during API outages and re-embedding everything after an `EMBEDDING_MODEL` switch (expand-contract: old-model vectors are pruned per-memory only once the new-model vector exists).
 
@@ -215,8 +215,8 @@ SELF_IMPROVEMENT_MODEL=<model>       # Model for self-improvement analysis
 # Semantic memory (embedding-based retrieval):
 SEMANTIC_MEMORY_ENABLED=<bool>       # Kill switch (default: true). false/0 => FTS5-only keyword retrieval
 EMBEDDING_MODEL=<model>              # Embedding model (default: qwen/qwen3-embedding-8b; must have ZDR endpoints)
-MEMORY_RELEVANCE_THRESHOLD=<0..1>    # Search semantic gate: min cosine to return a memory (default: 0.35)
-MEMORY_DEDUP_THRESHOLD=<0..1>        # Save/compact dedup: cosine at/above which memories merge (default: 0.88)
+MEMORY_RELEVANCE_THRESHOLD=<0..1>    # Search semantic gate: min cosine to return a memory (default: 0.5)
+MEMORY_DEDUP_THRESHOLD=<0..1>        # Save/compact dedup: cosine at/above which memories merge (default: 0.9)
 EMBEDDING_QUERY_INSTRUCTION=<text>   # Override the qwen3 query instruct task description
 BACKFILL_INTERVAL_MS=<ms>            # Periodic embedding backfill/self-heal interval (default: 1800000 / 30 min)
 MEMORY_TTL_IMAGE_HOURS=<n>           # Ephemeral TTL: image memories expire n hours after last update (default: 24; 0 disables)

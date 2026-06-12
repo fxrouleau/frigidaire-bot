@@ -65,9 +65,9 @@ type EmojiUpsertInput = {
 export type MemoryStoreOptions = {
   /** When present, save() embeds memories and runs semantic dedup; absent ⇒ FTS5-only (legacy) behavior. */
   embeddings?: EmbeddingProvider;
-  /** Cosine similarity at/above which two memories are duplicates. Default: MEMORY_DEDUP_THRESHOLD env or 0.88. */
+  /** Cosine similarity at/above which two memories are duplicates. Default: MEMORY_DEDUP_THRESHOLD env or 0.9. */
   dedupThreshold?: number;
-  /** Minimum cosine similarity for a memory to be returned by search(). Default: MEMORY_RELEVANCE_THRESHOLD env or 0.35. */
+  /** Minimum cosine similarity for a memory to be returned by search(). Default: MEMORY_RELEVANCE_THRESHOLD env or 0.5. */
   relevanceThreshold?: number;
   /**
    * Per-category TTLs in HOURS for "ephemeral" memories: sweepExpiredMemories() deactivates memories in
@@ -91,8 +91,8 @@ type CachedVector = {
   subject: string;
 };
 
-const DEFAULT_DEDUP_THRESHOLD = 0.88;
-const DEFAULT_RELEVANCE_THRESHOLD = 0.35;
+const DEFAULT_DEDUP_THRESHOLD = 0.9;
+const DEFAULT_RELEVANCE_THRESHOLD = 0.5;
 
 // Reciprocal-rank-fusion parameters for hybrid search: vector leg dominates, FTS is a booster.
 const RRF_K = 60;
