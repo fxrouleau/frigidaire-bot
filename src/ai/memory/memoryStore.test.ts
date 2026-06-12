@@ -446,6 +446,22 @@ describe('bot_state (generic key/value)', () => {
     const rows = store.db.prepare('SELECT * FROM bot_state WHERE key = ?').all('deploy:last_announced_sha');
     expect(rows).toHaveLength(1);
   });
+
+  it('setState() refreshes updated_at on overwrite', () => {
+    store.setState('digest:last_run_at', 'v1');
+    // datetime('now') only has 1s resolution, so two rapid writes could share a timestamp. Force a
+    // known-old value first, then prove the overwrite moves updated_at forward.
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare('UPDATE bot_state SET updated_at = ? WHERE key = ?').run('2000-01-01 00:00:00', 'digest:last_run_at');
+
+    store.setState('digest:last_run_at', 'v2');
+
+    // @ts-expect-error accessing private db for verification
+    const row = store.db.prepare('SELECT updated_at FROM bot_state WHERE key = ?').get('digest:last_run_at') as {
+      updated_at: string;
+    };
+    expect(row.updated_at).not.toBe('2000-01-01 00:00:00');
+  });
 });
 
 describe('subject_user_id (soft-FK to identities)', () => {

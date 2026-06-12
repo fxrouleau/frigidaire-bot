@@ -94,6 +94,42 @@ describe('runDigestCheck watermark gating', () => {
   });
 });
 
+describe('runDigestCheck privacy', () => {
+  it('never leaks an error capture conversation payload into the rendered digest', async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    // A signal forces the full (non-quiet) digest, so the captures section actually renders.
+    await store.save({ category: 'capability_gap', subject: 'bot', content: 'some gap' });
+
+    // A realistic capture file: privacy-safe metadata (timestamp + a bare network-error message, which
+    // the digest IS allowed to surface as a label) PLUS the private chat payload it must never read.
+    // The sentinels are distinctive lowercase tokens so any leak survives the digest's label derivation
+    // (which lowercases and keeps the leading word) and is caught here.
+    const SENTINEL = 'mysecretpayload';
+    const capture = {
+      timestamp: new Date().toISOString(),
+      channelId: 'c1',
+      model: 'test-model',
+      error: { name: 'Error', message: 'read ECONNRESET' },
+      conversationEntries: [
+        { kind: 'message', role: 'user', content: [{ type: 'text', text: `${SENTINEL} my credit card is 1234` }] },
+        { kind: 'message', role: 'assistant', content: [{ type: 'text', text: `noted about ${SENTINEL}` }] },
+      ],
+      thoughts: `internal reasoning mentioning ${SENTINEL}`,
+    };
+    fs.writeFileSync(path.join(tmpDir, 'error-1-aaaa.json'), JSON.stringify(capture), 'utf8');
+
+    await runDigestCheck(fakeClient.client);
+
+    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    // The capture is counted and its privacy-safe network-error code surfaces as a label...
+    expect(sent).toContain('AI errors captured (data/debug) — 1');
+    expect(sent).toContain('ECONNRESET');
+    // ...but nothing from the private conversation payload (or the thoughts) ever appears.
+    expect(sent).not.toContain(SENTINEL);
+    expect(sent).not.toContain('credit card');
+  });
+});
+
 describe('reportDigest execute master switch', () => {
   it('is a no-op (no channel fetch) when REPORT_CHANNEL_ID is unset', () => {
     execute(fakeClient.client);

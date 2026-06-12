@@ -593,6 +593,28 @@ describe('AgentOrchestrator per-turn memory refresh', () => {
     expect(embeddings.calls.filter((c) => c.kind === 'query')).toHaveLength(1);
   });
 
+  it('splices in NO developer entry when no memories match (no blank dynamic message)', async () => {
+    // Empty store: speaker bucket, contextual search, and mentioned pulls all come back empty, so the
+    // dynamic context entry must be undefined — not a developer message with empty text.
+    setMemoryStoreForTesting(new MemoryStore(':memory:'));
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'hello there' });
+
+    await orchestrator.handleMention(fake.message);
+
+    const developerEntries = provider.calls[0].messages.filter(
+      (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
+    );
+    // Exactly the static prompt — the empty dynamic entry was dropped, not pushed blank.
+    expect(developerEntries).toHaveLength(1);
+    for (const dev of developerEntries) {
+      const text = dev.content.map((p) => (p.type === 'text' ? p.text : '')).join('');
+      expect(text.trim().length).toBeGreaterThan(0);
+    }
+  });
+
   it('refreshes the speaker bucket when a different user speaks mid-conversation', async () => {
     const store = new MemoryStore(':memory:');
     await store.save({ category: 'fact', subject: 'Alice', content: 'alice mains support' });
