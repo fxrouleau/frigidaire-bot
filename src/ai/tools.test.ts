@@ -268,6 +268,14 @@ describe('remember_fact tool', () => {
   });
 });
 
+describe('forget_memory tool', () => {
+  it('frames removal around corrections/supersession and warns off jokes', () => {
+    expect(forgetMemoryTool!.description).toMatch(/correct|supersed/i);
+    expect(forgetMemoryTool!.description).toMatch(/recall_memories/);
+    expect(forgetMemoryTool!.description).toMatch(/jok|banter/i);
+  });
+});
+
 describe('remember_fact + recall_memories round trip', () => {
   it('saves via remember_fact and finds it via recall_memories', async () => {
     const saveResult = await rememberFactTool!.handler(stubCtx, {

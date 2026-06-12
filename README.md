@@ -26,6 +26,16 @@ services:
 - `CLIENT_SECRET` can be gotten from the [discord developer portal](https://discord.com/developers/applications) under the bot section. You will have to give the bot permissions to manage webhooks, read and send messages.
 - `OPENAI_API_KEY` can be obtained from the [OpenAI API keys page](https://platform.openai.com/api-keys).
 
+### Report channel (optional)
+Set `REPORT_CHANNEL_ID` to a Discord channel id to turn on the operational report channel. It is the master switch — leave it unset and both features below are fully off.
+
+- `REPORT_CHANNEL_ID` — channel for the digest and deploy announcements (unset ⇒ everything off).
+- `DIGEST_ENABLED` — weekly self-diagnosis digest (default `true`).
+- `DIGEST_PERIOD_MS` — minimum interval between digests (default `604800000`, 7 days).
+- `DIGEST_CHECK_INTERVAL_MS` — how often the digest gate is checked (default `3600000`, 1 hour).
+- `DEPLOY_ANNOUNCE_ENABLED` — post "🚀 Deployed `<sha>`" on a new build (default `true`).
+- `GIT_SHA` — the running commit; baked into the prod image by CI and used for deploy announcements (unset ⇒ no announcement).
+
 ## Development
 ### Setup
 - Node 22 LTS

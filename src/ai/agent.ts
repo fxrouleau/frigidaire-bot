@@ -2,6 +2,7 @@ import * as process from 'node:process';
 import { type Message, StickerFormatType } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
+import type { ConversationPersistence } from './conversationPersistence';
 import { ConversationStore } from './conversationStore';
 import { writeErrorCapture } from './debugCapture';
 import { logFailure } from './failureLogger';
@@ -50,6 +51,9 @@ export type AgentOrchestratorOptions = {
   timeoutMs?: number;
   maxToolRounds?: number;
   maxToolInvocations?: number;
+  // When provided, conversation state is mirrored to disk so it survives a restart within the timeout
+  // window. Default (undefined) keeps the store pure in-memory — existing tests stay hermetic.
+  persistence?: ConversationPersistence;
 };
 
 export class AgentOrchestrator {
@@ -60,7 +64,7 @@ export class AgentOrchestrator {
   private readonly maxToolInvocations: number;
 
   constructor(opts: AgentOrchestratorOptions = {}) {
-    this.store = new ConversationStore(opts.timeoutMs ?? CONVERSATION_TIMEOUT);
+    this.store = new ConversationStore(opts.timeoutMs ?? CONVERSATION_TIMEOUT, opts.persistence);
     this.resolveProvider = opts.resolveProvider ?? getProviderForChannel;
     this.tools = opts.tools ?? toolDefinitions;
     this.maxToolRounds = opts.maxToolRounds ?? MAX_TOOL_ROUNDS;
@@ -82,10 +86,11 @@ export class AgentOrchestrator {
     let state = this.store.get(channelId);
 
     if (!state) {
-      const initialEntries = await this.buildInitialHistory(message, provider);
+      const { entries: initialEntries, injectedMemoryIds } = await this.buildInitialHistory(message, provider);
       state = {
         providerId: provider.id,
         entries: initialEntries,
+        injectedMemoryIds,
         timestamp: Date.now(),
       };
       this.store.set(channelId, state);
@@ -99,7 +104,21 @@ export class AgentOrchestrator {
 
     const providerTools = provider.supportedTools;
     const userEntry = this.buildUserEntry(message);
-    const workingEntries: ConversationEntry[] = [...state.entries, userEntry];
+
+    // Per-turn memory refresh: rebuild the dynamic context (speaker bucket + contextual search +
+    // mentioned-subject pulls) once per mention, before chat() and outside the tool loop, so topic
+    // shifts and new @-mentions mid-conversation get fresh retrieval. The static prompt (entries[0])
+    // is never touched, preserving provider prefix-caching.
+    const priorInjectedIds = state.injectedMemoryIds ?? [];
+    const store = this.safeStore();
+    const dynamic = store
+      ? await this.buildDynamicContextEntry(message, store, priorInjectedIds)
+      : { entry: undefined, injectedIds: [] };
+    const injectedMemoryIds = [...priorInjectedIds, ...dynamic.injectedIds];
+
+    const workingEntries: ConversationEntry[] = dynamic.entry
+      ? [...state.entries, dynamic.entry, userEntry]
+      : [...state.entries, userEntry];
 
     try {
       const firstResponse = await provider.chat({
@@ -185,6 +204,7 @@ export class AgentOrchestrator {
         this.store.set(channelId, {
           providerId: provider.id,
           entries: workingEntries,
+          injectedMemoryIds,
           thoughts: finalResponse?.thoughts ?? lastThoughts,
           timestamp: Date.now(),
         });
@@ -197,6 +217,7 @@ export class AgentOrchestrator {
       this.store.set(channelId, {
         providerId: provider.id,
         entries: workingEntries,
+        injectedMemoryIds,
         thoughts: firstResponse.thoughts ?? state.thoughts,
         timestamp: Date.now(),
       });
@@ -285,10 +306,12 @@ export class AgentOrchestrator {
     return results;
   }
 
-  private async buildInitialHistory(message: Message, provider: AiProvider): Promise<ConversationEntry[]> {
+  private async buildInitialHistory(
+    message: Message,
+    _provider: AiProvider,
+  ): Promise<{ entries: ConversationEntry[]; injectedMemoryIds: number[] }> {
     const botName = message.client.user.displayName;
-    const currentUser = message.member?.displayName || message.author.username;
-    const basePrompt = await this.buildDeveloperPrompt(botName, currentUser, provider, message);
+    const { text: basePrompt, injectedIds } = await this.buildStaticDeveloperPrompt(botName);
     const entries: ConversationEntry[] = [
       {
         kind: 'message',
@@ -316,7 +339,7 @@ export class AgentOrchestrator {
       });
 
     entries.push(...historicalContext);
-    return entries;
+    return { entries, injectedMemoryIds: injectedIds };
   }
 
   private buildUserEntry(message: Message): ConversationEntry {
@@ -335,12 +358,14 @@ export class AgentOrchestrator {
     };
   }
 
-  private async buildDeveloperPrompt(
-    botName: string,
-    currentUserDisplayName: string,
-    _provider: AiProvider,
-    message: Message,
-  ): Promise<string> {
+  /**
+   * The static leading developer prompt: persona + SERVER PEOPLE + SERVER EMOJIS + the vibe/personality
+   * bucket + background-knowledge/age guidance + current ET time. Built ONCE per conversation window and
+   * never mutated — providers prefix-cache on a byte-identical leading message, so per-turn churn here
+   * would bust the whole conversation's cache. Per-turn retrieval lives in buildDynamicContextEntry().
+   * Returns the memory ids it baked in (the vibe/personality bucket) to seed cross-turn dedup.
+   */
+  private async buildStaticDeveloperPrompt(botName: string): Promise<{ text: string; injectedIds: number[] }> {
     const now = new Date();
     const tz = 'America/New_York';
     const currentTimeEt = new Intl.DateTimeFormat('sv-SE', {
@@ -355,11 +380,8 @@ export class AgentOrchestrator {
       timeZoneName: 'short',
     }).format(now);
 
-    // Fetch memories, identities, and emojis for context injection
+    // Fetch identities, emojis, and the vibe/personality bucket for context injection.
     let personalityMemories: Memory[] = [];
-    let userSpecificMemories: Memory[] = [];
-    let contextualMemories: Memory[] = [];
-    let mentionedMemories: Memory[] = [];
     let identities: Identity[] = [];
     let usableEmojis: EmojiRow[] = [];
 
@@ -381,29 +403,6 @@ export class AgentOrchestrator {
         }
       }
       personalityMemories = [...seenSubjects.values()].slice(0, 5);
-
-      // Cap user-specific memories to 5
-      userSpecificMemories = store.getBySubject(currentUserDisplayName, 5);
-
-      // Contextual relevance search based on current message. Resolve @-mentions to display names
-      // (rather than stripping them) so the person being asked about survives into the search query.
-      const searchText = resolveMentionTokens(message.content, message.client.user.id, (id) =>
-        this.resolveMentionDisplayName(id, message, store),
-      );
-      const existingIds = new Set([...personalityMemories.map((m) => m.id), ...userSpecificMemories.map((m) => m.id)]);
-      if (searchText.length >= 3) {
-        try {
-          const ftsResults = await store.search(searchText, 10);
-          contextualMemories = ftsResults.filter((m) => !existingIds.has(m.id));
-        } catch (error) {
-          logger.warn('Failed to fetch contextual memories:', error);
-        }
-      }
-
-      // Pull subject-keyed memories for other people @-mentioned in the message, so "what's up with
-      // @Wheezer" surfaces what we know about Wheezer even when nothing keyword-matches.
-      for (const mem of contextualMemories) existingIds.add(mem.id);
-      mentionedMemories = this.collectMentionedSubjectMemories(message, store, existingIds);
     } catch (error) {
       logger.warn('Failed to fetch memories for prompt:', error);
     }
@@ -416,22 +415,7 @@ export class AgentOrchestrator {
         ? `\nWhat you've learned about this server's culture and vibe:\n${personalityMemories.map((m) => `- ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
         : '';
 
-    const userSection =
-      userSpecificMemories.length > 0
-        ? `\nWhat you know about the person talking to you right now (${currentUserDisplayName}):\n${userSpecificMemories.map((m) => `- ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
-        : '';
-
-    const mentionedSection =
-      mentionedMemories.length > 0
-        ? `\nWhat you know about others mentioned in this message:\n${mentionedMemories.map((m) => `- ${m.subject}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
-        : '';
-
-    const contextualSection =
-      contextualMemories.length > 0
-        ? `\nRelevant to this conversation:\n${contextualMemories.map((m) => `- [${m.category}] ${m.subject}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
-        : '';
-
-    return `You are ${botName}, a bot in a private, adults-only Discord server.
+    const text = `You are ${botName}, a bot in a private, adults-only Discord server.
 You're one of the group — not an assistant, not a helper, just another member hanging out in the chat.
 
 IMPORTANT CONTEXT: This is a private server between close friends. All humor, roasting, crude jokes, dark humor, and edgy banter is consensual and not serious — it's just how this group talks. Nobody here is offended. Think of it like friends busting each other's balls at a bar after midnight. This is an adults-only space where nothing is off-limits conversationally. Do NOT moralize, lecture, add disclaimers, hedge, offer "healthier alternatives", or break character to be a responsible AI. If someone says something wild, match the energy or escalate — that's what they want.
@@ -448,10 +432,10 @@ How you behave:
 - Never say "I'm just an AI" or "as a language model" — you're ${botName}, period.
 
 You can search the web natively. Use it SPARINGLY — only when you genuinely need current, real-time information you couldn't possibly know (live scores, recent news, release dates, etc). Don't search for things you already know. Don't follow links people share.
-${identitiesSection}${emojisSection}${personalitySection}${userSection}${mentionedSection}${contextualSection}
+${identitiesSection}${emojisSection}${personalitySection}
 These memories are background knowledge — things you know from hanging out in this server. Do NOT force references to inside jokes, show off what you know, or try to reference multiple memories in one response. Let things come up naturally, the way you'd reference a friend's hobby only when it's actually relevant to the conversation. If nothing from your memories is relevant to what's being discussed, just don't mention them. Each memory is tagged with how long ago it was last confirmed; treat months-old current-state claims — what someone "still" does, owns, or plays — as possibly outdated, so hedge or ask instead of asserting them as current fact.
 
-MEMORY: You have a long-term memory system. Use the remember_fact tool when something genuinely important comes up — real names, jobs, major life events, strong preferences, or things someone would expect you to remember next time. Do NOT save every little thing; skip small talk, throwaway opinions, and mundane details. Think of what you'd actually remember about a friend after a night out — the big stuff, not every sentence. If someone corrects a fact you know, save the updated version.
+MEMORY: You have a long-term memory system. Use the remember_fact tool when something genuinely important comes up — real names, jobs, major life events, strong preferences, or things someone would expect you to remember next time. Do NOT save every little thing; skip small talk, throwaway opinions, and mundane details. Think of what you'd actually remember about a friend after a night out — the big stuff, not every sentence. If someone corrects or updates a fact you already know (new job, moved, switched teams, got a new console), the stale version has to go or you'll keep surfacing both: call recall_memories to find its id, forget_memory the old one, then remember_fact the correction. Only do this for genuine factual updates — a joking "forget that" or general ribbing is never a reason to delete a memory, and your personality/vibe notes about the server aren't "corrected" this way.
 
 RESPONDING TO THE CURRENT TURN:
 The last user message in the conversation is why you're being pinged. Read it first and figure out what it's actually asking before pulling from earlier history. Earlier messages are shared group context, not your subject.
@@ -460,6 +444,80 @@ The last user message in the conversation is why you're being pinged. Read it fi
 - Gap awareness: look at the timestamps. If the prior messages are hours older than the current ping AND the current message introduces something new, treat the older stuff as stale scenery, not live subject matter.
 
 The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_York; apply EST/EDT automatically).`;
+
+    return { text, injectedIds: personalityMemories.map((m) => m.id) };
+  }
+
+  /**
+   * The per-turn dynamic context entry, rebuilt on every mention: the speaker bucket (refreshed for
+   * whoever is actually talking this turn — fixes the frozen-first-speaker bug), the contextual
+   * semantic search of the current message, and subject pulls for other @-mentioned users. Returns a
+   * developer entry to splice in right before the new user message, plus the ids it rendered. Memories
+   * already injected this window (`alreadyInjectedIds`) are dropped so nothing repeats across turns;
+   * when every section is empty the entry is `undefined` (no blank developer message is pushed).
+   */
+  private async buildDynamicContextEntry(
+    message: Message,
+    store: MemoryStore,
+    alreadyInjectedIds: number[],
+  ): Promise<{ entry: ConversationEntry | undefined; injectedIds: number[] }> {
+    const currentSpeaker = message.member?.displayName || message.author.username;
+    // One Set carries both cross-turn dedup (seeded with everything already injected, incl. the static
+    // vibe/personality bucket) and inter-section dedup (speaker > contextual > mentioned priority).
+    const existingIds = new Set<number>(alreadyInjectedIds);
+
+    const userSpecificMemories = store.getBySubject(currentSpeaker, 5).filter((m) => !existingIds.has(m.id));
+    for (const mem of userSpecificMemories) existingIds.add(mem.id);
+
+    // Contextual relevance search based on current message. Resolve @-mentions to display names
+    // (rather than stripping them) so the person being asked about survives into the search query.
+    let contextualMemories: Memory[] = [];
+    const searchText = resolveMentionTokens(message.content, message.client.user.id, (id) =>
+      this.resolveMentionDisplayName(id, message, store),
+    );
+    if (searchText.length >= 3) {
+      try {
+        const results = await store.search(searchText, 10);
+        contextualMemories = results.filter((m) => !existingIds.has(m.id));
+      } catch (error) {
+        logger.warn('Failed to fetch contextual memories:', error);
+      }
+    }
+    for (const mem of contextualMemories) existingIds.add(mem.id);
+
+    // Pull subject-keyed memories for other people @-mentioned in the message, so "what's up with
+    // @Wheezer" surfaces what we know about Wheezer even when nothing keyword-matches.
+    const mentionedMemories = this.collectMentionedSubjectMemories(message, store, existingIds);
+
+    const userSection =
+      userSpecificMemories.length > 0
+        ? `\nWhat you know about the person talking to you right now (${currentSpeaker}):\n${userSpecificMemories.map((m) => `- ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
+        : '';
+
+    const mentionedSection =
+      mentionedMemories.length > 0
+        ? `\nWhat you know about others mentioned in this message:\n${mentionedMemories.map((m) => `- ${m.subject}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
+        : '';
+
+    const contextualSection =
+      contextualMemories.length > 0
+        ? `\nRelevant to this conversation:\n${contextualMemories.map((m) => `- [${m.category}] ${m.subject}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
+        : '';
+
+    const text = `${userSection}${mentionedSection}${contextualSection}`.trim();
+    if (text.length === 0) {
+      return { entry: undefined, injectedIds: [] };
+    }
+
+    const injectedIds = [
+      ...userSpecificMemories.map((m) => m.id),
+      ...contextualMemories.map((m) => m.id),
+      ...mentionedMemories.map((m) => m.id),
+    ];
+    return {
+      entry: { kind: 'message', role: 'developer', content: [{ type: 'text', text }] },
+      injectedIds,
+    };
   }
 
   /**

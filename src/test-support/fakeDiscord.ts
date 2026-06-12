@@ -1,7 +1,7 @@
 // Typed factories that build discord.js Message objects for tests. Real Collection instances are
 // used so .size/.values()/.has() behave like production; a single localized cast bridges the plain
 // object to the Message type at the very end.
-import { ChannelType, Collection, type Message } from 'discord.js';
+import { type Channel, ChannelType, type Client, Collection, type Message } from 'discord.js';
 import { type Recorder, createRecorder } from './recorder';
 
 export type FakeWebhook = {
@@ -187,6 +187,45 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     recorders: { reply, send, sendTyping, messagesFetch, delete: deleteRecorder, createWebhook },
     webhooks,
   };
+}
+
+export type FakeChannel = {
+  channel: Channel;
+  recorders: { send: Recorder<[unknown], Promise<unknown>> };
+};
+
+/** A minimal sendable GuildText channel: isTextBased() true + a recording send(). */
+export function createFakeChannel(opts: { id?: string } = {}): FakeChannel {
+  const id = opts.id ?? 'report-channel-1';
+  const send = createRecorder<[unknown], Promise<unknown>>(async (_content: unknown) => ({}) as unknown);
+  const built = {
+    id,
+    type: ChannelType.GuildText,
+    isTextBased: () => true,
+    send,
+  };
+  return { channel: built as unknown as Channel, recorders: { send } };
+}
+
+export type FakeClient = {
+  client: Client;
+  recorders: { channelsFetch: Recorder<[string], Promise<Channel>> };
+};
+
+/** A Client whose channels.fetch(id) resolves channels from a map and throws for unknown ids. */
+export function createFakeClient(opts: { channelsById?: Record<string, Channel> } = {}): FakeClient {
+  const channelsById = opts.channelsById ?? {};
+  const channelsFetch = createRecorder<[string], Promise<Channel>>(async (channelId: string) => {
+    const found = channelsById[channelId];
+    if (found === undefined) {
+      throw new Error(`Unknown channel id "${channelId}"`);
+    }
+    return found;
+  });
+  const built = {
+    channels: { fetch: channelsFetch },
+  };
+  return { client: built as unknown as Client, recorders: { channelsFetch } };
 }
 
 export function createFakeBotMessage(opts: FakeMessageOptions = {}): FakeMessage {

@@ -6,6 +6,8 @@ import { createFakeMessage } from '../test-support/fakeDiscord';
 import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
 import { FakeProvider, errorStep, textResponse, toolCallResponse } from '../test-support/fakeProvider';
 import { AgentOrchestrator } from './agent';
+import { ConversationPersistence } from './conversationPersistence';
+import type { ConversationState } from './conversationStore';
 import { loadErrorCapture } from './debugCapture';
 import { MemoryStore } from './memory/memoryStore';
 import { getMemoryStore, setMemoryStoreForTesting } from './tools';
@@ -107,16 +109,29 @@ describe('AgentOrchestrator.handleMention', () => {
 
     await orchestrator.handleMention(fake.message);
 
+    // The just-saved speaker memory renders (with a 'today' age annotation) in the per-turn dynamic
+    // context entry now, not the static prompt.
+    expect(dynamicContextText(provider, 0)).toContain('- works as a plumber (today)');
+    // The guidance sentence teaching the model to distrust stale current-state claims stays static.
+    expect(developerPromptText(provider)).toContain('how long ago it was last confirmed');
+  });
+
+  it('tells the model to forget the stale memory when a fact is corrected', async () => {
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'hello' });
+
+    await orchestrator.handleMention(fake.message);
+
     const developerEntry = provider.calls[0].messages.find(
       (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
     );
     expect(developerEntry).toBeDefined();
     const promptText = developerEntry!.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
 
-    // The just-saved memory renders with a 'today' age annotation appended.
-    expect(promptText).toContain('- works as a plumber (today)');
-    // The guidance sentence teaching the model to distrust stale current-state claims is present.
-    expect(promptText).toContain('how long ago it was last confirmed');
+    // The correction guidance now names forget_memory and the distinctive 'has to go' phrasing.
+    expect(promptText).toContain('forget_memory');
+    expect(promptText).toContain('has to go');
   });
 
   it('executes a single tool round then replies', async () => {
@@ -321,6 +336,18 @@ function developerPromptText(provider: FakeProvider): string {
   return developerEntry?.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n') ?? '';
 }
 
+// The per-turn dynamic context entry for the chat call at `callIndex`. It is the developer message
+// spliced in right before that turn's new user entry (the last message at chat() time); messages[0]
+// is the static prompt and is never the dynamic entry. Returns '' when the turn injected nothing.
+function dynamicContextText(provider: FakeProvider, callIndex = 0): string {
+  const messages = provider.calls[callIndex].messages;
+  const candidate = messages.at(-2);
+  if (candidate && candidate !== messages[0] && candidate.kind === 'message' && candidate.role === 'developer') {
+    return candidate.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
+  }
+  return '';
+}
+
 function lastUserText(provider: FakeProvider): string {
   const userEntries = provider.calls[0].messages.filter(
     (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'user',
@@ -440,9 +467,9 @@ describe('AgentOrchestrator @-mention resolution', () => {
 
     await orchestrator.handleMention(fake.message);
 
-    const promptText = developerPromptText(provider);
-    expect(promptText).toContain('What you know about others mentioned in this message:');
-    expect(promptText).toContain('- Wheezer: plays valorant every night');
+    const dynamicText = dynamicContextText(provider, 0);
+    expect(dynamicText).toContain('What you know about others mentioned in this message:');
+    expect(dynamicText).toContain('- Wheezer: plays valorant every night');
   });
 
   it('excludes the bot and the speaker from the mentioned-subjects pull', async () => {
@@ -466,7 +493,7 @@ describe('AgentOrchestrator @-mention resolution', () => {
 
     await orchestrator.handleMention(fake.message);
 
-    expect(developerPromptText(provider)).not.toContain('others mentioned in this message');
+    expect(dynamicContextText(provider, 0)).not.toContain('others mentioned in this message');
   });
 
   it('resolves mention tokens in the model-visible user message text', async () => {
@@ -485,5 +512,196 @@ describe('AgentOrchestrator @-mention resolution', () => {
     const userText = lastUserText(provider);
     expect(userText).toContain('@Wheezer');
     expect(userText).not.toContain('<@');
+  });
+});
+
+describe('AgentOrchestrator per-turn memory refresh', () => {
+  it('refreshes contextual retrieval on a second mention', async () => {
+    // relevanceThreshold 0.99 keeps the contextual leg empty so only the dedicated mentioned pull can
+    // surface Wheezer — proving retrieval re-ran on turn 2 rather than reusing a frozen prompt.
+    const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider(), relevanceThreshold: 0.99 });
+    await store.save({ category: 'fact', subject: 'Wheezer', content: 'plays valorant every night' });
+    setMemoryStoreForTesting(store);
+
+    const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
+    const orchestrator = makeOrchestrator(provider);
+    const turn1 = createFakeMessage({ content: 'hows it going', channelId: 'c', messageId: 'm1', botUserId: BOT_ID });
+    const turn2 = createFakeMessage({
+      content: `whats up with <@${WHEEZER_ID}>`,
+      channelId: 'c',
+      messageId: 'm2',
+      botUserId: BOT_ID,
+      mentionedUsers: [{ id: WHEEZER_ID, displayName: 'Wheezer' }],
+    });
+
+    await orchestrator.handleMention(turn1.message);
+    await orchestrator.handleMention(turn2.message);
+
+    expect(dynamicContextText(provider, 0)).not.toContain('plays valorant every night');
+    expect(dynamicContextText(provider, 1)).toContain('- Wheezer: plays valorant every night');
+  });
+
+  it('keeps the static prompt byte-identical across mentions', async () => {
+    const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() });
+    await store.save({ category: 'fact', subject: 'Test User', content: 'works as a plumber' });
+    setMemoryStoreForTesting(store);
+
+    const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
+    const orchestrator = makeOrchestrator(provider);
+    const turn1 = createFakeMessage({ content: 'hello', channelId: 'c', messageId: 'm1' });
+    const turn2 = createFakeMessage({ content: 'hello again', channelId: 'c', messageId: 'm2' });
+
+    await orchestrator.handleMention(turn1.message);
+    await orchestrator.handleMention(turn2.message);
+
+    // entries[0] is the static developer prompt — mutating it every turn would bust provider caching.
+    expect(provider.calls[1].messages[0]).toEqual(provider.calls[0].messages[0]);
+  });
+
+  it('does not duplicate a memory across consecutive turns', async () => {
+    const store = new MemoryStore(':memory:');
+    await store.save({ category: 'fact', subject: 'Test User', content: 'works as a plumber' });
+    setMemoryStoreForTesting(store);
+
+    const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
+    const orchestrator = makeOrchestrator(provider);
+    const turn1 = createFakeMessage({ content: 'hello', channelId: 'c', messageId: 'm1' });
+    const turn2 = createFakeMessage({ content: 'hello again', channelId: 'c', messageId: 'm2' });
+
+    await orchestrator.handleMention(turn1.message);
+    await orchestrator.handleMention(turn2.message);
+
+    expect(dynamicContextText(provider, 0)).toContain('- works as a plumber');
+    expect(dynamicContextText(provider, 1)).not.toContain('works as a plumber');
+  });
+
+  it('does not re-run semantic search during tool rounds', async () => {
+    const embeddings = new FakeEmbeddingProvider();
+    setMemoryStoreForTesting(new MemoryStore(':memory:', { embeddings }));
+
+    const provider = new FakeProvider([
+      toolCallResponse([{ id: 't1', name: 'echo_tool', arguments: {} }]),
+      textResponse('done'),
+    ]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'do the thing please' });
+
+    await orchestrator.handleMention(fake.message);
+
+    expect(provider.calls).toHaveLength(2);
+    // The dynamic context is built once per mention (outside the tool loop), so exactly one query embed.
+    expect(embeddings.calls.filter((c) => c.kind === 'query')).toHaveLength(1);
+  });
+
+  it('splices in NO developer entry when no memories match (no blank dynamic message)', async () => {
+    // Empty store: speaker bucket, contextual search, and mentioned pulls all come back empty, so the
+    // dynamic context entry must be undefined — not a developer message with empty text.
+    setMemoryStoreForTesting(new MemoryStore(':memory:'));
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'hello there' });
+
+    await orchestrator.handleMention(fake.message);
+
+    const developerEntries = provider.calls[0].messages.filter(
+      (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
+    );
+    // Exactly the static prompt — the empty dynamic entry was dropped, not pushed blank.
+    expect(developerEntries).toHaveLength(1);
+    for (const dev of developerEntries) {
+      const text = dev.content.map((p) => (p.type === 'text' ? p.text : '')).join('');
+      expect(text.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it('refreshes the speaker bucket when a different user speaks mid-conversation', async () => {
+    const store = new MemoryStore(':memory:');
+    await store.save({ category: 'fact', subject: 'Alice', content: 'alice mains support' });
+    await store.save({ category: 'fact', subject: 'Bob', content: 'bob mains duelist' });
+    setMemoryStoreForTesting(store);
+
+    const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
+    const orchestrator = makeOrchestrator(provider);
+    const turn1 = createFakeMessage({
+      content: 'hi',
+      channelId: 'c',
+      messageId: 'm1',
+      authorId: 'alice-id',
+      authorDisplayName: 'Alice',
+    });
+    const turn2 = createFakeMessage({
+      content: 'yo',
+      channelId: 'c',
+      messageId: 'm2',
+      authorId: 'bob-id',
+      authorDisplayName: 'Bob',
+    });
+
+    await orchestrator.handleMention(turn1.message);
+    await orchestrator.handleMention(turn2.message);
+
+    expect(dynamicContextText(provider, 0)).toContain('- alice mains support');
+    // The bug this fixes: the speaker bucket used to freeze to the first speaker of the window.
+    expect(dynamicContextText(provider, 1)).toContain('- bob mains duelist');
+  });
+
+  it('re-injects a memory after the conversation window expires', async () => {
+    const store = new MemoryStore(':memory:');
+    await store.save({ category: 'fact', subject: 'Test User', content: 'works as a plumber' });
+    setMemoryStoreForTesting(store);
+
+    const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
+    const orchestrator = makeOrchestrator(provider, { timeoutMs: 1 });
+    const turn1 = createFakeMessage({ content: 'hello', channelId: 'c', messageId: 'm1' });
+    const turn2 = createFakeMessage({ content: 'hello', channelId: 'c', messageId: 'm2' });
+
+    await orchestrator.handleMention(turn1.message);
+    await new Promise((r) => setTimeout(r, 10));
+    await orchestrator.handleMention(turn2.message);
+
+    // A fresh window resets injectedMemoryIds, so the same memory is allowed to render again.
+    expect(dynamicContextText(provider, 0)).toContain('- works as a plumber');
+    expect(dynamicContextText(provider, 1)).toContain('- works as a plumber');
+  });
+});
+
+describe('AgentOrchestrator conversation persistence', () => {
+  it('restores persisted state across a restart instead of rebuilding initial history', async () => {
+    // Simulate a pre-restart conversation already cached on disk.
+    const persistence = new ConversationPersistence(':memory:');
+    const restoredEntries: ConversationEntry[] = [
+      { kind: 'message', role: 'developer', content: [{ type: 'text', text: 'RESTORED-STATIC-PROMPT' }] },
+      { kind: 'message', role: 'user', content: [{ type: 'text', text: 'earlier message' }] },
+      { kind: 'message', role: 'assistant', content: [{ type: 'text', text: 'earlier reply' }] },
+    ];
+    const persisted: ConversationState = {
+      providerId: 'fake',
+      entries: restoredEntries,
+      timestamp: Date.now(),
+      injectedMemoryIds: [],
+    };
+    persistence.save('channel-1', persisted);
+
+    // A fresh orchestrator (new process) restores from the same disk cache on construction.
+    const provider = new FakeProvider([textResponse('welcome back')]);
+    const orchestrator = new AgentOrchestrator({
+      resolveProvider: () => provider,
+      tools: [echoTool],
+      timeoutMs: 60_000,
+      persistence,
+    });
+    const fake = createFakeMessage({ content: 'still there?', channelId: 'channel-1' });
+
+    await orchestrator.handleMention(fake.message);
+
+    // The provider sees the RESTORED history (static prompt + prior turns), not a freshly-built one.
+    expect(provider.calls[0].messages[0]).toEqual(restoredEntries[0]);
+    expect(developerPromptText(provider)).toContain('RESTORED-STATIC-PROMPT');
+    expect(provider.calls[0].messages).toContainEqual(restoredEntries[1]);
+    // buildInitialHistory (which fetches the last ~25 channel messages) was never invoked.
+    expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
+
+    persistence.close();
   });
 });

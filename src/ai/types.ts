@@ -25,6 +25,11 @@ export type ConversationEntry =
       content: string;
     };
 
+// Bump whenever the ConversationEntry/ConversationState shape changes: persisted rows carrying an
+// older version are discarded on restore (the conversation simply starts fresh), so a shape change
+// can never feed a stale-shaped blob back into the running orchestrator.
+export const CONVERSATION_STATE_SCHEMA_VERSION = 1;
+
 export type ProviderToolType = 'function' | 'web_search' | 'code_interpreter';
 
 export type ProviderToolDefinition = {
