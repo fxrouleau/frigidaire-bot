@@ -1,4 +1,4 @@
-import * as process from 'node:process';
+import process from 'node:process';
 import { ChannelType, type Client, type Collection, type Message, type TextChannel } from 'discord.js';
 import OpenAI from 'openai';
 import type { ChatCompletionContentPart } from 'openai/resources/chat/completions';

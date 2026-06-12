@@ -1,4 +1,4 @@
-import * as process from 'node:process';
+import process from 'node:process';
 import OpenAI from 'openai';
 import { normalize } from './vectorMath';
 
