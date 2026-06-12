@@ -1,14 +1,25 @@
 import { logger } from '../logger';
-import { type Memory, MemoryStore } from './memory/memoryStore';
+import { makeDefaultEmbeddingProvider } from './memory/embeddingProvider';
+import { type Memory, MemoryStore, SELF_DIAGNOSIS_CATEGORIES } from './memory/memoryStore';
 import type { ToolDefinition, ToolHandlerContext } from './types';
 
 let memoryStore: MemoryStore | undefined;
 
 export function getMemoryStore(): MemoryStore {
   if (!memoryStore) {
-    memoryStore = new MemoryStore();
+    // Structural test hermeticity: inside Vitest, an un-injected getMemoryStore() must never touch
+    // the real on-disk DB or the network. Tests that need a specific store inject one via
+    // setMemoryStoreForTesting(); anything else gets an isolated, embedder-less in-memory store.
+    memoryStore = process.env.VITEST
+      ? new MemoryStore(':memory:')
+      : new MemoryStore(undefined, { embeddings: makeDefaultEmbeddingProvider() });
   }
   return memoryStore;
+}
+
+/** Test-only: lets tests point the shared memory store at an isolated instance (e.g. ':memory:'). */
+export function setMemoryStoreForTesting(store: MemoryStore | undefined): void {
+  memoryStore = store;
 }
 
 const summarizeTool: ToolDefinition = {
@@ -87,7 +98,7 @@ const imageTool: ToolDefinition = {
 const rememberFactTool: ToolDefinition = {
   name: 'remember_fact',
   description:
-    'Save something to long-term memory. Categories: "fact" (names, jobs, locations), "preference" (likes/dislikes), "personality" (communication style), "event" (something that happened), "vibe" (server culture, in-jokes).',
+    'Save something to long-term memory. Categories: "fact" (names, jobs, locations), "preference" (likes/dislikes), "personality" (communication style), "event" (something that happened — expires automatically after ~2 weeks; use "fact" for anything that should be remembered permanently), "vibe" (server culture, in-jokes).',
   parameters: {
     type: 'object',
     properties: {
@@ -100,7 +111,7 @@ const rememberFactTool: ToolDefinition = {
   },
   handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const store = getMemoryStore();
-    const id = store.save({
+    const id = await store.save({
       category: String(args.category ?? 'fact'),
       subject: String(args.subject ?? 'general'),
       content: String(args.content ?? ''),
@@ -130,17 +141,17 @@ const recallMemoriesTool: ToolDefinition = {
 
     const results = subject ? store.getBySubject(subject) : [];
 
-    // Also search via FTS
+    // Also run hybrid (semantic + keyword) search
     try {
-      const ftsResults = store.search(query, 15);
+      const searchResults = await store.search(query, 15);
       const existingIds = new Set(results.map((r) => r.id));
-      for (const r of ftsResults) {
+      for (const r of searchResults) {
         if (!existingIds.has(r.id)) {
           results.push(r);
         }
       }
     } catch {
-      // FTS search may fail on certain queries; fall back to subject-only results
+      // Search may fail (e.g. embeddings and FTS both unavailable); fall back to subject-only results
     }
 
     if (results.length === 0) {
@@ -183,7 +194,7 @@ const forgetMemoryTool: ToolDefinition = {
 const queryLongTermMemoryTool: ToolDefinition = {
   name: 'query_long_term_memory',
   description:
-    'Search long-term memory broadly. Use for open-ended questions like "what do you know about X", "tell me about Y", "memories about Z". Searches by subject name, topic keywords, and category. Returns a comprehensive view.',
+    'Search conversational long-term memory: facts, preferences, personality, events, and server vibe. Use for open-ended questions like "what do you know about X", "tell me about Y", "memories about Z". Searches by subject name, topic keywords, and category. Bot self-diagnosis entries (capability gaps, errors, improvement ideas) are not included — use query_self_diagnosis for those.',
   parameters: {
     type: 'object',
     properties: {
@@ -220,7 +231,7 @@ const queryLongTermMemoryTool: ToolDefinition = {
 
     // 2. FTS search for topic/keyword matches
     try {
-      const ftsResults = store.search(query, 20);
+      const ftsResults = await store.search(query, 20);
       for (const r of ftsResults) {
         if (category && r.category !== category) continue;
         if (!seenIds.has(r.id)) {
@@ -256,35 +267,16 @@ const queryLongTermMemoryTool: ToolDefinition = {
   },
 };
 
-const SELF_DIAGNOSIS_CATEGORIES = [
-  'capability_gap',
-  'pain_point',
-  'feature_request',
-  'improvement_idea',
-  'parse_failure',
-  'tool_error',
-  'missing_context',
-  'unrecognized_content',
-];
-
 const querySelfDiagnosisTool: ToolDefinition = {
   name: 'query_self_diagnosis',
   description:
-    'Check what the bot has been struggling with or what could be improved. Use when asked "what have you been struggling with?", "what should we improve?", "any issues lately?", "what are your pain points?".',
+    'Check what the bot has been struggling with or what could be improved. Use when asked "what have you been struggling with?", "what should we improve?", "any issues lately?", "what are your pain points?". Entries are prefixed with [id:N]; pass an id to forget_memory to remove one.',
   parameters: {
     type: 'object',
     properties: {
       category: {
         type: 'string',
-        enum: [
-          'capability_gap',
-          'pain_point',
-          'feature_request',
-          'improvement_idea',
-          'parse_failure',
-          'tool_error',
-          'all',
-        ],
+        enum: [...SELF_DIAGNOSIS_CATEGORIES, 'all'],
         description: 'Filter by type of issue. Use "all" to see everything.',
       },
       limit: {
@@ -320,7 +312,9 @@ const querySelfDiagnosisTool: ToolDefinition = {
       return "No self-diagnosis data found yet. The bot hasn't logged any issues or improvement ideas.";
     }
 
-    const formatted = results.map((m) => `[${m.category}] ${m.content} (${m.updated_at})`).join('\n');
+    // [id:N] prefixes keep forget_memory usable for self-diagnosis entries — search() excludes these
+    // categories, so this tool is their only discovery path.
+    const formatted = results.map((m) => `[id:${m.id}] [${m.category}] ${m.content} (${m.updated_at})`).join('\n');
 
     return `Self-diagnosis (${results.length} entries):\n${formatted}`;
   },

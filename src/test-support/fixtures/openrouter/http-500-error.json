@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "description": "HTTP 500 with an error body; the SDK should raise an APIError.",
+  "status": 500,
+  "request": {
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "messages": [{ "role": "user", "content": "Hello" }]
+  },
+  "response": {
+    "error": {
+      "message": "Internal Server Error",
+      "code": 500
+    }
+  }
+}

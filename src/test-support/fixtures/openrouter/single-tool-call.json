@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "description": "Single function tool_call (remember_fact), content null, finish_reason 'tool_calls'.",
+  "status": 200,
+  "request": {
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "messages": [{ "role": "user", "content": "Remember that TestUser likes cats" }]
+  },
+  "response": {
+    "id": "gen-test-tool-001",
+    "object": "chat.completion",
+    "created": 1735689600,
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_001",
+              "type": "function",
+              "function": {
+                "name": "remember_fact",
+                "arguments": "{\"category\":\"fact\",\"subject\":\"TestUser\",\"content\":\"Test user likes cats\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 18,
+      "completion_tokens": 24,
+      "total_tokens": 42
+    }
+  }
+}

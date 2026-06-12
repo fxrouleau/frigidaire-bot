@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "description": "Tool call whose function.arguments is not valid JSON; parser must fall back to {}.",
+  "status": 200,
+  "request": {
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "messages": [{ "role": "user", "content": "Remember something" }]
+  },
+  "response": {
+    "id": "gen-test-malformed-001",
+    "object": "chat.completion",
+    "created": 1735689600,
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_001",
+              "type": "function",
+              "function": {
+                "name": "remember_fact",
+                "arguments": "{not valid json"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 8,
+      "total_tokens": 18
+    }
+  }
+}

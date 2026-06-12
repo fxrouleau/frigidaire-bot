@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "description": "Plain assistant text reply with finish_reason 'stop'.",
+  "status": 200,
+  "request": {
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "messages": [{ "role": "user", "content": "Say hi" }]
+  },
+  "response": {
+    "id": "gen-test-text-001",
+    "object": "chat.completion",
+    "created": 1735689600,
+    "model": "deepseek/deepseek-v3.2:nitro",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Hello! This is a plain text reply.",
+          "refusal": null
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 12,
+      "completion_tokens": 9,
+      "total_tokens": 21
+    }
+  }
+}

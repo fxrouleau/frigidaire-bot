@@ -244,3 +244,8 @@ dist
 # SQLite data directory
 data/
 
+# Git history and local tooling — never needed inside images
+.git
+.claude
+REFACTOR_PLAN.md
+
