@@ -5,6 +5,10 @@ export type ConversationState = {
   entries: ConversationEntry[];
   timestamp: number;
   thoughts?: unknown;
+  // Ids of memories already injected into this window's prompt (static seed + every dynamic turn),
+  // so a memory rendered once isn't repeated on later turns. Plain number[] — kept JSON-serializable
+  // on purpose (conversation state is persisted across restarts).
+  injectedMemoryIds?: number[];
 };
 
 export class ConversationStore {
