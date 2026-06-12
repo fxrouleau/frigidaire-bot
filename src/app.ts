@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as process from 'node:process';
 import { Client, GatewayIntentBits } from 'discord.js';
 import * as dotenv from 'dotenv';
+import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
 import { getMemoryStore } from './ai/tools';
 import { logger } from './logger';
@@ -84,3 +85,28 @@ client.once('ready', () => {
 });
 
 client.login(process.env.CLIENT_SECRET);
+
+// Graceful shutdown: the bot redeploys on every master merge (SIGTERM from Docker). Flush/close both
+// SQLite handles and the Discord connection so the next boot reads a clean WAL. Idempotent — a second
+// signal during shutdown is ignored.
+let shuttingDown = false;
+const shutdown = (signal: string) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info(`Received ${signal}, shutting down.`);
+  try {
+    getMemoryStore().close();
+  } catch (error) {
+    logger.warn('Closing memory store on shutdown failed:', error);
+  }
+  try {
+    getConversationPersistence().close();
+  } catch (error) {
+    logger.warn('Closing conversation persistence on shutdown failed:', error);
+  }
+  void client.destroy();
+  process.exit(0);
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

@@ -6,6 +6,8 @@ import { createFakeMessage } from '../test-support/fakeDiscord';
 import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
 import { FakeProvider, errorStep, textResponse, toolCallResponse } from '../test-support/fakeProvider';
 import { AgentOrchestrator } from './agent';
+import { ConversationPersistence } from './conversationPersistence';
+import type { ConversationState } from './conversationStore';
 import { loadErrorCapture } from './debugCapture';
 import { MemoryStore } from './memory/memoryStore';
 import { getMemoryStore, setMemoryStoreForTesting } from './tools';
@@ -639,5 +641,45 @@ describe('AgentOrchestrator per-turn memory refresh', () => {
     // A fresh window resets injectedMemoryIds, so the same memory is allowed to render again.
     expect(dynamicContextText(provider, 0)).toContain('- works as a plumber');
     expect(dynamicContextText(provider, 1)).toContain('- works as a plumber');
+  });
+});
+
+describe('AgentOrchestrator conversation persistence', () => {
+  it('restores persisted state across a restart instead of rebuilding initial history', async () => {
+    // Simulate a pre-restart conversation already cached on disk.
+    const persistence = new ConversationPersistence(':memory:');
+    const restoredEntries: ConversationEntry[] = [
+      { kind: 'message', role: 'developer', content: [{ type: 'text', text: 'RESTORED-STATIC-PROMPT' }] },
+      { kind: 'message', role: 'user', content: [{ type: 'text', text: 'earlier message' }] },
+      { kind: 'message', role: 'assistant', content: [{ type: 'text', text: 'earlier reply' }] },
+    ];
+    const persisted: ConversationState = {
+      providerId: 'fake',
+      entries: restoredEntries,
+      timestamp: Date.now(),
+      injectedMemoryIds: [],
+    };
+    persistence.save('channel-1', persisted);
+
+    // A fresh orchestrator (new process) restores from the same disk cache on construction.
+    const provider = new FakeProvider([textResponse('welcome back')]);
+    const orchestrator = new AgentOrchestrator({
+      resolveProvider: () => provider,
+      tools: [echoTool],
+      timeoutMs: 60_000,
+      persistence,
+    });
+    const fake = createFakeMessage({ content: 'still there?', channelId: 'channel-1' });
+
+    await orchestrator.handleMention(fake.message);
+
+    // The provider sees the RESTORED history (static prompt + prior turns), not a freshly-built one.
+    expect(provider.calls[0].messages[0]).toEqual(restoredEntries[0]);
+    expect(developerPromptText(provider)).toContain('RESTORED-STATIC-PROMPT');
+    expect(provider.calls[0].messages).toContainEqual(restoredEntries[1]);
+    // buildInitialHistory (which fetches the last ~25 channel messages) was never invoked.
+    expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
+
+    persistence.close();
   });
 });

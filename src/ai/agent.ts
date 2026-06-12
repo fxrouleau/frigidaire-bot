@@ -2,6 +2,7 @@ import * as process from 'node:process';
 import { type Message, StickerFormatType } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
+import type { ConversationPersistence } from './conversationPersistence';
 import { ConversationStore } from './conversationStore';
 import { writeErrorCapture } from './debugCapture';
 import { logFailure } from './failureLogger';
@@ -50,6 +51,9 @@ export type AgentOrchestratorOptions = {
   timeoutMs?: number;
   maxToolRounds?: number;
   maxToolInvocations?: number;
+  // When provided, conversation state is mirrored to disk so it survives a restart within the timeout
+  // window. Default (undefined) keeps the store pure in-memory — existing tests stay hermetic.
+  persistence?: ConversationPersistence;
 };
 
 export class AgentOrchestrator {
@@ -60,7 +64,7 @@ export class AgentOrchestrator {
   private readonly maxToolInvocations: number;
 
   constructor(opts: AgentOrchestratorOptions = {}) {
-    this.store = new ConversationStore(opts.timeoutMs ?? CONVERSATION_TIMEOUT);
+    this.store = new ConversationStore(opts.timeoutMs ?? CONVERSATION_TIMEOUT, opts.persistence);
     this.resolveProvider = opts.resolveProvider ?? getProviderForChannel;
     this.tools = opts.tools ?? toolDefinitions;
     this.maxToolRounds = opts.maxToolRounds ?? MAX_TOOL_ROUNDS;

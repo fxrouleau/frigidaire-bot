@@ -1095,6 +1095,11 @@ export class MemoryStore {
     return this.stmt("SELECT * FROM emojis WHERE active = 1 AND (caption IS NULL OR caption = '')").all() as EmojiRow[];
   }
 
+  /** Closes the underlying database handle (graceful shutdown). */
+  close(): void {
+    this.db.close();
+  }
+
   // ---- Internals ----
 
   /** Returns the cached prepared statement for this SQL, compiling it on first use. */
