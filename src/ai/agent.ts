@@ -16,7 +16,7 @@ import type {
   ProviderToolCall,
   ToolDefinition,
 } from './types';
-import { formatTimestampET } from './utils';
+import { formatRelativeAge, formatTimestampET } from './utils';
 
 const CONVERSATION_TIMEOUT = Number(process.env.CONVERSATION_TIMEOUT_MS) || 15 * 60 * 1000; // 15 minutes
 const MAX_TOOL_ROUNDS = Number(process.env.MAX_TOOL_ROUNDS) || 10;
@@ -385,17 +385,17 @@ export class AgentOrchestrator {
 
     const personalitySection =
       personalityMemories.length > 0
-        ? `\nWhat you've learned about this server's culture and vibe:\n${personalityMemories.map((m) => `- ${m.content}`).join('\n')}\n`
+        ? `\nWhat you've learned about this server's culture and vibe:\n${personalityMemories.map((m) => `- ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
         : '';
 
     const userSection =
       userSpecificMemories.length > 0
-        ? `\nWhat you know about the person talking to you right now (${currentUserDisplayName}):\n${userSpecificMemories.map((m) => `- ${m.content}`).join('\n')}\n`
+        ? `\nWhat you know about the person talking to you right now (${currentUserDisplayName}):\n${userSpecificMemories.map((m) => `- ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
         : '';
 
     const contextualSection =
       contextualMemories.length > 0
-        ? `\nRelevant to this conversation:\n${contextualMemories.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')}\n`
+        ? `\nRelevant to this conversation:\n${contextualMemories.map((m) => `- [${m.category}] ${m.subject}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}\n`
         : '';
 
     return `You are ${botName}, a bot in a private, adults-only Discord server.
@@ -416,7 +416,7 @@ How you behave:
 
 You can search the web natively. Use it SPARINGLY — only when you genuinely need current, real-time information you couldn't possibly know (live scores, recent news, release dates, etc). Don't search for things you already know. Don't follow links people share.
 ${identitiesSection}${emojisSection}${personalitySection}${userSection}${contextualSection}
-These memories are background knowledge — things you know from hanging out in this server. Do NOT force references to inside jokes, show off what you know, or try to reference multiple memories in one response. Let things come up naturally, the way you'd reference a friend's hobby only when it's actually relevant to the conversation. If nothing from your memories is relevant to what's being discussed, just don't mention them.
+These memories are background knowledge — things you know from hanging out in this server. Do NOT force references to inside jokes, show off what you know, or try to reference multiple memories in one response. Let things come up naturally, the way you'd reference a friend's hobby only when it's actually relevant to the conversation. If nothing from your memories is relevant to what's being discussed, just don't mention them. Each memory is tagged with how long ago it was last confirmed; treat months-old current-state claims — what someone "still" does, owns, or plays — as possibly outdated, so hedge or ask instead of asserting them as current fact.
 
 MEMORY: You have a long-term memory system. Use the remember_fact tool when something genuinely important comes up — real names, jobs, major life events, strong preferences, or things someone would expect you to remember next time. Do NOT save every little thing; skip small talk, throwaway opinions, and mundane details. Think of what you'd actually remember about a friend after a night out — the big stuff, not every sentence. If someone corrects a fact you know, save the updated version.
 

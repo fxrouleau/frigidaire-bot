@@ -96,6 +96,28 @@ describe('AgentOrchestrator.handleMention', () => {
     expect(promptText).not.toContain('prefer emojis near the top');
   });
 
+  it('annotates injected memory lines with their relative age and warns about stale current-state claims', async () => {
+    // Default fake author display name is 'Test User', the key buildDeveloperPrompt fetches by.
+    await getMemoryStore().save({ category: 'fact', subject: 'Test User', content: 'works as a plumber' });
+
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'hello' });
+
+    await orchestrator.handleMention(fake.message);
+
+    const developerEntry = provider.calls[0].messages.find(
+      (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
+    );
+    expect(developerEntry).toBeDefined();
+    const promptText = developerEntry!.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
+
+    // The just-saved memory renders with a 'today' age annotation appended.
+    expect(promptText).toContain('- works as a plumber (today)');
+    // The guidance sentence teaching the model to distrust stale current-state claims is present.
+    expect(promptText).toContain('how long ago it was last confirmed');
+  });
+
   it('executes a single tool round then replies', async () => {
     const provider = new FakeProvider([
       toolCallResponse([{ id: 't1', name: 'echo_tool', arguments: {} }]),
