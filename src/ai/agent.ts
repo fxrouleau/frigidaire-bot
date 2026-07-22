@@ -3,7 +3,7 @@ import { type Message, StickerFormatType } from 'discord.js';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 import type { ConversationPersistence } from './conversationPersistence';
-import { ConversationStore } from './conversationStore';
+import { type ConversationState, ConversationStore } from './conversationStore';
 import { writeErrorCapture } from './debugCapture';
 import { logFailure } from './failureLogger';
 import type { EmojiRow, Identity, Memory, MemoryStore } from './memory/memoryStore';
@@ -22,6 +22,10 @@ import { formatRelativeAge, formatTimestampET } from './utils';
 const CONVERSATION_TIMEOUT = Number(process.env.CONVERSATION_TIMEOUT_MS) || 15 * 60 * 1000; // 15 minutes
 const MAX_TOOL_ROUNDS = Number(process.env.MAX_TOOL_ROUNDS) || 10;
 const MAX_TOOL_INVOCATIONS = Number(process.env.MAX_TOOL_INVOCATIONS) || 50;
+// Cap on persisted conversation entries per channel (static prompt + newest turns). Every turn
+// refreshes the expiry clock, so a continuously active channel never times out — without a cap its
+// history grows until the model's context overflows and every mention errors.
+const MAX_CONVERSATION_ENTRIES = Number(process.env.MAX_CONVERSATION_ENTRIES) || 120;
 
 // `<@123>` / `<@!123>` user mentions (the legacy `!` is the old nickname form). Role (`<@&>`) and
 // channel (`<#>`) mentions are deliberately not matched.
@@ -51,6 +55,7 @@ export type AgentOrchestratorOptions = {
   timeoutMs?: number;
   maxToolRounds?: number;
   maxToolInvocations?: number;
+  maxConversationEntries?: number;
   // When provided, conversation state is mirrored to disk so it survives a restart within the timeout
   // window. Default (undefined) keeps the store pure in-memory — existing tests stay hermetic.
   persistence?: ConversationPersistence;
@@ -62,6 +67,9 @@ export class AgentOrchestrator {
   private readonly tools: ToolDefinition[];
   private readonly maxToolRounds: number;
   private readonly maxToolInvocations: number;
+  private readonly maxConversationEntries: number;
+  // Per-channel promise chains that serialize turns; an entry is removed once its channel goes idle.
+  private readonly channelQueues = new Map<string, Promise<void>>();
 
   constructor(opts: AgentOrchestratorOptions = {}) {
     this.store = new ConversationStore(opts.timeoutMs ?? CONVERSATION_TIMEOUT, opts.persistence);
@@ -69,58 +77,87 @@ export class AgentOrchestrator {
     this.tools = opts.tools ?? toolDefinitions;
     this.maxToolRounds = opts.maxToolRounds ?? MAX_TOOL_ROUNDS;
     this.maxToolInvocations = opts.maxToolInvocations ?? MAX_TOOL_INVOCATIONS;
+    this.maxConversationEntries = opts.maxConversationEntries ?? MAX_CONVERSATION_ENTRIES;
   }
 
+  /**
+   * Public entry point. Turns in the same channel are serialized through a per-channel promise
+   * chain — concurrent mentions used to race on the same conversation state, and the losing turn's
+   * user message and reply silently vanished from history when the winner's set() overwrote it.
+   */
   async handleMention(message: Message) {
-    const stopTyping = this.startTypingLoop(message);
-    const botName = message.client.user.displayName;
-    const provider = this.resolveProvider(message.channel.id);
-    if (!provider) {
-      stopTyping();
-      await message.reply('No AI provider is configured for this bot.');
-      return;
-    }
-
-    this.store.pruneExpired();
     const channelId = message.channel.id;
-    let state = this.store.get(channelId);
-
-    if (!state) {
-      const { entries: initialEntries, injectedMemoryIds } = await this.buildInitialHistory(message, provider);
-      state = {
-        providerId: provider.id,
-        entries: initialEntries,
-        injectedMemoryIds,
-        timestamp: Date.now(),
-      };
-      this.store.set(channelId, state);
+    const previous = this.channelQueues.get(channelId) ?? Promise.resolve();
+    const run = previous.then(() => this.processMention(message));
+    // processMention handles its own errors; this catch only keeps the chain usable for the next turn.
+    const tail = run.catch(() => {});
+    this.channelQueues.set(channelId, tail);
+    try {
+      await run;
+    } finally {
+      if (this.channelQueues.get(channelId) === tail) {
+        this.channelQueues.delete(channelId);
+      }
     }
+  }
 
-    if (!state) {
-      stopTyping();
-      await message.reply('Failed to initialize the conversation state.');
-      return;
-    }
-
-    const providerTools = provider.supportedTools;
-    const userEntry = this.buildUserEntry(message);
-
-    // Per-turn memory refresh: rebuild the dynamic context (speaker bucket + contextual search +
-    // mentioned-subject pulls) once per mention, before chat() and outside the tool loop, so topic
-    // shifts and new @-mentions mid-conversation get fresh retrieval. The static prompt (entries[0])
-    // is never touched, preserving provider prefix-caching.
-    const priorInjectedIds = state.injectedMemoryIds ?? [];
-    const store = this.safeStore();
-    const dynamic = store
-      ? await this.buildDynamicContextEntry(message, store, priorInjectedIds)
-      : { entry: undefined, injectedIds: [] };
-    const injectedMemoryIds = [...priorInjectedIds, ...dynamic.injectedIds];
-
-    const workingEntries: ConversationEntry[] = dynamic.entry
-      ? [...state.entries, dynamic.entry, userEntry]
-      : [...state.entries, userEntry];
+  private async processMention(message: Message) {
+    const stopTyping = this.startTypingLoop(message);
+    const channelId = message.channel.id;
+    // Referenced by the catch block; populated inside the try as the turn progresses. Everything
+    // after startTypingLoop must run under the try — a throw before it (history fetch, memory
+    // lookups) used to leak the typing loop forever and crash the process as an unhandled rejection.
+    let provider: AiProvider | undefined;
+    let state: ConversationState | undefined;
+    let workingEntries: ConversationEntry[] = [];
 
     try {
+      provider = this.resolveProvider(channelId);
+      if (!provider) {
+        stopTyping();
+        await message.reply('No AI provider is configured for this bot.');
+        return;
+      }
+
+      this.store.pruneExpired();
+      state = this.store.get(channelId);
+
+      if (!state) {
+        const { entries: initialEntries, injectedMemoryIds } = await this.buildInitialHistory(message, provider);
+        state = {
+          providerId: provider.id,
+          entries: initialEntries,
+          injectedMemoryIds,
+          timestamp: Date.now(),
+        };
+        this.store.set(channelId, state);
+      }
+
+      const providerTools = provider.supportedTools;
+      const userEntry = this.buildUserEntry(message);
+
+      // Treat unknown tool names as host-handled too: executeToolCalls answers them with its
+      // synthetic "not supported" result. Filtering them out entirely would leave a dangling
+      // tool_call with no tool_result in the transcript — strict backends reject that with a 400,
+      // and once persisted it poisons every following turn in the window.
+      const isHostHandled = (call: ProviderToolCall): boolean => {
+        const providerTool = providerTools.find((tool) => tool.name === call.name);
+        return providerTool ? (providerTool.hostHandled ?? false) : true;
+      };
+
+      // Per-turn memory refresh: rebuild the dynamic context (speaker bucket + contextual search +
+      // mentioned-subject pulls) once per mention, before chat() and outside the tool loop, so topic
+      // shifts and new @-mentions mid-conversation get fresh retrieval. The static prompt (entries[0])
+      // is never touched, preserving provider prefix-caching.
+      const priorInjectedIds = state.injectedMemoryIds ?? [];
+      const store = this.safeStore();
+      const dynamic = store
+        ? await this.buildDynamicContextEntry(message, store, priorInjectedIds)
+        : { entry: undefined, injectedIds: [] };
+      const injectedMemoryIds = [...priorInjectedIds, ...dynamic.injectedIds];
+
+      workingEntries = dynamic.entry ? [...state.entries, dynamic.entry, userEntry] : [...state.entries, userEntry];
+
       const firstResponse = await provider.chat({
         messages: workingEntries,
         tools: providerTools,
@@ -130,10 +167,7 @@ export class AgentOrchestrator {
 
       workingEntries.push(...firstResponse.outputEntries);
 
-      const hostHandledCalls = firstResponse.toolCalls.filter((call) => {
-        const providerTool = providerTools.find((tool) => tool.name === call.name);
-        return providerTool?.hostHandled ?? false;
-      });
+      const hostHandledCalls = firstResponse.toolCalls.filter(isHostHandled);
 
       if (hostHandledCalls.length > 0) {
         const toolResults = await this.executeToolCalls(hostHandledCalls, message, provider, channelId);
@@ -154,10 +188,7 @@ export class AgentOrchestrator {
           workingEntries.push(...roundResponse.outputEntries);
           lastThoughts = roundResponse.thoughts ?? lastThoughts;
 
-          const roundToolCalls = roundResponse.toolCalls.filter((call) => {
-            const providerTool = providerTools.find((tool) => tool.name === call.name);
-            return providerTool?.hostHandled ?? false;
-          });
+          const roundToolCalls = roundResponse.toolCalls.filter(isHostHandled);
 
           if (roundToolCalls.length === 0) {
             finalResponse = roundResponse;
@@ -168,6 +199,20 @@ export class AgentOrchestrator {
           if (totalInvocations > this.maxToolInvocations) {
             logger.warn(
               `Tool invocation limit (${this.maxToolInvocations}) exceeded in channel ${channelId}, forcing text response.`,
+            );
+            // The just-received calls are already in workingEntries (outputEntries above) but will
+            // never execute. Answer them with synthetic results — an assistant tool_calls message
+            // with no matching tool results is an invalid transcript that strict backends 400 on.
+            workingEntries.push(
+              ...roundToolCalls.map(
+                (call) =>
+                  ({
+                    kind: 'tool_result',
+                    id: call.id,
+                    name: call.name,
+                    content: 'Tool invocation limit reached for this turn; the call was not executed.',
+                  }) satisfies ConversationEntry,
+              ),
             );
             const forcedResponse = await provider.chat({
               messages: workingEntries,
@@ -199,11 +244,16 @@ export class AgentOrchestrator {
         }
 
         stopTyping();
-        await this.sendReply(finalResponse?.text, message);
+        const sentText = await this.sendReply(finalResponse?.text, message);
+        if (!finalResponse?.text) {
+          // The fallback line was shown to the channel — record it so the model knows what its
+          // own last visible message was on the next turn.
+          workingEntries.push({ kind: 'message', role: 'assistant', content: [{ type: 'text', text: sentText }] });
+        }
 
         this.store.set(channelId, {
           providerId: provider.id,
-          entries: workingEntries,
+          entries: this.trimEntries(workingEntries),
           injectedMemoryIds,
           thoughts: finalResponse?.thoughts ?? lastThoughts,
           timestamp: Date.now(),
@@ -212,11 +262,14 @@ export class AgentOrchestrator {
       }
 
       stopTyping();
-      await this.sendReply(firstResponse.text, message);
+      const sentText = await this.sendReply(firstResponse.text, message);
+      if (!firstResponse.text) {
+        workingEntries.push({ kind: 'message', role: 'assistant', content: [{ type: 'text', text: sentText }] });
+      }
 
       this.store.set(channelId, {
         providerId: provider.id,
-        entries: workingEntries,
+        entries: this.trimEntries(workingEntries),
         injectedMemoryIds,
         thoughts: firstResponse.thoughts ?? state.thoughts,
         timestamp: Date.now(),
@@ -229,10 +282,10 @@ export class AgentOrchestrator {
       );
       const capturePath = writeErrorCapture({
         channelId,
-        model: provider.defaultModel,
+        model: provider?.defaultModel ?? 'unknown',
         error,
         conversationEntries: workingEntries,
-        thoughts: state.thoughts,
+        thoughts: state?.thoughts,
       });
       if (capturePath) {
         logger.info(`Error capture written to ${capturePath}`);
@@ -255,6 +308,19 @@ export class AgentOrchestrator {
     }
   }
 
+  /**
+   * Bounds persisted history so a continuously active channel (whose expiry clock resets every
+   * turn) can't grow the prompt until the model's context overflows. Keeps the static prompt
+   * (entries[0]) plus the newest entries, advancing past any leading tool_results so a dropped
+   * tool_call never leaves orphaned results at the start of the transcript.
+   */
+  private trimEntries(entries: ConversationEntry[]): ConversationEntry[] {
+    if (entries.length <= this.maxConversationEntries) return entries;
+    let start = entries.length - (this.maxConversationEntries - 1);
+    while (start < entries.length && entries[start].kind === 'tool_result') start++;
+    return [entries[0], ...entries.slice(start)];
+  }
+
   private async executeToolCalls(
     calls: ProviderToolCall[],
     message: Message,
@@ -263,6 +329,20 @@ export class AgentOrchestrator {
   ): Promise<ConversationEntry[]> {
     const results: ConversationEntry[] = [];
     for (const call of calls) {
+      if (call.argumentsInvalid) {
+        // Executing with the substituted `{}` would silently run the tool on garbage (an image from
+        // an empty prompt, a summary over empty timestamps). Tell the model so it can retry.
+        logger.warn(`Tool ${call.name} was called with malformed JSON arguments; returning an error result.`);
+        logFailure('parse_failure', `Tool "${call.name}" called with malformed JSON arguments`);
+        results.push({
+          kind: 'tool_result',
+          id: call.id,
+          name: call.name,
+          content: `The arguments for "${call.name}" were not valid JSON. Retry the call with corrected arguments.`,
+        });
+        continue;
+      }
+
       const toolDefinition = this.tools.find((tool) => tool.name === call.name);
       if (!toolDefinition) {
         logger.warn(`Tool ${call.name} was requested but no handler is registered.`);
@@ -680,18 +760,21 @@ ${lines.join('\n')}
     return parts.length > 0 ? parts : [{ type: 'text', text: '' }];
   }
 
-  private async sendReply(content: string | undefined, message: Message) {
+  /** Sends the reply (or the empty-response fallback) and returns the text that was actually sent. */
+  private async sendReply(content: string | undefined, message: Message): Promise<string> {
     if (!content) {
       const authorName = message.member?.displayName || message.author.username;
       logFailure('parse_failure', `Empty LLM response for message from ${authorName}`);
-      await this.safeSend(message, "I've processed the information, but I don't have anything further to add.");
-      return;
+      const fallback = "I've processed the information, but I don't have anything further to add.";
+      await this.safeSend(message, fallback);
+      return fallback;
     }
 
     const chunks = splitMessage(content);
     for (const chunk of chunks) {
       await this.safeSend(message, chunk);
     }
+    return content;
   }
 
   private async safeSend(message: Message, content: string): Promise<void> {

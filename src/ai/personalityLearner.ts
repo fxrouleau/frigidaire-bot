@@ -2,12 +2,19 @@ import process from 'node:process';
 import { ChannelType, type Client, type Collection, type Message, type TextChannel } from 'discord.js';
 import OpenAI from 'openai';
 import type { ChatCompletionContentPart } from 'openai/resources/chat/completions';
+import { envBool } from '../envUtils';
 import { logger } from '../logger';
 import type { MemoryStore } from './memory/memoryStore';
 import { formatTimestampET } from './utils';
 
 const DEFAULT_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_MIN_MESSAGES = 5;
+// The openai-node SDK's default request timeout is 10 minutes — a single hung vision request would
+// stall the learner (and, with the re-entrancy guard, every subsequent tick) for that long. 120s is
+// generous for one learner request.
+const REQUEST_TIMEOUT_MS = 120_000;
+/** Max inline image parts per observation batch — bounds vision-request size/cost for image-heavy channels. */
+export const MAX_IMAGES_PER_OBSERVATION = 8;
 
 // Single source of truth for valid categories — a runtime value (not just a type) because the TTL
 // sweep keys on exact category strings: a hallucinated category from the LLM ('Image', 'meme') would
@@ -239,6 +246,67 @@ Respond ONLY with a JSON object. If nothing actionable, respond with {"observati
 }`;
 }
 
+/**
+ * Structural subset of discord.js Message that buildMessageParts() needs — lets tests exercise the
+ * interleaving/image-cap logic with plain objects instead of full discord.js fakes.
+ */
+export type LearnerMessage = {
+  content: string;
+  createdAt: Date;
+  webhookId: string | null;
+  author: { id: string; bot: boolean; username: string };
+  member: { displayName: string } | null;
+  attachments: ReadonlyMap<string, { contentType?: string | null; url: string }>;
+  embeds: readonly { image?: { url: string } | null; thumbnail?: { url: string } | null }[];
+};
+
+/**
+ * Builds the interleaved text+image content parts for one observation batch. Image parts are capped
+ * at `maxImages` (text parts are never dropped): a 100-message batch of an image-heavy channel would
+ * otherwise inline an unbounded number of vision inputs into a single request.
+ */
+export function buildMessageParts(
+  messages: readonly LearnerMessage[],
+  maxImages: number = MAX_IMAGES_PER_OBSERVATION,
+): { parts: ChatCompletionContentPart[]; imageCount: number; truncatedImages: number } {
+  const parts: ChatCompletionContentPart[] = [];
+  let imageCount = 0;
+  let truncatedImages = 0;
+
+  const pushImage = (url: string): void => {
+    if (imageCount >= maxImages) {
+      truncatedImages++;
+      return;
+    }
+    parts.push({ type: 'image_url', image_url: { url } });
+    imageCount++;
+  };
+
+  for (const msg of messages) {
+    const name = msg.member?.displayName || msg.author.username;
+    const ts = formatTimestampET(msg.createdAt);
+    const idSuffix = !msg.webhookId && !msg.author.bot ? ` (id:${msg.author.id})` : '';
+    parts.push({ type: 'text', text: `[${ts}] [${name}${idSuffix}] ${msg.content}` });
+    // Inline image parts from attachments
+    for (const attachment of msg.attachments.values()) {
+      if (attachment.contentType?.startsWith('image/')) {
+        pushImage(attachment.url);
+      }
+    }
+    // Inline image parts from embeds
+    for (const embed of msg.embeds) {
+      if (embed.image?.url) {
+        pushImage(embed.image.url);
+      }
+      if (embed.thumbnail?.url) {
+        pushImage(embed.thumbnail.url);
+      }
+    }
+  }
+
+  return { parts, imageCount, truncatedImages };
+}
+
 export class PersonalityLearner {
   private readonly store: MemoryStore;
   private readonly intervalMs: number;
@@ -247,12 +315,21 @@ export class PersonalityLearner {
   private readonly activeChannels = new Set<string>();
   private readonly ignoredChannels: Set<string>;
   private client: OpenAI | undefined;
+  // Re-entrancy guard: a cycle slower than the interval must not overlap the next tick (it would
+  // double-process messages and regress the lastObserved watermark).
+  private observing = false;
 
   constructor(store: MemoryStore, intervalMs?: number) {
     this.store = store;
     this.intervalMs = intervalMs ?? (Number(process.env.LEARNING_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
     this.minMessages = Number(process.env.MIN_MESSAGES_FOR_OBSERVATION) || DEFAULT_MIN_MESSAGES;
-    this.ignoredChannels = new Set((process.env.LEARNER_IGNORE_CHANNELS || '').split(',').filter(Boolean));
+    // Trim entries so "123, 456" ignores both channels, not just the first.
+    this.ignoredChannels = new Set(
+      (process.env.LEARNER_IGNORE_CHANNELS || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean),
+    );
   }
 
   start(discordClient: Client): void {
@@ -339,6 +416,9 @@ export class PersonalityLearner {
         apiKey: process.env.OPENROUTER_API_KEY,
         baseURL: 'https://openrouter.ai/api/v1',
         defaultHeaders: { 'X-Title': 'Frigidaire Bot' },
+        // openai-node client option: max ms to wait for a response (SDK default is 10 minutes).
+        // Only applies to the client we construct here — an injected test client is untouched.
+        timeout: REQUEST_TIMEOUT_MS,
       });
     }
     return this.client;
@@ -411,7 +491,23 @@ export class PersonalityLearner {
     return { observations, identityUpdates };
   }
 
-  private async observe(discordClient: Client): Promise<void> {
+  /** One observation cycle. Public so tests can drive it directly; prod calls it via start()'s interval. */
+  async observe(discordClient: Client): Promise<void> {
+    // Skip (don't queue) overlapping ticks. The guard runs before activeChannels is consumed, so
+    // activity tracked during a slow cycle is preserved for the next tick.
+    if (this.observing) {
+      logger.debug('PersonalityLearner: Previous observation cycle still running — skipping this tick.');
+      return;
+    }
+    this.observing = true;
+    try {
+      await this.runObservationCycle(discordClient);
+    } finally {
+      this.observing = false;
+    }
+  }
+
+  private async runObservationCycle(discordClient: Client): Promise<void> {
     const channelsToProcess = [...this.activeChannels];
     this.activeChannels.clear();
 
@@ -426,7 +522,7 @@ export class PersonalityLearner {
     }
 
     const botName = discordClient.user?.displayName ?? 'Frigidaire';
-    const selfImprovementEnabled = (process.env.SELF_IMPROVEMENT_ENABLED ?? 'true') !== 'false';
+    const selfImprovementEnabled = envBool('SELF_IMPROVEMENT_ENABLED', true);
 
     for (const channelId of channelsToProcess) {
       try {
@@ -472,35 +568,14 @@ export class PersonalityLearner {
           }
         }
 
-        // Build interleaved content parts: text + images per message
-        const messageParts: ChatCompletionContentPart[] = [];
-        let imageCount = 0;
-        for (const msg of humanMessages) {
-          const name = msg.member?.displayName || msg.author.username;
-          const ts = formatTimestampET(msg.createdAt);
-          const idSuffix = !msg.webhookId && !msg.author.bot ? ` (id:${msg.author.id})` : '';
-          messageParts.push({ type: 'text', text: `[${ts}] [${name}${idSuffix}] ${msg.content}` });
-          // Inline image parts from attachments
-          for (const attachment of msg.attachments.values()) {
-            if (attachment.contentType?.startsWith('image/')) {
-              messageParts.push({ type: 'image_url', image_url: { url: attachment.url } });
-              imageCount++;
-            }
-          }
-          // Inline image parts from embeds
-          for (const embed of msg.embeds) {
-            if (embed.image?.url) {
-              messageParts.push({ type: 'image_url', image_url: { url: embed.image.url } });
-              imageCount++;
-            }
-            if (embed.thumbnail?.url) {
-              messageParts.push({ type: 'image_url', image_url: { url: embed.thumbnail.url } });
-              imageCount++;
-            }
-          }
-        }
+        // Build interleaved content parts: text + images per message (image parts are capped).
+        const { parts: messageParts, imageCount, truncatedImages } = buildMessageParts(humanMessages);
 
-        if (imageCount > 0) {
+        if (truncatedImages > 0) {
+          logger.info(
+            `PersonalityLearner: Image cap hit for channel ${channelId} — including ${imageCount} of ${imageCount + truncatedImages} images`,
+          );
+        } else if (imageCount > 0) {
           logger.info(`PersonalityLearner: Including ${imageCount} images from channel ${channelId}`);
         }
 

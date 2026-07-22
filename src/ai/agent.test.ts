@@ -31,7 +31,13 @@ const throwingTool: ToolDefinition = {
 
 function makeOrchestrator(
   provider: FakeProvider,
-  opts: { tools?: ToolDefinition[]; timeoutMs?: number; maxToolRounds?: number; maxToolInvocations?: number } = {},
+  opts: {
+    tools?: ToolDefinition[];
+    timeoutMs?: number;
+    maxToolRounds?: number;
+    maxToolInvocations?: number;
+    maxConversationEntries?: number;
+  } = {},
 ): AgentOrchestrator {
   return new AgentOrchestrator({
     resolveProvider: () => provider,
@@ -39,6 +45,7 @@ function makeOrchestrator(
     timeoutMs: opts.timeoutMs ?? 60_000,
     maxToolRounds: opts.maxToolRounds,
     maxToolInvocations: opts.maxToolInvocations,
+    maxConversationEntries: opts.maxConversationEntries,
   });
 }
 
@@ -326,6 +333,136 @@ describe('AgentOrchestrator.handleMention', () => {
 
     expect(fake1.recorders.messagesFetch.calls).toHaveLength(1);
     expect(fake2.recorders.messagesFetch.calls).toHaveLength(1);
+  });
+});
+
+describe('AgentOrchestrator crash resilience and transcript validity', () => {
+  it('survives a failing history fetch: no rejection escapes and the user gets an error reply (regression: typing-loop leak + process crash)', async () => {
+    const provider = new FakeProvider([textResponse('never reached')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'hello' });
+    const channel = fake.message.channel as unknown as { messages: { fetch: () => Promise<unknown> } };
+    channel.messages.fetch = () => Promise.reject(new Error('Missing Access'));
+
+    // Pre-fix, the fetch ran before the try block: this call rejected (→ unhandled rejection in
+    // prod, killing the process) and the typing loop was never stopped.
+    await expect(orchestrator.handleMention(fake.message)).resolves.toBeUndefined();
+
+    expect(provider.calls).toHaveLength(0);
+    expect(fake.recorders.reply.calls).toContainEqual(['Sorry, I encountered an error while processing your request.']);
+  });
+
+  it('answers a hallucinated tool name with a "not supported" result instead of leaving a dangling tool_call', async () => {
+    // The provider does NOT advertise this tool at all (unlike the older test where it was
+    // advertised as hostHandled). Pre-fix the call failed the hostHandled filter, was never
+    // executed, and the dangling tool_call was persisted — poisoning every later turn.
+    const provider = new FakeProvider([
+      toolCallResponse([{ id: 't1', name: 'hallucinated_tool', arguments: {} }]),
+      textResponse('recovered'),
+    ]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'use a made-up tool' });
+
+    await orchestrator.handleMention(fake.message);
+
+    expect(provider.calls).toHaveLength(2);
+    const results = toolResultEntries(provider.calls[1].messages);
+    expect(results.some((r) => r.id === 't1' && r.content.includes('not supported'))).toBe(true);
+    expect(fake.recorders.reply.calls).toContainEqual(['recovered']);
+  });
+
+  it('answers over-cap tool calls with synthetic results so the forced request has no dangling tool_calls', async () => {
+    const provider = new FakeProvider([
+      toolCallResponse([
+        { id: 't1', name: 'echo_tool', arguments: {} },
+        { id: 't2', name: 'echo_tool', arguments: {} },
+      ]),
+      toolCallResponse([{ id: 't3', name: 'echo_tool', arguments: {} }]),
+      textResponse('forced'),
+    ]);
+    const orchestrator = makeOrchestrator(provider, { maxToolInvocations: 2 });
+    const fake = createFakeMessage({ content: 'too many tools' });
+
+    await orchestrator.handleMention(fake.message);
+
+    // t3 pushed the count over the cap and was never executed — the forced request must still
+    // carry a tool_result for it (strict backends 400 on unanswered tool_calls).
+    const forcedCall = provider.calls[provider.calls.length - 1];
+    expect(forcedCall.toolChoice).toBe('none');
+    const results = toolResultEntries(forcedCall.messages);
+    expect(results.some((r) => r.id === 't3' && r.content.includes('limit reached'))).toBe(true);
+  });
+
+  it('returns an error tool_result for malformed JSON arguments instead of executing the tool with {}', async () => {
+    let executions = 0;
+    const countingTool: ToolDefinition = {
+      ...echoTool,
+      handler: async () => {
+        executions++;
+        return 'echo result';
+      },
+    };
+    const provider = new FakeProvider([
+      {
+        text: undefined,
+        toolCalls: [{ id: 't1', name: 'echo_tool', arguments: {}, argumentsInvalid: true }],
+        outputEntries: [{ kind: 'tool_call', id: 't1', name: 'echo_tool', arguments: {} }],
+        raw: undefined,
+      },
+      textResponse('ok'),
+    ]);
+    const orchestrator = makeOrchestrator(provider, { tools: [countingTool] });
+    const fake = createFakeMessage({ content: 'garbled call' });
+
+    await orchestrator.handleMention(fake.message);
+
+    expect(executions).toBe(0);
+    const results = toolResultEntries(provider.calls[1].messages);
+    expect(results.some((r) => r.id === 't1' && r.content.includes('not valid JSON'))).toBe(true);
+    expect(getMemoryStore().getByCategory('parse_failure').length).toBeGreaterThan(0);
+  });
+
+  it('serializes concurrent mentions in the same channel (regression: last write silently dropped the other turn)', async () => {
+    const provider = new FakeProvider([textResponse('One'), textResponse('Two')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fakeA = createFakeMessage({ content: 'first concurrent', channelId: 'same-channel', messageId: 'mA' });
+    const fakeB = createFakeMessage({ content: 'second concurrent', channelId: 'same-channel', messageId: 'mB' });
+
+    await Promise.all([orchestrator.handleMention(fakeA.message), orchestrator.handleMention(fakeB.message)]);
+
+    // The second turn must see the first turn's exchange: initial history is built once, and the
+    // second chat() input contains both the first user message and the first reply.
+    expect(fakeA.recorders.messagesFetch.calls.length + fakeB.recorders.messagesFetch.calls.length).toBe(1);
+    const secondTexts = provider.calls[1].messages
+      .filter((e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message')
+      .map((e) => e.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n'));
+    expect(secondTexts.some((t) => t.includes('first concurrent'))).toBe(true);
+    expect(secondTexts.some((t) => t.includes('One'))).toBe(true);
+  });
+
+  it('caps persisted conversation history while keeping the static prompt and pair-safe boundaries', async () => {
+    const provider = new FakeProvider([
+      textResponse('r1'),
+      textResponse('r2'),
+      textResponse('r3'),
+      textResponse('r4'),
+    ]);
+    const orchestrator = makeOrchestrator(provider, { maxConversationEntries: 5 });
+    const channelId = 'busy-channel';
+
+    for (let i = 0; i < 4; i++) {
+      const fake = createFakeMessage({ content: `turn ${i}`, channelId, messageId: `m${i}` });
+      await orchestrator.handleMention(fake.message);
+    }
+
+    // Each chat() input is trimmed-state + (dynamic?) + new user entry: bounded, not ever-growing.
+    const lastCall = provider.calls[3].messages;
+    expect(lastCall.length).toBeLessThanOrEqual(7);
+    // The static developer prompt survives every trim as the first entry.
+    expect(lastCall[0].kind).toBe('message');
+    expect((lastCall[0] as Extract<ConversationEntry, { kind: 'message' }>).role).toBe('developer');
+    // No entry sequence starts with an orphaned tool_result.
+    expect(lastCall[1]?.kind).not.toBe('tool_result');
   });
 });
 

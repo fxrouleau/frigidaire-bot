@@ -1,5 +1,6 @@
 services:
   frigidaire-bot:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: Dockerfile

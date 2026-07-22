@@ -2,6 +2,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { envBool } from '../envUtils';
 import { logger } from '../logger';
 import type { ConversationEntry } from './types';
 
@@ -69,7 +70,8 @@ export function writeErrorCapture(input: {
   conversationEntries: ConversationEntry[];
   thoughts?: unknown;
 }): string | undefined {
-  if (process.env.DEBUG_CAPTURE === '0') {
+  // Read at call time (not module load) so tests and runtime env changes both take effect.
+  if (!envBool('DEBUG_CAPTURE', true)) {
     return undefined;
   }
 

@@ -291,7 +291,10 @@ const querySelfDiagnosisTool: ToolDefinition = {
   handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const store = getMemoryStore();
     const category = args.category && args.category !== 'all' ? String(args.category) : undefined;
-    const limit = Number(args.limit ?? 15);
+    // Models sometimes pass non-numeric limits ("a few" → NaN), and NaN bound as a SQL LIMIT throws
+    // a datatype mismatch. Non-finite → default; otherwise floor to an integer within [1, 50].
+    const rawLimit = Number(args.limit ?? 15);
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit))) : 15;
 
     let results: Memory[] = [];
 
@@ -304,8 +307,10 @@ const querySelfDiagnosisTool: ToolDefinition = {
       }
     }
 
-    // Filter to only bot-related subjects FIRST, then sort and slice
-    results = results.filter((r) => r.subject === 'bot' || r.subject === 'server');
+    // No subject filter: the rows are already category-scoped via SELF_DIAGNOSIS_CATEGORIES, and the
+    // learner may save self-diagnosis observations under a person's display name. This tool is their
+    // only access path (search() and getBySubject() exclude these categories), so filtering to
+    // bot/server subjects would orphan those entries permanently.
     results.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
     results = results.slice(0, limit);
 

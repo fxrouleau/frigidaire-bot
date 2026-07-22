@@ -1,7 +1,9 @@
 const getTimestamp = () => new Date().toISOString();
 
 const log = (level: string, message: string, ...args: unknown[]) => {
-  console.log(`[${getTimestamp()}] [${level.toUpperCase()}] ${message}`, ...args);
+  // warn/error go to stderr so container log filtering and alerting can key off the stream.
+  const sink = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+  sink(`[${getTimestamp()}] [${level.toUpperCase()}] ${message}`, ...args);
 };
 
 export const logger = {
