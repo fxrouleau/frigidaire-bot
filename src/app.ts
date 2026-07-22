@@ -28,12 +28,34 @@ const eventFiles = fs
 for (const file of eventFiles) {
   const filePath = path.join(eventsPath, file);
   const event = require(filePath);
+  // Async handler rejections would otherwise become unhandled rejections and kill the process
+  // (one under-permissioned channel could crash the bot on every message there).
+  const run = (...args: unknown[]) => {
+    try {
+      Promise.resolve(event.execute(...args)).catch((error: unknown) => {
+        logger.error(`Unhandled error in ${file} handler for ${event.name}:`, error);
+      });
+    } catch (error) {
+      logger.error(`Unhandled error in ${file} handler for ${event.name}:`, error);
+    }
+  };
   if (event.once) {
-    client.once(event.name, (...args) => event.execute(...args));
+    client.once(event.name, run);
   } else {
-    client.on(event.name, (...args) => event.execute(...args));
+    client.on(event.name, run);
   }
 }
+
+// Last-resort safety nets. A rejection that slips past per-handler catches must not take the bot
+// down; a synchronous uncaught exception leaves unknown state, so log it and exit non-zero for
+// the container restart policy to handle.
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception, exiting:', error);
+  process.exit(1);
+});
 
 // Run memory compaction on startup
 try {
@@ -84,7 +106,10 @@ client.once('ready', () => {
   personalityLearner.start(client);
 });
 
-client.login(process.env.CLIENT_SECRET);
+client.login(process.env.CLIENT_SECRET).catch((error) => {
+  logger.error('Discord login failed:', error);
+  process.exit(1);
+});
 
 // Graceful shutdown: the bot redeploys on every master merge (SIGTERM from Docker). Flush/close both
 // SQLite handles and the Discord connection so the next boot reads a clean WAL. Idempotent — a second
@@ -104,8 +129,14 @@ const shutdown = (signal: string) => {
   } catch (error) {
     logger.warn('Closing conversation persistence on shutdown failed:', error);
   }
-  void client.destroy();
-  process.exit(0);
+  // destroy() is async (gateway + REST teardown); exiting before it settles leaves a dangling
+  // session. Wait for it, but never longer than 5s — the container must still stop promptly.
+  const forceExit = setTimeout(() => process.exit(0), 5000);
+  forceExit.unref();
+  client
+    .destroy()
+    .catch((error) => logger.warn('Destroying Discord client on shutdown failed:', error))
+    .finally(() => process.exit(0));
 };
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

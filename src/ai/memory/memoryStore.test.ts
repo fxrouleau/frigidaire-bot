@@ -245,6 +245,18 @@ describe('deactivate() and remove()', () => {
 
   it('deactivate() is a no-op for nonexistent ids', () => {
     expect(() => store.deactivate(999)).not.toThrow();
+    expect(store.deactivate(999)).toBe(false);
+  });
+
+  it('deactivate() returns true on first call, false on repeat calls (idempotent — no replayed FTS delete)', async () => {
+    // Per https://sqlite.org/fts5.html (external content tables): issuing the 'delete' command with
+    // values that no longer match what the index holds leaves the FTS index in an unpredictable
+    // state. A second deactivate(id) must therefore be a pure no-op.
+    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
+    expect(store.deactivate(id)).toBe(true);
+    expect(store.deactivate(id)).toBe(false);
+    expect(store.deactivate(id)).toBe(false);
+    expect(await store.search('pangolins')).toEqual([]);
   });
 
   it('remove() permanently deletes the row', async () => {
@@ -304,6 +316,29 @@ describe('compact()', () => {
     const active = store.getAllActive();
     expect(active).toHaveLength(1);
     expect(active[0].id).toBe(id1);
+  });
+
+  it('counts each duplicate exactly once in a 3-way mutual-duplicate group (no double deactivation)', async () => {
+    // Save three distinct memories (no save-time dedup), then rewrite them via raw SQL into three
+    // mutually overlapping contents (>60% pairwise word overlap), staggered so A is newest.
+    const idA = await store.save({ category: 'fact', subject: 'Felix', content: 'Enjoys swimming every weekend morning' });
+    const idB = await store.save({ category: 'fact', subject: 'Felix', content: 'Works as a plumber downtown daily' });
+    const idC = await store.save({ category: 'fact', subject: 'Felix', content: 'Collects vintage vinyl records often' });
+
+    // @ts-expect-error accessing private db for test setup
+    const db = store.db;
+    db.prepare("UPDATE memories SET content = 'Likes cats and dogs very much', updated_at = datetime('now') WHERE id = ?").run(idA);
+    db.prepare("UPDATE memories SET content = 'Likes cats and dogs very much indeed', updated_at = datetime('now', '-1 hour') WHERE id = ?").run(idB);
+    db.prepare("UPDATE memories SET content = 'Likes cats and dogs very much truly', updated_at = datetime('now', '-2 hours') WHERE id = ?").run(idC);
+
+    const deactivateSpy = vi.spyOn(store, 'deactivate');
+    const result = store.compact();
+
+    // Exactly two duplicates (B, C) of the kept newest (A). The buggy loop re-processed C through the
+    // (B, C) pair after it was already deactivated, double-counting `removed` and replaying deactivate.
+    expect(result.removed).toBe(2);
+    expect(deactivateSpy.mock.calls.map((c) => c[0])).toEqual([idB, idC]);
+    expect(store.getAllActive().map((m) => m.id)).toEqual([idA]);
   });
 
   it('does not touch memories with different subjects or categories', async () => {
@@ -370,12 +405,24 @@ describe('new self-improvement categories', () => {
     expect(byCategory[0].content).toBe('Cannot process custom Discord emojis');
   });
 
-  it('getBySubject("bot") returns self-diagnosis entries', async () => {
+  it('getBySubject() excludes self-diagnosis categories by default (no leak into chat prompts)', async () => {
+    // The learner can save self-diagnosis rows under a PERSON's subject; getBySubject() feeds the
+    // agent's speaker/mention prompt injection and recall, so those rows must not surface there.
+    await store.save({ category: 'tool_error', subject: 'bot', content: 'Error in image tool' });
+    await store.save({ category: 'capability_gap', subject: 'Felix', content: 'Cannot read the links Felix shares' });
+    await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+
+    expect(store.getBySubject('bot')).toEqual([]);
+    const felixResults = store.getBySubject('Felix');
+    expect(felixResults.map((m) => m.category)).toEqual(['fact']);
+  });
+
+  it('getBySubject() returns self-diagnosis entries when includeSelfDiagnosis is set', async () => {
     await store.save({ category: 'tool_error', subject: 'bot', content: 'Error in image tool' });
     await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot read links' });
     await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
 
-    const botResults = store.getBySubject('bot');
+    const botResults = store.getBySubject('bot', 20, { includeSelfDiagnosis: true });
     expect(botResults).toHaveLength(2);
     expect(botResults.every((r) => r.subject === 'bot')).toBe(true);
   });
@@ -480,6 +527,53 @@ describe('subject_user_id (soft-FK to identities)', () => {
     });
     const row = store.getAllActive().find((m) => m.id === id);
     expect(row?.subject_user_id).toBe('123');
+  });
+
+  it('lexical dedup merge backfills subject_user_id onto the existing row', async () => {
+    const id1 = await store.save({ category: 'fact', subject: 'Felix', content: 'Felix lives in Toronto Canada downtown' });
+    // >60% word overlap → phase-1 lexical merge into id1; the incoming id anchor must not be dropped.
+    const id2 = await store.save({
+      category: 'fact',
+      subject: 'Felix',
+      content: 'Felix lives in Montreal Canada downtown',
+      subject_user_id: '42',
+    });
+    expect(id2).toBe(id1);
+    const row = store.getAllActive().find((m) => m.id === id1);
+    expect(row?.subject_user_id).toBe('42');
+  });
+
+  it('lexical dedup merge never overwrites an existing subject_user_id with null', async () => {
+    const id1 = await store.save({
+      category: 'fact',
+      subject: 'Felix',
+      content: 'Felix lives in Toronto Canada downtown',
+      subject_user_id: '42',
+    });
+    const id2 = await store.save({ category: 'fact', subject: 'Felix', content: 'Felix lives in Montreal Canada downtown' });
+    expect(id2).toBe(id1);
+    const row = store.getAllActive().find((m) => m.id === id1);
+    expect(row?.subject_user_id).toBe('42');
+  });
+
+  it('semantic dedup merge backfills subject_user_id onto the surviving memory', async () => {
+    const { store: semStore } = makeSemanticStore({ dedupThreshold: 0.65 });
+    // Verified in the save-time dedup suite: overlap 0.5714 (lexical miss) but cosine 0.8018 ≥ 0.65
+    // (semantic merge into the original id).
+    const originalId = await semStore.save({
+      category: 'fact',
+      subject: 'Felix',
+      content: 'Felix loves eating pizza with extra cheese on top',
+    });
+    const mergedId = await semStore.save({
+      category: 'fact',
+      subject: 'Felix',
+      content: 'Felix loves eating pizza with mushrooms',
+      subject_user_id: '42',
+    });
+    expect(mergedId).toBe(originalId);
+    const row = semStore.getAllActive().find((m) => m.id === originalId);
+    expect(row?.subject_user_id).toBe('42');
   });
 });
 
@@ -1099,6 +1193,22 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
     // The contract with teeth: queries that sanitize to nothing must never trigger a (paid) embed call.
     // In prod the real provider wraps queries in the qwen3 instruct prefix, so embedding a blank query
     // produces a non-zero vector that can pull arbitrary memories over the gate — the guard prevents that.
+    expect(fake.calls.length).toBe(callsBefore);
+  });
+
+  it('treats punctuation-only queries ("???", "...", "///") as degenerate: no results, no embed calls', async () => {
+    // Regression: the old strip list missed . ? / ; = < > [ ] | _ \ so "???" passed the degenerate
+    // gate as a "term", spending a paid embed call whose vector matches arbitrary memories. The gate
+    // is now positive: a query with no letter or digit anywhere is degenerate.
+    const { store: semStore, fake } = makeSemanticStore({ relevanceThreshold: 0.3 });
+    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    const callsBefore = fake.calls.length;
+
+    expect(await semStore.search('???')).toEqual([]);
+    expect(await semStore.search('...')).toEqual([]);
+    expect(await semStore.search('///')).toEqual([]);
+    expect(await semStore.search(';; == <> [] || __ \\\\')).toEqual([]);
+
     expect(fake.calls.length).toBe(callsBefore);
   });
 

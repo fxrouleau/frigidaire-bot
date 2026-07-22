@@ -108,4 +108,17 @@ describe('deployAnnounce execute', () => {
     // The switch must not silently consume the sha — a later enable should still announce.
     expect(store.getState('deploy:last_announced_sha')).toBeUndefined();
   });
+
+  it('is a no-op when DEPLOY_ANNOUNCE_ENABLED=0 (envBool parsing)', async () => {
+    const { fakeChannel, fakeClient } = setup();
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    process.env.GIT_SHA = 'abcdef1234567890';
+    process.env.DEPLOY_ANNOUNCE_ENABLED = '0';
+
+    await execute(fakeClient.client);
+
+    expect(fakeClient.recorders.channelsFetch.calls).toHaveLength(0);
+    expect(fakeChannel.recorders.send.calls).toHaveLength(0);
+    expect(store.getState('deploy:last_announced_sha')).toBeUndefined();
+  });
 });

@@ -49,6 +49,38 @@ describe('writeErrorCapture / loadErrorCapture', () => {
     expect(files).toHaveLength(0);
   });
 
+  it.each(['false', 'no', 'FALSE'])('does nothing when DEBUG_CAPTURE is %s (envBool parsing)', (value) => {
+    const dir = tempDir();
+    vi.stubEnv('DEBUG_CAPTURE_DIR', dir);
+    vi.stubEnv('DEBUG_CAPTURE', value);
+
+    const result = writeErrorCapture({
+      channelId: 'c1',
+      model: 'm',
+      error: new Error('test'),
+      conversationEntries: [],
+    });
+
+    expect(result).toBeUndefined();
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+    expect(files).toHaveLength(0);
+  });
+
+  it('still captures when DEBUG_CAPTURE is set to an affirmative value', () => {
+    const dir = tempDir();
+    vi.stubEnv('DEBUG_CAPTURE_DIR', dir);
+    vi.stubEnv('DEBUG_CAPTURE', 'true');
+
+    const result = writeErrorCapture({
+      channelId: 'c1',
+      model: 'm',
+      error: new Error('test'),
+      conversationEntries: [],
+    });
+
+    expect(result).toBeTruthy();
+  });
+
   it('prunes to at most 50 captures', () => {
     const dir = tempDir();
     vi.stubEnv('DEBUG_CAPTURE_DIR', dir);

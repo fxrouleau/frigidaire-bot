@@ -4,6 +4,7 @@ import { type Client, Events } from 'discord.js';
 import { getReportChannelId, sendToReportChannel } from '../ai/reportChannel';
 import { getMemoryStore } from '../ai/tools';
 import { formatTimestampET } from '../ai/utils';
+import { envBool } from '../envUtils';
 import { logger } from '../logger';
 
 const STORED_SHA_KEY = 'deploy:last_announced_sha';
@@ -18,7 +19,7 @@ export const once = true;
 
 export async function execute(client: Client): Promise<void> {
   try {
-    if (!getReportChannelId() || process.env.DEPLOY_ANNOUNCE_ENABLED === 'false') return;
+    if (!getReportChannelId() || !envBool('DEPLOY_ANNOUNCE_ENABLED', true)) return;
 
     const currentSha = process.env.GIT_SHA?.trim();
     if (!currentSha) return;

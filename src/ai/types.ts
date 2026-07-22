@@ -49,6 +49,12 @@ export type ProviderToolCall = {
   name: string;
   arguments: Record<string, unknown>;
   thoughtSignature?: string;
+  /**
+   * Set when the model's raw arguments string failed to JSON-parse. The host must not execute the
+   * tool (arguments above are a meaningless `{}`) — it returns an error tool_result instead so the
+   * model can retry with corrected arguments.
+   */
+  argumentsInvalid?: boolean;
 };
 
 export type ProviderChatResponse = {

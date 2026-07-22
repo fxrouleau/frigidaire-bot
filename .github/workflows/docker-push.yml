@@ -17,6 +17,18 @@ on:
     branches:
       - master
 
+# Least-privilege GITHUB_TOKEN: checkout only reads the repo; DockerHub auth
+# uses vars/secrets, and the buildx gha cache authenticates via
+# ACTIONS_RUNTIME_TOKEN, which the permissions block does not govern.
+permissions:
+  contents: read
+
+# Serialize master pushes without cancelling: an older commit's build must not
+# finish after a newer one and win the `latest` tag.
+concurrency:
+  group: docker-push-master
+  cancel-in-progress: false
+
 jobs:
   docker:
     runs-on: ubuntu-latest

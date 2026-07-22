@@ -1,11 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import type { Client } from 'discord.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MemoryStore } from './memory/memoryStore';
 import {
+  buildMessageParts,
   buildPersonalityPrompt,
   buildSelfImprovementPrompt,
+  type LearnerMessage,
+  MAX_IMAGES_PER_OBSERVATION,
   normalizeObservationCategory,
   type Observation,
   type ObservationCategory,
   parseLearnerOutput,
+  PersonalityLearner,
 } from './personalityLearner';
 
 describe('Observation type', () => {
@@ -244,5 +250,159 @@ describe('buildSelfImprovementPrompt (anti-junk rules)', () => {
     expect(prompt).not.toMatch(/paraphras/i);
     expect(prompt).not.toMatch(/never quote/i);
     expect(prompt).not.toMatch(/saniti[sz]e/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Behavioral fixes: observation re-entrancy guard, image cap, ignore-list parsing
+// ---------------------------------------------------------------------------
+
+function makeMessage(overrides: Partial<LearnerMessage> = {}): LearnerMessage {
+  return {
+    content: 'hello',
+    createdAt: new Date('2026-01-01T12:00:00Z'),
+    webhookId: null,
+    author: { id: 'u1', bot: false, username: 'user1' },
+    member: { displayName: 'User One' },
+    attachments: new Map(),
+    embeds: [],
+    ...overrides,
+  };
+}
+
+function attachmentMap(count: number): LearnerMessage['attachments'] {
+  const map = new Map<string, { contentType?: string | null; url: string }>();
+  for (let i = 0; i < count; i++) {
+    map.set(`a${i}`, { contentType: 'image/png', url: `https://cdn.example/img-${i}.png` });
+  }
+  return map;
+}
+
+describe('buildMessageParts (image cap)', () => {
+  it('interleaves text and image parts in message order', () => {
+    const messages: LearnerMessage[] = [
+      makeMessage({ content: 'first', attachments: attachmentMap(1) }),
+      makeMessage({
+        content: 'second',
+        embeds: [{ image: { url: 'https://cdn.example/embed.png' }, thumbnail: { url: 'https://cdn.example/thumb.png' } }],
+      }),
+    ];
+
+    const { parts, imageCount, truncatedImages } = buildMessageParts(messages);
+
+    expect(imageCount).toBe(3);
+    expect(truncatedImages).toBe(0);
+    expect(parts.map((p) => p.type)).toEqual(['text', 'image_url', 'text', 'image_url', 'image_url']);
+    expect(parts[0]).toMatchObject({ type: 'text', text: expect.stringContaining('first') });
+    expect(parts[0]).toMatchObject({ type: 'text', text: expect.stringContaining('User One (id:u1)') });
+  });
+
+  it('skips non-image attachments', () => {
+    const attachments = new Map([['a1', { contentType: 'application/pdf', url: 'https://cdn.example/doc.pdf' }]]);
+    const { parts, imageCount } = buildMessageParts([makeMessage({ attachments })]);
+    expect(imageCount).toBe(0);
+    expect(parts).toHaveLength(1);
+  });
+
+  it('caps image parts at MAX_IMAGES_PER_OBSERVATION and reports the truncated count', () => {
+    const messages: LearnerMessage[] = [
+      makeMessage({ content: 'a', attachments: attachmentMap(6) }),
+      makeMessage({ content: 'b', attachments: attachmentMap(6) }),
+    ];
+
+    const { parts, imageCount, truncatedImages } = buildMessageParts(messages);
+
+    expect(imageCount).toBe(MAX_IMAGES_PER_OBSERVATION);
+    expect(truncatedImages).toBe(12 - MAX_IMAGES_PER_OBSERVATION);
+    expect(parts.filter((p) => p.type === 'image_url')).toHaveLength(MAX_IMAGES_PER_OBSERVATION);
+    // Text parts are never dropped by the cap.
+    expect(parts.filter((p) => p.type === 'text')).toHaveLength(2);
+  });
+
+  it('omits the id suffix for webhook messages', () => {
+    const { parts } = buildMessageParts([makeMessage({ webhookId: 'wh1' })]);
+    expect(parts[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('(id:u1)') });
+  });
+});
+
+describe('PersonalityLearner.observe re-entrancy guard', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function makeSlowClient() {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let fetchCalls = 0;
+    const client = {
+      user: { displayName: 'Fridge' },
+      channels: {
+        fetch: async () => {
+          fetchCalls++;
+          await gate;
+          return null; // not a text channel -> the cycle skips it after the (slow) fetch
+        },
+      },
+    } as unknown as Client;
+    return { client, release, fetchCalls: () => fetchCalls };
+  }
+
+  it('skips a tick while a cycle is still in flight, without losing tracked channels', async () => {
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
+    const store = new MemoryStore(':memory:');
+    const learner = new PersonalityLearner(store);
+    const { client, release, fetchCalls } = makeSlowClient();
+
+    learner.trackActivity('c1');
+    const first = learner.observe(client); // in flight, blocked on the gate
+    learner.trackActivity('c1'); // activity arrives while the cycle runs
+
+    // Overlapping tick: must return immediately without starting a second cycle.
+    await learner.observe(client);
+    expect(fetchCalls()).toBe(1);
+
+    release();
+    await first;
+
+    // The skipped tick did not consume the tracked activity — the next cycle processes it.
+    await learner.observe(client);
+    expect(fetchCalls()).toBe(2);
+    store.close();
+  });
+});
+
+describe('LEARNER_IGNORE_CHANNELS parsing', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('trims whitespace around ids so "123, 456" ignores both channels', async () => {
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
+    vi.stubEnv('LEARNER_IGNORE_CHANNELS', '123, 456 ,,  789');
+    const store = new MemoryStore(':memory:');
+    const learner = new PersonalityLearner(store);
+
+    let fetchCalls = 0;
+    const client = {
+      user: { displayName: 'Fridge' },
+      channels: {
+        fetch: async () => {
+          fetchCalls++;
+          return null;
+        },
+      },
+    } as unknown as Client;
+
+    learner.trackActivity('123');
+    learner.trackActivity('456');
+    learner.trackActivity('789');
+
+    await learner.observe(client);
+
+    // All three ids are ignored -> no channel is ever fetched.
+    expect(fetchCalls).toBe(0);
+    store.close();
   });
 });

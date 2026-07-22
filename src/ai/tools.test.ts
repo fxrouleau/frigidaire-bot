@@ -196,9 +196,9 @@ describe('query_self_diagnosis tool', () => {
     expect(result).toContain('teleportation');
   });
 
-  it('returns "no self-diagnosis data" when no bot/server entries exist for a category', async () => {
+  it('returns "no self-diagnosis data" when no entries exist for the requested category', async () => {
     const store = getMemoryStore();
-    // Save a non-bot entry in unrecognized_content (won't match the bot/server subject filter)
+    // Save an entry in a DIFFERENT category — the missing_context query below finds nothing.
     await store.save({
       category: 'unrecognized_content',
       subject: 'SomeRandomUser',
@@ -220,7 +220,10 @@ describe('query_self_diagnosis tool', () => {
     expect(lines.length).toBeLessThanOrEqual(2);
   });
 
-  it('filters to only bot/server subjects', async () => {
+  it('includes person-subject entries (category-filtered, not subject-filtered)', async () => {
+    // Regression: the learner may save self-diagnosis rows under a person's display name. This tool
+    // is their ONLY access path (search() and getBySubject() exclude the categories), so the old
+    // bot/server subject filter orphaned them permanently.
     const store = getMemoryStore();
     await store.save({
       category: 'capability_gap',
@@ -235,7 +238,32 @@ describe('query_self_diagnosis tool', () => {
 
     const result = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'capability_gap' });
     expect(result).toContain('antimatter');
-    expect(result).not.toContain('RandomPerson specific issue unique_filter');
+    expect(result).toContain('RandomPerson specific issue unique_filter');
+  });
+
+  it('clamps a non-numeric limit to the default instead of throwing', async () => {
+    // Regression: Number("a few") * 3 = NaN bound as the SQL LIMIT threw a datatype mismatch.
+    const store = getMemoryStore();
+    await store.save({ category: 'tool_error', subject: 'bot', content: 'Unique nan limit entry alpha bravo' });
+
+    const result = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'tool_error', limit: 'a few' });
+    expect(result).toContain('nan limit entry alpha bravo');
+  });
+
+  it('clamps fractional and out-of-range limits to sane integers', async () => {
+    // Contents are deliberately dissimilar so neither lexical nor semantic dedup merges them.
+    const store = getMemoryStore();
+    await store.save({ category: 'tool_error', subject: 'bot', content: 'Summarize timed out on long channel history' });
+    await store.save({ category: 'tool_error', subject: 'bot', content: 'Image generation returned a corrupted file' });
+    await store.save({ category: 'tool_error', subject: 'bot', content: 'Web search crashed while parsing results' });
+
+    // 2.9 floors to 2.
+    const fractional = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'tool_error', limit: 2.9 });
+    expect(fractional.split('\n').filter((l: string) => l.startsWith('[')).length).toBe(2);
+
+    // Negative/zero limits are nonsense — clamped up to at least 1, never a SQL error.
+    const negative = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'tool_error', limit: -5 });
+    expect(negative.split('\n').filter((l: string) => l.startsWith('[')).length).toBe(1);
   });
 
   it('prefixes every entry with [id:N] so forget_memory can remove it', async () => {
@@ -273,6 +301,24 @@ describe('forget_memory tool', () => {
     expect(forgetMemoryTool!.description).toMatch(/correct|supersed/i);
     expect(forgetMemoryTool!.description).toMatch(/recall_memories/);
     expect(forgetMemoryTool!.description).toMatch(/jok|banter/i);
+  });
+});
+
+describe('recall_memories tool', () => {
+  it('subject lookups do not surface self-diagnosis entries', async () => {
+    // getBySubject() excludes SELF_DIAGNOSIS_CATEGORIES by default, so a person-subject
+    // capability_gap row can no longer leak into normal chat recall.
+    const store = getMemoryStore();
+    await store.save({ category: 'preference', subject: 'Margo_test', content: 'Collects vintage harmonicas enthusiastically' });
+    await store.save({
+      category: 'capability_gap',
+      subject: 'Margo_test',
+      content: 'Cannot read the encrypted spreadsheets Margo_test shares',
+    });
+
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'vintage harmonicas', subject: 'Margo_test' });
+    expect(result).toContain('harmonicas');
+    expect(result).not.toContain('spreadsheets');
   });
 });
 

@@ -45,9 +45,13 @@ export class OpenRouterProvider implements AiProvider {
         throw new Error('OPENROUTER_API_KEY is required');
       }
 
+      // Bound each request: the SDK default is 10 minutes, and a turn can make a dozen chat calls —
+      // without a timeout the typing indicator can legally run for over an hour on a hung backend.
+      const timeoutMs = Number(process.env.OPENROUTER_TIMEOUT_MS) || 120_000;
       this.client = new OpenAI({
         apiKey,
         baseURL: 'https://openrouter.ai/api/v1',
+        timeout: timeoutMs,
         defaultHeaders: {
           'X-Title': 'Frigidaire Bot',
         },
@@ -320,19 +324,24 @@ export function extractToolCalls(message: OpenAI.ChatCompletionMessage | undefin
     .filter((call): call is OpenAI.ChatCompletionMessageToolCall & { type: 'function' } => call.type === 'function')
     .map((call) => {
       let args: Record<string, unknown> = {};
+      let argumentsInvalid = false;
       try {
         const parsed = JSON.parse(call.function.arguments);
         if (parsed && typeof parsed === 'object') {
           args = parsed as Record<string, unknown>;
         }
       } catch {
+        // Flag it instead of silently executing with {} — the host returns an error tool_result so
+        // the model learns its call was garbled and can retry.
         logger.warn(`Failed to parse tool arguments for ${call.function.name}`);
+        argumentsInvalid = true;
       }
 
       return {
         id: call.id || crypto.randomUUID(),
         name: call.function.name,
         arguments: args,
+        ...(argumentsInvalid ? { argumentsInvalid } : {}),
       };
     });
 }

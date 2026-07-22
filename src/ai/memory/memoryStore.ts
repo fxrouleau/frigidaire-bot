@@ -438,7 +438,11 @@ export class MemoryStore {
 
   /** Updates a memory's content + updated_at and keeps the FTS index in sync. Caller provides the OLD content. */
   private updateMemoryContent(id: number, oldContent: string, memory: MemoryInput): void {
-    this.stmt("UPDATE memories SET content = ?, updated_at = datetime('now') WHERE id = ?").run(memory.content, id);
+    // COALESCE backfills subject_user_id when the existing row lacks it (dedup merges must not drop
+    // the incoming identity anchor); an existing non-null value always wins and is never overwritten.
+    this.stmt(
+      "UPDATE memories SET content = ?, updated_at = datetime('now'), subject_user_id = COALESCE(subject_user_id, ?) WHERE id = ?",
+    ).run(memory.content, memory.subject_user_id ?? null, id);
 
     // External-content FTS5: the 'delete' command must be given the OLD column values.
     this.stmt(
@@ -576,17 +580,28 @@ export class MemoryStore {
   private sanitizeFtsQuery(query: string): string {
     // Strip FTS5 operator/special characters and apostrophes (token boundaries)
     const stripped = query.replace(/["',()\{\}\*:^~@!#$%&+\-]/g, ' ');
-    // Split on whitespace, filter empty/single-char fragments
-    const terms = stripped.split(/\s+/).filter((t) => t.length > 1);
+    // Split on whitespace; a fragment only counts as a term if it is longer than one char AND
+    // contains at least one letter or digit (unicode-aware). The positive check is the degenerate-
+    // query gate: punctuation the strip list doesn't cover ("???", "...", "///") must never pass —
+    // search() would spend a paid embed call on it and match arbitrary memories.
+    const terms = stripped.split(/\s+/).filter((t) => t.length > 1 && /[\p{L}\p{N}]/u.test(t));
     if (terms.length === 0) return '';
     return terms.map((t) => `"${t}"`).join(' ');
   }
 
-  getBySubject(subject: string, limit = 20): Memory[] {
-    return this.stmt('SELECT * FROM memories WHERE subject = ? AND active = 1 ORDER BY updated_at DESC LIMIT ?').all(
-      subject,
-      limit,
-    ) as Memory[];
+  /**
+   * Active memories for a subject, newest first. Self-diagnosis categories are excluded by default —
+   * getBySubject() feeds the agent's speaker/mention prompt injection and recall_memories, and the
+   * learner can save self-diagnosis rows under a person's subject; those belong to
+   * query_self_diagnosis, not normal chat. Pass includeSelfDiagnosis to get the unfiltered view.
+   */
+  getBySubject(subject: string, limit = 20, opts: { includeSelfDiagnosis?: boolean } = {}): Memory[] {
+    const sql = opts.includeSelfDiagnosis
+      ? 'SELECT * FROM memories WHERE subject = ? AND active = 1 ORDER BY updated_at DESC LIMIT ?'
+      : `SELECT * FROM memories WHERE subject = ? AND active = 1
+         AND category NOT IN (${SELF_DIAGNOSIS_NOT_IN})
+         ORDER BY updated_at DESC LIMIT ?`;
+    return this.stmt(sql).all(subject, limit) as Memory[];
   }
 
   getRecent(limit = 15): Memory[] {
@@ -600,22 +615,31 @@ export class MemoryStore {
     ) as Memory[];
   }
 
-  deactivate(id: number): void {
-    this.runInTransaction(() => {
-      const row = this.stmt('SELECT content, subject, category FROM memories WHERE id = ?').get(id) as
+  /**
+   * Soft-deletes a memory. Returns true when a row was deactivated, false when the id is unknown or
+   * already inactive. Idempotency is load-bearing: the external-content FTS5 'delete' command must
+   * run exactly once, with the values still present in the index — replaying it for a row already
+   * removed leaves the full-text index in an unpredictable state (sqlite.org/fts5.html, "External
+   * Content Tables": "the results may be unpredictable" when the delete values don't match the index).
+   */
+  deactivate(id: number): boolean {
+    return this.runInTransaction(() => {
+      const row = this.stmt('SELECT content, subject, category FROM memories WHERE id = ? AND active = 1').get(id) as
         | Pick<Memory, 'content' | 'subject' | 'category'>
         | undefined;
 
+      // Unknown or already-inactive id → pure no-op (its FTS entry and vectors are already gone).
+      if (!row) return false;
+
       this.stmt('UPDATE memories SET active = 0 WHERE id = ?').run(id);
 
-      if (row) {
-        this.stmt(
-          "INSERT INTO memories_fts(memories_fts, rowid, content, subject, category) VALUES('delete', ?, ?, ?, ?)",
-        ).run(id, row.content, row.subject, row.category);
-      }
+      this.stmt(
+        "INSERT INTO memories_fts(memories_fts, rowid, content, subject, category) VALUES('delete', ?, ?, ?, ?)",
+      ).run(id, row.content, row.subject, row.category);
 
       // Deactivated memories are never searched or reactivated — their vectors go too.
       this.deleteVectors(id);
+      return true;
     });
   }
 
@@ -734,8 +758,15 @@ export class MemoryStore {
       // Sort by updated_at descending (newest first)
       group.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
 
+      // Ids deactivated within this group: a row deactivated by an earlier pair must never be
+      // re-processed (double-counting `removed` and replaying deactivate) nor serve as a keeper
+      // in later comparisons.
+      const deactivatedIds = new Set<number>();
+
       for (let i = 0; i < group.length; i++) {
+        if (deactivatedIds.has(group[i].id)) continue;
         for (let j = i + 1; j < group.length; j++) {
+          if (deactivatedIds.has(group[j].id)) continue;
           // Semantic comparison when both sides have current-model vectors; lexical fallback otherwise.
           const vecI = cache?.get(group[i].id)?.vec;
           const vecJ = cache?.get(group[j].id)?.vec;
@@ -747,6 +778,7 @@ export class MemoryStore {
           if (isDuplicate) {
             // Keep newer (i), deactivate older (j)
             this.deactivate(group[j].id);
+            deactivatedIds.add(group[j].id);
             removed++;
             logger.info(`Compacted: deactivated memory #${group[j].id} (duplicate of #${group[i].id})`);
           }

@@ -7,7 +7,7 @@ A Discord bot built in **TypeScript** that hangs out in a private server as "one
 1. **AI Chat** — Mention the bot to converse. A single AI backend (OpenRouter) with multi-round tool-calling, vision (images/emojis/stickers), and native web search.
 2. **Long-Term Memory** — Persists facts, server-member identities, and emoji captions in SQLite. Retrieval is **semantic**: memories are embedded (OpenRouter embeddings API) and searched by cosine similarity, hybridized with FTS5 keyword search. Relevant memories are injected into the system prompt. A background "personality learner" observes channels off-mention to learn the server's vibe.
 3. **Message Summarization** — Ask the bot to summarize recent channel history (via the `summarize_messages` tool).
-4. **Link Replacement** — Rewrites Twitter/X (`fixvx.com`), Instagram (`zzinstagram.com`), and TikTok (`tnktok.com`) links for proper Discord embedding, reposting via webhooks to preserve the original author's appearance.
+4. **Link Replacement** — Rewrites Twitter/X (`fixvx.com`), Instagram (`zzinstagram.com`), and TikTok (`tnktok.com`) links for proper Discord embedding, reposting via webhooks to preserve the original author's appearance. One merged handler (`linkRepost.ts`) processes all platforms in a single pass; links inside code blocks/inline code and `<>`-suppressed links are left alone, attachments are forwarded, and the webhook copy is sent **before** the original is deleted (a failed send never destroys the user's message).
 5. **Report Channel** — When `REPORT_CHANNEL_ID` is set, the bot posts a weekly self-diagnosis digest (improvement signals, runtime-failure counts, and privacy-safe AI-error-capture stats) and a "🚀 Deployed `<sha>`" line on each new build. Both are off when `REPORT_CHANNEL_ID` is unset.
 
 ## Tech Stack
@@ -28,6 +28,7 @@ A Discord bot built in **TypeScript** that hangs out in a private server as "one
 src/
 ├── app.ts                          # Entry point — Discord client, dynamic event loading, startup tasks
 ├── logger.ts  utils.ts             # Console logger; splitMessage()/repostMessage() helpers
+├── envUtils.ts                     # envBool() — the one true boolean env-var parser (true/1/yes, false/0/no)
 ├── ai/
 │   ├── agent.ts                    # AgentOrchestrator — main conversation/tool loop (DI-friendly)
 │   ├── agentInstance.ts            # Shared AgentOrchestrator singleton
@@ -49,7 +50,7 @@ src/
 │   └── tools/                      # summary.ts (summarization prompt) + localImageGenerator.ts (image gen)
 ├── events/                         # Dynamically loaded Discord event handlers:
 │   ├── aiChat.ts                   #   bot-mention → AgentOrchestrator
-│   ├── {twitter,instagram,tiktok}Repost.ts  # link replacement via webhooks
+│   ├── linkRepost.ts               #   link replacement (Twitter/X, Instagram, TikTok) via webhooks — one merged handler
 │   ├── emoji{Create,Delete,Update,Ready}.ts # sync emoji DB w/ guild; startup reconcile+caption
 │   ├── emojiUsageTracker.ts identityTracker.ts reactionTracker.ts  # usage/identity/reaction tracking
 │   ├── learnerActivityTracker.ts   #   feeds channel activity to the personality learner
@@ -204,7 +205,9 @@ EMOJI_FORCE_RECAPTION=<bool>         # Force re-captioning all emojis on startup
 CONVERSATION_TIMEOUT_MS=<ms>         # Per-channel conversation timeout (default: 900000 / 15 min)
 MAX_TOOL_ROUNDS=<n>                  # Max tool-call rounds per turn (default: 10)
 MAX_TOOL_INVOCATIONS=<n>             # Max total tool calls per turn (default: 50)
-DEBUG_CAPTURE=<0|...>                # Error capture; ON by default, '0' disables
+MAX_CONVERSATION_ENTRIES=<n>         # Cap on persisted history entries per channel (default: 120; static prompt + newest turns)
+OPENROUTER_TIMEOUT_MS=<ms>           # Per-request timeout on OpenRouter chat calls (default: 120000)
+DEBUG_CAPTURE=<bool>                 # Error capture; ON by default (booleans accept true/1/yes and false/0/no via envBool())
 DEBUG_CAPTURE_DIR=<path>             # Error capture output dir (default: ./data/debug)
 LEARNING_INTERVAL_MS=<ms>            # Personality learner interval (default: 1800000 / 30 min)
 MIN_MESSAGES_FOR_OBSERVATION=<n>     # Min new messages before the learner observes (default: 5)
@@ -276,6 +279,7 @@ Both workflows are **containerized** — they build the `ci` Docker stage with G
 ## Tooling Notes
 
 - `CLAUDE.md` is a symlink to `AGENTS.md` — they are the same file. Git tracks it as `AGENTS.md`.
+- **The prod container runs as the unprivileged `node` user (uid/gid 1000)**, not root. Hosts that previously ran the image as root have root-owned files in the mounted `./data` — run a one-time `chown -R 1000:1000 ./data` on the host or the bot cannot write its DB/captures.
 - **Persisted data lives in `./data`** (SQLite DB + error captures). Prod **must** volume-mount it (`./data:/app/data`, as `docker-compose.yaml` does) or memories and captures are lost whenever the container is recreated. When first adding the mount to an already-running server, `docker cp` the in-container `/app/data/memory.db` out to the host `./data` first, or you'll start from an empty DB. Expect the DB file to sit at ~32MB once embedding vectors are backfilled (~2k memories × 16KB/vector) — that's normal, not bloat.
 - The Docker image installs Corepack from npm (`npm install -g corepack`) — it is no longer bundled with Node 25+.
 - Discord typing indicator loops every 8 seconds during AI processing.

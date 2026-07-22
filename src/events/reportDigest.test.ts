@@ -81,16 +81,16 @@ describe('runDigestCheck watermark gating', () => {
     expect(store.getState(WATERMARK_KEY)).not.toBe(eightDaysAgo);
   });
 
-  it('surfaces only bot/server self-diagnosis subjects (mirrors query_self_diagnosis)', async () => {
+  it('surfaces self-diagnosis rows regardless of subject (learner may key them on a DisplayName)', async () => {
     process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
     await store.save({ category: 'capability_gap', subject: 'bot', content: 'bot gap visible' });
-    await store.save({ category: 'capability_gap', subject: 'Alice', content: 'user gap hidden' });
+    await store.save({ category: 'capability_gap', subject: 'Alice', content: 'alice gap also visible' });
 
     await runDigestCheck(fakeClient.client);
 
     const sent = String(fakeChannel.recorders.send.calls[0][0]);
     expect(sent).toContain('bot gap visible');
-    expect(sent).not.toContain('user gap hidden');
+    expect(sent).toContain('alice gap also visible');
   });
 });
 
@@ -139,6 +139,13 @@ describe('reportDigest execute master switch', () => {
   it('is a no-op when DIGEST_ENABLED=false', () => {
     process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
     process.env.DIGEST_ENABLED = 'false';
+    execute(fakeClient.client);
+    expect(fakeClient.recorders.channelsFetch.calls).toHaveLength(0);
+  });
+
+  it('is a no-op when DIGEST_ENABLED=0 (envBool parsing)', () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    process.env.DIGEST_ENABLED = '0';
     execute(fakeClient.client);
     expect(fakeClient.recorders.channelsFetch.calls).toHaveLength(0);
   });

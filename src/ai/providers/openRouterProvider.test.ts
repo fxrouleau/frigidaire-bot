@@ -55,10 +55,18 @@ describe('parseOpenRouterResponse', () => {
     expect(result.toolCalls.map((c) => c.id)).toEqual(['call_001', 'call_002']);
   });
 
-  it('falls back to {} for malformed tool arguments without throwing', () => {
+  it('falls back to {} for malformed tool arguments without throwing, and flags the call as invalid', () => {
     const result = parseOpenRouterResponse(fixtureResponse('malformed-tool-args'));
     expect(result.toolCalls).toHaveLength(1);
     expect(result.toolCalls[0].arguments).toEqual({});
+    // The host must not execute a garbled call — the flag routes it to an error tool_result.
+    expect(result.toolCalls[0].argumentsInvalid).toBe(true);
+  });
+
+  it('does not flag well-formed tool arguments as invalid', () => {
+    const result = parseOpenRouterResponse(fixtureResponse('single-tool-call'));
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0].argumentsInvalid).toBeUndefined();
   });
 
   it('synthesizes a non-empty id for a tool call with an empty id', () => {

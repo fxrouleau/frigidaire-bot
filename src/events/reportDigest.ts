@@ -16,6 +16,7 @@ import {
 import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { getReportChannelId, sendToReportChannel } from '../ai/reportChannel';
 import { getMemoryStore } from '../ai/tools';
+import { envBool } from '../envUtils';
 import { logger } from '../logger';
 
 const WATERMARK_KEY = 'digest:last_run_at';
@@ -28,7 +29,7 @@ export const name = Events.ClientReady;
 export const once = true;
 
 export function execute(client: Client): void {
-  if (!getReportChannelId() || process.env.DIGEST_ENABLED === 'false') return;
+  if (!getReportChannelId() || !envBool('DIGEST_ENABLED', true)) return;
 
   void runDigestCheck(client);
   const interval = envPositiveMs('DIGEST_CHECK_INTERVAL_MS', DEFAULT_CHECK_INTERVAL_MS);
@@ -51,10 +52,9 @@ export async function runDigestCheck(client: Client): Promise<void> {
     const signals: DigestSignal[] = [];
     const failures: DigestFailure[] = [];
     for (const category of SELF_DIAGNOSIS_CATEGORIES) {
-      // Mirror query_self_diagnosis's subject filter: only the bot's / server's own signals.
-      const rows = store
-        .getByCategory(category, CATEGORY_QUERY_CAP)
-        .filter((r) => r.subject === 'bot' || r.subject === 'server');
+      // No subject filter: rows are already category-scoped, and the learner sometimes keys
+      // self-diagnosis entries on a person's DisplayName — those signals must not be dropped.
+      const rows = store.getByCategory(category, CATEGORY_QUERY_CAP);
       if (signalSet.has(category)) {
         for (const r of rows) signals.push({ category, content: r.content, updated_at: r.updated_at });
       } else if (failureSet.has(category)) {

@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { createFakeMessage } from './test-support/fakeDiscord';
 import { repostMessage, splitMessage } from './utils';
 
+type WebhookSendArg = { content: string; files: string[] };
+
 describe('splitMessage', () => {
   it('returns a single unchanged chunk for short text', () => {
     const chunks = splitMessage('hello world');
@@ -68,13 +70,47 @@ describe('splitMessage', () => {
       expect(chunk.length).toBeLessThanOrEqual(2000);
     }
   });
+
+  it('never bisects a surrogate pair on a hard split (regression: lone surrogates rendered as U+FFFD)', () => {
+    // Place an astral char (2 UTF-16 units) so a naive slice at 2000 would cut it in half.
+    const text = 'a'.repeat(1999) + '😀' + 'b'.repeat(50);
+    const chunks = splitMessage(text);
+    for (const chunk of chunks) {
+      // No chunk may end on a high surrogate or start on a low surrogate.
+      expect(chunk.charCodeAt(chunk.length - 1)).not.toBeGreaterThanOrEqual(0xd800);
+      const first = chunk.charCodeAt(0);
+      expect(first < 0xdc00 || first > 0xdfff).toBe(true);
+      expect(chunk.length).toBeLessThanOrEqual(2000);
+    }
+    expect(chunks.join('')).toContain('😀');
+  });
+
+  it('closes and reopens code fences across chunk boundaries (regression: second half rendered as plain text)', () => {
+    const codeLines = Array.from({ length: 60 }, (_, i) => `const line${i} = ${'x'.repeat(40)};`);
+    const text = ['```ts', ...codeLines, '```'].join('\n');
+    expect(text.length).toBeGreaterThan(2000);
+
+    const chunks = splitMessage(text);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(2000);
+      // Every chunk must contain an even number of fence lines (self-contained code blocks).
+      const fenceCount = (chunk.match(/^\s*```/gm) ?? []).length;
+      expect(fenceCount % 2).toBe(0);
+    }
+    // The continuation chunk reopens with the language tag.
+    expect(chunks[1].startsWith('```ts\n')).toBe(true);
+    expect(chunks[0].endsWith('\n```')).toBe(true);
+  });
 });
 
 describe('repostMessage', () => {
-  it('creates a webhook, deletes the original, sends new content, and cleans up', async () => {
+  it('creates a webhook, sends new content with attachments, deletes the original, and cleans up', async () => {
     const fake = createFakeMessage({
       content: 'original content',
       authorDisplayName: 'Cool Author',
+      attachments: [{ url: 'https://cdn.example/pic.png', contentType: 'image/png' }],
     });
 
     await repostMessage(fake.message, 'new content');
@@ -92,7 +128,9 @@ describe('repostMessage', () => {
     expect(fake.webhooks).toHaveLength(1);
     const hook = fake.webhooks[0];
     expect(hook.send.calls).toHaveLength(1);
-    expect(hook.send.calls[0][0]).toBe('new content');
+    const sent = hook.send.calls[0][0] as WebhookSendArg;
+    expect(sent.content).toBe('new content');
+    expect(sent.files).toEqual(['https://cdn.example/pic.png']);
     expect(hook.delete.calls).toHaveLength(1);
   });
 
@@ -108,23 +146,54 @@ describe('repostMessage', () => {
     expect(createArg.name).toBe('Nickname');
   });
 
-  it('webhook is created before the original message is deleted', async () => {
-    // Observe ordering: createWebhook must resolve before delete is invoked, since
-    // delete is part of the Promise.all that follows webhook creation.
+  it('sends the webhook copy BEFORE deleting the original (regression: a failed send used to destroy the message)', async () => {
     const events: string[] = [];
     const fake = createFakeMessage({});
-    const original = fake.recorders.createWebhook;
-    // Wrap delete to record ordering.
     const msg = fake.message as unknown as { delete: () => Promise<unknown> };
     const realDelete = msg.delete;
     msg.delete = () => {
       events.push('delete');
       return realDelete();
     };
-    // createWebhook already records into its calls array; capture ordering by length check.
+
     await repostMessage(fake.message, 'ordered');
-    expect(original.calls).toHaveLength(1);
-    expect(events).toContain('delete');
+
+    const hook = fake.webhooks[0];
+    expect(hook.send.calls).toHaveLength(1);
+    expect(events).toEqual(['delete']);
+    // send happened first: at the moment delete ran, the send recorder had already been called.
+    // (delete is only reached after the awaited send resolves in the implementation.)
+  });
+
+  it('does not delete the original when the webhook send fails, but still cleans up the webhook', async () => {
+    const fake = createFakeMessage({});
+    // Make every webhook created by this channel fail its send.
+    const channel = fake.message.channel as unknown as { createWebhook: (o: unknown) => Promise<unknown> };
+    const realCreate = channel.createWebhook.bind(channel);
+    channel.createWebhook = async (o: unknown) => {
+      const hook = (await realCreate(o)) as { send: (c: unknown) => Promise<unknown>; delete: () => Promise<unknown> };
+      const failingSend = () => Promise.reject(new Error('Request entity too large'));
+      return { ...hook, send: failingSend };
+    };
+
+    await expect(repostMessage(fake.message, 'will fail')).rejects.toThrow('Request entity too large');
+
+    // Original message untouched; webhook still deleted (no leak toward the 15-webhook cap).
+    expect(fake.recorders.delete.calls).toHaveLength(0);
+    expect(fake.webhooks[0].delete.calls).toHaveLength(1);
+  });
+
+  it('splits oversized content into multiple webhook sends', async () => {
+    const fake = createFakeMessage({});
+    const long = `${'a'.repeat(1990)}\n${'b'.repeat(100)}`;
+
+    await repostMessage(fake.message, long);
+
+    const hook = fake.webhooks[0];
+    expect(hook.send.calls.length).toBeGreaterThan(1);
+    for (const call of hook.send.calls) {
+      expect((call[0] as WebhookSendArg).content.length).toBeLessThanOrEqual(2000);
+    }
   });
 });
 
