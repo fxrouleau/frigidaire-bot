@@ -1,4 +1,6 @@
 services:
+  # Local/prod-style run of the bot image. Every setting comes from .env (see AGENTS.md for the list);
+  # the Portainer stack in production sets the same variables in its own environment block.
   frigidaire-bot:
     build:
       context: .
@@ -6,10 +8,10 @@ services:
       target: prod
       args:
         GIT_SHA: "${GIT_SHA:-}"
-    environment:
-      - CLIENT_SECRET=${CLIENT_SECRET}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - REPORT_CHANNEL_ID=${REPORT_CHANNEL_ID:-}
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
     volumes:
       - ./data:/app/data
 

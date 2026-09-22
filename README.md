@@ -1,59 +1,53 @@
 # Frigidaire Bot
-This is a bot that I've created for personal use on a discord server with friends. It has two main features:
 
-1.  **Twitter/X Link Replacement**: The bot automatically replaces Twitter/X links with `fixvx.com` links to ensure proper embedding in Discord. This is because, at the time of writing, Twitter embeds do not work correctly. The bot uses a webhook to make it look like the user sent the corrected message, as Discord does not allow bots to edit other users' messages directly.
-2.  **OpenAI Integration**: You can mention the bot (`@Frigidaire Bot`) to interact with it. The bot uses OpenAI's `gpt-5-mini` model to understand your request and can perform two main tasks:
-    *   **Chat**: Engage in a natural conversation. The bot remembers the last 10 messages to understand the context.
-    *   **Summarize**: Ask the bot to summarize the chat history within a specific timeframe (up to a maximum of one week). The bot understands natural language for timeframes.
-        - **Examples**:
-            - `@Frigidaire Bot summarize what happened this morning.`
-            - `@Frigidaire Bot can you summarize the conversation from 3am to 6am today?`
-            - `@Frigidaire Bot give me a summary of yesterday's chat.`
+A Discord bot for one private server, written in TypeScript. It hangs out in the chat as one of the group: talk to it by mentioning it or replying to it, and it answers in character, remembers things about people over time, and does a few chores nobody wants to do by hand.
 
-    The conversation history for the chat feature is shared among all users in the channel and will be maintained for up to 15 minutes of inactivity before being reset.
+## What it does
 
-## Docker Compose
-If you want to just use the bot easily without downloading this repository, you can use the following docker-compose template:
+- **Chat** — mention `@Frigidaire` (or reply to one of its messages) and it answers, with tools for summarizing channel history, generating images, looking things up on the web, and reading/writing its own memory. Any model on [OpenRouter](https://openrouter.ai) works; every request is routed to zero-data-retention providers.
+- **Long-term memory** — facts, preferences, events and the server's in-jokes live in SQLite with semantic (embedding) + keyword search. A background learner picks up durable knowledge from regular chat, not just from conversations with the bot.
+- **Link fixing** — Twitter/X, Instagram and TikTok links are rewritten to embed-fixer domains and reposted under the author's name and avatar, so they actually show a preview. Each fixer is probed before use and dead ones are skipped automatically.
+- **Regret reposting** (optional) — for chosen members, a message deleted within a couple of minutes of being posted gets judged by a cheap classifier and, if it was one of their edgy bouts, reposted as them. Attachments included.
+- **Ops channel** (optional) — a weekly self-diagnosis digest and a one-line "🚀 Deployed" note on every new build.
+
+## Running it
+
+The bot ships as a Docker image built by CI and pushed to DockerHub on every merge to `master`. A minimal Compose service:
+
 ```yaml
-version: '3'
 services:
-  discord-bot:
-    image: zergyhan/frigidaire-bot
+  frigidaire-bot:
+    image: <your-dockerhub-user>/frigidaire-bot:latest
+    restart: unless-stopped
     environment:
-      - CLIENT_SECRET=YOUR_SECRET_HERE
-      - OPENAI_API_KEY=YOUR_OPENAI_KEY_HERE
+      - CLIENT_SECRET=<discord bot token>
+      - OPENROUTER_API_KEY=<openrouter api key>
+    volumes:
+      - ./data:/app/data   # SQLite databases + error captures; keep this or memories are lost on recreate
 ```
-- `CLIENT_SECRET` can be gotten from the [discord developer portal](https://discord.com/developers/applications) under the bot section. You will have to give the bot permissions to manage webhooks, read and send messages.
-- `OPENAI_API_KEY` can be obtained from the [OpenAI API keys page](https://platform.openai.com/api-keys).
 
-### Report channel (optional)
-Set `REPORT_CHANNEL_ID` to a Discord channel id to turn on the operational report channel. It is the master switch — leave it unset and both features below are fully off.
+Only those two variables are required. Everything else has a sane default; the full list, with defaults, is in [AGENTS.md](AGENTS.md#environment-variables). The container drops to the unprivileged `node` user at startup after making `/app/data` writable, so a root-owned host directory is fine.
 
-- `REPORT_CHANNEL_ID` — channel for the digest and deploy announcements (unset ⇒ everything off).
-- `DIGEST_ENABLED` — weekly self-diagnosis digest (default `true`).
-- `DIGEST_PERIOD_MS` — minimum interval between digests (default `604800000`, 7 days).
-- `DIGEST_CHECK_INTERVAL_MS` — how often the digest gate is checked (default `3600000`, 1 hour).
-- `DEPLOY_ANNOUNCE_ENABLED` — post "🚀 Deployed `<sha>`" on a new build (default `true`).
-- `GIT_SHA` — the running commit; baked into the prod image by CI and used for deploy announcements (unset ⇒ no announcement).
+### Discord setup
+
+1. Create an application and bot in the [Discord developer portal](https://discord.com/developers/applications). Enable the **Message Content** privileged intent.
+2. Invite it with these permissions: View Channels, Send Messages, Read Message History, Attach Files, Add Reactions, **Manage Webhooks** and **Manage Messages** (the last two are what link fixing and regret reposting need).
+3. Put the bot token in `CLIENT_SECRET`.
+
+### Costs
+
+Chat, embeddings, image generation, emoji captions, the learner and the deleted-message judge all bill through the single OpenRouter key. With the defaults, day-to-day usage on a small server is cents per day; the one-off emoji captioning on first boot uses a Claude model and costs a few cents per emoji.
 
 ## Development
-### Setup
-- Node 22 LTS
-- Typescript
-- Modern yarn
-- [discord.js](https://discord.js.org/docs/packages/discord.js/14.18.0)
 
-### Recommended plugins
-- BiomeJS ([VSCode](https://marketplace.visualstudio.com/items?itemName=biomejs.biome), [Jetbrains](https://plugins.jetbrains.com/plugin/22761-biome))
-- EditorConfig ([VSCode](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig))
+The toolchain runs in Docker; the host only needs Docker (Node is optional, for IDE intellisense).
 
-### Running
-For both versions, you'll need an env file with the following content:
-```env
-CLIENT_SECRET=YOUR_SECRET_HERE
-OPENAI_API_KEY=YOUR_OPENAI_KEY_HERE
+```bash
+docker compose build test                          # once, and after dependency changes
+docker compose run --rm test                       # full test suite
+docker compose run --rm test yarn typecheck        # strict TypeScript over src/ including tests
+docker compose run --rm test yarn check            # Biome lint + format (writes fixes back)
+docker build --target ci .                         # the exact gate CI runs
 ```
 
-To run the development version, run `yarn dev` to start the bot.
-
-To test the production version, run `yarn build` followed by `yarn prod` to start the bot.
+Everything about the code — architecture, memory system, conventions, environment variables, the prod-error replay workflow — is in [AGENTS.md](AGENTS.md).

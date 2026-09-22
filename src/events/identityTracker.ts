@@ -1,10 +1,10 @@
-import { Events, type Message } from 'discord.js';
-import { getMemoryStore } from '../ai/tools';
+import { Events } from 'discord.js';
+import { getMemoryStore } from '../ai/memory';
+import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
 
-module.exports = {
-  name: Events.MessageCreate,
-  execute(message: Message) {
+export default defineEvent(Events.MessageCreate, {
+  execute(message) {
     if (message.author.bot) return;
     if (message.webhookId) return;
 
@@ -17,4 +17,4 @@ module.exports = {
       logger.warn('identityTracker: failed to upsert identity:', error);
     }
   },
-};
+});

@@ -1,4 +1,4 @@
-import type { Message } from 'discord.js';
+import { ChannelType, type Message } from 'discord.js';
 import { describe, expect, it } from 'vitest';
 import { createFakeMessage } from './test-support/fakeDiscord';
 import { repostMessage, splitMessage } from './utils';
@@ -50,9 +50,8 @@ describe('splitMessage', () => {
     expect(chunks.join('\n')).toBe('one\ntwo\nthree');
   });
 
-  it('returns an empty array for an empty string (filtered out)', () => {
+  it('returns a single empty chunk for an empty string', () => {
     // Empty string has length 0 <= maxLength so it short-circuits to [''].
-    // Document the actual behavior: a single empty chunk is returned.
     const chunks = splitMessage('');
     expect(chunks).toEqual(['']);
   });
@@ -71,7 +70,7 @@ describe('splitMessage', () => {
 });
 
 describe('repostMessage', () => {
-  it('creates a webhook, deletes the original, sends new content, and cleans up', async () => {
+  it('creates a webhook, sends the new content, deletes the original, and cleans up the webhook', async () => {
     const fake = createFakeMessage({
       content: 'original content',
       authorDisplayName: 'Cool Author',
@@ -108,23 +107,47 @@ describe('repostMessage', () => {
     expect(createArg.name).toBe('Nickname');
   });
 
-  it('webhook is created before the original message is deleted', async () => {
-    // Observe ordering: createWebhook must resolve before delete is invoked, since
-    // delete is part of the Promise.all that follows webhook creation.
+  it('sends the repost BEFORE deleting the original, so a failed send never loses the message', async () => {
     const events: string[] = [];
-    const fake = createFakeMessage({});
-    const original = fake.recorders.createWebhook;
-    // Wrap delete to record ordering.
+    const fake = createFakeMessage({
+      webhookSendImpl: async () => {
+        events.push('send');
+        return {};
+      },
+    });
     const msg = fake.message as unknown as { delete: () => Promise<unknown> };
     const realDelete = msg.delete;
     msg.delete = () => {
       events.push('delete');
       return realDelete();
     };
-    // createWebhook already records into its calls array; capture ordering by length check.
+
     await repostMessage(fake.message, 'ordered');
-    expect(original.calls).toHaveLength(1);
-    expect(events).toContain('delete');
+
+    expect(events).toEqual(['send', 'delete']);
+  });
+
+  it('deletes the webhook and keeps the original when the send fails (no webhook leak)', async () => {
+    const fake = createFakeMessage({
+      webhookSendImpl: async () => {
+        throw new Error('Missing Permissions');
+      },
+    });
+
+    await expect(repostMessage(fake.message, 'boom')).rejects.toThrow('Missing Permissions');
+
+    expect(fake.webhooks).toHaveLength(1);
+    expect(fake.webhooks[0].delete.calls).toHaveLength(1);
+    expect(fake.recorders.delete.calls).toHaveLength(0);
+  });
+
+  it('refuses channels that cannot own a webhook (threads, DMs) without touching the message', async () => {
+    const fake = createFakeMessage({ channelType: ChannelType.PublicThread });
+
+    await expect(repostMessage(fake.message, 'x')).rejects.toThrow(/cannot own a webhook/);
+
+    expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+    expect(fake.recorders.delete.calls).toHaveLength(0);
   });
 });
 

@@ -1,10 +1,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
+import { config } from '../../config';
 import { logger } from '../../logger';
 import type { EmbeddingProvider } from './embeddingProvider';
 import { blobToVector, dot, vectorToBlob } from './vectorMath';
-import { wordOverlap } from './wordOverlap';
+import { STOP_WORDS, wordOverlap } from './wordOverlap';
 
 export type Memory = {
   id: number;
@@ -91,13 +92,13 @@ type CachedVector = {
   subject: string;
 };
 
-const DEFAULT_DEDUP_THRESHOLD = 0.9;
-const DEFAULT_RELEVANCE_THRESHOLD = 0.5;
-
-// Reciprocal-rank-fusion parameters for hybrid search: vector leg dominates, FTS is a booster.
+// Reciprocal-rank-fusion parameters for hybrid search: vector leg dominates, FTS is a booster. A
+// memory matching EVERY query term is strong keyword evidence; one matching only some terms is weak
+// evidence and gets half the weight (see searchFts()).
 const RRF_K = 60;
 const RRF_VECTOR_WEIGHT = 1.0;
 const RRF_KEYWORD_WEIGHT = 0.5;
+const RRF_PARTIAL_KEYWORD_WEIGHT = 0.25;
 
 // The semantic gate only engages when at least this fraction of searchable active memories have
 // current-model vectors. Below it (fresh DB, mid-backfill, model switch, prolonged API outage),
@@ -145,19 +146,15 @@ export function buildEmbeddingInput(memory: Pick<MemoryInput, 'subject' | 'conte
  */
 function defaultTtls(): Record<string, number> {
   const ttls: Record<string, number> = {};
-  const imageHours = envNumber('MEMORY_TTL_IMAGE_HOURS', 24);
+  const imageHours = config.memory.ttlImageHours;
   if (imageHours > 0) ttls.image = imageHours;
-  const eventDays = envNumber('MEMORY_TTL_EVENT_DAYS', 14);
+  const eventDays = config.memory.ttlEventDays;
   if (eventDays > 0) ttls.event = eventDays * 24;
   return ttls;
 }
 
-function envNumber(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
+/** One ranked list of keyword hits: rows matching every query term first, then rows matching only some. */
+type KeywordHits = { exact: Memory[]; partial: Memory[] };
 
 export class MemoryStore {
   private readonly db: Database.Database;
@@ -192,9 +189,8 @@ export class MemoryStore {
     this.db.pragma('wal_autocheckpoint = 256');
 
     this.embeddings = opts.embeddings;
-    this.dedupThreshold = opts.dedupThreshold ?? envNumber('MEMORY_DEDUP_THRESHOLD', DEFAULT_DEDUP_THRESHOLD);
-    this.relevanceThreshold =
-      opts.relevanceThreshold ?? envNumber('MEMORY_RELEVANCE_THRESHOLD', DEFAULT_RELEVANCE_THRESHOLD);
+    this.dedupThreshold = opts.dedupThreshold ?? config.memory.dedupThreshold;
+    this.relevanceThreshold = opts.relevanceThreshold ?? config.memory.relevanceThreshold;
     this.ttls = opts.ttls ?? defaultTtls();
 
     this.init();
@@ -471,9 +467,11 @@ export class MemoryStore {
     // returned [] (the legacy FTS path had no terms to match). Keep that contract: never spend a
     // paid embed call on them, and never embed a near-empty string — the qwen3 instruct prefix
     // would dominate its vector and score arbitrary memories above the relevance gate.
-    if (!this.sanitizeFtsQuery(query)) return [];
+    const terms = this.ftsTerms(query);
+    if (terms.length === 0) return [];
 
-    const ftsRows = this.searchFts(query, Math.max(limit, 50));
+    const keyword = this.searchFts(terms, Math.max(limit, 50));
+    const ftsRows = [...keyword.exact, ...keyword.partial];
 
     if (!this.embeddings) return ftsRows.slice(0, limit);
 
@@ -523,7 +521,8 @@ export class MemoryStore {
       fusedById.set(v.id, (fusedById.get(v.id) ?? 0) + RRF_VECTOR_WEIGHT / (RRF_K + rank + 1));
     });
     ftsRows.forEach((m, rank) => {
-      fusedById.set(m.id, (fusedById.get(m.id) ?? 0) + RRF_KEYWORD_WEIGHT / (RRF_K + rank + 1));
+      const weight = rank < keyword.exact.length ? RRF_KEYWORD_WEIGHT : RRF_PARTIAL_KEYWORD_WEIGHT;
+      fusedById.set(m.id, (fusedById.get(m.id) ?? 0) + weight / (RRF_K + rank + 1));
     });
 
     // SEMANTIC GATE: candidates without a computable cosine (keyword-only hits on un-embedded
@@ -546,11 +545,26 @@ export class MemoryStore {
     return this.fetchMemoriesByIds(gatedIds.slice(0, limit));
   }
 
-  /** The FTS5 keyword leg (and the ungated fallback): BM25-ranked, active-only, self-diagnosis excluded. */
-  private searchFts(query: string, limit: number): Memory[] {
-    const sanitized = this.sanitizeFtsQuery(query);
-    if (!sanitized) return [];
+  /**
+   * The FTS5 keyword leg (and the ungated fallback), in two tiers: rows matching EVERY term
+   * (implicit AND — high precision) first, then rows matching ANY non-stop-word term (OR — BM25
+   * ranks rows matching more and rarer terms higher). The second tier is what keeps keyword search
+   * alive for message-length queries: with AND alone, a whole chat message as the query matched
+   * nothing, which made the keyword leg inert and the FTS-only fallback return nothing at all.
+   */
+  private searchFts(terms: string[], limit: number): KeywordHits {
+    const exact = this.matchFts(this.ftsMatchExpression(terms, 'all'), limit);
+    if (terms.length < 2 || exact.length >= limit) return { exact, partial: [] };
 
+    const anyExpression = this.ftsMatchExpression(terms, 'any');
+    if (!anyExpression) return { exact, partial: [] };
+    const exactIds = new Set(exact.map((m) => m.id));
+    const partial = this.matchFts(anyExpression, limit).filter((m) => !exactIds.has(m.id));
+    return { exact, partial: partial.slice(0, limit - exact.length) };
+  }
+
+  /** BM25-ranked, active-only, self-diagnosis excluded. */
+  private matchFts(expression: string, limit: number): Memory[] {
     return this.stmt(
       `SELECT m.* FROM memories m
        JOIN memories_fts fts ON m.id = fts.rowid
@@ -558,7 +572,7 @@ export class MemoryStore {
          AND m.category NOT IN (${SELF_DIAGNOSIS_NOT_IN})
        ORDER BY rank
        LIMIT ?`,
-    ).all(sanitized, limit) as Memory[];
+    ).all(expression, limit) as Memory[];
   }
 
   /** Fetches active memory rows by id, preserving the order of the input ids. Never returns vector blobs. */
@@ -573,13 +587,22 @@ export class MemoryStore {
     return ids.map((id) => byId.get(id)).filter((m): m is Memory => m !== undefined);
   }
 
-  private sanitizeFtsQuery(query: string): string {
-    // Strip FTS5 operator/special characters and apostrophes (token boundaries)
+  /** The distinct searchable terms of a query: FTS5 operators/punctuation stripped, single characters dropped. */
+  private ftsTerms(query: string): string[] {
     const stripped = query.replace(/["',()\{\}\*:^~@!#$%&+\-]/g, ' ');
-    // Split on whitespace, filter empty/single-char fragments
-    const terms = stripped.split(/\s+/).filter((t) => t.length > 1);
-    if (terms.length === 0) return '';
-    return terms.map((t) => `"${t}"`).join(' ');
+    return [...new Set(stripped.split(/\s+/).filter((t) => t.length > 1))];
+  }
+
+  /**
+   * An FTS5 MATCH expression over quoted terms: 'all' joins with the implicit AND; 'any' drops stop
+   * words (they carry no signal and would match nearly every row) and joins with OR. Returns '' when
+   * nothing is left to match.
+   */
+  private ftsMatchExpression(terms: string[], mode: 'all' | 'any'): string {
+    const quoted = (term: string) => `"${term}"`;
+    if (mode === 'all') return terms.map(quoted).join(' ');
+    const meaningful = terms.filter((t) => !STOP_WORDS.has(t.toLowerCase()));
+    return meaningful.map(quoted).join(' OR ');
   }
 
   getBySubject(subject: string, limit = 20): Memory[] {
@@ -589,10 +612,6 @@ export class MemoryStore {
     ) as Memory[];
   }
 
-  getRecent(limit = 15): Memory[] {
-    return this.stmt('SELECT * FROM memories WHERE active = 1 ORDER BY updated_at DESC LIMIT ?').all(limit) as Memory[];
-  }
-
   getByCategory(category: string, limit = 20): Memory[] {
     return this.stmt('SELECT * FROM memories WHERE category = ? AND active = 1 ORDER BY updated_at DESC LIMIT ?').all(
       category,
@@ -600,22 +619,50 @@ export class MemoryStore {
     ) as Memory[];
   }
 
-  deactivate(id: number): void {
-    this.runInTransaction(() => {
-      const row = this.stmt('SELECT content, subject, category FROM memories WHERE id = ?').get(id) as
-        | Pick<Memory, 'content' | 'subject' | 'category'>
+  /**
+   * Soft-deletes a memory: clears its active flag, removes it from the FTS index and drops its vectors.
+   * Returns false (and does nothing) when the id is unknown or already inactive. That guard matters:
+   * only active rows are in the FTS index, and issuing the external-content 'delete' command for a row
+   * that was already removed corrupts the index (every later MATCH fails with "database disk image is
+   * malformed") — a repeat forget_memory call or a three-way duplicate group in compact() used to do
+   * exactly that.
+   */
+  deactivate(id: number): boolean {
+    return this.runInTransaction(() => {
+      const row = this.stmt('SELECT content, subject, category, active FROM memories WHERE id = ?').get(id) as
+        | Pick<Memory, 'content' | 'subject' | 'category' | 'active'>
         | undefined;
+      if (!row || row.active !== 1) return false;
 
       this.stmt('UPDATE memories SET active = 0 WHERE id = ?').run(id);
-
-      if (row) {
-        this.stmt(
-          "INSERT INTO memories_fts(memories_fts, rowid, content, subject, category) VALUES('delete', ?, ?, ?, ?)",
-        ).run(id, row.content, row.subject, row.category);
-      }
+      this.stmt(
+        "INSERT INTO memories_fts(memories_fts, rowid, content, subject, category) VALUES('delete', ?, ?, ?, ?)",
+      ).run(id, row.content, row.subject, row.category);
 
       // Deactivated memories are never searched or reactivated — their vectors go too.
       this.deleteVectors(id);
+      return true;
+    });
+  }
+
+  /**
+   * Rebuilds the FTS index from the active rows of the content table. External-content FTS5 tables
+   * only stay consistent as long as every insert/update/delete is mirrored exactly; this makes the
+   * index correct by construction at startup regardless of what happened before (self-heal for the
+   * historical double-delete corruption). ~2k rows rebuild in milliseconds.
+   */
+  rebuildFtsIndex(): number {
+    return this.runInTransaction(() => {
+      this.stmt("INSERT INTO memories_fts(memories_fts) VALUES('delete-all')").run();
+      const rows = this.stmt('SELECT id, content, subject, category FROM memories WHERE active = 1').all() as Pick<
+        Memory,
+        'id' | 'content' | 'subject' | 'category'
+      >[];
+      const insert = this.stmt('INSERT INTO memories_fts(rowid, content, subject, category) VALUES(?, ?, ?, ?)');
+      for (const row of rows) {
+        insert.run(row.id, row.content, row.subject, row.category);
+      }
+      return rows.length;
     });
   }
 
@@ -696,7 +743,11 @@ export class MemoryStore {
    * embeddings API.
    */
   compact(): { removed: number; expired: number } {
-    // 0. Ephemeral TTL sweep first: expired memories shouldn't waste dedup cycles below, and their
+    // 0. Make the FTS index correct by construction before anything below touches it.
+    const indexed = this.rebuildFtsIndex();
+    logger.info(`Compact: rebuilt the FTS index over ${indexed} active memories`);
+
+    //    Ephemeral TTL sweep next: expired memories shouldn't waste dedup cycles below, and their
     //    vector/FTS cleanup happens inside deactivate().
     const { expired } = this.sweepExpiredMemories();
 
@@ -734,8 +785,14 @@ export class MemoryStore {
       // Sort by updated_at descending (newest first)
       group.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
 
+      // A memory deactivated as a duplicate never takes part in another comparison: in a group of
+      // three mutual duplicates the old loop deactivated the third one twice (once against each of
+      // the others), and the second, redundant FTS delete corrupted the index.
+      const deactivated = new Set<number>();
       for (let i = 0; i < group.length; i++) {
+        if (deactivated.has(group[i].id)) continue;
         for (let j = i + 1; j < group.length; j++) {
+          if (deactivated.has(group[j].id)) continue;
           // Semantic comparison when both sides have current-model vectors; lexical fallback otherwise.
           const vecI = cache?.get(group[i].id)?.vec;
           const vecJ = cache?.get(group[j].id)?.vec;
@@ -744,9 +801,9 @@ export class MemoryStore {
               ? dot(vecI, vecJ) >= this.dedupThreshold
               : wordOverlap(group[i].content, group[j].content) > 0.6;
 
-          if (isDuplicate) {
+          if (isDuplicate && this.deactivate(group[j].id)) {
             // Keep newer (i), deactivate older (j)
-            this.deactivate(group[j].id);
+            deactivated.add(group[j].id);
             removed++;
             logger.info(`Compacted: deactivated memory #${group[j].id} (duplicate of #${group[i].id})`);
           }
@@ -1089,10 +1146,6 @@ export class MemoryStore {
   clearAllEmojiCaptions(): number {
     const result = this.stmt('UPDATE emojis SET caption = NULL, captioned_at = NULL').run();
     return result.changes;
-  }
-
-  getEmojisNeedingCaption(): EmojiRow[] {
-    return this.stmt("SELECT * FROM emojis WHERE active = 1 AND (caption IS NULL OR caption = '')").all() as EmojiRow[];
   }
 
   /** Closes the underlying database handle (graceful shutdown). */

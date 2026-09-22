@@ -401,3 +401,43 @@ describe('OpenRouterProvider image pipeline', () => {
     expect(Math.max(meta.width ?? 0, meta.height ?? 0)).toBe(1568);
   });
 });
+
+describe('OpenRouterProvider image cache', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('downloads each image URL once per provider, not once per chat() call', async () => {
+    const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 0, g: 255, b: 0 } } })
+      .png()
+      .toBuffer();
+    vi.mocked(globalThis.fetch).mockImplementation(
+      async () =>
+        new Response(png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer, {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+    );
+
+    const provider = new OpenRouterProvider({
+      client: createReplayClient(loadFixture('text-response')),
+      model: 'test-model',
+    });
+    const entry: ConversationEntry = {
+      kind: 'message',
+      role: 'user',
+      content: [
+        { type: 'text', text: 'same image twice' },
+        { type: 'image', url: 'https://example.com/cached.png' },
+      ],
+    };
+
+    await provider.chat({ messages: [entry], tools: [] });
+    await provider.chat({ messages: [entry, entry], tools: [] });
+
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
+  });
+});

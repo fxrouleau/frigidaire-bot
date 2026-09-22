@@ -1,33 +1,37 @@
-import process from 'node:process';
 import { type Message, StickerFormatType } from 'discord.js';
+import { config } from '../config';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
 import type { ConversationPersistence } from './conversationPersistence';
 import { ConversationStore } from './conversationStore';
 import { writeErrorCapture } from './debugCapture';
+import { applyEmojiPolicy, hasCustomEmoji } from './emojiPolicy';
 import { logFailure } from './failureLogger';
+import { getMemoryStore } from './memory';
 import type { EmojiRow, Identity, Memory, MemoryStore } from './memory/memoryStore';
-import { getProviderForChannel } from './providerRegistry';
-import { getMemoryStore, toolDefinitions } from './tools';
+import { emojiCdnUrl, findCustomEmojis, formatIdentityLines } from './promptSections';
+import { getProvider } from './providerRegistry';
+import { toolDefinitions } from './tools';
 import type {
   AiProvider,
   ConversationEntry,
   NormalizedContentPart,
   ProviderChatResponse,
   ProviderToolCall,
+  ProviderToolDefinition,
   ToolDefinition,
 } from './types';
-import { formatRelativeAge, formatTimestampET } from './utils';
-
-const CONVERSATION_TIMEOUT = Number(process.env.CONVERSATION_TIMEOUT_MS) || 15 * 60 * 1000; // 15 minutes
-const MAX_TOOL_ROUNDS = Number(process.env.MAX_TOOL_ROUNDS) || 10;
-const MAX_TOOL_INVOCATIONS = Number(process.env.MAX_TOOL_INVOCATIONS) || 50;
+import { formatCurrentTimeET, formatRelativeAge, formatTimestampET } from './utils';
 
 // `<@123>` / `<@!123>` user mentions (the legacy `!` is the old nickname form). Role (`<@&>`) and
 // channel (`<#>`) mentions are deliberately not matched.
 const USER_MENTION_REGEX = /<@!?(\d+)>/g;
 // Bound prompt growth: at most this many distinct mentioned users get a subject-memory pull.
 const MAX_MENTIONED_SUBJECTS = 3;
+// How many of the bot's previous replies the emoji guardrail looks back over (see emojiPolicy.ts).
+const EMOJI_LOOKBACK_REPLIES = 4;
+
+const ERROR_REPLY = 'Sorry, I encountered an error while processing your request.';
 
 /**
  * Rewrites user-mention tokens in `text`: the bot's own ping is removed (it's the trigger, noise in
@@ -46,7 +50,7 @@ function resolveMentionTokens(text: string, botUserId: string, resolve: (id: str
 }
 
 export type AgentOrchestratorOptions = {
-  resolveProvider?: (channelId: string) => AiProvider | undefined;
+  resolveProvider?: () => AiProvider;
   tools?: ToolDefinition[];
   timeoutMs?: number;
   maxToolRounds?: number;
@@ -58,169 +62,74 @@ export type AgentOrchestratorOptions = {
 
 export class AgentOrchestrator {
   private readonly store: ConversationStore;
-  private readonly resolveProvider: (channelId: string) => AiProvider | undefined;
+  private readonly resolveProvider: () => AiProvider;
   private readonly tools: ToolDefinition[];
   private readonly maxToolRounds: number;
   private readonly maxToolInvocations: number;
+  // One in-flight turn per channel: two mentions in the same channel run back to back, so the second
+  // sees the first's reply in its history instead of both reading the same stale state and the last
+  // writer silently dropping the other turn.
+  private readonly channelQueues = new Map<string, Promise<void>>();
 
   constructor(opts: AgentOrchestratorOptions = {}) {
-    this.store = new ConversationStore(opts.timeoutMs ?? CONVERSATION_TIMEOUT, opts.persistence);
-    this.resolveProvider = opts.resolveProvider ?? getProviderForChannel;
+    this.store = new ConversationStore(opts.timeoutMs ?? config.agent.conversationTimeoutMs, opts.persistence);
+    this.resolveProvider = opts.resolveProvider ?? getProvider;
     this.tools = opts.tools ?? toolDefinitions;
-    this.maxToolRounds = opts.maxToolRounds ?? MAX_TOOL_ROUNDS;
-    this.maxToolInvocations = opts.maxToolInvocations ?? MAX_TOOL_INVOCATIONS;
+    this.maxToolRounds = opts.maxToolRounds ?? config.agent.maxToolRounds;
+    this.maxToolInvocations = opts.maxToolInvocations ?? config.agent.maxToolInvocations;
   }
 
-  async handleMention(message: Message) {
-    const stopTyping = this.startTypingLoop(message);
-    const botName = message.client.user.displayName;
-    const provider = this.resolveProvider(message.channel.id);
-    if (!provider) {
-      stopTyping();
-      await message.reply('No AI provider is configured for this bot.');
-      return;
-    }
-
-    this.store.pruneExpired();
+  handleMention(message: Message): Promise<void> {
     const channelId = message.channel.id;
-    let state = this.store.get(channelId);
+    const previous = this.channelQueues.get(channelId) ?? Promise.resolve();
+    const run = previous.then(() => this.processMention(message));
+    const settled = run.catch(() => undefined);
+    this.channelQueues.set(channelId, settled);
+    void settled.then(() => {
+      if (this.channelQueues.get(channelId) === settled) this.channelQueues.delete(channelId);
+    });
+    return run;
+  }
 
-    if (!state) {
-      const { entries: initialEntries, injectedMemoryIds } = await this.buildInitialHistory(message, provider);
-      state = {
-        providerId: provider.id,
-        entries: initialEntries,
-        injectedMemoryIds,
-        timestamp: Date.now(),
-      };
-      this.store.set(channelId, state);
-    }
-
-    if (!state) {
-      stopTyping();
-      await message.reply('Failed to initialize the conversation state.');
-      return;
-    }
-
-    const providerTools = provider.supportedTools;
-    const userEntry = this.buildUserEntry(message);
-
-    // Per-turn memory refresh: rebuild the dynamic context (speaker bucket + contextual search +
-    // mentioned-subject pulls) once per mention, before chat() and outside the tool loop, so topic
-    // shifts and new @-mentions mid-conversation get fresh retrieval. The static prompt (entries[0])
-    // is never touched, preserving provider prefix-caching.
-    const priorInjectedIds = state.injectedMemoryIds ?? [];
-    const store = this.safeStore();
-    const dynamic = store
-      ? await this.buildDynamicContextEntry(message, store, priorInjectedIds)
-      : { entry: undefined, injectedIds: [] };
-    const injectedMemoryIds = [...priorInjectedIds, ...dynamic.injectedIds];
-
-    const workingEntries: ConversationEntry[] = dynamic.entry
-      ? [...state.entries, dynamic.entry, userEntry]
-      : [...state.entries, userEntry];
+  private async processMention(message: Message): Promise<void> {
+    const channelId = message.channel.id;
+    const stopTyping = this.startTypingLoop(message);
+    let provider: AiProvider | undefined;
+    let workingEntries: ConversationEntry[] = [];
 
     try {
-      const firstResponse = await provider.chat({
-        messages: workingEntries,
-        tools: providerTools,
-        toolChoice: 'auto',
-        thoughts: state.thoughts,
-      });
+      provider = this.resolveProvider();
+      this.store.pruneExpired();
 
-      workingEntries.push(...firstResponse.outputEntries);
-
-      const hostHandledCalls = firstResponse.toolCalls.filter((call) => {
-        const providerTool = providerTools.find((tool) => tool.name === call.name);
-        return providerTool?.hostHandled ?? false;
-      });
-
-      if (hostHandledCalls.length > 0) {
-        const toolResults = await this.executeToolCalls(hostHandledCalls, message, provider, channelId);
-        workingEntries.push(...toolResults);
-
-        let totalInvocations = hostHandledCalls.length;
-        let lastThoughts = firstResponse.thoughts ?? state.thoughts;
-        let finalResponse: ProviderChatResponse | undefined;
-
-        for (let round = 0; round < this.maxToolRounds; round++) {
-          const roundResponse = await provider.chat({
-            messages: workingEntries,
-            tools: providerTools,
-            toolChoice: 'auto',
-            thoughts: lastThoughts,
-          });
-
-          workingEntries.push(...roundResponse.outputEntries);
-          lastThoughts = roundResponse.thoughts ?? lastThoughts;
-
-          const roundToolCalls = roundResponse.toolCalls.filter((call) => {
-            const providerTool = providerTools.find((tool) => tool.name === call.name);
-            return providerTool?.hostHandled ?? false;
-          });
-
-          if (roundToolCalls.length === 0) {
-            finalResponse = roundResponse;
-            break;
-          }
-
-          totalInvocations += roundToolCalls.length;
-          if (totalInvocations > this.maxToolInvocations) {
-            logger.warn(
-              `Tool invocation limit (${this.maxToolInvocations}) exceeded in channel ${channelId}, forcing text response.`,
-            );
-            const forcedResponse = await provider.chat({
-              messages: workingEntries,
-              tools: providerTools,
-              toolChoice: 'none',
-              thoughts: lastThoughts,
-            });
-            workingEntries.push(...forcedResponse.outputEntries);
-            finalResponse = forcedResponse;
-            lastThoughts = forcedResponse.thoughts ?? lastThoughts;
-            break;
-          }
-
-          const roundResults = await this.executeToolCalls(roundToolCalls, message, provider, channelId);
-          workingEntries.push(...roundResults);
-
-          // Last allowed round — force a text-only response
-          if (round === this.maxToolRounds - 1) {
-            const forcedResponse = await provider.chat({
-              messages: workingEntries,
-              tools: providerTools,
-              toolChoice: 'none',
-              thoughts: lastThoughts,
-            });
-            workingEntries.push(...forcedResponse.outputEntries);
-            finalResponse = forcedResponse;
-            lastThoughts = forcedResponse.thoughts ?? lastThoughts;
-          }
-        }
-
-        stopTyping();
-        await this.sendReply(finalResponse?.text, message);
-
-        this.store.set(channelId, {
-          providerId: provider.id,
-          entries: workingEntries,
-          injectedMemoryIds,
-          thoughts: finalResponse?.thoughts ?? lastThoughts,
-          timestamp: Date.now(),
-        });
-        return;
+      let state = this.store.get(channelId);
+      if (!state) {
+        const initial = await this.buildInitialHistory(message);
+        state = { entries: initial.entries, injectedMemoryIds: initial.injectedMemoryIds, timestamp: Date.now() };
+        this.store.set(channelId, state);
       }
 
-      stopTyping();
-      await this.sendReply(firstResponse.text, message);
+      const userEntry = this.buildUserEntry(message);
 
-      this.store.set(channelId, {
-        providerId: provider.id,
-        entries: workingEntries,
-        injectedMemoryIds,
-        thoughts: firstResponse.thoughts ?? state.thoughts,
-        timestamp: Date.now(),
-      });
+      // Per-turn memory refresh: rebuild the dynamic context (speaker bucket + contextual search +
+      // mentioned-subject pulls) once per mention, before chat() and outside the tool loop, so topic
+      // shifts and new @-mentions mid-conversation get fresh retrieval. The static prompt (entries[0])
+      // is never touched, preserving provider prefix-caching.
+      const priorInjectedIds = state.injectedMemoryIds ?? [];
+      const memoryStore = this.safeStore();
+      const dynamic = memoryStore
+        ? await this.buildDynamicContextEntry(message, memoryStore, priorInjectedIds)
+        : { entry: undefined, injectedIds: [] };
+      const injectedMemoryIds = [...priorInjectedIds, ...dynamic.injectedIds];
+
+      workingEntries = dynamic.entry ? [...state.entries, dynamic.entry, userEntry] : [...state.entries, userEntry];
+
+      const finalResponse = await this.runToolLoop(provider, workingEntries, message, channelId);
+      const reply = this.applyReplyPolicy(finalResponse.text, message, workingEntries, provider.defaultModel);
+
+      stopTyping();
+      await this.sendReply(reply, message);
+
+      this.store.set(channelId, { entries: workingEntries, injectedMemoryIds, timestamp: Date.now() });
     } catch (error) {
       logger.error('Error while processing AI response:', error);
       logFailure(
@@ -229,29 +138,132 @@ export class AgentOrchestrator {
       );
       const capturePath = writeErrorCapture({
         channelId,
-        model: provider.defaultModel,
+        model: provider?.defaultModel ?? config.models.chat,
         error,
         conversationEntries: workingEntries,
-        thoughts: state.thoughts,
       });
       if (capturePath) {
         logger.info(`Error capture written to ${capturePath}`);
       }
       stopTyping();
-      try {
-        await message.reply('Sorry, I encountered an error while processing your request.');
-      } catch (replyError) {
-        logger.warn('Failed to reply with error message, falling back to channel.send():', replyError);
-        try {
-          if ('send' in message.channel) {
-            await message.channel.send('Sorry, I encountered an error while processing your request.');
-          }
-        } catch (sendError) {
-          logger.error('Failed to send error message to channel:', sendError);
-        }
-      }
+      await this.sendErrorReply(message);
     } finally {
       stopTyping();
+    }
+  }
+
+  /**
+   * The chat → tools → chat loop. Appends every provider output and tool result to `workingEntries`
+   * (in place) and returns the response whose text is the reply. Bounded by maxToolRounds (rounds
+   * after the first response) and maxToolInvocations (total host tool calls); when either bound is
+   * hit the model is forced into a text-only answer.
+   */
+  private async runToolLoop(
+    provider: AiProvider,
+    workingEntries: ConversationEntry[],
+    message: Message,
+    channelId: string,
+  ): Promise<ProviderChatResponse> {
+    const providerTools = provider.supportedTools;
+    const hostHandled = (calls: ProviderToolCall[]) =>
+      calls.filter((call) => providerTools.find((tool) => tool.name === call.name)?.hostHandled ?? false);
+    const chat = (toolChoice: 'auto' | 'none') =>
+      provider.chat({ messages: workingEntries, tools: providerTools, toolChoice });
+
+    const firstResponse = await chat('auto');
+    workingEntries.push(...firstResponse.outputEntries);
+
+    const firstCalls = hostHandled(firstResponse.toolCalls);
+    if (firstCalls.length === 0) return firstResponse;
+
+    workingEntries.push(...(await this.executeToolCalls(firstCalls, message, provider, channelId)));
+    let totalInvocations = firstCalls.length;
+
+    for (let round = 0; round < this.maxToolRounds; round++) {
+      const roundResponse = await chat('auto');
+      workingEntries.push(...roundResponse.outputEntries);
+
+      const roundCalls = hostHandled(roundResponse.toolCalls);
+      if (roundCalls.length === 0) return roundResponse;
+
+      totalInvocations += roundCalls.length;
+      if (totalInvocations > this.maxToolInvocations) {
+        logger.warn(
+          `Tool invocation limit (${this.maxToolInvocations}) exceeded in channel ${channelId}, forcing text response.`,
+        );
+        return this.forceTextResponse(chat, workingEntries);
+      }
+
+      workingEntries.push(...(await this.executeToolCalls(roundCalls, message, provider, channelId)));
+
+      // Last allowed round — force a text-only response
+      if (round === this.maxToolRounds - 1) {
+        return this.forceTextResponse(chat, workingEntries);
+      }
+    }
+
+    // Unreachable: the last round always returns. Kept so the function is total for the type checker.
+    return this.forceTextResponse(chat, workingEntries);
+  }
+
+  private async forceTextResponse(
+    chat: (toolChoice: 'auto' | 'none') => Promise<ProviderChatResponse>,
+    workingEntries: ConversationEntry[],
+  ): Promise<ProviderChatResponse> {
+    const forced = await chat('none');
+    workingEntries.push(...forced.outputEntries);
+    return forced;
+  }
+
+  /**
+   * Runs the emoji guardrail over the model's reply and logs one `reply_stats` line per reply (the
+   * metric for "does the bot still emoji every message"). When the guardrail changes the text, the
+   * assistant entry already appended to `workingEntries` is rewritten to the posted text — otherwise
+   * the in-window history would keep showing the unstripped reply and teach the model to repeat it.
+   */
+  private applyReplyPolicy(
+    text: string | undefined,
+    message: Message,
+    workingEntries: ConversationEntry[],
+    model: string,
+  ): string | undefined {
+    if (!text) return text;
+
+    const assistantEntries = workingEntries.filter(
+      (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'assistant',
+    );
+    // The last assistant entry is this very reply; the guardrail looks at the ones before it.
+    const previousReplies = assistantEntries.slice(0, -1).slice(-EMOJI_LOOKBACK_REPLIES);
+    const recentBotEmojiReplies = previousReplies.filter((e) =>
+      e.content.some((p) => p.type === 'text' && hasCustomEmoji(p.text)),
+    ).length;
+
+    const policy = applyEmojiPolicy(text, {
+      userMessageHadEmoji: hasCustomEmoji(message.content ?? ''),
+      recentBotEmojiReplies,
+      knownIds: this.knownEmojiIds(),
+    });
+
+    if (policy.text !== text) {
+      const own = assistantEntries.at(-1);
+      if (own) own.content = [{ type: 'text', text: policy.text }];
+    }
+
+    logger.info(
+      `reply_stats channel=${message.channel.id} model=${model} chars=${policy.text.length} emoji_kept=${policy.kept.length} emoji_stripped=${policy.stripped.length} names=${[...policy.kept, ...policy.stripped].join(',')}`,
+    );
+    return policy.text;
+  }
+
+  private knownEmojiIds(): ReadonlySet<string> | undefined {
+    try {
+      return new Set(
+        getMemoryStore()
+          .getUsableEmojis()
+          .map((e) => e.id),
+      );
+    } catch {
+      return undefined;
     }
   }
 
@@ -277,17 +289,8 @@ export class AgentOrchestrator {
       }
 
       try {
-        logger.info(`Executing host tool "${call.name}" for provider "${provider.id}" in channel ${channelId}.`);
-        const toolOutput = await toolDefinition.handler(
-          {
-            message,
-            providerId: provider.id,
-            provider,
-            channelId,
-            switchProvider: () => ({ error: 'Provider switching is not supported.' }),
-          },
-          call.arguments,
-        );
+        logger.info(`Executing host tool "${call.name}" in channel ${channelId}.`);
+        const toolOutput = await toolDefinition.handler({ message, provider, channelId }, call.arguments);
         results.push({ kind: 'tool_result', id: call.id, name: call.name, content: toolOutput });
       } catch (error) {
         logger.error(`Error while executing tool ${call.name}:`, error);
@@ -308,7 +311,6 @@ export class AgentOrchestrator {
 
   private async buildInitialHistory(
     message: Message,
-    _provider: AiProvider,
   ): Promise<{ entries: ConversationEntry[]; injectedMemoryIds: number[] }> {
     const botName = message.client.user.displayName;
     const { text: basePrompt, injectedIds } = await this.buildStaticDeveloperPrompt(botName);
@@ -335,7 +337,7 @@ export class AgentOrchestrator {
           } satisfies ConversationEntry;
         }
 
-        return this.buildHistoricalUserEntry(msg);
+        return this.buildUserEntry(msg);
       });
 
     entries.push(...historicalContext);
@@ -343,14 +345,6 @@ export class AgentOrchestrator {
   }
 
   private buildUserEntry(message: Message): ConversationEntry {
-    return {
-      kind: 'message',
-      role: 'user',
-      content: this.buildUserContentParts(message),
-    };
-  }
-
-  private buildHistoricalUserEntry(message: Message): ConversationEntry {
     return {
       kind: 'message',
       role: 'user',
@@ -366,19 +360,7 @@ export class AgentOrchestrator {
    * Returns the memory ids it baked in (the vibe/personality bucket) to seed cross-turn dedup.
    */
   private async buildStaticDeveloperPrompt(botName: string): Promise<{ text: string; injectedIds: number[] }> {
-    const now = new Date();
-    const tz = 'America/New_York';
-    const currentTimeEt = new Intl.DateTimeFormat('sv-SE', {
-      timeZone: tz,
-      hour12: false,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      timeZoneName: 'short',
-    }).format(now);
+    const currentTimeEt = formatCurrentTimeET();
 
     // Fetch identities, emojis, and the vibe/personality bucket for context injection.
     let personalityMemories: Memory[] = [];
@@ -429,6 +411,7 @@ How you behave:
 - You can roast, joke, be sarcastic, be crude — whatever fits the moment
 - If someone genuinely needs help, help them properly without being preachy
 - You have your own opinions and preferences. Don't be a yes-man.
+- Emojis: you basically don't use them. Plain text is your default and you go many messages without one. A custom server emoji is only for a one-word reaction or a punchline that would otherwise need explaining — never decoration on a normal sentence, and never just because someone else used one. To post one, look it up with get_emoji first; the glossary below is for reading, not a menu.
 - Never say "I'm just an AI" or "as a language model" — you're ${botName}, period.
 
 You can search the web natively. Use it SPARINGLY — only when you genuinely need current, real-time information you couldn't possibly know (live scores, recent news, release dates, etc). Don't search for things you already know. Don't follow links people share.
@@ -443,7 +426,7 @@ The last user message in the conversation is why you're being pinged. Read it fi
 - If the current message is open-ended ("thoughts?", "analyze this", "fridge roast him"), the group is usually pointing at the most recent prior topic — use that context.
 - Gap awareness: look at the timestamps. If the prior messages are hours older than the current ping AND the current message introduces something new, treat the older stuff as stale scenery, not live subject matter.
 
-The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_York; apply EST/EDT automatically).`;
+The current time is ${currentTimeEt} (ISO 8601, America/New_York; apply EST/EDT automatically).`;
 
     return { text, injectedIds: personalityMemories.map((m) => m.id) };
   }
@@ -580,36 +563,19 @@ The current time is ${currentTimeEt.replace(' ', 'T')} (ISO 8601, America/New_Yo
 
   private formatIdentitiesSection(identities: Identity[]): string {
     if (identities.length === 0) return '';
-
-    const lines = identities.map((i) => {
-      const displayPart =
-        i.canonical_name === i.display_name ? i.canonical_name : `${i.canonical_name} (now: ${i.display_name})`;
-      const irlPart = i.irl_name ? ` — IRL: ${i.irl_name}` : '';
-      const aliasPart = i.aliases.length > 0 ? `. Also called: ${i.aliases.join(', ')}` : '';
-      return `- ${displayPart} (id:${i.discord_user_id})${irlPart}${aliasPart}`;
-    });
-
-    return `\n=== SERVER PEOPLE ===\n${lines.join('\n')}\n`;
+    return `\n=== SERVER PEOPLE ===\n${formatIdentityLines(identities).join('\n')}\n`;
   }
 
   private formatEmojisSection(emojis: EmojiRow[]): string {
     if (emojis.length === 0) return '';
 
-    const lines = emojis.map((e) => {
-      const syntax = e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`;
-      const captionPart = e.caption ? ` — ${e.caption}` : '';
-      return `- ${syntax}${captionPart}`;
-    });
-
-    // Deliberately framed around restraint: a prominent capability list with "prefer these" guidance
-    // reads to the model as an instruction to use emojis in every message (Felix's complaint).
+    // A reading glossary, not a menu: names and meanings only. The `<:name:id>` syntax the model would
+    // need to post one is deliberately withheld — a full list with syntax read as "things to use" and
+    // produced an emoji in nearly every reply. Deliberate use goes through the get_emoji tool.
+    const lines = emojis.map((e) => `- ${e.name}${e.caption ? ` — ${e.caption}` : ''}`);
     return `
-=== SERVER EMOJIS (use sparingly) ===
-These are the server's custom emojis (most-used first) so you know what each one means. Usage rules:
-- MOST of your messages should have NO emoji at all. Plain text is the default — that's how everyone else here talks.
-- Drop one in only when it genuinely adds something: a reaction, a punchline, matching the moment. If you're unsure, skip it.
-- Never decorate ordinary sentences with emojis. Never use more than one per message unless you're quoting someone.
-- Only these custom emojis render properly; when you do use one, paste the exact syntax shown.
+=== EMOJI GLOSSARY (for reading what people post — not a menu for you) ===
+Reference only; the emoji rule above still applies. Each line is a server custom emoji's name and what it means when someone posts it:
 ${lines.join('\n')}
 `;
   }
@@ -632,14 +598,8 @@ ${lines.join('\n')}
     parts.push({ type: 'text', text: baseText });
 
     // Extract custom emoji images so the model can "see" them
-    const customEmojiRegex = /<a?:(\w+):(\d+)>/g;
-    const emojiMatches = (msg.content ?? '').matchAll(customEmojiRegex);
-    for (const match of emojiMatches) {
-      const [, , emojiId] = match;
-      const isAnimated = match[0].startsWith('<a:');
-      const ext = isAnimated ? 'gif' : 'png';
-      const emojiUrl = `https://cdn.discordapp.com/emojis/${emojiId}.${ext}?size=96&quality=lossless`;
-      parts.push({ type: 'image', url: emojiUrl });
+    for (const emoji of findCustomEmojis(rawContent)) {
+      parts.push({ type: 'image', url: emojiCdnUrl(emoji.id, emoji.animated) });
     }
 
     if (msg.attachments.size > 0) {
@@ -651,7 +611,10 @@ ${lines.join('\n')}
     }
 
     for (const embed of msg.embeds) {
-      const imageUrl = embed.image?.url || embed.thumbnail?.url;
+      // Prefer Discord's media proxy over the third-party origin URL: the bot fetches these from
+      // inside its own network, and the proxy also sidesteps hotlink-protected hosts.
+      const image = embed.image ?? embed.thumbnail;
+      const imageUrl = image?.proxyURL || image?.url;
       if (imageUrl) {
         parts.push({ type: 'image', url: imageUrl });
       }
@@ -691,6 +654,21 @@ ${lines.join('\n')}
     const chunks = splitMessage(content);
     for (const chunk of chunks) {
       await this.safeSend(message, chunk);
+    }
+  }
+
+  private async sendErrorReply(message: Message): Promise<void> {
+    try {
+      await message.reply(ERROR_REPLY);
+    } catch (replyError) {
+      logger.warn('Failed to reply with error message, falling back to channel.send():', replyError);
+      try {
+        if ('send' in message.channel) {
+          await message.channel.send(ERROR_REPLY);
+        }
+      } catch (sendError) {
+        logger.error('Failed to send error message to channel:', sendError);
+      }
     }
   }
 
@@ -740,3 +718,6 @@ ${lines.join('\n')}
     };
   }
 }
+
+// Re-exported for tests that assert on the tool surface the orchestrator advertises.
+export type { ProviderToolDefinition };

@@ -98,3 +98,16 @@ describe('serializeError', () => {
     expect(result.message).toBe('just a string');
   });
 });
+
+describe('DEBUG_CAPTURE spellings', () => {
+  it.each(['false', 'no', 'off'])('disables captures for DEBUG_CAPTURE=%s (regression: only "0" used to work)', (flag) => {
+    const dir = tempDir();
+    vi.stubEnv('DEBUG_CAPTURE_DIR', dir);
+    vi.stubEnv('DEBUG_CAPTURE', flag);
+
+    const result = writeErrorCapture({ channelId: 'c1', model: 'm', error: new Error('test'), conversationEntries: [] });
+
+    expect(result).toBeUndefined();
+    expect(fs.existsSync(dir) ? fs.readdirSync(dir) : []).toHaveLength(0);
+  });
+});

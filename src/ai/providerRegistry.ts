@@ -3,17 +3,10 @@ import type { AiProvider } from './types';
 
 let provider: AiProvider | undefined;
 
-function ensureProvider(): AiProvider {
+/** The process-wide chat provider (OpenRouter), constructed on first use. */
+export function getProvider(): AiProvider {
   if (!provider) {
     provider = new OpenRouterProvider();
   }
   return provider;
-}
-
-export function getProvider(): AiProvider {
-  return ensureProvider();
-}
-
-export function getProviderForChannel(_channelId: string): AiProvider {
-  return ensureProvider();
 }

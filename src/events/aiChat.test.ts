@@ -1,14 +1,7 @@
-import type { Message } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent } from '../ai/agentInstance';
 import { createFakeBotMessage, createFakeMessage } from '../test-support/fakeDiscord';
-import * as aiChatModule from './aiChat';
-
-// The handler is `module.exports = { name, execute }`. Under Vitest/Vite that surfaces
-// as the namespace's `default` member; tsc sees only a namespace, so we bridge via unknown.
-const aiChatEvent = (aiChatModule as unknown as {
-  default: { name: string; execute: (message: Message) => Promise<void> };
-}).default;
+import aiChatEvent from './aiChat';
 
 const BOT_ID = 'bot-1';
 
@@ -63,6 +56,34 @@ describe('aiChat event', () => {
 
     expect(agent.handleMention).toHaveBeenCalledTimes(1);
     expect(agent.handleMention).toHaveBeenCalledWith(fake.message);
+  });
+
+  it('uses the resolved replied-to user instead of fetching the message when Discord provides it', async () => {
+    const fake = createFakeMessage({
+      content: 'replying with ping',
+      botUserId: BOT_ID,
+      referencedMessageId: 'ref-1',
+      repliedUserId: BOT_ID,
+    });
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).toHaveBeenCalledTimes(1);
+    expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
+  });
+
+  it('does NOT route (and does not fetch) when the resolved replied-to user is a human', async () => {
+    const fake = createFakeMessage({
+      content: 'replying to a human with ping',
+      botUserId: BOT_ID,
+      referencedMessageId: 'ref-1',
+      repliedUserId: 'human-2',
+    });
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).not.toHaveBeenCalled();
+    expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
   });
 
   it('does NOT route when replying to a human message', async () => {

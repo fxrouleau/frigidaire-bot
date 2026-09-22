@@ -1,14 +1,14 @@
-import { Events, type GuildEmoji } from 'discord.js';
+import { Events } from 'discord.js';
 import { syncEmoji } from '../ai/emojiSync';
+import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
 
-module.exports = {
-  name: Events.GuildEmojiUpdate,
-  async execute(_oldEmoji: GuildEmoji, newEmoji: GuildEmoji) {
+export default defineEvent(Events.GuildEmojiUpdate, {
+  async execute(_oldEmoji, newEmoji) {
     try {
       await syncEmoji(newEmoji);
     } catch (error) {
       logger.warn('emojiUpdate: failed to sync updated emoji:', error);
     }
   },
-};
+});

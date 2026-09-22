@@ -1,14 +1,8 @@
-import type { Message } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getMemoryStore, setMemoryStoreForTesting } from '../ai/tools';
+import { getMemoryStore, setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
 import { createFakeMessage } from '../test-support/fakeDiscord';
-import * as emojiUsageModule from './emojiUsageTracker';
-
-// `module.exports = {...}` surfaces as the namespace's `default` under Vitest/Vite.
-const emojiUsageEvent = (emojiUsageModule as unknown as {
-  default: { name: string; execute: (message: Message) => void };
-}).default;
+import emojiUsageEvent from './emojiUsageTracker';
 
 function useCount(id: string): number {
   return getMemoryStore().getEmojiById(id)?.use_count ?? -1;

@@ -1,5 +1,7 @@
+const ET_TIMEZONE = 'America/New_York';
+
 const ET_DATETIME_FORMAT = new Intl.DateTimeFormat('sv-SE', {
-  timeZone: 'America/New_York',
+  timeZone: ET_TIMEZONE,
   hour12: false,
   year: 'numeric',
   month: '2-digit',
@@ -8,8 +10,26 @@ const ET_DATETIME_FORMAT = new Intl.DateTimeFormat('sv-SE', {
   minute: '2-digit',
 });
 
+const ET_DATETIME_WITH_ZONE_FORMAT = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: ET_TIMEZONE,
+  hour12: false,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  timeZoneName: 'short',
+});
+
+/** 'YYYY-MM-DD HH:MM' in Eastern time — the message timestamp format used in every prompt. */
 export function formatTimestampET(date: Date): string {
   return ET_DATETIME_FORMAT.format(date);
+}
+
+/** 'YYYY-MM-DDTHH:MM:SS EST|EDT' — the "current time" line of the chat system prompt. */
+export function formatCurrentTimeET(now: Date = new Date()): string {
+  return ET_DATETIME_WITH_ZONE_FORMAT.format(now).replace(' ', 'T');
 }
 
 const DAY_MS = 86_400_000;

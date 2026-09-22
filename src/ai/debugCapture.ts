@@ -2,6 +2,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { config } from '../config';
 import { logger } from '../logger';
 import type { ConversationEntry } from './types';
 
@@ -21,7 +22,6 @@ export type ErrorCapture = {
   model: string;
   error: CapturedError;
   conversationEntries: ConversationEntry[];
-  thoughts?: unknown;
 };
 
 export const MAX_CAPTURES = 50;
@@ -67,14 +67,13 @@ export function writeErrorCapture(input: {
   model: string;
   error: unknown;
   conversationEntries: ConversationEntry[];
-  thoughts?: unknown;
 }): string | undefined {
-  if (process.env.DEBUG_CAPTURE === '0') {
+  if (!config.debugCapture.enabled) {
     return undefined;
   }
 
   try {
-    const dir = process.env.DEBUG_CAPTURE_DIR || './data/debug';
+    const dir = config.debugCapture.dir;
     fs.mkdirSync(dir, { recursive: true });
 
     const capture: ErrorCapture = {
@@ -85,7 +84,6 @@ export function writeErrorCapture(input: {
       model: input.model,
       error: serializeError(input.error),
       conversationEntries: input.conversationEntries,
-      thoughts: input.thoughts,
     };
 
     // A short random suffix guarantees uniqueness: the ISO timestamp only has millisecond

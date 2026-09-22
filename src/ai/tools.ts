@@ -1,25 +1,43 @@
-import { logger } from '../logger';
-import { makeDefaultEmbeddingProvider } from './memory/embeddingProvider';
-import { type Memory, MemoryStore, SELF_DIAGNOSIS_CATEGORIES } from './memory/memoryStore';
+import { getMemoryStore } from './memory';
+import { type Memory, SELF_DIAGNOSIS_CATEGORIES } from './memory/memoryStore';
+import { emojiSyntax } from './promptSections';
 import type { ToolDefinition, ToolHandlerContext } from './types';
 
-let memoryStore: MemoryStore | undefined;
+// The categories the chat model may write. Everything the model sends is untrusted text: a
+// hallucinated 'Fact', 'image' or 'capability_gap' would create a never-expiring or self-diagnosis
+// polluting row, so arguments are whitelisted here exactly like the learner whitelists its own.
+const CHAT_MEMORY_CATEGORIES = ['fact', 'preference', 'personality', 'event', 'vibe'] as const;
+type ChatMemoryCategory = (typeof CHAT_MEMORY_CATEGORIES)[number];
 
-export function getMemoryStore(): MemoryStore {
-  if (!memoryStore) {
-    // Structural test hermeticity: inside Vitest, an un-injected getMemoryStore() must never touch
-    // the real on-disk DB or the network. Tests that need a specific store inject one via
-    // setMemoryStoreForTesting(); anything else gets an isolated, embedder-less in-memory store.
-    memoryStore = process.env.VITEST
-      ? new MemoryStore(':memory:')
-      : new MemoryStore(undefined, { embeddings: makeDefaultEmbeddingProvider() });
-  }
-  return memoryStore;
+function parseCategory(raw: unknown): ChatMemoryCategory | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const normalized = raw.trim().toLowerCase();
+  return (CHAT_MEMORY_CATEGORIES as readonly string[]).includes(normalized)
+    ? (normalized as ChatMemoryCategory)
+    : undefined;
 }
 
-/** Test-only: lets tests point the shared memory store at an isolated instance (e.g. ':memory:'). */
-export function setMemoryStoreForTesting(store: MemoryStore | undefined): void {
-  memoryStore = store;
+/** Parses a positive integer id from a number or numeric string; undefined for anything else. */
+function parseId(raw: unknown): number | undefined {
+  const value = typeof raw === 'string' ? Number(raw.trim()) : raw;
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/** Parses an integer within [min, max], falling back to the default for anything else. */
+function parseLimit(raw: unknown, fallback: number, min: number, max: number): number {
+  const value = typeof raw === 'string' ? Number(raw.trim()) : raw;
+  if (typeof value !== 'number' || !Number.isInteger(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+function optionalString(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function formatMemoryLine(m: Memory): string {
+  return `[id:${m.id}] [${m.category}] ${m.subject}: ${m.content} (saved: ${m.created_at}, updated: ${m.updated_at})`;
 }
 
 const summarizeTool: ToolDefinition = {
@@ -79,19 +97,13 @@ const imageTool: ToolDefinition = {
     additionalProperties: false,
   },
   handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+    if (!ctx.provider.generateImage) {
+      return 'This provider does not support image generation.';
+    }
     const prompt = String(args.prompt ?? '');
-    const refinePrevious = Boolean(args.refine_previous ?? false);
-    const sourceImageUrl = args.source_image_url ? String(args.source_image_url) : undefined;
-
-    if (ctx.provider.generateImageLocal) {
-      return ctx.provider.generateImageLocal(ctx.message, prompt, { refinePrevious, sourceImageUrl });
-    }
-
-    if (ctx.provider.generateImage) {
-      return ctx.provider.generateImage(ctx.message, prompt);
-    }
-
-    return 'This provider does not support image generation.';
+    const refinePrevious = args.refine_previous === true || args.refine_previous === 'true';
+    const sourceImageUrl = optionalString(args.source_image_url);
+    return ctx.provider.generateImage(ctx.message, prompt, { refinePrevious, sourceImageUrl });
   },
 };
 
@@ -102,7 +114,7 @@ const rememberFactTool: ToolDefinition = {
   parameters: {
     type: 'object',
     properties: {
-      category: { type: 'string', enum: ['fact', 'preference', 'personality', 'event', 'vibe'] },
+      category: { type: 'string', enum: [...CHAT_MEMORY_CATEGORIES] },
       subject: { type: 'string', description: 'Who/what this is about. Use Discord display name or "server".' },
       content: { type: 'string', description: 'What to remember. Be concise.' },
     },
@@ -110,13 +122,18 @@ const rememberFactTool: ToolDefinition = {
     additionalProperties: false,
   },
   handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+    const category = parseCategory(args.category);
+    if (!category) {
+      return `Invalid category "${String(args.category)}". Use one of: ${CHAT_MEMORY_CATEGORIES.join(', ')}.`;
+    }
+    const content = optionalString(args.content);
+    if (!content) {
+      return 'Nothing to remember: content was empty.';
+    }
+    const subject = optionalString(args.subject) ?? 'general';
+
     const store = getMemoryStore();
-    const id = await store.save({
-      category: String(args.category ?? 'fact'),
-      subject: String(args.subject ?? 'general'),
-      content: String(args.content ?? ''),
-      source: 'conversation',
-    });
+    const id = await store.save({ category, subject, content, source: 'conversation' });
     return `Saved to memory (id: ${id}).`;
   },
 };
@@ -124,47 +141,59 @@ const rememberFactTool: ToolDefinition = {
 const recallMemoriesTool: ToolDefinition = {
   name: 'recall_memories',
   description:
-    'Search long-term memory. Use when someone references the past, when you need context about someone, to check what you know before asking, or to find the id of a memory you need to update or forget.',
+    'Search long-term memory: facts, preferences, personality, events, and server vibe. Use when someone references the past, for "what do you know about X" questions, to check what you know before asking, or to find the id of a memory you need to update or forget. Searches by subject name, topic keywords, and category. Bot self-diagnosis entries (capability gaps, errors, improvement ideas) are not included — use query_self_diagnosis for those.',
   parameters: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'What to search for.' },
-      subject: { type: 'string', description: 'Optional: filter by person name or "server".' },
+      query: { type: 'string', description: "What to search for — a person's name, a topic, an event, etc." },
+      subject: { type: 'string', description: 'Optional: filter by person display name or "server".' },
+      category: {
+        type: 'string',
+        enum: [...CHAT_MEMORY_CATEGORIES, 'all'],
+        description: 'Optional category filter. Use "all" or omit to search everything.',
+      },
     },
     required: ['query'],
     additionalProperties: false,
   },
   handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const store = getMemoryStore();
-    const query = String(args.query ?? '');
-    const subject = args.subject ? String(args.subject) : undefined;
+    const query = optionalString(args.query) ?? '';
+    const subject = optionalString(args.subject);
+    const category = args.category === 'all' ? undefined : parseCategory(args.category);
 
-    const results = subject ? store.getBySubject(subject) : [];
-
-    // Also run hybrid (semantic + keyword) search
-    try {
-      const searchResults = await store.search(query, 15);
-      const existingIds = new Set(results.map((r) => r.id));
-      for (const r of searchResults) {
-        if (!existingIds.has(r.id)) {
-          results.push(r);
-        }
+    const results: Memory[] = [];
+    const seenIds = new Set<number>();
+    const add = (rows: Memory[]) => {
+      for (const row of rows) {
+        if (category && row.category !== category) continue;
+        if (seenIds.has(row.id)) continue;
+        seenIds.add(row.id);
+        results.push(row);
       }
-    } catch {
-      // Search may fail (e.g. embeddings and FTS both unavailable); fall back to subject-only results
+    };
+
+    // 1. Subject-keyed rows first: an explicit subject filter, then the query itself read as a name.
+    if (subject) add(store.getBySubject(subject, 20));
+    if (query) add(store.getBySubject(query, 20));
+
+    // 2. Hybrid (semantic + keyword) search for topic matches.
+    if (query) {
+      try {
+        add(await store.search(query, 20));
+      } catch {
+        // Search may fail (e.g. embeddings and FTS both unavailable); fall back to subject-only results.
+      }
     }
+
+    // 3. A category filter with few hits widens to the category's most recent rows.
+    if (category && results.length < 5) add(store.getByCategory(category, 20));
 
     if (results.length === 0) {
       return 'No memories found matching that query.';
     }
 
-    return results
-      .slice(0, 20)
-      .map(
-        (m) =>
-          `[id:${m.id}] [${m.category}] ${m.subject}: ${m.content} (saved: ${m.created_at}, updated: ${m.updated_at})`,
-      )
-      .join('\n');
+    return `Found ${results.length} memories:\n${results.slice(0, 25).map(formatMemoryLine).join('\n')}`;
   },
 };
 
@@ -182,89 +211,12 @@ const forgetMemoryTool: ToolDefinition = {
     additionalProperties: false,
   },
   handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
-    const store = getMemoryStore();
-    const id = Number(args.memory_id);
-    if (Number.isNaN(id)) {
+    const id = parseId(args.memory_id);
+    if (id === undefined) {
       return 'Invalid memory ID.';
     }
-    store.deactivate(id);
-    return `Memory #${id} has been forgotten.`;
-  },
-};
-
-const queryLongTermMemoryTool: ToolDefinition = {
-  name: 'query_long_term_memory',
-  description:
-    'Search conversational long-term memory: facts, preferences, personality, events, and server vibe. Use for open-ended questions like "what do you know about X", "tell me about Y", "memories about Z". Searches by subject name, topic keywords, and category. Bot self-diagnosis entries (capability gaps, errors, improvement ideas) are not included — use query_self_diagnosis for those.',
-  parameters: {
-    type: 'object',
-    properties: {
-      query: {
-        type: 'string',
-        description: "What to search for — a person's name, a topic, an event, etc.",
-      },
-      category: {
-        type: 'string',
-        enum: ['fact', 'preference', 'personality', 'event', 'vibe', 'all'],
-        description: 'Optional category filter. Use "all" or omit to search everything.',
-      },
-    },
-    required: ['query'],
-    additionalProperties: false,
-  },
-  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
-    const store = getMemoryStore();
-    const query = String(args.query ?? '');
-    const category = args.category && args.category !== 'all' ? String(args.category) : undefined;
-
-    const results: Memory[] = [];
-    const seenIds = new Set<number>();
-
-    // 1. Search by subject (exact match on the query as a name)
-    const subjectResults = store.getBySubject(query, 20);
-    for (const r of subjectResults) {
-      if (category && r.category !== category) continue;
-      if (!seenIds.has(r.id)) {
-        seenIds.add(r.id);
-        results.push(r);
-      }
-    }
-
-    // 2. FTS search for topic/keyword matches
-    try {
-      const ftsResults = await store.search(query, 20);
-      for (const r of ftsResults) {
-        if (category && r.category !== category) continue;
-        if (!seenIds.has(r.id)) {
-          seenIds.add(r.id);
-          results.push(r);
-        }
-      }
-    } catch {
-      // FTS may fail on certain query patterns
-    }
-
-    // 3. If category specified and few results, also get all by category
-    if (category && results.length < 5) {
-      const catResults = store.getByCategory(category, 20);
-      for (const r of catResults) {
-        if (!seenIds.has(r.id)) {
-          seenIds.add(r.id);
-          results.push(r);
-        }
-      }
-    }
-
-    if (results.length === 0) {
-      return `No memories found for "${query}".`;
-    }
-
-    const formatted = results
-      .slice(0, 25)
-      .map((m) => `[${m.category}] ${m.subject}: ${m.content} (saved: ${m.created_at}, updated: ${m.updated_at})`)
-      .join('\n');
-
-    return `Found ${results.length} memories:\n${formatted}`;
+    const forgotten = getMemoryStore().deactivate(id);
+    return forgotten ? `Memory #${id} has been forgotten.` : `No active memory with id ${id} — nothing to forget.`;
   },
 };
 
@@ -290,8 +242,12 @@ const querySelfDiagnosisTool: ToolDefinition = {
   },
   handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const store = getMemoryStore();
-    const category = args.category && args.category !== 'all' ? String(args.category) : undefined;
-    const limit = Number(args.limit ?? 15);
+    const requested = optionalString(args.category);
+    const category =
+      requested && requested !== 'all' && (SELF_DIAGNOSIS_CATEGORIES as readonly string[]).includes(requested)
+        ? requested
+        : undefined;
+    const limit = parseLimit(args.limit, 15, 1, 50);
 
     let results: Memory[] = [];
 
@@ -299,8 +255,7 @@ const querySelfDiagnosisTool: ToolDefinition = {
       results = store.getByCategory(category, limit * 3);
     } else {
       for (const cat of SELF_DIAGNOSIS_CATEGORIES) {
-        const catResults = store.getByCategory(cat, limit * 3);
-        results.push(...catResults);
+        results.push(...store.getByCategory(cat, limit * 3));
       }
     }
 
@@ -321,12 +276,36 @@ const querySelfDiagnosisTool: ToolDefinition = {
   },
 };
 
+const getEmojiTool: ToolDefinition = {
+  name: 'get_emoji',
+  description:
+    'Look up a server custom emoji by name or by the reaction you want, and get the exact syntax to post it. Only call this once you have already decided that a single emoji IS the reply or the punchline — most replies never need one.',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'Emoji name or the reaction you want, e.g. "trolle" or "panic".' },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+    const query = (optionalString(args.query) ?? '').toLowerCase();
+    if (!query) return 'No matching emoji. Reply in plain text.';
+    const hits = getMemoryStore()
+      .getUsableEmojis()
+      .filter((e) => e.name.toLowerCase().includes(query) || (e.caption ?? '').toLowerCase().includes(query))
+      .slice(0, 5);
+    if (hits.length === 0) return 'No matching emoji. Reply in plain text.';
+    return hits.map((e) => `${emojiSyntax(e)} — ${e.caption ?? e.name}`).join('\n');
+  },
+};
+
 export const toolDefinitions: ToolDefinition[] = [
   summarizeTool,
   imageTool,
   rememberFactTool,
   recallMemoriesTool,
   forgetMemoryTool,
-  queryLongTermMemoryTool,
   querySelfDiagnosisTool,
+  getEmojiTool,
 ];

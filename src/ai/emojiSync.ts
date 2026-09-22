@@ -1,7 +1,7 @@
 import type { GuildEmoji } from 'discord.js';
 import { logger } from '../logger';
 import { captionEmoji } from './emojiCaptioner';
-import { getMemoryStore } from './tools';
+import { getMemoryStore } from './memory';
 
 /**
  * Insert/update an emoji in the DB and caption it if no caption exists yet or the

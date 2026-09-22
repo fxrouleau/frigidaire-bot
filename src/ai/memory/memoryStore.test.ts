@@ -77,26 +77,31 @@ describe('CRUD basics', () => {
     expect(results[0].category).toBe('fact');
   });
 
-  it('getRecent() returns newest-first and respects limit', async () => {
-    const id1 = await store.save({ category: 'fact', subject: 'A', content: 'First memory' });
-    const id2 = await store.save({ category: 'fact', subject: 'B', content: 'Second memory' });
-    const id3 = await store.save({ category: 'fact', subject: 'C', content: 'Third memory' });
-
-    // Manually set different timestamps so ordering is deterministic
-    // @ts-expect-error accessing private db for test setup
-    const db = store.db;
-    db.prepare("UPDATE memories SET updated_at = datetime('now', '-2 minutes') WHERE id = ?").run(id1);
-    db.prepare("UPDATE memories SET updated_at = datetime('now', '-1 minutes') WHERE id = ?").run(id2);
-    db.prepare("UPDATE memories SET updated_at = datetime('now') WHERE id = ?").run(id3);
-
-    const results = store.getRecent(2);
-    expect(results).toHaveLength(2);
-    expect(results[0].subject).toBe('C');
-    expect(results[1].subject).toBe('B');
-  });
 });
 
 describe('FTS5 search', () => {
+  it('search() matches message-length queries on any keyword (partial tier), not only when every word matches', async () => {
+    // Regression: the keyword leg used to AND every query term, so a whole chat message as the query
+    // matched nothing — the FTS-only fallback returned [] for any real message.
+    await store.save({ category: 'fact', subject: 'Felix', content: 'Drives a red Miata' });
+    await store.save({ category: 'fact', subject: 'Jason', content: 'Plays League ranked' });
+    const results = await store.search('what does felix drive these days');
+    expect(results.map((m) => m.content)).toEqual(['Drives a red Miata']);
+  });
+
+  it('search() ranks a memory matching every term above one matching some terms', async () => {
+    await store.save({ category: 'fact', subject: 'A', content: 'apple picking trip planned' });
+    await store.save({ category: 'fact', subject: 'B', content: 'apple pie recipe' });
+    const results = await store.search('apple picking');
+    expect(results.map((m) => m.subject)).toEqual(['A', 'B']);
+  });
+
+  it('search() ignores stop words in the partial tier', async () => {
+    await store.save({ category: 'fact', subject: 'A', content: 'the weather is nice' });
+    // Every query term is a stop word except one that matches nothing → no partial hits.
+    expect(await store.search('is it the dinosaurs')).toEqual([]);
+  });
+
   it('search() finds by content keyword', async () => {
     await store.save({ category: 'fact', subject: 'Felix', content: 'Loves programming in TypeScript' });
     const results = await store.search('TypeScript');
@@ -646,17 +651,6 @@ describe('emojis', () => {
     expect(usable.map((e) => e.name)).toEqual(['mango', 'zebra']);
   });
 
-  it('getEmojisNeedingCaption() returns active uncaptioned emojis', () => {
-    store.upsertEmoji({ id: '1', name: 'a', animated: false });
-    store.upsertEmoji({ id: '2', name: 'b', animated: false });
-    store.upsertEmoji({ id: '3', name: 'c', animated: false });
-    store.setEmojiCaption('2', 'caption for b');
-    store.deactivateEmoji('3');
-
-    const needing = store.getEmojisNeedingCaption();
-    expect(needing.map((e) => e.id)).toEqual(['1']);
-  });
-
   it('upsertEmoji() defaults use_count to 0 and last_used_at to null', () => {
     store.upsertEmoji({ id: '1', name: 'a', animated: false });
     const row = store.getEmojiById('1');
@@ -853,11 +847,8 @@ describe('semantic search (hybrid vector + FTS)', () => {
     // Precondition (verified value 0.5774): the query is semantically close to the pizza memory.
     expect(fakeCosine('felix favorite pizza', pizzaMemory)).toBeGreaterThan(0.3);
 
-    // FTS AND-semantics misses: 'favorite' appears in no memory. Prove it on a legacy (embedder-less)
-    // store holding identical data — this is exactly the query class the semantic upgrade exists for.
-    await store.save(pizzaMemory);
-    expect(await store.search('felix favorite pizza')).toEqual([]);
-
+    // No memory contains every query word ('favorite' appears nowhere), so the exact keyword tier is
+    // empty; the semantic leg is what carries this query class.
     const results = await semStore.search('felix favorite pizza');
     expect(results.map((m) => m.id)).toEqual([id]);
   });
@@ -1184,8 +1175,9 @@ describe('backfillEmbeddings()', () => {
     await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
     fake.failWith = undefined;
 
-    // Un-embedded and not keyword-matchable → invisible to search.
-    expect(await semStore.search('felix favorite pizza')).toEqual([]);
+    // Before the backfill nothing has a vector, so search runs in ungated keyword mode: a query that
+    // shares no word with the memory can't find it (this is the query class embeddings exist for).
+    expect(await semStore.search('favourite italian food')).toEqual([]);
 
     const result = await semStore.backfillEmbeddings();
 
@@ -1684,5 +1676,73 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
 
     expect(result).toEqual({ removed: 0, expired: 1 });
     expect(semStore.getAllActive()).toEqual([]);
+  });
+});
+
+describe('deactivate() idempotence and FTS index integrity', () => {
+  it('deactivate() returns true once and false on a repeat call', async () => {
+    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
+    expect(store.deactivate(id)).toBe(true);
+    expect(store.deactivate(id)).toBe(false);
+    expect(store.deactivate(999_999)).toBe(false);
+  });
+
+  it('a repeated deactivate() does not corrupt the FTS index (regression: "database disk image is malformed")', async () => {
+    const keep = await store.save({ category: 'fact', subject: 'Felix', content: 'Collects vintage synthesizers' });
+    const gone = await store.save({ category: 'fact', subject: 'Jason', content: 'Likes pangolins' });
+
+    store.deactivate(gone);
+    store.deactivate(gone); // the model calling forget_memory twice with the same id
+
+    // Every later MATCH used to throw once the external-content index was corrupted.
+    const results = await store.search('synthesizers');
+    expect(results.map((m) => m.id)).toEqual([keep]);
+  });
+
+  it('compact() survives a three-way duplicate group and leaves the index searchable', async () => {
+    // Three mutual duplicates: the old i/j loop deactivated the third one twice (once against each of
+    // the others), corrupting the index.
+    const a = await store.save({ category: 'fact', subject: 'Felix', content: 'Enjoys swimming every weekend morning' });
+    const b = await store.save({ category: 'fact', subject: 'Felix', content: 'Collects rare stamps from Europe' });
+    const c = await store.save({ category: 'fact', subject: 'Felix', content: 'Reads science fiction novels nightly' });
+    const jason = await store.save({ category: 'fact', subject: 'Jason', content: 'Plays League of Legends ranked' });
+    // @ts-expect-error accessing private db for test setup
+    const db = store.db;
+    db.prepare("UPDATE memories SET content = 'Likes cats and dogs very much indeed' WHERE id = ?").run(a);
+    db.prepare("UPDATE memories SET content = 'Likes cats and dogs very much indeed too', updated_at = datetime('now', '-1 hour') WHERE id = ?").run(b);
+    db.prepare("UPDATE memories SET content = 'Likes cats and dogs very much indeed also', updated_at = datetime('now', '-2 hours') WHERE id = ?").run(c);
+
+    const result = store.compact();
+
+    expect(result.removed).toBe(2);
+    expect(store.getAllActive().map((m) => m.id).sort((x, y) => x - y)).toEqual([a, jason]);
+    const results = await store.search('League');
+    expect(results).toHaveLength(1);
+  });
+
+  it('rebuildFtsIndex() restores a searchable index from the active rows', async () => {
+    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Brews kombucha at home' });
+    const inactive = await store.save({ category: 'fact', subject: 'Jason', content: 'Drinks kombucha daily' });
+    store.deactivate(inactive);
+
+    // Simulate a corrupted / stale index: wipe it behind the store's back.
+    // @ts-expect-error accessing private db for test setup
+    store.db.exec("INSERT INTO memories_fts(memories_fts) VALUES('delete-all')");
+    expect(await store.search('kombucha')).toEqual([]);
+
+    expect(store.rebuildFtsIndex()).toBe(1);
+
+    const results = await store.search('kombucha');
+    expect(results.map((m) => m.id)).toEqual([id]);
+  });
+
+  it('compact() rebuilds the index, so a corrupted index heals on the next startup', async () => {
+    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Restores old arcade cabinets' });
+    // @ts-expect-error accessing private db for test setup
+    store.db.exec("INSERT INTO memories_fts(memories_fts) VALUES('delete-all')");
+
+    store.compact();
+
+    expect((await store.search('arcade')).map((m) => m.id)).toEqual([id]);
   });
 });

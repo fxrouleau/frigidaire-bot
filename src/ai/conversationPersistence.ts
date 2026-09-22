@@ -1,16 +1,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
+import { config } from '../config';
 import { logger } from '../logger';
 import type { ConversationState } from './conversationStore';
 import { CONVERSATION_STATE_SCHEMA_VERSION } from './types';
 
-// The mutable, JSON-serializable slice of a ConversationState: providerId and timestamp live in their
-// own columns, the rest goes through JSON.stringify. thoughts is `unknown` on the type, so a
-// serialization failure (circular ref, BigInt, …) is possible — save() degrades to skipping the row.
+// The JSON-serialized slice of a ConversationState; the timestamp lives in its own column.
 type SerializedState = {
   entries: ConversationState['entries'];
-  thoughts?: unknown;
   injectedMemoryIds?: number[];
 };
 
@@ -21,7 +19,6 @@ const MAX_STATE_BYTES = 1_000_000;
 type StateRow = {
   channel_id: string;
   schema_version: number;
-  provider_id: string;
   state_json: string;
   updated_at: number;
 };
@@ -53,11 +50,18 @@ export class ConversationPersistence {
   }
 
   private init() {
+    // The v1 table carried a provider_id column from the multi-provider era. This is a disposable
+    // session cache, so an old-shape table is simply dropped and recreated (its rows would be
+    // discarded by the schema-version guard anyway).
+    const columns = this.db.prepare('PRAGMA table_info(conversation_state)').all() as { name: string }[];
+    if (columns.some((c) => c.name === 'provider_id')) {
+      this.db.exec('DROP TABLE conversation_state');
+    }
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS conversation_state (
         channel_id     TEXT    PRIMARY KEY,
         schema_version INTEGER NOT NULL,
-        provider_id    TEXT    NOT NULL,
         state_json     TEXT    NOT NULL,
         updated_at     INTEGER NOT NULL
       );
@@ -73,7 +77,6 @@ export class ConversationPersistence {
   save(channelId: string, state: ConversationState): void {
     const serializable: SerializedState = {
       entries: state.entries,
-      thoughts: state.thoughts,
       injectedMemoryIds: state.injectedMemoryIds,
     };
 
@@ -91,14 +94,13 @@ export class ConversationPersistence {
     }
 
     this.stmt(
-      `INSERT INTO conversation_state (channel_id, schema_version, provider_id, state_json, updated_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO conversation_state (channel_id, schema_version, state_json, updated_at)
+       VALUES (?, ?, ?, ?)
        ON CONFLICT(channel_id) DO UPDATE SET
          schema_version = excluded.schema_version,
-         provider_id = excluded.provider_id,
          state_json = excluded.state_json,
          updated_at = excluded.updated_at`,
-    ).run(channelId, CONVERSATION_STATE_SCHEMA_VERSION, state.providerId, stateJson, state.timestamp);
+    ).run(channelId, CONVERSATION_STATE_SCHEMA_VERSION, stateJson, state.timestamp);
   }
 
   /**
@@ -140,16 +142,10 @@ export class ConversationPersistence {
     }
 
     return {
-      providerId: row.provider_id,
       entries: parsed.entries ?? [],
       timestamp: row.updated_at,
-      thoughts: parsed.thoughts,
       injectedMemoryIds: parsed.injectedMemoryIds,
     };
-  }
-
-  delete(channelId: string): void {
-    this.stmt('DELETE FROM conversation_state WHERE channel_id = ?').run(channelId);
   }
 
   /** Deletes every row older than the timeout (same strict boundary as the in-memory store's expiry). */
@@ -182,9 +178,7 @@ let conversationPersistence: ConversationPersistence | undefined;
 export function getConversationPersistence(): ConversationPersistence {
   if (!conversationPersistence) {
     // Test hermeticity: inside Vitest an un-injected instance must never touch the on-disk cache DB.
-    conversationPersistence = process.env.VITEST
-      ? new ConversationPersistence(':memory:')
-      : new ConversationPersistence();
+    conversationPersistence = config.isTest ? new ConversationPersistence(':memory:') : new ConversationPersistence();
   }
   return conversationPersistence;
 }

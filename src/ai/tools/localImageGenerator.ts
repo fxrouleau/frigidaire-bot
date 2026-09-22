@@ -1,7 +1,9 @@
-import process from 'node:process';
 import { AttachmentBuilder, type Message } from 'discord.js';
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
+import { config } from '../../config';
 import { logger } from '../../logger';
+import { requireOpenRouterClient } from '../openRouterClient';
+import type { ImageGenerationOptions } from '../types';
 
 type ImageConversationMessage = {
   role: 'user' | 'assistant';
@@ -10,29 +12,14 @@ type ImageConversationMessage = {
 
 type ImageSession = {
   conversationHistory: ImageConversationMessage[];
-  lastImageBase64: string;
   createdAt: number;
 };
 
 const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+// Every refinement re-sends the whole history, and each assistant turn carries a full base64 image,
+// so the history is capped to the last few exchanges (a "refine" only needs the latest image anyway).
+const MAX_SESSION_MESSAGES = 6;
 const sessions = new Map<string, ImageSession>();
-
-let imageClient: OpenAI | undefined;
-
-function getImageClient(): OpenAI {
-  if (!imageClient) {
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
-      throw new Error('OPENROUTER_API_KEY is required for image generation.');
-    }
-    imageClient = new OpenAI({
-      apiKey,
-      baseURL: 'https://openrouter.ai/api/v1',
-      defaultHeaders: { 'X-Title': 'Frigidaire Bot' },
-    });
-  }
-  return imageClient;
-}
 
 function getSession(channelId: string): ImageSession | undefined {
   const session = sessions.get(channelId);
@@ -42,6 +29,15 @@ function getSession(channelId: string): ImageSession | undefined {
     return undefined;
   }
   return session;
+}
+
+function setSession(channelId: string, history: ImageConversationMessage[]): void {
+  // Sweep other channels' expired sessions here too, so an idle channel's base64 blobs don't linger.
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (now - session.createdAt > SESSION_TIMEOUT) sessions.delete(id);
+  }
+  sessions.set(channelId, { conversationHistory: history.slice(-MAX_SESSION_MESSAGES), createdAt: now });
 }
 
 export function extractImageFromResponse(
@@ -93,7 +89,7 @@ export function extractImageFromResponse(
 export async function generateLocalImage(
   message: Message,
   prompt: string,
-  options?: { refinePrevious?: boolean; sourceImageUrl?: string },
+  options?: ImageGenerationOptions,
 ): Promise<string> {
   try {
     const shouldRefine = options?.refinePrevious ?? false;
@@ -109,8 +105,8 @@ export async function generateLocalImage(
       await message.channel.sendTyping();
     }
 
-    const client = getImageClient();
-    const model = process.env.IMAGE_MODEL || 'google/gemini-2.5-flash-image';
+    const client = requireOpenRouterClient('image generation');
+    const model = config.models.image;
 
     let messages: ImageConversationMessage[];
     if (shouldRefine && session) {
@@ -160,12 +156,7 @@ export async function generateLocalImage(
         { type: 'image_url', image_url: { url: `data:image/png;base64,${imageResult.base64}` } },
       ],
     };
-
-    sessions.set(channelId, {
-      conversationHistory: [...messages, assistantMessage],
-      lastImageBase64: imageResult.base64,
-      createdAt: Date.now(),
-    });
+    setSession(channelId, [...messages, assistantMessage]);
 
     const attachment = new AttachmentBuilder(imageBuffer, { name: 'image.png' });
     await message.reply({ content: 'Here is your image.', files: [attachment] });

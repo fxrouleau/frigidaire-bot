@@ -1,10 +1,10 @@
-import { Events, type GuildEmoji } from 'discord.js';
-import { getMemoryStore } from '../ai/tools';
+import { Events } from 'discord.js';
+import { getMemoryStore } from '../ai/memory';
+import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
 
-module.exports = {
-  name: Events.GuildEmojiDelete,
-  execute(emoji: GuildEmoji) {
+export default defineEvent(Events.GuildEmojiDelete, {
+  execute(emoji) {
     if (!emoji.id) return;
     try {
       getMemoryStore().deactivateEmoji(emoji.id);
@@ -13,4 +13,4 @@ module.exports = {
       logger.warn('emojiDelete: failed to deactivate emoji:', error);
     }
   },
-};
+});

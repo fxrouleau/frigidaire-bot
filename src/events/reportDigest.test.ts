@@ -2,10 +2,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
-import { setMemoryStoreForTesting } from '../ai/tools';
 import { createFakeChannel, createFakeClient } from '../test-support/fakeDiscord';
-import { execute, runDigestCheck } from './reportDigest';
+import reportDigestEvent, { runDigestCheck } from './reportDigest';
 
 const ENV_KEYS = [
   'REPORT_CHANNEL_ID',
@@ -22,6 +22,8 @@ let store: MemoryStore;
 let tmpDir: string;
 let fakeChannel: ReturnType<typeof createFakeChannel>;
 let fakeClient: ReturnType<typeof createFakeClient>;
+
+const execute = reportDigestEvent.execute;
 
 beforeEach(() => {
   savedEnv = {};
@@ -59,6 +61,19 @@ describe('runDigestCheck watermark gating', () => {
     expect(fakeChannel.recorders.send.calls).toHaveLength(1);
     expect(String(fakeChannel.recorders.send.calls[0][0])).toContain('Cannot read receipts');
     expect(store.getState(WATERMARK_KEY)).toBeDefined();
+  });
+
+  it('labels the digest with the period that just ended (last run → now), not the coming week', async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    store.setState(WATERMARK_KEY, eightDaysAgo.toISOString());
+    await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot read receipts' });
+
+    await runDigestCheck(fakeClient.client);
+
+    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    const today = new Date().toISOString().slice(0, 10);
+    expect(sent).toContain(`${eightDaysAgo.toISOString().slice(0, 10)} → ${today}`);
   });
 
   it('does not post when the last run is within the period', async () => {
@@ -114,7 +129,6 @@ describe('runDigestCheck privacy', () => {
         { kind: 'message', role: 'user', content: [{ type: 'text', text: `${SENTINEL} my credit card is 1234` }] },
         { kind: 'message', role: 'assistant', content: [{ type: 'text', text: `noted about ${SENTINEL}` }] },
       ],
-      thoughts: `internal reasoning mentioning ${SENTINEL}`,
     };
     fs.writeFileSync(path.join(tmpDir, 'error-1-aaaa.json'), JSON.stringify(capture), 'utf8');
 
@@ -124,21 +138,26 @@ describe('runDigestCheck privacy', () => {
     // The capture is counted and its privacy-safe network-error code surfaces as a label...
     expect(sent).toContain('AI errors captured (data/debug) — 1');
     expect(sent).toContain('ECONNRESET');
-    // ...but nothing from the private conversation payload (or the thoughts) ever appears.
+    // ...but nothing from the private conversation payload ever appears.
     expect(sent).not.toContain(SENTINEL);
     expect(sent).not.toContain('credit card');
   });
 });
 
 describe('reportDigest execute master switch', () => {
+  it('is a once-only ClientReady handler', () => {
+    expect(reportDigestEvent.name).toBe('clientReady');
+    expect(reportDigestEvent.once).toBe(true);
+  });
+
   it('is a no-op (no channel fetch) when REPORT_CHANNEL_ID is unset', () => {
     execute(fakeClient.client);
     expect(fakeClient.recorders.channelsFetch.calls).toHaveLength(0);
   });
 
-  it('is a no-op when DIGEST_ENABLED=false', () => {
+  it.each(['false', '0'])('is a no-op when DIGEST_ENABLED=%s', (flag) => {
     process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
-    process.env.DIGEST_ENABLED = 'false';
+    process.env.DIGEST_ENABLED = flag;
     execute(fakeClient.client);
     expect(fakeClient.recorders.channelsFetch.calls).toHaveLength(0);
   });

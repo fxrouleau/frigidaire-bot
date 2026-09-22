@@ -2,293 +2,318 @@
 
 ## Overview
 
-A Discord bot built in **TypeScript** that hangs out in a private server as "one of the group". Core features:
+A Discord bot built in **TypeScript** that lives in one private friend server as "one of the group". Features:
 
-1. **AI Chat** — Mention the bot to converse. A single AI backend (OpenRouter) with multi-round tool-calling, vision (images/emojis/stickers), and native web search.
-2. **Long-Term Memory** — Persists facts, server-member identities, and emoji captions in SQLite. Retrieval is **semantic**: memories are embedded (OpenRouter embeddings API) and searched by cosine similarity, hybridized with FTS5 keyword search. Relevant memories are injected into the system prompt. A background "personality learner" observes channels off-mention to learn the server's vibe.
-3. **Message Summarization** — Ask the bot to summarize recent channel history (via the `summarize_messages` tool).
-4. **Link Replacement** — Rewrites Twitter/X (`fixvx.com`), Instagram (`zzinstagram.com`), and TikTok (`tnktok.com`) links for proper Discord embedding, reposting via webhooks to preserve the original author's appearance.
-5. **Report Channel** — When `REPORT_CHANNEL_ID` is set, the bot posts a weekly self-diagnosis digest (improvement signals, runtime-failure counts, and privacy-safe AI-error-capture stats) and a "🚀 Deployed `<sha>`" line on each new build. Both are off when `REPORT_CHANNEL_ID` is unset.
+1. **AI chat** — mention or reply to the bot to talk to it. One provider (OpenRouter), multi-round tool calling, vision (images, custom emojis, stickers), native web search. Every AI request is routed with zero-data-retention (`zdr: true`) provider preferences; that is a hard rule for anything touching chat text.
+2. **Long-term memory** — facts, member identities and emoji captions in SQLite. Retrieval is hybrid: embeddings (cosine) fused with FTS5 keyword search. A background "personality learner" observes channels off-mention. See [Long-term memory](#long-term-memory--learning).
+3. **Link fixing** — Twitter/X, Instagram and TikTok links are rewritten to embed-fixer domains (ordered fallback lists, each candidate probed with Discord's crawler user agent) and reposted through a webhook as the original author. See [Link fixing](#link-fixing).
+4. **Deleted-message repost** — for configured members, a message deleted shortly after posting is judged ("was that edgy?") and reposted as them, attachments included. Off unless `DELETE_REPOST_USER_IDS` is set. See [Deleted-message repost](#deleted-message-repost).
+5. **Report channel** — when `REPORT_CHANNEL_ID` is set: a weekly self-diagnosis digest and a "🚀 Deployed `<sha>`" line on each new build.
 
-## Tech Stack
+## Tech stack
 
-- **Runtime**: Node.js v26 (`node:26-alpine`)
-- **Language**: TypeScript 5.9 (strict mode, target `es2024`, `commonjs` modules)
-- **Package Manager**: Yarn v4.7 (via Corepack, node-modules linker)
-- **AI**: OpenRouter via the `openai` SDK (`baseURL: https://openrouter.ai/api/v1`)
-- **Storage**: `better-sqlite3` at `./data/memory.db` (memories + FTS5 + embedding vectors, identities, emojis, learner state)
-- **Images**: `sharp` for resizing/encoding
-- **Linter/Formatter**: Biome — 120-char line width, 2-space indent, single quotes, trailing commas
-- **Tests**: Vitest 4
-- **Deployment**: Docker (single container). **Dev/test toolchain is fully containerized** — the host needs only Docker.
+- **Runtime**: Node.js 26 (`node:26-alpine`), TypeScript 5.9 (strict, `es2024`, CommonJS output)
+- **Package manager**: Yarn 4.7 via Corepack, node-modules linker
+- **Discord**: discord.js 14
+- **AI**: OpenRouter through the `openai` SDK (chat completions + embeddings) and its `/api/alpha/decisions` endpoint (TypeSafe "System One" decision models, used by the message judge)
+- **Storage**: `better-sqlite3` — `./data/memory.db` (memories, FTS5, vectors, identities, emojis, learner/bot state) and `./data/conversations.db` (per-channel conversation cache)
+- **Images**: `sharp`
+- **Lint/format**: Biome (120 cols, 2 spaces, single quotes, trailing commas; `noUnusedImports`/`noUnusedVariables` are errors)
+- **Tests**: Vitest 4, ~590 tests colocated as `src/**/*.test.ts`
+- **Deployment**: one Docker image; dev/test toolchain fully containerized (host needs only Docker)
 
-## Project Structure
+## Project structure
 
 ```
 src/
-├── app.ts                          # Entry point — Discord client, dynamic event loading, startup tasks
-├── logger.ts  utils.ts             # Console logger; splitMessage()/repostMessage() helpers
+├── app.ts                     # Entry: config summary, Discord client, event loader + safe dispatcher, startup maintenance, shutdown
+├── config.ts                  # EVERY env var, parsed once per access with one set of rules (see Environment variables)
+├── eventModule.ts             # defineEvent()/EventModule — the contract each file in src/events/ fulfils
+├── logger.ts  utils.ts        # Console logger; splitMessage(), sendViaWebhook(), repostMessage()
+├── deletedMessages.ts         # DeletedMessageReposter — snapshot cache + judge + webhook repost for watched users
+├── links/embedFixers.ts       # Link patterns, canonical paths, fixer probing/health, fixLinksInContent()
 ├── ai/
-│   ├── agent.ts                    # AgentOrchestrator — main conversation/tool loop (DI-friendly)
-│   ├── agentInstance.ts            # Shared AgentOrchestrator singleton
-│   ├── conversationStore.ts        # In-memory per-channel state with timeout
-│   ├── providerRegistry.ts         # Resolves the AI provider for a channel
-│   ├── tools.ts                    # Host tool definitions (summarize, image, memory, self-diagnosis)
-│   ├── types.ts  utils.ts          # Core types; formatTimestampET() + misc helpers
-│   ├── debugCapture.ts             # Writes failed exchanges to data/debug/*.json for replay
-│   ├── failureLogger.ts            # Structured failure logging (capability gaps, parse failures)
-│   ├── personalityLearner.ts       # Off-mention background observer (vibe + self-improvement)
-│   ├── learnerInstance.ts          # Shared PersonalityLearner singleton
+│   ├── agent.ts               # AgentOrchestrator — per-channel serialized conversation/tool loop, prompt building, emoji guardrail
+│   ├── agentInstance.ts       # Shared orchestrator singleton (with disk-backed conversation persistence)
+│   ├── conversationStore.ts   # In-memory per-channel state with timeout (+ write-through to persistence)
+│   ├── conversationPersistence.ts  # SQLite mirror of conversation state (survives redeploys within the timeout)
+│   ├── providerRegistry.ts    # getProvider() — the OpenRouterProvider singleton
+│   ├── openRouterClient.ts    # The one place an OpenAI-SDK client for OpenRouter is built
+│   ├── tools.ts               # Host tools: summarize_messages, generate_image, remember_fact, recall_memories, forget_memory, query_self_diagnosis, get_emoji
+│   ├── emojiPolicy.ts         # applyEmojiPolicy() — deterministic guardrail on custom-emoji use in replies
+│   ├── messageJudge.ts        # createEdgyJudge() — decision-model (jev) judge with chat-model fallback
+│   ├── promptSections.ts      # Shared identity/emoji prompt lines, custom-emoji parsing, CDN URLs
+│   ├── types.ts  utils.ts     # Core types; ET time formatting, relative ages
+│   ├── debugCapture.ts        # Writes failed exchanges to data/debug/*.json for replay
+│   ├── failureLogger.ts       # Structured failure logging into self-diagnosis memories
+│   ├── personalityLearner.ts  # Off-mention background observer (vibe + self-improvement), learnerInstance.ts singleton
 │   ├── emojiSync.ts emojiCaptioner.ts  # Reconcile guild emojis to DB; caption via a vision model
+│   ├── digest.ts reportChannel.ts      # Weekly digest rendering; report-channel sending
 │   ├── memory/
-│   │   ├── memoryStore.ts          #   SQLite store: memories + FTS5 + memory_embeddings, identities, emojis
-│   │   ├── embeddingProvider.ts    #   EmbeddingProvider iface + OpenRouterEmbeddingProvider (ZDR routing)
-│   │   ├── vectorMath.ts           #   dot/cosine/normalize + Float32Array ↔ SQLite BLOB conversion
-│   │   └── wordOverlap.ts          #   Jaccard word-overlap (lexical dedup fallback)
-│   ├── providers/openRouterProvider.ts # The single AiProvider implementation
-│   └── tools/                      # summary.ts (summarization prompt) + localImageGenerator.ts (image gen)
-├── events/                         # Dynamically loaded Discord event handlers:
-│   ├── aiChat.ts                   #   bot-mention → AgentOrchestrator
-│   ├── {twitter,instagram,tiktok}Repost.ts  # link replacement via webhooks
-│   ├── emoji{Create,Delete,Update,Ready}.ts # sync emoji DB w/ guild; startup reconcile+caption
-│   ├── emojiUsageTracker.ts identityTracker.ts reactionTracker.ts  # usage/identity/reaction tracking
-│   ├── learnerActivityTracker.ts   #   feeds channel activity to the personality learner
-│   └── ready.ts                    #   client-ready logger
-└── test-support/                   # Shared TEST helpers (excluded from prod build; type-checked separately)
-    ├── fakeProvider.ts             #   FakeProvider — scripted AiProvider for orchestration tests
-    ├── fakeDiscord.ts              #   createFakeMessage()/createFakeBotMessage() — typed discord.js fakes
-    ├── fakeEmbeddings.ts           #   FakeEmbeddingProvider — deterministic offline embeddings for tests
-    ├── openRouterFetch.ts          #   replay/record OpenAI-SDK clients backed by JSON fixtures
-    ├── recorder.ts  replayCli.ts   #   call-recorder util; the `yarn replay` command
-    └── fixtures/openrouter/*.json  #   committed, hand-authored OpenRouter response shapes (chat + embeddings)
-
-# Tests are colocated as src/**/*.test.ts (~360). Live tests (opt-in, paid): src/**/*.live.test.ts
+│   │   ├── index.ts           #   getMemoryStore() / setMemoryStoreForTesting()
+│   │   ├── memoryStore.ts     #   SQLite store: memories + FTS5 + vectors, identities, emojis, state
+│   │   ├── embeddingProvider.ts  # EmbeddingProvider + OpenRouterEmbeddingProvider (ZDR)
+│   │   ├── vectorMath.ts wordOverlap.ts  # dot/cosine/normalize, blob codecs; Jaccard overlap + STOP_WORDS
+│   ├── providers/openRouterProvider.ts  # The single AiProvider (chat, summaries, images, image cache)
+│   └── tools/                 # summary.ts (summarization prompt) + localImageGenerator.ts (image gen)
+├── events/                    # One handler per file, each `export default defineEvent(Events.X, { execute })`:
+│   ├── aiChat.ts              #   mention/reply → agent
+│   ├── linkRepost.ts          #   link fixing (all platforms, one repost per message)
+│   ├── deletedMessageCache.ts deletedMessageRepost.ts  # deleted-message repost feature
+│   ├── emoji{Create,Delete,Update,Ready}.ts            # emoji DB sync; startup reconcile + caption
+│   ├── emojiUsageTracker.ts reactionTracker.ts identityTracker.ts learnerActivityTracker.ts
+│   ├── deployAnnounce.ts reportDigest.ts ready.ts
+└── test-support/              # Shared test helpers (excluded from the prod build, type-checked by tsconfig.test.json)
+    ├── fakeProvider.ts fakeDiscord.ts fakeEmbeddings.ts openRouterFetch.ts recorder.ts replayCli.ts
+    └── fixtures/openrouter/*.json   # committed OpenRouter response shapes (chat + embeddings)
+docker/entrypoint.sh           # prod entrypoint: chown the data volume, drop to the `node` user
 ```
 
 ## Architecture
 
-### Event-Driven Design
-- `app.ts` dynamically loads every non-`.test` `.ts`/`.js` file from `src/events/` as a Discord event handler.
-- Each event file exports `{ name, once?, execute(...args) }`.
-- Adding a handler = creating a file in `src/events/`; no changes to `app.ts` needed.
-- On startup `app.ts` also runs memory compaction (which includes the ephemeral TTL sweep), kicks off the embedding backfill, re-runs the sweep + backfill every `BACKFILL_INTERVAL_MS` as a self-heal, and starts the personality learner once the client is ready.
+### Configuration (`src/config.ts`)
 
-### Single-Provider AI System
-- **`AiProvider` interface** (`src/ai/types.ts`): `id`, `displayName`, `personality`, `defaultModel`, `supportedTools`, `chat()`, plus optional `summarizeMessages()` / `generateImage()` / `generateImageLocal()`.
-- **`OpenRouterProvider`** is the only implementation. It builds OpenAI-style chat requests, attaches function tools + OpenRouter's native `web_search`, sends an OpenRouter `provider` routing object (default `{ zdr: true, sort: 'throughput' }`), and parses the response back into normalized entries. Constructor takes DI options (`client`, `model`, `routing`) so tests can inject a fixture-backed client.
-- **Tools** are defined once in `src/ai/tools.ts` and exposed to the model as function tools. Host tools (executed by this bot): `summarize_messages`, `generate_image`, `remember_fact`, `recall_memories`, `forget_memory`, `query_long_term_memory`, `query_self_diagnosis`. `web_search` is provider-handled (not host).
+Every `process.env` read lives here. Values are parsed on access (getters) so tests can set env per case; prod never mutates env. Rules: booleans accept `1/0`, `true/false`, `yes/no`, `on/off` (whitespace/quotes ignored, anything else ⇒ default); numbers must be finite and within bounds or the default applies; csv lists are trimmed. `describeEffectiveConfig()` is logged once at startup (never secrets). Add a new variable here first, then document it below.
 
-### Conversation Flow (`AgentOrchestrator.handleMention`)
-1. Resolve the provider; start the typing loop.
-2. Fetch/create per-channel state (on first mention, seed history from the last ~25 messages).
-3. Build the developer/system prompt (persona + injected memories/identities/usable emojis + current ET time) and the new user entry. The emoji section is framed for restraint ("use sparingly" — most messages should have no emoji at all), not as a capability list.
-4. Call `chat()` with `tool_choice: auto`. Execute any **host-handled** tool calls, append results, and loop (`chat()` → execute) for up to `MAX_TOOL_ROUNDS` rounds / `MAX_TOOL_INVOCATIONS` total tool calls. On the last allowed round, or once the invocation cap is exceeded, force a text-only response (`tool_choice: none`).
-5. Send the reply (split into Discord-sized chunks), persist updated state.
-- Constructor accepts DI options `{ resolveProvider, tools, timeoutMs, maxToolRounds, maxToolInvocations }` purely to make the loop testable.
+### Events (`src/eventModule.ts`, `src/app.ts`)
 
-### Long-Term Memory & Learning
+- Every non-test file in `src/events/` is loaded at startup and must `export default defineEvent(Events.X, { once?, execute })`; `execute`'s arguments are typed from the event name. A file that isn't a valid module fails startup with a clear error (`eventModule.test.ts` also checks every file).
+- Handlers run behind a dispatcher that catches a throwing or rejecting handler and logs it. A `process.on('unhandledRejection')` logger covers everything else. A missing permission in one channel can no longer take the process down.
+- A missing or rejected Discord token exits with code 1 (fail fast; the container's restart policy takes it from there).
 
-- `MemoryStore` (`./data/memory.db`): memories (+ FTS5 index + embedding vectors), server-member identities, emoji rows (name/caption/use-count), and learner state. The prompt builder injects capped, relevance-ranked memories each turn.
-- `PersonalityLearner` runs on an interval (off-mention) to record server "vibe" memories and, optionally, bot self-improvement signals. Emojis are reconciled to the DB on startup and captioned by a vision model.
+### Conversation flow (`AgentOrchestrator`)
 
-**Learner prompt rules (what gets saved).** The learner's prompts enforce durable-knowledge-over-transcription — these rules exist because the original prompts filled the prod DB with per-message logging (see the memory curation report):
-- **The 30-day test**: only knowledge still true and useful in 30 days gets saved (jobs, preferences, relationships, habits, goals, server culture). "Someone asked/confirmed/declined/arrived/shared X" is transcription, never a memory.
-- **Ephemeral categories**: time-bound observations MUST use `event` (TTL ~14 days); image/GIF-share observations MUST use `image` (TTL ~24h). The TTL sweep expires both automatically — but only if the category is right, which is why the prompts are strict about it. An image that reveals a durable fact gets saved as `fact` instead.
-- **No re-saves**: traits/issues already in the injected existing-memories context are never saved again (save-time semantic dedup is the backstop, not the primary defense).
-- **Subject normalization**: subjects use the person's **current display name** from the identities list (+ `subject_user_id` as the stable identity anchor), never nicknames, in-game names, or stale usernames — keeping new memories consistent with every `getBySubject()` lookup and all existing subject-keyed memories.
-- Observations stay authentic/verbatim — there is deliberately **no censoring or paraphrasing rule** for offensive content (Felix's explicit call; do not add one).
+1. `handleMention` queues the turn **per channel**: two mentions in one channel run back to back, so the second sees the first's reply (no lost-update race).
+2. Fetch/create per-channel state (first mention seeds history from the last ~25 messages; state persists across restarts within `CONVERSATION_TIMEOUT_MS`).
+3. Build the frozen static developer prompt (persona + SERVER PEOPLE + emoji glossary + vibe/personality bucket + current ET time) once per window, plus a per-turn dynamic developer entry (speaker memories, hybrid-search hits for the message, @-mentioned subjects; deduped against everything already injected this window).
+4. `chat()` with `tool_choice: auto`; execute host-handled tool calls; loop up to `MAX_TOOL_ROUNDS` / `MAX_TOOL_INVOCATIONS`, then force a text-only answer.
+5. Run the **emoji guardrail** (below), send the reply in Discord-sized chunks, persist the state. Everything from step 2 on is inside one try/catch: any failure yields the error reply plus an error capture.
+- Embed images are read through Discord's media proxy (`proxyURL`) rather than the third-party origin; every user message's custom emojis/attachments/stickers are attached as image parts. The provider memoizes image downloads per URL (100 entries, 15 min).
 
-**Embeddings (`src/ai/memory/embeddingProvider.ts`).** `OpenRouterEmbeddingProvider` calls OpenRouter's `/embeddings` endpoint (default model `qwen/qwen3-embedding-8b`, env `EMBEDDING_MODEL`) with the same DI pattern as the chat provider (`{ client?, model?, routing? }`). Two non-negotiables:
-- **ZDR routing**: every embeddings request sends `provider: { zdr: true }` — memory text is the same private content the chat path protects. Never ship an embedding path without it.
-- **Asymmetric retrieval**: search queries are embedded with the qwen3 instruct prefix (`Instruct: {task}\nQuery: {text}`); stored memories ("documents") are embedded bare. Vectors are L2-normalized before storage, so cosine similarity is a plain dot product.
-- `makeDefaultEmbeddingProvider()` wires the embedder into the `MemoryStore` singleton (`tools.ts`). It returns `undefined` (→ FTS5-only legacy mode, never throws) when `OPENROUTER_API_KEY` is missing, when the `SEMANTIC_MEMORY_ENABLED` kill switch is off, or inside Vitest (test hermeticity guard).
+### Emoji policy (`src/ai/emojiPolicy.ts`)
 
-**Hybrid search (`MemoryStore.search()`, async).** Vector-primary with FTS5 as a keyword booster:
-1. Embed the query; score every active memory's stored vector by cosine (in-memory vector cache, write-through).
-2. Run the FTS5 keyword leg (BM25-ranked).
-3. Fuse both legs with Reciprocal Rank Fusion (k=60; vector weight 1.0, keyword weight 0.5).
-4. **Semantic gate**: every returned memory must score cosine ≥ `MEMORY_RELEVANCE_THRESHOLD` (default 0.5). Keyword-only hits on un-embedded memories are dropped — FTS can boost rank but never introduce a semantically irrelevant result.
-5. **Ungated FTS fallback** (legacy behavior): no embedder configured (silent — that's normal FTS5-only mode), the query embed failed, or fewer than 80% of searchable memories have current-model vectors (fresh DB, mid-backfill, model switch). The latter two log at WARN so degraded retrieval is visible in prod logs.
-- Self-diagnosis categories (`capability_gap`, `tool_error`, …; see `SELF_DIAGNOSIS_CATEGORIES`) are excluded from search entirely — they're reachable only via `query_self_diagnosis`, whose output carries `[id:N]` prefixes so `forget_memory` works on them.
+Felix's complaint: the bot put a custom emoji in nearly every reply, often the wrong one. Three layers now:
+- **Prompt**: the persona's behavior list says emojis are basically not used; the static prompt carries an *emoji glossary* (name + caption, for reading what people post) that deliberately withholds the `<:name:id>` syntax. Deliberate use goes through the `get_emoji` tool, whose description tells the model to hold back.
+- **Guardrail** (`applyEmojiPolicy`): at most one custom emoji per reply; only when the reply is emoji-only, the triggering message contained a custom emoji, or none of the bot's last 4 replies in the window had one; unknown emoji ids are always stripped. When the guardrail edits a reply, the stored assistant entry is rewritten to the posted text so the model never re-learns the stripped version from its own history.
+- **Metric**: one `reply_stats channel=… emoji_kept=… emoji_stripped=… names=…` log line per reply. `emoji_stripped` staying high means the prompt still wants one; the rate itself is the guardrail's.
+- Later (not done): richer captions grounded in real usage examples, an "emoji usage audit" job. Rework of *what emoji means what* is a separate task.
 
-**Save (`MemoryStore.save()`, async).** Two phases:
-1. *Synchronous* (before any `await`): lexical word-overlap dedup + INSERT/UPDATE + FTS sync in one transaction. The row is durable when this returns — fire-and-forget callers (`failureLogger`) and tests that read back immediately stay correct.
-2. *Async, best-effort*: embed the memory, run semantic dedup (cosine ≥ `MEMORY_DEDUP_THRESHOLD`, default 0.9, within the same category+subject group), store the vector. A semantic duplicate **merges into the existing memory id** (ids are user-visible via `recall_memories`/`forget_memory`). Failures here never lose the memory — the backfill heals missing vectors later.
+### Link fixing (`src/links/embedFixers.ts`, `src/events/linkRepost.ts`)
 
-**Backfill (`MemoryStore.backfillEmbeddings()`).** Idempotent, batched (32/request): embeds every active memory lacking a current-model vector. Runs at startup and every `BACKFILL_INTERVAL_MS` (app.ts), healing memories saved during API outages and re-embedding everything after an `EMBEDDING_MODEL` switch (expand-contract: old-model vectors are pruned per-memory only once the new-model vector exists).
+Instagram embed fixers are hobby scrapers that die regularly (zzinstagram.com was dead for months while the bot kept rewriting to it). Design:
+- Per-platform **ordered fixer lists** (`TWITTER_FIXERS`, `INSTAGRAM_FIXERS`, `TIKTOK_FIXERS`; defaults in `config.ts`).
+- **Canonicalization** first: `/share/<id>` Instagram links and `vm.`/`vt.` TikTok short links are resolved through the platform's own 302 (no login), profile-prefixed Instagram paths (`/<user>/reel/<id>/`) reduced to the bare post path, queries stripped. Only post-shaped URLs match: profiles, stories, `/discover`, `/tag` are ignored. Links wrapped in `<…>` are skipped.
+- **Verification**: each candidate `https://<fixer><path>` is fetched with Discord's crawler user agent and classified `ok` (OpenGraph media tags, or a redirect straight to a media file), `unavailable` (404 / "post not found" — the fixer is fine, skip it for this link) or `down` (network error, 5xx, timeout, bounce to the platform's login wall). Two consecutive `down`s put a domain in a 10-minute cooldown. `LINK_FIX_VERIFY=false` rewrites blindly to the first domain.
+- A message is reposted **once** with every fixable link rewritten. If no fixer works, the message is left alone (a raw link beats a guaranteed-broken one) and a WARN is logged.
+- `repostMessage` sends the webhook post **before** deleting the original; the webhook is always deleted afterwards (also on failure), so the 15-webhooks-per-channel cap can't be leaked into. Only text and announcement channels are handled (threads can't own webhooks).
 
-**Compaction (`MemoryStore.compact()`, sync, startup).** Expires ephemeral memories (see below), sweeps orphaned vectors, dedups within (subject, category) groups — by cosine when both sides have stored vectors, word-overlap otherwise — and refreshes query-planner stats. Operational notes (measured at real prod scale, ~2k memories): the cosine pass costs ~1s of synchronous startup time; the DB file grows from ~1MB to ~32MB once vectors are backfilled; and cosine dedup only kicks in from the **second** startup after first deploy (the first compact() runs before any vectors exist).
+### Deleted-message repost (`src/deletedMessages.ts`, `src/ai/messageJudge.ts`)
 
-**Ephemeral memory TTL (`MemoryStore.sweepExpiredMemories()`).** Image and event memories are moments, not durable facts — they expire (soft-delete via `deactivate()`: FTS index, vectors, and the in-memory cache are all cleaned; reversible) once their `updated_at` is older than the per-category TTL (image: 24h, event: 14 days; env-configurable, 0 disables). The clock is `updated_at`, so a dedup-merge re-observation restarts the TTL window; the boundary is strict (`<`). Runs as step 0 of `compact()` (startup) and in the periodic maintenance interval in app.ts (before each backfill, so expiring memories never waste embed calls). First-deploy note: every pre-existing image/event memory already past its TTL expires on the first sweep (~250 rows in today's prod DB — the same rows the curation pass deactivates); set the TTL env vars to 0 before first boot to opt out.
+For users in `DELETE_REPOST_USER_IDS`, every new message in a webhook-capable channel is snapshotted (content, identity, and attachment bytes ≤10 MB downloaded immediately — Discord drops attachments on delete). When such a message is deleted within `DELETE_REPOST_WINDOW_MS`:
+- `DELETE_REPOST_MODE=edgy` (default): the judge decides. `DELETE_REPOST_MODEL` defaults to `typesafe/jev-1.13`, a text-only *decision model* called through OpenRouter's `/api/alpha/decisions` endpoint (returns a calibrated probability, ~$0.00001 per call, on OpenRouter's ZDR list). Image-only messages, or any decision-model failure (the endpoint is alpha; calls have a 6 s timeout and one retry), fall back to the chat model with a JSON yes/no prompt. Any chat model id in `DELETE_REPOST_MODEL` skips the decision model entirely. No verdict ⇒ no repost (fail closed).
+- `DELETE_REPOST_MODE=always`: every qualifying deletion is reposted.
+- The repost goes through `sendViaWebhook` with the author's nickname/avatar. Deletions the bot performs itself (link fixing) are excluded via `forget()`.
 
-### Memory schema & model-switch runbook
+### Memory tools
 
-Tables in `./data/memory.db` (all DDL is idempotent `CREATE ... IF NOT EXISTS`, applied in `MemoryStore.init()`):
+`recall_memories` (subject + keyword + category search, every line prefixed `[id:N]`), `remember_fact` (category whitelist enforced — the model cannot write self-diagnosis or ephemeral categories), `forget_memory` (reports "no active memory" for unknown or already-forgotten ids), `query_self_diagnosis` (limit clamped 1..50). The former `query_long_term_memory` was merged into `recall_memories`.
+
+## Long-term memory & learning
+
+- `MemoryStore` (`./data/memory.db`): memories (+ FTS5 index + embedding vectors), member identities, emoji rows (name/caption/use-count), learner state, generic `bot_state` key/values. The prompt builder injects capped, relevance-ranked memories each turn.
+- `PersonalityLearner` runs every `LEARNING_INTERVAL_MS` over channels with ≥ `MIN_MESSAGES_FOR_OBSERVATION` new human messages, extracting observations (and identity updates) with `LEARNER_MODEL`, plus an optional self-improvement pass. Emojis are reconciled at startup and captioned by `EMOJI_CAPTION_MODEL`.
+
+**Learner prompt rules** (why the prompts are rule-heavy — the originals filled prod with per-message transcription):
+- **30-day test**: only knowledge still true and useful in 30 days is saved; "someone asked/confirmed/shared X" is transcription, never a memory.
+- **Ephemeral categories**: time-bound observations MUST be `event` (TTL ~14 days), image/GIF shares MUST be `image` (TTL ~24 h). A durable fact revealed by an image is saved as `fact`.
+- **No re-saves** of traits already in the injected existing-memories context; save-time dedup is the backstop.
+- **Subject normalization**: subjects are the person's **current display name** (+ `subject_user_id` as the stable anchor), never nicknames or stale usernames. Emoji style is described in words — emoji syntax never goes into a memory.
+- Observations stay verbatim: there is deliberately **no censoring or paraphrasing rule** (Felix's explicit call; do not add one).
+
+**Embeddings** (`embeddingProvider.ts`): `OpenRouterEmbeddingProvider` calls `/embeddings` (`EMBEDDING_MODEL`, default `qwen/qwen3-embedding-8b`) with `provider: { zdr: true }` — non-negotiable. Asymmetric retrieval: queries get the qwen3 instruct prefix, documents are embedded bare; vectors are L2-normalized so cosine is a dot product. `makeDefaultEmbeddingProvider()` returns `undefined` (FTS5-only mode) without a key, with `SEMANTIC_MEMORY_ENABLED=false`, or inside Vitest.
+
+**Hybrid search** (`MemoryStore.search()`):
+1. Keyword leg in two tiers: rows matching **every** query term (implicit AND), then rows matching **any** non-stop-word term (OR, BM25-ranked). The second tier is what keeps keyword search useful for message-length queries; before it existed the keyword leg matched nothing for real messages.
+2. Vector leg: cosine over the in-memory vector cache.
+3. Reciprocal-rank fusion (k=60; vector 1.0, exact keyword 0.5, partial keyword 0.25).
+4. **Semantic gate**: every result needs cosine ≥ `MEMORY_RELEVANCE_THRESHOLD` (default 0.5); keyword hits on un-embedded memories are dropped.
+5. Ungated keyword fallback (both tiers) when there is no embedder, the query embed fails, or fewer than 80% of searchable memories have current-model vectors (logged at WARN).
+- Self-diagnosis categories (`SELF_DIAGNOSIS_CATEGORIES`) are excluded from search; `query_self_diagnosis` is their only path.
+
+**Save** (`save()`): phase 1 synchronous — word-overlap dedup + INSERT/UPDATE + FTS sync in one transaction (durable before the first `await`); phase 2 best-effort — embed, cosine dedup (≥ `MEMORY_DEDUP_THRESHOLD`, same category+subject; a duplicate merges into the **existing** id), store the vector. Failures never lose the row; backfill heals it.
+
+**Deactivate / FTS integrity**: `deactivate(id)` returns `false` and does nothing for unknown or already-inactive rows. This guard matters: the external-content FTS5 index only holds active rows, and a repeated `'delete'` command corrupts it ("database disk image is malformed" on the next MATCH). `compact()` also rebuilds the FTS index from the active rows at every startup (`rebuildFtsIndex()`, milliseconds at prod scale), so the index is correct by construction.
+
+**Backfill** (`backfillEmbeddings()`): idempotent, batched (32/request), embeds every active memory lacking a current-model vector; runs at startup and every `BACKFILL_INTERVAL_MS`; expand-contract on `EMBEDDING_MODEL` switches.
+
+**Compaction** (`compact()`, startup): rebuild FTS index → TTL sweep → orphan-vector sweep → dedup within (subject, category) groups (cosine when both sides have vectors, word overlap otherwise; a row deactivated in a pass is never compared again) → `PRAGMA optimize`.
+
+**Ephemeral TTL** (`sweepExpiredMemories()`): `image` after `MEMORY_TTL_IMAGE_HOURS`, `event` after `MEMORY_TTL_EVENT_DAYS`, measured on `updated_at`, strict `<`; also runs before each periodic backfill. `0` disables a category's expiry.
+
+### Memory schema
 
 | Table | Contents |
 |---|---|
 | `memories` | id, category, subject, content, source, timestamps, active flag, subject_user_id |
-| `memories_fts` | FTS5 external-content index over memories (content/subject/category) |
-| `memory_embeddings` | id, memory_id (FK → memories, ON DELETE CASCADE), model, dims, input_text, vector BLOB, created_at; `UNIQUE(memory_id, model)` |
-| `identities` / `emojis` / `learner_state` | unchanged by the semantic-memory feature |
+| `memories_fts` | FTS5 external-content index over memories (content/subject/category); active rows only |
+| `memory_embeddings` | memory_id (FK, cascade), model, dims, input_text, vector BLOB (L2-normalized LE Float32, `CHECK(length = dims*4)`), `UNIQUE(memory_id, model)` |
+| `identities` / `emojis` / `learner_state` / `bot_state` | members (display/canonical/IRL names, aliases), emoji captions + use counts, learner watermarks, key/values (digest watermark, last announced sha) |
 
-- **Vectors** are L2-normalized little-endian Float32 BLOBs; `CHECK (length(vector) = dims * 4)` makes truncated blobs impossible to commit. Read/write via `vectorMath.blobToVector()`/`vectorToBlob()` (alignment-safe — never construct a Float32Array directly over a better-sqlite3 Buffer).
-- **`input_text`** records the exact string that was sent to the embeddings API (`"subject: content"`, see `buildEmbeddingInput()`) — an audit trail for debugging vector quality. Re-embedding (backfill, model switch) always builds its input from the memory's **current** content, never from this stored copy, so a vector can never be regenerated from stale text.
-- **Referential integrity**: the FK cascades on hard `remove()`; `deactivate()` deletes vector rows explicitly in the same transaction; `compact()`'s orphan sweep is the backstop.
-- **1 row per (memory, model)**: during a model transition a memory can hold vectors for both models; search only ever reads current-model vectors.
+`conversations.db`: `conversation_state(channel_id, schema_version, state_json, updated_at)`. Rows with an old `CONVERSATION_STATE_SCHEMA_VERSION` are discarded on load; a v1 table (which still had a `provider_id` column) is dropped and recreated.
 
-**Model-switch runbook** (changing `EMBEDDING_MODEL`):
-1. Verify the new model has ZDR endpoints and sane thresholds: `RUN_LIVE=1 EMBEDDING_MODEL=<new> ... yarn test:live` (the calibration test prints cosine values for related/duplicate/unrelated pairs — grep `CALIBRATION`).
-2. Set `EMBEDDING_MODEL` and restart. Search falls back to ungated FTS (WARN logs) while new-model vector coverage is below 80%.
-3. The startup backfill re-embeds every active memory (from its current content, via `buildEmbeddingInput()`); old-model vectors are pruned per-memory as new ones land. At ~2k memories this is ~60 batched API calls (<$0.01).
-4. Adjust `MEMORY_RELEVANCE_THRESHOLD` / `MEMORY_DEDUP_THRESHOLD` if the calibration output says the new model's cosine distribution differs.
-5. Rollback = revert `EMBEDDING_MODEL`: memories still holding old-model vectors work instantly; the rest backfill again.
+**Model-switch runbook** (`EMBEDDING_MODEL`): run the live calibration test (`RUN_LIVE=1 EMBEDDING_MODEL=<new> … yarn test:live`, grep `CALIBRATION`) to confirm ZDR endpoints and sane thresholds → set the variable and restart (search falls back to keyword mode while coverage < 80%) → the startup backfill re-embeds everything (~60 calls at 2k memories) → adjust thresholds if the cosine distribution moved → rollback is reverting the variable.
 
-**Kill switch**: `SEMANTIC_MEMORY_ENABLED=0` reverts to FTS5-only keyword retrieval instantly (no code rollback, no data loss — vectors stay in place for when it's re-enabled). One deliberate difference from true pre-semantic behavior remains: self-diagnosis categories stay excluded from `search()` even in FTS-only mode.
+**Kill switch**: `SEMANTIC_MEMORY_ENABLED=false` ⇒ keyword-only retrieval instantly, vectors kept.
 
-### Error Capture & Replay
-- When the agent loop throws in production, `debugCapture.ts` writes the full conversation + raw error/response payload to `data/debug/error-<timestamp>-<rand>.json` (keeps the newest 50). On by default; set `DEBUG_CAPTURE=0` to disable, `DEBUG_CAPTURE_DIR` to relocate.
-- These captures (and the committed fixtures) replay locally with `yarn replay <file>` to reproduce the exact failure offline and for free.
+### Error capture & replay
 
-### Key Types (`src/ai/types.ts`)
-- `NormalizedContentPart`: `{ type: 'text', text } | { type: 'image', url }` (plus optional `thoughtSignature`).
-- `ConversationEntry`: `message | tool_call | tool_result`.
-- `ProviderToolDefinition` / `ProviderToolCall` / `ProviderChatResponse` / `ToolDefinition` / `ToolHandlerContext`.
+When the agent loop throws in prod, `debugCapture.ts` writes the conversation + raw error to `data/debug/error-<timestamp>-<rand>.json` (newest 50 kept; `DEBUG_CAPTURE=false` disables, `DEBUG_CAPTURE_DIR` relocates). `yarn replay <file>` reproduces the exchange offline. Captures hold full private chats — the digest reads only their timestamp/status/message.
 
 ## Commands
 
-The dev/test toolchain runs entirely in Docker — the host does **not** need Node, Yarn, or `node_modules`. Use either passwordless `sudo`, or add yourself to the docker group once (`sudo usermod -aG docker $USER`, then re-login) and drop the `sudo`.
+The dev/test toolchain runs entirely in Docker — the host does **not** need Node or Yarn.
 
 ```bash
-sudo docker compose build test                       # build/rebuild the test image (once, and after package.json/yarn.lock changes)
-sudo docker compose run --rm test                    # run the full test suite (default CMD = yarn test)
-sudo docker compose run --rm test yarn test          # same, explicit
-sudo docker compose run --rm test yarn typecheck     # strict TS over ALL of src/ incl. tests (tsconfig.test.json)
-sudo docker compose run --rm test yarn check         # Biome lint+format with --fix (writes back to host via the mount)
-sudo docker compose run --rm test yarn check:ci      # Biome check WITHOUT fixing (what CI runs)
-sudo docker compose run --rm test yarn build         # tsc build
-sudo docker compose run --rm test yarn replay data/debug/error-X.json   # replay a prod error capture / fixture
+docker compose build test                            # build the test image (once, and after package.json/yarn.lock changes)
+docker compose run --rm test                         # full test suite (default CMD = yarn test)
+docker compose run --rm test yarn typecheck          # strict TS over ALL of src/ incl. tests (tsconfig.test.json)
+docker compose run --rm test yarn check              # Biome lint+format with --fix (writes back via the mount)
+docker compose run --rm test yarn check:ci           # Biome check WITHOUT fixing (what CI runs)
+docker compose run --rm test yarn build              # tsc build
+docker compose run --rm test yarn replay data/debug/error-X.json   # replay a prod error capture / fixture
 
-# Full CI gate locally (lint + typecheck + build + tests, exactly as CI runs it):
-sudo docker build --target ci .
+docker build --target ci .                           # the full CI gate locally (lint + typecheck + build + tests)
+docker build --target prod -t frigidaire-bot:local . # the prod image
 
-# Opt-in LIVE API tests (paid, ~cents — hits real OpenRouter): chat smoke tests + the embeddings
-# ZDR canary / threshold-calibration test (grep output for CALIBRATION):
-sudo docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... test yarn test:live
+# Live API tests (paid, cents): chat smoke tests + the embeddings ZDR canary / threshold calibration
+docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... test yarn test:live
 
-# Update yarn.lock after editing package.json (no host Yarn needed):
-sudo docker run --rm -v "$PWD":/app -w /app -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 -e LEFTHOOK=0 \
-  node:26-alpine sh -c "npm install -g corepack >/dev/null 2>&1 && corepack enable && yarn install --mode=update-lockfile"
+# Update yarn.lock after editing package.json
+docker compose run --rm test yarn install --mode=update-lockfile   # then rebuild the test image
 ```
 
-Running prod via Compose: `sudo docker compose up -d frigidaire-bot` (builds the `prod` target; `./data` is volume-mounted).
+Running the bot via Compose: `docker compose up -d frigidaire-bot` reads `.env` (optional) and mounts `./data`. Production is a Portainer stack pulling the DockerHub image with the same variables.
 
-Local Yarn (`corepack enable && yarn install && yarn test` / `yarn dev`, etc.) still works **if** the host happens to have Node 26 — optional, mainly for IDE intellisense.
+**After any change, run `yarn check`, `yarn typecheck` and `yarn test` via `docker compose` before handoff.**
 
-**After any change, run tests + typecheck + check via `docker compose` before handoff** to ensure test, type, lint, and build health.
+## Environment variables
 
-## Environment Variables
+Parsed in `src/config.ts`; booleans accept `1/0`, `true/false`, `yes/no`, `on/off`.
 
 **Required (prod):**
 ```
-CLIENT_SECRET=<discord_bot_token>
-OPENROUTER_API_KEY=<openrouter_api_key>
+CLIENT_SECRET=<discord bot token>
+OPENROUTER_API_KEY=<openrouter api key>
 ```
 
-**Optional:**
+**Models:**
 ```
-CHAT_MODEL=<model>                   # Default chat model (default: deepseek/deepseek-v3.2:nitro)
-IMAGE_MODEL=<model>                  # Image generation model (default: google/gemini-2.5-flash-image)
-EMOJI_CAPTION_MODEL=<model>          # Vision model for emoji captions (default: anthropic/claude-opus-4.7)
-EMOJI_FORCE_RECAPTION=<bool>         # Force re-captioning all emojis on startup
-CONVERSATION_TIMEOUT_MS=<ms>         # Per-channel conversation timeout (default: 900000 / 15 min)
-MAX_TOOL_ROUNDS=<n>                  # Max tool-call rounds per turn (default: 10)
-MAX_TOOL_INVOCATIONS=<n>             # Max total tool calls per turn (default: 50)
-DEBUG_CAPTURE=<0|...>                # Error capture; ON by default, '0' disables
-DEBUG_CAPTURE_DIR=<path>             # Error capture output dir (default: ./data/debug)
-LEARNING_INTERVAL_MS=<ms>            # Personality learner interval (default: 1800000 / 30 min)
-MIN_MESSAGES_FOR_OBSERVATION=<n>     # Min new messages before the learner observes (default: 5)
-LEARNER_IGNORE_CHANNELS=<csv ids>    # Channels the learner skips
-LEARNER_MODEL=<model>                # Model used by the personality learner
-SELF_IMPROVEMENT_ENABLED=<bool>      # Learn bot self-improvement signals (default: true)
-SELF_IMPROVEMENT_MODEL=<model>       # Model for self-improvement analysis
-
-# Semantic memory (embedding-based retrieval):
-SEMANTIC_MEMORY_ENABLED=<bool>       # Kill switch (default: true). false/0 => FTS5-only keyword retrieval
-EMBEDDING_MODEL=<model>              # Embedding model (default: qwen/qwen3-embedding-8b; must have ZDR endpoints)
-MEMORY_RELEVANCE_THRESHOLD=<0..1>    # Search semantic gate: min cosine to return a memory (default: 0.5)
-MEMORY_DEDUP_THRESHOLD=<0..1>        # Save/compact dedup: cosine at/above which memories merge (default: 0.9)
-EMBEDDING_QUERY_INSTRUCTION=<text>   # Override the qwen3 query instruct task description
-BACKFILL_INTERVAL_MS=<ms>            # Periodic embedding backfill/self-heal interval (default: 1800000 / 30 min)
-MEMORY_TTL_IMAGE_HOURS=<n>           # Ephemeral TTL: image memories expire n hours after last update (default: 24; 0 disables)
-MEMORY_TTL_EVENT_DAYS=<n>            # Ephemeral TTL: event memories expire n days after last update (default: 14; 0 disables)
-LOG_DEBUG=<1>                        # Enable debug logging (per-search cosine score distributions for threshold calibration)
-
-# Report channel (self-diagnosis digest + deploy announcements):
-REPORT_CHANNEL_ID=<channel id>       # Master switch: unset => BOTH features fully off. Channel for the digest + deploy pings
-DIGEST_ENABLED=<bool>                # Weekly self-diagnosis digest (default: true). false disables just the digest
-DIGEST_PERIOD_MS=<ms>                # Min interval between digests (default: 604800000 / 7 days)
-DIGEST_CHECK_INTERVAL_MS=<ms>        # How often the digest gate is checked (default: 3600000 / 1 hour)
-DEPLOY_ANNOUNCE_ENABLED=<bool>       # "🚀 Deployed <sha>" ping on a new GIT_SHA (default: true)
-GIT_SHA=<full sha>                   # Baked into the prod image by CI; drives deploy announcements (unset => no ping)
+CHAT_MODEL                    default deepseek/deepseek-v3.2:nitro     # chat + summaries; must accept image parts if members post images/emojis
+IMAGE_MODEL                   default google/gemini-2.5-flash-image
+EMOJI_CAPTION_MODEL           default anthropic/claude-opus-4.7        # vision captions, one-shot per emoji
+LEARNER_MODEL                 default qwen/qwen3-vl-235b-a22b-instruct
+SELF_IMPROVEMENT_MODEL        default = LEARNER_MODEL
+EMBEDDING_MODEL               default qwen/qwen3-embedding-8b          # must have ZDR endpoints
+DELETE_REPOST_MODEL           default typesafe/jev-1.13                # decision model, or any chat model id
 ```
 
-For tests: `RUN_LIVE=1` enables the live smoke tests (also needs `OPENROUTER_API_KEY`).
+**Chat / agent:**
+```
+CONVERSATION_TIMEOUT_MS       default 900000 (15 min)
+MAX_TOOL_ROUNDS               default 10
+MAX_TOOL_INVOCATIONS          default 50
+```
+
+**Learner:**
+```
+LEARNING_INTERVAL_MS          default 1800000 (30 min)
+MIN_MESSAGES_FOR_OBSERVATION  default 5
+LEARNER_IGNORE_CHANNELS       csv of channel ids the learner skips
+SELF_IMPROVEMENT_ENABLED      default true
+EMOJI_FORCE_RECAPTION         default false  # ONE-SHOT: clears every caption at startup; unset it again or every redeploy re-captions
+```
+
+**Memory:**
+```
+SEMANTIC_MEMORY_ENABLED       default true   # false ⇒ keyword-only retrieval, no embeddings calls
+MEMORY_RELEVANCE_THRESHOLD    default 0.5    # search gate (cosine)
+MEMORY_DEDUP_THRESHOLD        default 0.9    # save/compact merge (cosine)
+EMBEDDING_QUERY_INSTRUCTION   override the qwen3 query instruction
+BACKFILL_INTERVAL_MS          default 1800000 (30 min)
+MEMORY_TTL_IMAGE_HOURS        default 24 (0 disables)
+MEMORY_TTL_EVENT_DAYS         default 14 (0 disables)
+```
+
+**Link fixing:**
+```
+TWITTER_FIXERS                default fixvx.com,fxtwitter.com,vxtwitter.com
+INSTAGRAM_FIXERS              default instagram7.com,uuinstagram.com,kkinstagram.com
+TIKTOK_FIXERS                 default tnktok.com,fixtiktok.com,tfxktok.com
+LINK_FIX_VERIFY               default true   # false ⇒ rewrite to the first domain without probing
+LINK_FIX_TIMEOUT_MS           default 4000
+```
+
+**Deleted-message repost:**
+```
+DELETE_REPOST_USER_IDS        csv of Discord user ids; empty ⇒ feature off
+DELETE_REPOST_WINDOW_MS       default 120000 (2 min)
+DELETE_REPOST_MODE            edgy (default) | always
+```
+
+**Report channel / ops:**
+```
+REPORT_CHANNEL_ID             master switch: unset ⇒ digest and deploy pings both off
+DIGEST_ENABLED                default true
+DIGEST_PERIOD_MS              default 604800000 (7 days)
+DIGEST_CHECK_INTERVAL_MS      default 3600000 (1 hour)
+DEPLOY_ANNOUNCE_ENABLED       default true
+GIT_SHA                       baked into the prod image by CI (unset ⇒ no deploy ping)
+DEBUG_CAPTURE                 default true
+DEBUG_CAPTURE_DIR             default ./data/debug
+LOG_DEBUG                     default false  # per-search cosine distributions etc.
+```
+
+For tests: `RUN_LIVE=1` enables the live tests (also needs `OPENROUTER_API_KEY`).
 
 ## Testing
 
-- **Vitest 4**, tests colocated as `src/**/*.test.ts` (~360 tests). Convention: new code at the **OpenRouter or Discord boundary should ship with fixture/fake-based tests**.
-- **Test hermeticity**: tests can never touch `./data/memory.db` or the network. `getMemoryStore()` auto-constructs an in-memory store under Vitest when nothing is injected, and `makeDefaultEmbeddingProvider()` returns `undefined` inside Vitest. Tests that need memory inject `new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() })` via `setMemoryStoreForTesting()`.
-- `src/test-support/` holds shared helpers — **excluded from the prod build** (`tsconfig.json`) but **type-checked strictly** via `tsconfig.test.json`:
-  - **`fakeProvider.ts`** — `FakeProvider`, a scripted `AiProvider` for deterministic orchestration tests (multi-round tool calls, forced text, errors); records every `chat()` input. Builders: `textResponse()`, `toolCallResponse()`, `errorStep()`.
-  - **`fakeDiscord.ts`** — `createFakeMessage()` / `createFakeBotMessage()`: typed discord.js `Message` fakes with recorders for `reply` / `send` / `sendTyping` / `messages.fetch` / `createWebhook` / `delete` (+ per-webhook `send`/`delete`). Uses real `Collection`s so `.size`/`.values()`/`.has()` behave like prod.
-  - **`fakeEmbeddings.ts`** — `FakeEmbeddingProvider`: deterministic offline embeddings (bag-of-words hash vectors, 128 dims, normalized) — texts sharing words get high cosine, so gate/dedup/fusion tests are meaningful without API access. Records every `embed()` call; `failWith` injects API-outage errors.
-  - **`openRouterFetch.ts`** — `createReplayClient()` / `createSequenceReplayClient()` / `loadFixture()`: OpenAI-SDK clients whose HTTP layer serves recorded JSON, so the provider's **real** request-building + response-parsing run offline and free. `createRecordingClient()` refreshes fixtures against the live API. Endpoint-agnostic — serves chat and embeddings fixtures alike.
-  - **`fixtures/openrouter/*.json`** — committed response shapes: text, single/multi tool calls, text-with-tool-call, malformed args, empty tool-call id, Bedrock-style no-choices error, HTTP 500, embeddings success (un-normalized vectors), embeddings HTTP 500.
-  - **`replayCli.ts`** backs `yarn replay`; **`recorder.ts`** is the recorder util (no test-runner imports, so usable from both Vitest and the ts-node CLI).
-- **Live tests** (`src/**/*.live.test.ts`, run via `yarn test:live`) are `describe.skipIf`-gated, running only with `RUN_LIVE=1` + `OPENROUTER_API_KEY`. Shape-only assertions tolerate non-determinism; routing can pin a backend (e.g. `only: ['amazon-bedrock']`) to reproduce backend-specific bugs.
-  - `openRouterProvider.live.test.ts` — chat-path smoke tests.
-  - `embeddingProvider.live.test.ts` — **ZDR canary** (fails loudly if the default embedding model has no Zero-Data-Retention endpoints — in prod that would mean permanent FTS fallback) + **threshold calibration**: prints real cosine values for related/near-duplicate/unrelated memory pairs (grep `CALIBRATION`) to tune `MEMORY_RELEVANCE_THRESHOLD` / `MEMORY_DEDUP_THRESHOLD`, at full and MRL-truncated dimensions.
+- Vitest 4; tests colocated as `src/**/*.test.ts`. Convention: code at the **OpenRouter or Discord boundary ships with fixture/fake-based tests**.
+- **Hermeticity**: tests never touch `./data` or the network. `getMemoryStore()` and `getConversationPersistence()` auto-construct in-memory instances under Vitest; `makeDefaultEmbeddingProvider()` returns `undefined` there. Tests needing memory inject `new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() })` via `setMemoryStoreForTesting()`. Anything that can write an error capture stubs `DEBUG_CAPTURE_DIR` (or sets `DEBUG_CAPTURE=0`).
+- `src/test-support/`:
+  - `fakeProvider.ts` — scripted `AiProvider` (`textResponse()`, `toolCallResponse()`, `errorStep()`), records every `chat()` input.
+  - `fakeDiscord.ts` — `createFakeMessage()` (typed as the exact `MessageCreate` argument; options for channel type, attachments, embeds incl. `proxyURL`, mentions, replied-to user, webhook send failures), `createFakeChannel()`, `createFakeClient()` (a ready `Client<true>`), `createFakeBotMessage()`.
+  - `fakeEmbeddings.ts` — deterministic bag-of-words embeddings; `failWith` simulates outages.
+  - `openRouterFetch.ts` — replay/record OpenAI-SDK clients backed by JSON fixtures (chat and embeddings).
+  - `replayCli.ts` backs `yarn replay`; `recorder.ts` is the call-recorder util.
+- Link fixers are tested with an injected `FixerDeps` (fake fetch + clock); the event handler test stubs global `fetch`. The message judge is tested with a fake decisions fetch and a replay chat client. The deleted-message reposter takes every dependency (judge, attachment download, webhook send, clock, config) through its constructor.
+- **Live tests** (`*.live.test.ts`, `yarn test:live`) are `describe.skipIf`-gated on `RUN_LIVE=1` + `OPENROUTER_API_KEY`: chat smoke tests, the embeddings ZDR canary and threshold calibration (grep `CALIBRATION`).
 
 ### Prod-error → regression-test workflow
+
 1. Bot errors in prod → `data/debug/error-<timestamp>.json` is written automatically.
-2. Copy that file off the server to your machine.
-3. `sudo docker compose run --rm test yarn replay <file>` reproduces the bug locally (exit code 1 = still reproduces).
-4. Fix the code.
-5. Sanitize the payload, move it into `src/test-support/fixtures/openrouter/`, and add a small regression test that loads it via `loadFixture()` / a replay client.
+2. Copy the file off the server; `docker compose run --rm test yarn replay <file>` reproduces it (exit 1 = still reproduces).
+3. Fix the code; sanitize the payload into `src/test-support/fixtures/openrouter/` and add a regression test that loads it via `loadFixture()` / a replay client.
 
-## Continuous Integration
+## Continuous integration
 
-Both workflows are **containerized** — they build the `ci` Docker stage with GitHub Actions layer caching (`cache-from/to: type=gha`) instead of running Yarn on the runner. The `ci` stage runs `check:ci`, `typecheck`, `build`, and `test` at image-build time, so a green build is the full gate.
+Both workflows build the `ci` Docker stage (GHA layer cache), which runs `check:ci`, `typecheck`, `build` and `test` at image-build time — a green build is the full gate. `docker-build.yml` (pull requests): the gate, then Gitleaks + Semgrep (`.semgrep/`), then a prod image build. `docker-push.yml` (push to `master`): the gate, then builds and pushes the `prod` image to DockerHub tagged `latest`, the date, and `sha-<short>`, with `GIT_SHA` baked in.
 
-- **`.github/workflows/docker-build.yml`** — PR checks: builds the `ci` stage, then runs Gitleaks + Semgrep on the runner, then a prod-image build.
-- **`.github/workflows/docker-push.yml`** — on push to `master`: builds the `ci` stage, then builds and pushes the `prod` image to DockerHub (tagged `latest`, date, and `sha-<short>`).
+## Docker image
+
+Stages: `base` (deps) → `test` (full source) → `ci` (runs the gate) / `build` (tsc) / `prod-deps` (`yarn workspaces focus --all --production`: runtime deps only). `prod` copies `dist/` + production `node_modules`, starts through `docker/entrypoint.sh`, which chowns `/app/data` and drops to the `node` user with `su-exec`. `.dockerignore` keeps the build context to the sources (no `.git`, `dist/`, `data/`, Yarn cache).
 
 ## Conventions
 
-- **Tests exist (~360)** — run them (plus `typecheck` and `check`) via `docker compose` before handoff. There is no separate `yarn dev` test step.
-- **Biome** handles all formatting and linting (no ESLint/Prettier). It **ignores `src/**/*.test.ts`** and `src/test-support/fixtures` — tests are not formatted/linted, but `tsconfig.test.json` type-checks them strictly.
-- camelCase for functions/variables, PascalCase for classes/interfaces.
-- Strict TypeScript — no `any`.
+- Strict TypeScript, no `any`; camelCase functions/variables, PascalCase types/classes.
 - Async/await throughout; `Promise.all()` for parallel work.
-- Error handling generally returns user-facing strings rather than throwing.
+- Errors at the user boundary become user-facing strings; infrastructure errors are logged, never swallowed silently.
+- Biome handles formatting and linting. It ignores `src/**/*.test.ts` and the fixtures; tests are still type-checked strictly by `tsconfig.test.json`.
+- New env vars go through `config.ts`; new events go through `defineEvent()`; new OpenRouter calls go through `openRouterClient.ts` and carry `provider: { zdr: true }`.
+- Persisted data lives in `./data`; prod must volume-mount it. Expect `memory.db` around 32 MB once vectors are backfilled (~2k memories × 16 KB) — normal, not bloat.
 
-## Tooling Notes
+## Notes for agents
 
-- `CLAUDE.md` is a symlink to `AGENTS.md` — they are the same file. Git tracks it as `AGENTS.md`.
-- **Persisted data lives in `./data`** (SQLite DB + error captures). Prod **must** volume-mount it (`./data:/app/data`, as `docker-compose.yaml` does) or memories and captures are lost whenever the container is recreated. When first adding the mount to an already-running server, `docker cp` the in-container `/app/data/memory.db` out to the host `./data` first, or you'll start from an empty DB. Expect the DB file to sit at ~32MB once embedding vectors are backfilled (~2k memories × 16KB/vector) — that's normal, not bloat.
-- The Docker image installs Corepack from npm (`npm install -g corepack`) — it is no longer bundled with Node 25+.
-- Discord typing indicator loops every 8 seconds during AI processing.
-- **Cloud / Claude Code on the web (no-Docker fallback)**: Corepack can't download Yarn v4 directly (the proxy blocks `repo.yarnpkg.com`), but Yarn v4 is reachable via npm. Use npm to install deps and run scripts, and run tests with `npx vitest run`:
-  ```bash
-  npm install && npx vitest run && npx tsc -p tsconfig.test.json && npx biome check --fix src/
-  ```
-  Set `LEFTHOOK=0` when committing (the pre-commit hook depends on Yarn). **Do NOT commit `package-lock.json`** — it's an npm side effect; leave it unstaged.
-  **When adding/removing packages**, also commit an updated `yarn.lock`. Generate a proper Yarn v4 lockfile via npm:
-  ```bash
-  npm pack @yarnpkg/cli-dist@4.7.0 && mkdir -p /tmp/yarn-setup && tar -xzf yarnpkg-cli-dist-4.7.0.tgz -C /tmp/yarn-setup
-  git checkout -- yarn.lock   # restore original before updating
-  node /tmp/yarn-setup/package/bin/yarn.js install
-  rm -f yarnpkg-cli-dist-4.7.0.tgz
-  ```
-  This passes CI's `--immutable` check. Always commit `yarn.lock` alongside `package.json` when dependencies change.
+- There is no `CLAUDE.md`; this file is the project instruction file (the harness reads `AGENTS.md`).
+- The memory *architecture* (atomic facts + retrieval injection) is due for a rework toward per-member profile documents + a consolidation job; that is a deliberate future task, not something to do incrementally.
+- Emoji caption quality ("what emoji means what") is a separate future task; the guardrail and glossary above only fix the *rate*.
+- Cloud / no-Docker fallback: `npm install && npx vitest run && npx tsc -p tsconfig.test.json && npx biome check --fix src/`; set `LEFTHOOK=0` when committing; never commit `package-lock.json`; regenerate `yarn.lock` with a Yarn 4 binary from npm (`npm pack @yarnpkg/cli-dist@4.7.0`) when dependencies change.

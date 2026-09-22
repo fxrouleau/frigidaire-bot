@@ -1,10 +1,10 @@
-import { Events, type MessageReaction, type PartialMessageReaction, type PartialUser, type User } from 'discord.js';
-import { getMemoryStore } from '../ai/tools';
+import { Events } from 'discord.js';
+import { getMemoryStore } from '../ai/memory';
+import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
 
-module.exports = {
-  name: Events.MessageReactionAdd,
-  execute(reaction: MessageReaction | PartialMessageReaction, user: User | PartialUser) {
+export default defineEvent(Events.MessageReactionAdd, {
+  execute(reaction, user) {
     if (user.bot) return;
 
     const emojiId = reaction.emoji.id;
@@ -16,4 +16,4 @@ module.exports = {
       logger.warn(`reactionTracker: increment failed for ${emojiId}:`, error);
     }
   },
-};
+});

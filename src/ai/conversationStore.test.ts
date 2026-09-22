@@ -6,7 +6,6 @@ const TIMEOUT = 60_000;
 
 function makeState(overrides: Partial<ConversationState> = {}): ConversationState {
   return {
-    providerId: 'fake',
     entries: [{ kind: 'message', role: 'user', content: [{ type: 'text', text: 'hi' }] }],
     timestamp: Date.now(),
     ...overrides,
@@ -47,7 +46,7 @@ describe('ConversationStore with persistence', () => {
 
     it('writes through on set() so persistence sees the new state', () => {
       const store = new ConversationStore(TIMEOUT, persistence);
-      const state = makeState({ providerId: 'openrouter', injectedMemoryIds: [7] });
+      const state = makeState({ injectedMemoryIds: [7] });
 
       store.set('chan', state);
 
@@ -55,7 +54,6 @@ describe('ConversationStore with persistence', () => {
       expect(loaded).toHaveLength(1);
       const [channelId, restored] = loaded[0];
       expect(channelId).toBe('chan');
-      expect(restored.providerId).toBe('openrouter');
       expect(restored.injectedMemoryIds).toEqual([7]);
 
       store.close();

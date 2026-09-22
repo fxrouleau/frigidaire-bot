@@ -2,16 +2,17 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
+import { getMemoryStore, setMemoryStoreForTesting } from './memory';
 import { MemoryStore } from './memory/memoryStore';
-import { getMemoryStore, setMemoryStoreForTesting, toolDefinitions } from './tools';
+import { toolDefinitions } from './tools';
 import type { ToolHandlerContext } from './types';
 
 // Access the tool handlers by name from the exported array
-const queryLongTermMemoryTool = toolDefinitions.find((t) => t.name === 'query_long_term_memory');
 const querySelfDiagnosisTool = toolDefinitions.find((t) => t.name === 'query_self_diagnosis');
 const forgetMemoryTool = toolDefinitions.find((t) => t.name === 'forget_memory');
 const rememberFactTool = toolDefinitions.find((t) => t.name === 'remember_fact');
 const recallMemoriesTool = toolDefinitions.find((t) => t.name === 'recall_memories');
+const getEmojiTool = toolDefinitions.find((t) => t.name === 'get_emoji');
 
 // Stub context — these tools don't use ctx fields
 const stubCtx = {} as ToolHandlerContext;
@@ -79,21 +80,30 @@ describe('getMemoryStore test hermeticity', () => {
   });
 });
 
-describe('query_long_term_memory tool', () => {
+describe('tool surface', () => {
+  it('exposes exactly one memory search tool (query_long_term_memory was merged into recall_memories)', () => {
+    const names = toolDefinitions.map((t) => t.name);
+    expect(names).toContain('recall_memories');
+    expect(names).not.toContain('query_long_term_memory');
+    expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+describe('recall_memories tool', () => {
   it('exists in toolDefinitions', () => {
-    expect(queryLongTermMemoryTool).toBeDefined();
+    expect(recallMemoriesTool).toBeDefined();
   });
 
   it('describes itself as conversational memory and points self-diagnosis at query_self_diagnosis', () => {
-    expect(queryLongTermMemoryTool!.description).toContain('query_self_diagnosis');
-    expect(queryLongTermMemoryTool!.description).not.toMatch(/search everything/i);
+    expect(recallMemoriesTool!.description).toContain('query_self_diagnosis');
+    expect(recallMemoriesTool!.description).not.toMatch(/search everything/i);
   });
 
-  it('finds memories by subject name', async () => {
+  it('finds memories by subject name given as the query', async () => {
     const store = getMemoryStore();
     await store.save({ category: 'fact', subject: 'Jason_test', content: 'Works as a mechanic test entry' });
 
-    const result = await queryLongTermMemoryTool!.handler(stubCtx, { query: 'Jason_test' });
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'Jason_test' });
     expect(result).toContain('Jason_test');
     expect(result).toContain('mechanic');
   });
@@ -102,7 +112,7 @@ describe('query_long_term_memory tool', () => {
     const store = getMemoryStore();
     await store.save({ category: 'event', subject: 'server', content: 'Zarquon session happened last Moonday night' });
 
-    const result = await queryLongTermMemoryTool!.handler(stubCtx, { query: 'Zarquon' });
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'Zarquon' });
     expect(result).toContain('Zarquon');
     expect(result).toContain('Moonday');
   });
@@ -112,18 +122,23 @@ describe('query_long_term_memory tool', () => {
     await store.save({ category: 'fact', subject: 'Quinby_test', content: 'Works in a quarry somewhere unique' });
     await store.save({ category: 'preference', subject: 'Quinby_test', content: 'Prefers ultraviolet theme unique' });
 
-    const result = await queryLongTermMemoryTool!.handler(stubCtx, {
-      query: 'Quinby_test',
-      category: 'preference',
-    });
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'Quinby_test', category: 'preference' });
     expect(result).toContain('ultraviolet');
     expect(result).not.toContain('quarry');
   });
 
-  it('returns "no memories found" for nonexistent query', async () => {
-    const result = await queryLongTermMemoryTool!.handler(stubCtx, {
-      query: 'zzz_completely_nonexistent_xyz_12345',
-    });
+  it('filters by an explicit subject', async () => {
+    const store = getMemoryStore();
+    await store.save({ category: 'preference', subject: 'Margo_test', content: 'Collects vintage harmonicas enthusiastically' });
+    await store.save({ category: 'preference', subject: 'Other_test', content: 'Collects vintage harmonicas too' });
+
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'vintage harmonicas', subject: 'Margo_test' });
+    const firstLine = result.split('\n')[1];
+    expect(firstLine).toContain('Margo_test');
+  });
+
+  it('returns "no memories found" for a nonexistent query', async () => {
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'zzz_completely_nonexistent_xyz_12345' });
     expect(result).toContain('No memories found');
   });
 
@@ -132,9 +147,25 @@ describe('query_long_term_memory tool', () => {
     await store.save({ category: 'fact', subject: 'Waldo_test', content: 'Lives in Narnia uniquely' });
     await store.save({ category: 'event', subject: 'server', content: 'Waldo_test hosted a gala uniquely' });
 
-    const result = await queryLongTermMemoryTool!.handler(stubCtx, { query: 'Waldo_test' });
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'Waldo_test' });
     expect(result).toContain('Narnia');
     expect(result).toContain('gala');
+  });
+
+  it('prefixes every result with [id:N] so forget_memory can act on it', async () => {
+    const store = getMemoryStore();
+    const id = await store.save({ category: 'fact', subject: 'Ida_test', content: 'Keeps bees on the roof uniquely' });
+
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'bees roof' });
+    expect(result).toContain(`[id:${id}]`);
+  });
+
+  it('ignores an invalid category instead of failing', async () => {
+    const store = getMemoryStore();
+    await store.save({ category: 'fact', subject: 'Cat_test', content: 'Owns a grumpy cat uniquely' });
+
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'grumpy cat', category: 'Facts!' });
+    expect(result).toContain('grumpy cat');
   });
 });
 
@@ -155,16 +186,8 @@ describe('query_self_diagnosis tool', () => {
   it('returns entries filtered by specific category', async () => {
     const store = getMemoryStore();
     // Use unique content to avoid dedup
-    await store.save({
-      category: 'capability_gap',
-      subject: 'bot',
-      content: 'Cannot read quantum flux links xyz123',
-    });
-    await store.save({
-      category: 'pain_point',
-      subject: 'bot',
-      content: 'Responds when absolutely nobody asked xyz123',
-    });
+    await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot read quantum flux links xyz123' });
+    await store.save({ category: 'pain_point', subject: 'bot', content: 'Responds when absolutely nobody asked xyz123' });
 
     const result = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'capability_gap' });
     expect(result).toContain('quantum flux');
@@ -174,21 +197,9 @@ describe('query_self_diagnosis tool', () => {
 
   it('returns all self-diagnosis categories when category is "all"', async () => {
     const store = getMemoryStore();
-    await store.save({
-      category: 'capability_gap',
-      subject: 'bot',
-      content: 'Cannot decode hieroglyphs unique_all_test',
-    });
-    await store.save({
-      category: 'pain_point',
-      subject: 'bot',
-      content: 'Too verbose in meme channel unique_all_test',
-    });
-    await store.save({
-      category: 'feature_request',
-      subject: 'bot',
-      content: 'Users want teleportation feature unique_all_test',
-    });
+    await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot decode hieroglyphs unique_all_test' });
+    await store.save({ category: 'pain_point', subject: 'bot', content: 'Too verbose in meme channel unique_all_test' });
+    await store.save({ category: 'feature_request', subject: 'bot', content: 'Users want teleportation feature unique_all_test' });
 
     const result = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'all' });
     expect(result).toContain('hieroglyphs');
@@ -199,11 +210,7 @@ describe('query_self_diagnosis tool', () => {
   it('returns "no self-diagnosis data" when no bot/server entries exist for a category', async () => {
     const store = getMemoryStore();
     // Save a non-bot entry in unrecognized_content (won't match the bot/server subject filter)
-    await store.save({
-      category: 'unrecognized_content',
-      subject: 'SomeRandomUser',
-      content: 'Unrecognized content test entry',
-    });
+    await store.save({ category: 'unrecognized_content', subject: 'SomeRandomUser', content: 'Unrecognized content test entry' });
 
     const result = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'missing_context' });
     expect(result).toContain('No self-diagnosis data found');
@@ -220,18 +227,18 @@ describe('query_self_diagnosis tool', () => {
     expect(lines.length).toBeLessThanOrEqual(2);
   });
 
+  it('falls back to the default limit for a non-numeric limit instead of throwing (regression: LIMIT NULL)', async () => {
+    const store = getMemoryStore();
+    await store.save({ category: 'tool_error', subject: 'bot', content: 'Unique nan limit test error' });
+
+    const result = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'tool_error', limit: 'lots' });
+    expect(result).toContain('nan limit');
+  });
+
   it('filters to only bot/server subjects', async () => {
     const store = getMemoryStore();
-    await store.save({
-      category: 'capability_gap',
-      subject: 'bot',
-      content: 'Cannot process antimatter images unique_filter',
-    });
-    await store.save({
-      category: 'capability_gap',
-      subject: 'RandomPerson',
-      content: 'RandomPerson specific issue unique_filter',
-    });
+    await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot process antimatter images unique_filter' });
+    await store.save({ category: 'capability_gap', subject: 'RandomPerson', content: 'RandomPerson specific issue unique_filter' });
 
     const result = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'capability_gap' });
     expect(result).toContain('antimatter');
@@ -240,11 +247,7 @@ describe('query_self_diagnosis tool', () => {
 
   it('prefixes every entry with [id:N] so forget_memory can remove it', async () => {
     const store = getMemoryStore();
-    const id = await store.save({
-      category: 'capability_gap',
-      subject: 'bot',
-      content: 'Cannot transcribe whale song recordings unique_id_test',
-    });
+    const id = await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot transcribe whale song recordings unique_id_test' });
 
     const result = await querySelfDiagnosisTool!.handler(stubCtx, { category: 'capability_gap' });
     expect(result).toContain(`[id:${id}]`);
@@ -266,6 +269,28 @@ describe('remember_fact tool', () => {
     expect(rememberFactTool!.description).toContain('expires automatically');
     expect(rememberFactTool!.description).toContain('use "fact" for anything that should be remembered permanently');
   });
+
+  it('rejects a category outside the whitelist without saving anything', async () => {
+    const result = await rememberFactTool!.handler(stubCtx, {
+      category: 'capability_gap',
+      subject: 'bot',
+      content: 'sneaky self-diagnosis pollution',
+    });
+    expect(result).toMatch(/invalid category/i);
+    expect(getMemoryStore().getAllActive()).toHaveLength(0);
+  });
+
+  it('normalizes category case and whitespace', async () => {
+    const result = await rememberFactTool!.handler(stubCtx, { category: ' Fact ', subject: 'Case_test', content: 'Case test content' });
+    expect(result).toMatch(/Saved to memory/);
+    expect(getMemoryStore().getAllActive()[0].category).toBe('fact');
+  });
+
+  it('refuses empty content', async () => {
+    const result = await rememberFactTool!.handler(stubCtx, { category: 'fact', subject: 'Empty_test', content: '   ' });
+    expect(result).toMatch(/empty/i);
+    expect(getMemoryStore().getAllActive()).toHaveLength(0);
+  });
 });
 
 describe('forget_memory tool', () => {
@@ -273,6 +298,34 @@ describe('forget_memory tool', () => {
     expect(forgetMemoryTool!.description).toMatch(/correct|supersed/i);
     expect(forgetMemoryTool!.description).toMatch(/recall_memories/);
     expect(forgetMemoryTool!.description).toMatch(/jok|banter/i);
+  });
+
+  it('reports an unknown id instead of pretending it forgot something', async () => {
+    const result = await forgetMemoryTool!.handler(stubCtx, { memory_id: 123456 });
+    expect(result).toMatch(/no active memory/i);
+  });
+
+  it('rejects non-integer ids', async () => {
+    expect(await forgetMemoryTool!.handler(stubCtx, { memory_id: true })).toBe('Invalid memory ID.');
+    expect(await forgetMemoryTool!.handler(stubCtx, { memory_id: 1.5 })).toBe('Invalid memory ID.');
+    expect(await forgetMemoryTool!.handler(stubCtx, { memory_id: 'abc' })).toBe('Invalid memory ID.');
+  });
+
+  it('accepts a numeric string id', async () => {
+    const id = await getMemoryStore().save({ category: 'fact', subject: 'Str_test', content: 'String id test entry' });
+    expect(await forgetMemoryTool!.handler(stubCtx, { memory_id: String(id) })).toContain(`#${id}`);
+  });
+
+  it('forgetting the same id twice is harmless and search keeps working (regression: FTS index corruption)', async () => {
+    const store = getMemoryStore();
+    const keep = await store.save({ category: 'fact', subject: 'Keep_test', content: 'Restores vintage typewriters' });
+    const gone = await store.save({ category: 'fact', subject: 'Gone_test', content: 'Likes pangolins a lot' });
+
+    expect(await forgetMemoryTool!.handler(stubCtx, { memory_id: gone })).toContain(`#${gone}`);
+    expect(await forgetMemoryTool!.handler(stubCtx, { memory_id: gone })).toMatch(/no active memory/i);
+
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'vintage typewriters' });
+    expect(result).toContain(`[id:${keep}]`);
   });
 });
 
@@ -291,5 +344,35 @@ describe('remember_fact + recall_memories round trip', () => {
     });
     expect(recallResult).toContain('harmonicas');
     expect(recallResult).toMatch(/\[id:\d+\]/);
+  });
+});
+
+describe('get_emoji tool', () => {
+  beforeEach(() => {
+    const store = getMemoryStore();
+    store.upsertEmoji({ id: '111', name: 'trolle', animated: false });
+    store.setEmojiCaption('111', 'trollface; for provocation, trolling');
+    store.upsertEmoji({ id: '222', name: 'monkaS', animated: true });
+    store.setEmojiCaption('222', 'sweating Pepe; for panic, shock');
+  });
+
+  it('tells the model to hold back unless it has already decided on an emoji', () => {
+    expect(getEmojiTool!.description).toMatch(/most replies never need one/i);
+  });
+
+  it('finds an emoji by name and returns the exact posting syntax', async () => {
+    const result = await getEmojiTool!.handler(stubCtx, { query: 'trolle' });
+    expect(result).toContain('<:trolle:111>');
+    expect(result).not.toContain('monkaS');
+  });
+
+  it('finds an emoji by the reaction described in its caption (animated syntax)', async () => {
+    const result = await getEmojiTool!.handler(stubCtx, { query: 'panic' });
+    expect(result).toContain('<a:monkaS:222>');
+  });
+
+  it('tells the model to reply in plain text when nothing matches', async () => {
+    expect(await getEmojiTool!.handler(stubCtx, { query: 'volcano' })).toMatch(/plain text/i);
+    expect(await getEmojiTool!.handler(stubCtx, {})).toMatch(/plain text/i);
   });
 });

@@ -1,33 +1,19 @@
-import process from 'node:process';
-import { type Client, Events, type GuildEmoji } from 'discord.js';
+import { Events, type GuildEmoji } from 'discord.js';
 import { syncEmoji } from '../ai/emojiSync';
-import { getMemoryStore } from '../ai/tools';
+import { getMemoryStore } from '../ai/memory';
+import { config } from '../config';
+import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
 
-module.exports = {
-  name: Events.ClientReady,
+export default defineEvent(Events.ClientReady, {
   once: true,
-  async execute(client: Client) {
-    // Env diagnostic so we can tell why re-captioning didn't fire. Logs only presence
-    // of secret-ish values (no OPENROUTER_API_KEY content); flag vars are logged raw.
-    const rawForce = process.env.EMOJI_FORCE_RECAPTION;
-    logger.info(
-      `emojiReady: env — EMOJI_FORCE_RECAPTION=${JSON.stringify(rawForce)} EMOJI_CAPTION_MODEL=${JSON.stringify(process.env.EMOJI_CAPTION_MODEL)} OPENROUTER_API_KEY=${process.env.OPENROUTER_API_KEY ? 'set' : 'MISSING'}`,
-    );
-
-    // One-shot re-caption flag: set EMOJI_FORCE_RECAPTION=true (e.g., after swapping
-    // the captioner model) to null every caption before reconciliation re-fills them.
-    // Accept a few lenient truthy spellings so stray whitespace/quotes don't silently
-    // turn it off.
-    const normalizedForce = (rawForce ?? '')
-      .trim()
-      .replace(/^["']|["']$/g, '')
-      .toLowerCase();
-    if (normalizedForce === 'true' || normalizedForce === '1' || normalizedForce === 'yes') {
+  async execute(client) {
+    // One-shot re-caption flag: set EMOJI_FORCE_RECAPTION=true (e.g., after swapping the captioner
+    // model) to null every caption before reconciliation re-fills them. Unset it again afterwards —
+    // left on, every redeploy re-captions the whole server.
+    if (config.emoji.forceRecaption) {
       const cleared = getMemoryStore().clearAllEmojiCaptions();
-      logger.warn(
-        `emojiReady: EMOJI_FORCE_RECAPTION=${rawForce} — cleared ${cleared} emoji caption(s) for re-captioning`,
-      );
+      logger.warn(`emojiReady: EMOJI_FORCE_RECAPTION is on — cleared ${cleared} emoji caption(s) for re-captioning`);
     }
 
     const guilds = [...client.guilds.cache.values()];
@@ -83,4 +69,4 @@ module.exports = {
 
     logger.info(`emojiReady: done — live=${liveIds.size} deactivated=${deactivated} captioned=${captioned}`);
   },
-};
+});

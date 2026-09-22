@@ -1,8 +1,6 @@
 import type { Message } from 'discord.js';
 
-export type NormalizedContentPart =
-  | { type: 'text'; text: string; thoughtSignature?: string }
-  | { type: 'image'; url: string; thoughtSignature?: string };
+export type NormalizedContentPart = { type: 'text'; text: string } | { type: 'image'; url: string };
 
 export type ConversationEntry =
   | {
@@ -16,7 +14,6 @@ export type ConversationEntry =
       id: string;
       name: string;
       arguments: Record<string, unknown>;
-      thoughtSignature?: string;
     }
   | {
       kind: 'tool_result';
@@ -28,9 +25,10 @@ export type ConversationEntry =
 // Bump whenever the ConversationEntry/ConversationState shape changes: persisted rows carrying an
 // older version are discarded on restore (the conversation simply starts fresh), so a shape change
 // can never feed a stale-shaped blob back into the running orchestrator.
-export const CONVERSATION_STATE_SCHEMA_VERSION = 1;
+// v2: dropped the multi-provider era fields (providerId, thoughts, thoughtSignature).
+export const CONVERSATION_STATE_SCHEMA_VERSION = 2;
 
-export type ProviderToolType = 'function' | 'web_search' | 'code_interpreter';
+export type ProviderToolType = 'function' | 'web_search';
 
 export type ProviderToolDefinition = {
   name: string;
@@ -48,23 +46,19 @@ export type ProviderToolCall = {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
-  thoughtSignature?: string;
 };
 
 export type ProviderChatResponse = {
   text?: string;
   toolCalls: ProviderToolCall[];
   outputEntries: ConversationEntry[];
-  thoughts?: unknown;
   raw?: unknown;
 };
 
 export interface ToolHandlerContext {
   message: Message;
-  providerId: string;
   provider: AiProvider;
   channelId: string;
-  switchProvider: (providerId: string) => { provider?: AiProvider; error?: string };
 }
 
 export type ToolHandler = (ctx: ToolHandlerContext, args: Record<string, unknown>) => Promise<string>;
@@ -76,23 +70,19 @@ export type ToolDefinition = {
   handler: ToolHandler;
 };
 
+export type ChatInput = {
+  messages: ConversationEntry[];
+  tools: ProviderToolDefinition[];
+  toolChoice?: 'auto' | 'none';
+};
+
+export type ImageGenerationOptions = { refinePrevious?: boolean; sourceImageUrl?: string };
+
 export interface AiProvider {
   id: string;
-  displayName: string;
-  personality: string;
   defaultModel: string;
   supportedTools: ProviderToolDefinition[];
-  chat(input: {
-    messages: ConversationEntry[];
-    tools: ProviderToolDefinition[];
-    toolChoice?: 'auto' | 'none';
-    thoughts?: unknown;
-  }): Promise<ProviderChatResponse>;
+  chat(input: ChatInput): Promise<ProviderChatResponse>;
   summarizeMessages?(message: Message, startTime: string, endTime: string): Promise<string>;
-  generateImage?(message: Message, prompt: string): Promise<string>;
-  generateImageLocal?(
-    message: Message,
-    prompt: string,
-    options?: { refinePrevious?: boolean; sourceImageUrl?: string },
-  ): Promise<string>;
+  generateImage?(message: Message, prompt: string, options?: ImageGenerationOptions): Promise<string>;
 }

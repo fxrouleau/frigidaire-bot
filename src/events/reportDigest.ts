@@ -13,27 +13,26 @@ import {
   buildDigest,
   summarizeErrorCaptures,
 } from '../ai/digest';
+import { getMemoryStore } from '../ai/memory';
 import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { getReportChannelId, sendToReportChannel } from '../ai/reportChannel';
-import { getMemoryStore } from '../ai/tools';
+import { config } from '../config';
+import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
 
 const WATERMARK_KEY = 'digest:last_run_at';
-const DEFAULT_PERIOD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 // Display caps at 10/category; this only bounds the count query so active totals stay accurate.
 const CATEGORY_QUERY_CAP = 500;
 
-export const name = Events.ClientReady;
-export const once = true;
+export default defineEvent(Events.ClientReady, {
+  once: true,
+  execute(client) {
+    if (!getReportChannelId() || !config.report.digestEnabled) return;
 
-export function execute(client: Client): void {
-  if (!getReportChannelId() || process.env.DIGEST_ENABLED === 'false') return;
-
-  void runDigestCheck(client);
-  const interval = envPositiveMs('DIGEST_CHECK_INTERVAL_MS', DEFAULT_CHECK_INTERVAL_MS);
-  setInterval(() => void runDigestCheck(client), interval).unref();
-}
+    void runDigestCheck(client);
+    setInterval(() => void runDigestCheck(client), config.report.digestCheckIntervalMs).unref();
+  },
+});
 
 /** Posts the digest if a full period has elapsed since the last run, then advances the watermark. */
 export async function runDigestCheck(client: Client): Promise<void> {
@@ -42,7 +41,7 @@ export async function runDigestCheck(client: Client): Promise<void> {
     const now = new Date();
     const lastRunIso = store.getState(WATERMARK_KEY);
     const watermark = lastRunIso ? new Date(lastRunIso) : null;
-    const periodMs = envPositiveMs('DIGEST_PERIOD_MS', DEFAULT_PERIOD_MS);
+    const periodMs = config.report.digestPeriodMs;
 
     if (watermark && now.getTime() - watermark.getTime() < periodMs) return;
 
@@ -64,9 +63,11 @@ export async function runDigestCheck(client: Client): Promise<void> {
 
     const captures = summarizeErrorCaptures(readCaptureMetadata(), watermark ?? new Date(0));
 
+    // The digest reports on the period that just ENDED: from the last run (or one period back on the
+    // very first run) up to now.
     const digest = buildDigest({
-      periodStart: now,
-      periodEnd: new Date(now.getTime() + periodMs),
+      periodStart: watermark ?? new Date(now.getTime() - periodMs),
+      periodEnd: now,
       watermark,
       signals,
       failures,
@@ -82,7 +83,7 @@ export async function runDigestCheck(client: Client): Promise<void> {
 
 /** Reads ONLY privacy-safe metadata (timestamp + error status/message) from each capture file. */
 function readCaptureMetadata(): CaptureMeta[] {
-  const dir = process.env.DEBUG_CAPTURE_DIR || './data/debug';
+  const dir = config.debugCapture.dir;
   let files: string[];
   try {
     files = fs.readdirSync(dir).filter((n) => n.startsWith('error-') && n.endsWith('.json'));
@@ -106,11 +107,4 @@ function readCaptureMetadata(): CaptureMeta[] {
     }
   }
   return metas;
-}
-
-function envPositiveMs(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
 }

@@ -1,9 +1,14 @@
 import { Events, type Message } from 'discord.js';
 import { agent } from '../ai/agentInstance';
+import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
 
 async function isReplyToBot(message: Message): Promise<boolean> {
   if (!message.reference?.messageId) return false;
+  // Discord resolves the replied-to author into the mentions when the reply pings them, which
+  // answers the question without a REST fetch for every reply posted server-wide.
+  const repliedUser = message.mentions.repliedUser;
+  if (repliedUser) return repliedUser.id === message.client.user.id;
   try {
     const repliedTo = await message.channel.messages.fetch(message.reference.messageId);
     return repliedTo.author.id === message.client.user.id;
@@ -12,9 +17,8 @@ async function isReplyToBot(message: Message): Promise<boolean> {
   }
 }
 
-module.exports = {
-  name: Events.MessageCreate,
-  async execute(message: Message) {
+export default defineEvent(Events.MessageCreate, {
+  async execute(message) {
     if (message.author.bot) return;
 
     const explicitMention = message.mentions.users.has(message.client.user.id);
@@ -26,4 +30,4 @@ module.exports = {
       await agent.handleMention(message);
     }
   },
-};
+});

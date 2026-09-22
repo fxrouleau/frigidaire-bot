@@ -960,15 +960,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/sharp@npm:^0.31.1":
-  version: 0.31.1
-  resolution: "@types/sharp@npm:0.31.1"
-  dependencies:
-    "@types/node": "npm:*"
-  checksum: 10c0/62de067f3ab5e29bbc649178540d2eb9bda061481d56a30970e04d503434319d0ae288e3680c8ad359f344db2ef310a63a4222254954b70945372eb5305045ad
-  languageName: node
-  linkType: hard
-
 "@types/ws@npm:^8.5.10":
   version: 8.18.1
   resolution: "@types/ws@npm:8.18.1"
@@ -1545,14 +1536,13 @@ __metadata:
   languageName: node
   linkType: hard
 
-"frigidaire-utilities@workspace:.":
+"frigidaire-bot@workspace:.":
   version: 0.0.0-use.local
-  resolution: "frigidaire-utilities@workspace:."
+  resolution: "frigidaire-bot@workspace:."
   dependencies:
     "@biomejs/biome": "npm:1.9.4"
     "@types/better-sqlite3": "npm:^7.6.13"
     "@types/node": "npm:^24"
-    "@types/sharp": "npm:^0.31.1"
     better-sqlite3: "npm:^12.6.2"
     discord.js: "npm:^14.25.1"
     dotenv: "npm:^17.2.4"
