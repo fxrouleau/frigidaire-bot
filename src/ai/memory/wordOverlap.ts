@@ -1,4 +1,5 @@
-const STOP_WORDS = new Set([
+/** Function words that carry no retrieval signal; shared by the lexical dedup and the FTS keyword search. */
+export const STOP_WORDS: ReadonlySet<string> = new Set([
   'a',
   'an',
   'the',

@@ -1,5 +1,6 @@
-import process from 'node:process';
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
+import { config } from '../../config';
+import { requireOpenRouterClient } from '../openRouterClient';
 import { normalize } from './vectorMath';
 
 /** What the texts will be used for: queries get the model's retrieval instruction prefix, documents do not. */
@@ -21,13 +22,6 @@ export type OpenRouterEmbeddingProviderOptions = {
   routing?: Record<string, unknown>;
 };
 
-const DEFAULT_EMBEDDING_MODEL = 'qwen/qwen3-embedding-8b';
-
-// Qwen3-Embedding's documented asymmetric-retrieval format: queries carry a task instruction,
-// documents are embedded with no prefix at all. Getting this wrong silently costs retrieval quality.
-const DEFAULT_QUERY_INSTRUCTION =
-  'Given a message from a Discord chat, retrieve stored memories about the people, preferences, events, and server culture that are relevant to it';
-
 export class OpenRouterEmbeddingProvider implements EmbeddingProvider {
   public readonly model: string;
 
@@ -36,27 +30,11 @@ export class OpenRouterEmbeddingProvider implements EmbeddingProvider {
   private readonly queryInstruction: string;
 
   constructor(opts: OpenRouterEmbeddingProviderOptions = {}) {
-    if (opts.client) {
-      this.client = opts.client;
-    } else {
-      const apiKey = process.env.OPENROUTER_API_KEY;
-      if (!apiKey) {
-        throw new Error('OPENROUTER_API_KEY is required');
-      }
-
-      this.client = new OpenAI({
-        apiKey,
-        baseURL: 'https://openrouter.ai/api/v1',
-        defaultHeaders: {
-          'X-Title': 'Frigidaire Bot',
-        },
-      });
-    }
-
-    this.model = opts.model ?? (process.env.EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL);
+    this.client = opts.client ?? requireOpenRouterClient('embeddings');
+    this.model = opts.model ?? config.models.embedding;
     // ZDR routing is mandatory: memory text is the same private content the chat path protects.
     this.routing = opts.routing ?? { zdr: true };
-    this.queryInstruction = process.env.EMBEDDING_QUERY_INSTRUCTION || DEFAULT_QUERY_INSTRUCTION;
+    this.queryInstruction = config.memory.queryInstruction;
   }
 
   async embed(texts: string[], kind: EmbeddingKind): Promise<Float32Array[]> {
@@ -107,13 +85,12 @@ export class OpenRouterEmbeddingProvider implements EmbeddingProvider {
 export function makeDefaultEmbeddingProvider(): EmbeddingProvider | undefined {
   // Test hermeticity guard: never construct a real (paid) provider from inside the Vitest runner.
   // Live tests construct OpenRouterEmbeddingProvider explicitly and are unaffected.
-  if (process.env.VITEST) return undefined;
+  if (config.isTest) return undefined;
 
   // Kill switch: SEMANTIC_MEMORY_ENABLED=false/0 reverts to FTS5-only memory with no code rollback.
-  const enabled = process.env.SEMANTIC_MEMORY_ENABLED;
-  if (enabled === 'false' || enabled === '0') return undefined;
+  if (!config.memory.semanticEnabled) return undefined;
 
-  if (!process.env.OPENROUTER_API_KEY) return undefined;
+  if (!config.openRouter.apiKey) return undefined;
 
   return new OpenRouterEmbeddingProvider();
 }

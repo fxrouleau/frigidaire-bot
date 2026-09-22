@@ -1,13 +1,12 @@
-import process from 'node:process';
 import { ChannelType, type Client, type Collection, type Message, type TextChannel } from 'discord.js';
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 import type { ChatCompletionContentPart } from 'openai/resources/chat/completions';
+import { config } from '../config';
 import { logger } from '../logger';
 import type { MemoryStore } from './memory/memoryStore';
+import { getOpenRouterClient } from './openRouterClient';
+import { formatEmojiLines, formatIdentityLines } from './promptSections';
 import { formatTimestampET } from './utils';
-
-const DEFAULT_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
-const DEFAULT_MIN_MESSAGES = 5;
 
 // Single source of truth for valid categories — a runtime value (not just a type) because the TTL
 // sweep keys on exact category strings: a hallucinated category from the LLM ('Image', 'meme') would
@@ -153,7 +152,7 @@ CATEGORIES (pick the right one — some expire automatically):
 WHAT NOT TO EXTRACT:
 - Small talk, greetings, reactions to the current moment
 - Conversation logistics — who asked, confirmed, declined, arrived, responded (fails the 30-day test)
-- Single emoji usages or reactions (a person's habitual emoji style belongs in ONE personality memory, not one per use)
+- Single emoji usages or reactions (a person's habitual emoji style belongs in ONE personality memory described in words — never paste emoji syntax into a memory)
 - Personality restatements of a known pattern
 - Things only inferred from what others say about them — only first-hand evidence
 - Real names, aliases, or nicknames — those go in identity_updates, never in observations
@@ -171,7 +170,7 @@ GOOD vs BAD examples:
   GOOD: {"category":"image","subject":"Jason","subject_user_id":"456","content":"Shared a meme about League ranked anxiety."}
   BAD:  {"category":"personality","subject":"Jason","content":"Shared a Tenor GIF of a dancing man, reinforcing his pattern of absurdist humor."}
 
-  GOOD: {"category":"personality","subject":"Jason","subject_user_id":"456","content":"Edgy humor, often with <:trolle:...> reactions."}
+  GOOD: {"category":"personality","subject":"Jason","subject_user_id":"456","content":"Edgy humor, loves winding people up."}
   BAD:  {"category":"personality","subject":"Jason","content":"Uses absurdist, boundary-pushing humor by sharing a joke ... reinforcing his pattern of edgy commentary."}
 
   GOOD: {"category":"vibe","subject":"server","content":"Group in-joke: Dillon cast as the villain."}
@@ -250,9 +249,9 @@ export class PersonalityLearner {
 
   constructor(store: MemoryStore, intervalMs?: number) {
     this.store = store;
-    this.intervalMs = intervalMs ?? (Number(process.env.LEARNING_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
-    this.minMessages = Number(process.env.MIN_MESSAGES_FOR_OBSERVATION) || DEFAULT_MIN_MESSAGES;
-    this.ignoredChannels = new Set((process.env.LEARNER_IGNORE_CHANNELS || '').split(',').filter(Boolean));
+    this.intervalMs = intervalMs ?? config.learner.intervalMs;
+    this.minMessages = config.learner.minMessages;
+    this.ignoredChannels = new Set(config.learner.ignoredChannels);
   }
 
   start(discordClient: Client): void {
@@ -308,39 +307,18 @@ export class PersonalityLearner {
     const identities = this.store.getAllIdentities().filter((i) => i.active !== 0);
     if (identities.length === 0) return '';
 
-    const lines = identities.map((i) => {
-      const namePart =
-        i.canonical_name === i.display_name ? i.canonical_name : `${i.canonical_name} (now: ${i.display_name})`;
-      const irlPart = i.irl_name ? ` — IRL: ${i.irl_name}` : '';
-      const aliasPart = i.aliases.length > 0 ? `. Also called: ${i.aliases.join(', ')}` : '';
-      return `- ${namePart} (id:${i.discord_user_id})${irlPart}${aliasPart}`;
-    });
-
-    return `\nKnown server identities (Discord ID → canonical name). Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${lines.join('\n')}\n`;
+    return `\nKnown server identities (Discord ID → canonical name). Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${formatIdentityLines(identities).join('\n')}\n`;
   }
 
   private formatLearnerEmojisSection(): string {
     const emojis = this.store.getUsableEmojis();
     if (emojis.length === 0) return '';
 
-    const lines = emojis.map((e) => {
-      const syntax = e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`;
-      const captionPart = e.caption ? ` — ${e.caption}` : '';
-      return `- ${syntax}${captionPart}`;
-    });
-
-    return `\nKnown server custom emojis (the bot can see/interpret these — do NOT log capability_gap entries claiming otherwise):\n${lines.join('\n')}\n`;
+    return `\nKnown server custom emojis (the bot can see/interpret these — do NOT log capability_gap entries claiming otherwise):\n${formatEmojiLines(emojis).join('\n')}\n`;
   }
 
   private getClient(): OpenAI | undefined {
-    if (!process.env.OPENROUTER_API_KEY) return undefined;
-    if (!this.client) {
-      this.client = new OpenAI({
-        apiKey: process.env.OPENROUTER_API_KEY,
-        baseURL: 'https://openrouter.ai/api/v1',
-        defaultHeaders: { 'X-Title': 'Frigidaire Bot' },
-      });
-    }
+    this.client ??= getOpenRouterClient();
     return this.client;
   }
 
@@ -426,7 +404,7 @@ export class PersonalityLearner {
     }
 
     const botName = discordClient.user?.displayName ?? 'Frigidaire';
-    const selfImprovementEnabled = (process.env.SELF_IMPROVEMENT_ENABLED ?? 'true') !== 'false';
+    const selfImprovementEnabled = config.learner.selfImprovementEnabled;
 
     for (const channelId of channelsToProcess) {
       try {
@@ -526,10 +504,9 @@ export class PersonalityLearner {
           ...messageParts,
         ];
 
-        const learnerModel = process.env.LEARNER_MODEL || 'qwen/qwen3-vl-235b-a22b-instruct';
         const personalityResult = await this.analyzeAndSave(
           openai,
-          learnerModel,
+          config.models.learner,
           personalityParts,
           channelId,
           'observation',
@@ -562,11 +539,9 @@ export class PersonalityLearner {
               ...messageParts,
             ];
 
-            const selfImprovementModel =
-              process.env.SELF_IMPROVEMENT_MODEL || process.env.LEARNER_MODEL || 'qwen/qwen3-vl-235b-a22b-instruct';
             const selfImprovementResult = await this.analyzeAndSave(
               openai,
-              selfImprovementModel,
+              config.models.selfImprovement,
               selfImprovementParts,
               channelId,
               'self-improvement',

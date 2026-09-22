@@ -1,8 +1,19 @@
 // Typed factories that build discord.js Message objects for tests. Real Collection instances are
 // used so .size/.values()/.has() behave like production; a single localized cast bridges the plain
 // object to the Message type at the very end.
-import { type Channel, ChannelType, type Client, Collection, type Message } from 'discord.js';
+import {
+  type Channel,
+  ChannelType,
+  type Client,
+  Collection,
+  type Message,
+  type OmitPartialGroupDMChannel,
+} from 'discord.js';
 import { type Recorder, createRecorder } from './recorder';
+
+// The exact type discord.js hands to a MessageCreate listener (a Message whose channel is never a
+// partial group DM), so fakes can be passed straight to event handlers as well as to the agent.
+export type EventMessage = OmitPartialGroupDMChannel<Message>;
 
 export type FakeWebhook = {
   send: Recorder<[unknown], Promise<unknown>>;
@@ -18,12 +29,14 @@ export type FakeMessageOptions = {
   botUserId?: string;
   botDisplayName?: string;
   channelId?: string;
+  channelType?: ChannelType;
   messageId?: string;
   webhookId?: string | null;
   createdAt?: Date;
-  attachments?: Array<{ url: string; contentType: string | null }>;
+  attachments?: Array<{ url: string; contentType: string | null; name?: string }>;
   embeds?: Array<{
     imageUrl?: string;
+    imageProxyUrl?: string;
     thumbnailUrl?: string;
     authorName?: string;
     title?: string;
@@ -36,16 +49,20 @@ export type FakeMessageOptions = {
   // `.members`. `member: false` puts the user in `.users` only (not a guild member). When omitted,
   // `mentionedUserIds` still populates `.users` with bare entries (no display name) for has() checks.
   mentionedUsers?: Array<{ id: string; displayName?: string; username?: string; member?: boolean }>;
+  // The author of the message this one replies to, when Discord resolved it (reply pings on).
+  repliedUserId?: string | null;
   referencedMessageId?: string | null;
   memberIsNull?: boolean;
   historyMessages?: Message[];
   fetchedMessageById?: Record<string, Message>;
   replyImpl?: (content: unknown) => Promise<unknown>;
   sendImpl?: (content: unknown) => Promise<unknown>;
+  // Make the fake webhook's send() reject (exercises repost error paths).
+  webhookSendImpl?: (content: unknown) => Promise<unknown>;
 };
 
 export type FakeMessage = {
-  message: Message;
+  message: EventMessage;
   recorders: {
     reply: Recorder<[unknown], Promise<unknown>>;
     send: Recorder<[unknown], Promise<unknown>>;
@@ -57,9 +74,9 @@ export type FakeMessage = {
   webhooks: FakeWebhook[];
 };
 
-function createFakeWebhook(): FakeWebhook {
+function createFakeWebhook(sendImpl?: (content: unknown) => Promise<unknown>): FakeWebhook {
   return {
-    send: createRecorder(async (_content: unknown) => ({}) as unknown),
+    send: createRecorder(async (content: unknown) => (sendImpl ? sendImpl(content) : ({} as unknown))),
     delete: createRecorder(async () => ({}) as unknown),
   };
 }
@@ -73,6 +90,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   const botUserId = opts.botUserId ?? 'bot-1';
   const botDisplayName = opts.botDisplayName ?? 'Frigidaire';
   const channelId = opts.channelId ?? 'channel-1';
+  const channelType = opts.channelType ?? ChannelType.GuildText;
   const messageId = opts.messageId ?? 'msg-1';
   const webhookId = opts.webhookId ?? null;
   const createdAt = opts.createdAt ?? new Date('2026-01-01T00:00:00Z');
@@ -81,9 +99,9 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   const historyMessages = opts.historyMessages ?? [];
   const fetchedMessageById = opts.fetchedMessageById ?? {};
 
-  const attachments = new Collection<string, { contentType: string | null; url: string; size?: number }>();
+  const attachments = new Collection<string, { contentType: string | null; url: string; name: string }>();
   (opts.attachments ?? []).forEach((att, index) => {
-    attachments.set(`att-${index}`, { contentType: att.contentType, url: att.url });
+    attachments.set(`att-${index}`, { contentType: att.contentType, url: att.url, name: att.name ?? `file-${index}` });
   });
 
   const stickers = new Collection<string, { id: string; name: string; format: number }>();
@@ -104,7 +122,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   }
 
   const embeds = (opts.embeds ?? []).map((embed) => ({
-    image: embed.imageUrl ? { url: embed.imageUrl } : null,
+    image: embed.imageUrl ? { url: embed.imageUrl, proxyURL: embed.imageProxyUrl } : null,
     thumbnail: embed.thumbnailUrl ? { url: embed.thumbnailUrl } : null,
     author: embed.authorName ? { name: embed.authorName } : null,
     title: embed.title ?? null,
@@ -122,7 +140,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   const sendTyping = createRecorder<[], Promise<void>>(async () => {});
   const deleteRecorder = createRecorder<[], Promise<unknown>>(async () => ({}) as unknown);
   const createWebhook = createRecorder<[unknown], Promise<unknown>>(async (_options) => {
-    const hook = createFakeWebhook();
+    const hook = createFakeWebhook(opts.webhookSendImpl);
     webhooks.push(hook);
     return hook as unknown;
   });
@@ -153,6 +171,8 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     id: messageId,
     content,
     createdAt,
+    createdTimestamp: createdAt.getTime(),
+    partial: false,
     webhookId,
     author: {
       id: authorId,
@@ -164,14 +184,18 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     attachments,
     embeds,
     stickers,
-    mentions: { users: mentionUsers, members: mentionMembers },
+    mentions: {
+      users: mentionUsers,
+      members: mentionMembers,
+      repliedUser: opts.repliedUserId ? { id: opts.repliedUserId } : null,
+    },
     reference: referencedMessageId ? { messageId: referencedMessageId } : null,
     client: {
       user: { id: botUserId, displayName: botDisplayName },
     },
     channel: {
       id: channelId,
-      type: ChannelType.GuildText,
+      type: channelType,
       isTextBased: () => true,
       send,
       sendTyping,
@@ -183,7 +207,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   };
 
   return {
-    message: built as unknown as Message,
+    message: built as unknown as EventMessage,
     recorders: { reply, send, sendTyping, messagesFetch, delete: deleteRecorder, createWebhook },
     webhooks,
   };
@@ -208,11 +232,12 @@ export function createFakeChannel(opts: { id?: string } = {}): FakeChannel {
 }
 
 export type FakeClient = {
-  client: Client;
+  // A ready client (Client<true>) — what every ClientReady handler receives.
+  client: Client<true>;
   recorders: { channelsFetch: Recorder<[string], Promise<Channel>> };
 };
 
-/** A Client whose channels.fetch(id) resolves channels from a map and throws for unknown ids. */
+/** A ready Client whose channels.fetch(id) resolves channels from a map and throws for unknown ids. */
 export function createFakeClient(opts: { channelsById?: Record<string, Channel> } = {}): FakeClient {
   const channelsById = opts.channelsById ?? {};
   const channelsFetch = createRecorder<[string], Promise<Channel>>(async (channelId: string) => {
@@ -224,8 +249,10 @@ export function createFakeClient(opts: { channelsById?: Record<string, Channel> 
   });
   const built = {
     channels: { fetch: channelsFetch },
+    user: { id: 'bot-1', tag: 'Frigidaire#0001', displayName: 'Frigidaire' },
+    guilds: { cache: new Collection() },
   };
-  return { client: built as unknown as Client, recorders: { channelsFetch } };
+  return { client: built as unknown as Client<true>, recorders: { channelsFetch } };
 }
 
 export function createFakeBotMessage(opts: FakeMessageOptions = {}): FakeMessage {

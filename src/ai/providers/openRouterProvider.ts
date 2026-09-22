@@ -1,15 +1,18 @@
 import * as crypto from 'node:crypto';
-import process from 'node:process';
-import { AttachmentBuilder, type Message } from 'discord.js';
-import OpenAI from 'openai';
+import type { Message } from 'discord.js';
+import type OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import sharp from 'sharp';
+import { config } from '../../config';
 import { logger } from '../../logger';
+import { requireOpenRouterClient } from '../openRouterClient';
 import { toolDefinitions } from '../tools';
 import { prepareSummaryPrompt } from '../tools/summary';
 import type {
   AiProvider,
+  ChatInput,
   ConversationEntry,
+  ImageGenerationOptions,
   NormalizedContentPart,
   ProviderChatResponse,
   ProviderToolCall,
@@ -26,35 +29,27 @@ export type OpenRouterProviderOptions = {
   routing?: Record<string, unknown>;
 };
 
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION = 1568;
+// Every chat() call re-walks the whole conversation, so without a cache each image in the 25-message
+// seed history would be downloaded and decoded again on every tool round of every turn.
+const IMAGE_CACHE_MAX_ENTRIES = 100;
+const IMAGE_CACHE_TTL_MS = 15 * 60 * 1000;
+
+type CachedImage = { dataUri: Promise<string | undefined>; at: number };
+
 export class OpenRouterProvider implements AiProvider {
   public readonly id = 'openrouter';
-  public readonly displayName = 'OpenRouter';
-  public readonly personality = '';
   public readonly defaultModel: string;
   public readonly supportedTools: ProviderToolDefinition[];
 
   private readonly client: OpenAI;
   private readonly routing: Record<string, unknown>;
+  private readonly imageCache = new Map<string, CachedImage>();
 
   constructor(opts: OpenRouterProviderOptions = {}) {
-    if (opts.client) {
-      this.client = opts.client;
-    } else {
-      const apiKey = process.env.OPENROUTER_API_KEY;
-      if (!apiKey) {
-        throw new Error('OPENROUTER_API_KEY is required');
-      }
-
-      this.client = new OpenAI({
-        apiKey,
-        baseURL: 'https://openrouter.ai/api/v1',
-        defaultHeaders: {
-          'X-Title': 'Frigidaire Bot',
-        },
-      });
-    }
-
-    this.defaultModel = opts.model ?? (process.env.CHAT_MODEL || 'deepseek/deepseek-v3.2:nitro');
+    this.client = opts.client ?? requireOpenRouterClient('chat');
+    this.defaultModel = opts.model ?? config.models.chat;
     this.routing = opts.routing ?? { zdr: true, sort: 'throughput' };
 
     this.supportedTools = toolDefinitions.map(
@@ -77,12 +72,7 @@ export class OpenRouterProvider implements AiProvider {
     });
   }
 
-  async chat(input: {
-    messages: ConversationEntry[];
-    tools: ProviderToolDefinition[];
-    toolChoice?: 'auto' | 'none';
-    thoughts?: unknown;
-  }): Promise<ProviderChatResponse> {
+  async chat(input: ChatInput): Promise<ProviderChatResponse> {
     const messages = await this.toOpenAIMessages(input.messages);
 
     const functionTools: OpenAI.ChatCompletionTool[] = input.tools
@@ -142,16 +132,9 @@ export class OpenRouterProvider implements AiProvider {
     }
   }
 
-  async generateImageLocal(
-    message: Message,
-    prompt: string,
-    options?: { refinePrevious?: boolean; sourceImageUrl?: string },
-  ): Promise<string> {
+  async generateImage(message: Message, prompt: string, options?: ImageGenerationOptions): Promise<string> {
     const { generateLocalImage } = await import('../tools/localImageGenerator');
-    return generateLocalImage(message, prompt, {
-      refinePrevious: options?.refinePrevious,
-      sourceImageUrl: options?.sourceImageUrl,
-    });
+    return generateLocalImage(message, prompt, options);
   }
 
   private async toOpenAIMessages(entries: ConversationEntry[]): Promise<ChatCompletionMessageParam[]> {
@@ -165,25 +148,22 @@ export class OpenRouterProvider implements AiProvider {
       if (entry.kind === 'tool_call') {
         const toolCalls: { id: string; type: 'function'; function: { name: string; arguments: string } }[] = [];
 
-        while (i < entries.length && entries[i].kind === 'tool_call') {
-          const tc = entries[i] as ConversationEntry & { kind: 'tool_call' };
+        while (i < entries.length) {
+          const candidate = entries[i];
+          if (candidate.kind !== 'tool_call') break;
           toolCalls.push({
-            id: tc.id,
+            id: candidate.id,
             type: 'function',
-            function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+            function: { name: candidate.name, arguments: JSON.stringify(candidate.arguments) },
           });
           i++;
         }
 
         // Check if the next entry is an assistant message to merge as content
         let content: string | null = null;
-        if (
-          i < entries.length &&
-          entries[i].kind === 'message' &&
-          (entries[i] as ConversationEntry & { kind: 'message' }).role === 'assistant'
-        ) {
-          const assistantEntry = entries[i] as ConversationEntry & { kind: 'message' };
-          content = assistantEntry.content.map((p) => (p.type === 'text' ? p.text : `[image]: ${p.url}`)).join('\n');
+        const next = entries[i];
+        if (next && next.kind === 'message' && next.role === 'assistant') {
+          content = next.content.map((p) => (p.type === 'text' ? p.text : `[image]: ${p.url}`)).join('\n');
           i++;
         }
 
@@ -202,48 +182,33 @@ export class OpenRouterProvider implements AiProvider {
     return messages;
   }
 
-  private async toOpenAIMessage(entry: ConversationEntry): Promise<ChatCompletionMessageParam> {
-    if (entry.kind === 'message') {
-      if (entry.role === 'assistant') {
-        const text = entry.content.map((p) => (p.type === 'text' ? p.text : `[image]: ${p.url}`)).join('\n');
-        return { role: 'assistant', content: text };
-      }
-
-      if (entry.role === 'developer' || entry.role === 'system') {
-        const text = entry.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
-        return { role: 'system', content: text };
-      }
-
-      // user message
-      const parts = await this.buildContentParts(entry.content);
-      if (parts.length === 1 && parts[0].type === 'text') {
-        return { role: 'user', content: parts[0].text };
-      }
-      return { role: 'user', content: parts };
-    }
-
-    if (entry.kind === 'tool_call') {
+  private async toOpenAIMessage(
+    entry: Exclude<ConversationEntry, { kind: 'tool_call' }>,
+  ): Promise<ChatCompletionMessageParam> {
+    if (entry.kind === 'tool_result') {
       return {
-        role: 'assistant',
-        tool_calls: [
-          {
-            id: entry.id,
-            type: 'function',
-            function: {
-              name: entry.name,
-              arguments: JSON.stringify(entry.arguments),
-            },
-          },
-        ],
+        role: 'tool',
+        tool_call_id: entry.id,
+        content: entry.content,
       };
     }
 
-    // tool_result
-    return {
-      role: 'tool',
-      tool_call_id: entry.id,
-      content: entry.content,
-    };
+    if (entry.role === 'assistant') {
+      const text = entry.content.map((p) => (p.type === 'text' ? p.text : `[image]: ${p.url}`)).join('\n');
+      return { role: 'assistant', content: text };
+    }
+
+    if (entry.role === 'developer' || entry.role === 'system') {
+      const text = entry.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
+      return { role: 'system', content: text };
+    }
+
+    // user message
+    const parts = await this.buildContentParts(entry.content);
+    if (parts.length === 1 && parts[0].type === 'text') {
+      return { role: 'user', content: parts[0].text };
+    }
+    return { role: 'user', content: parts };
   }
 
   private async buildContentParts(content: NormalizedContentPart[]): Promise<ChatContentPart[]> {
@@ -251,7 +216,7 @@ export class OpenRouterProvider implements AiProvider {
     const parts: ChatContentPart[] = [];
     for (const part of content) {
       if (part.type === 'image') {
-        const dataUri = await this.fetchImageAsBase64(part.url);
+        const dataUri = await this.imageAsDataUri(part.url);
         if (dataUri) {
           parts.push({ type: 'image_url', image_url: { url: dataUri, detail: 'auto' } });
         }
@@ -262,11 +227,25 @@ export class OpenRouterProvider implements AiProvider {
     return parts.length > 0 ? parts : [{ type: 'text', text: '' }];
   }
 
-  private async fetchImageAsBase64(url: string): Promise<string | undefined> {
-    if (url.startsWith('data:')) return url;
+  /** Memoized fetch + resize of an image URL (bounded, TTL'd); a failed fetch is cached too so it is not retried every round. */
+  private imageAsDataUri(url: string): Promise<string | undefined> {
+    if (url.startsWith('data:')) return Promise.resolve(url);
 
-    const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
-    const MAX_DIMENSION = 1568;
+    const now = Date.now();
+    const cached = this.imageCache.get(url);
+    if (cached && now - cached.at < IMAGE_CACHE_TTL_MS) return cached.dataUri;
+
+    const dataUri = this.fetchImageAsBase64(url);
+    this.imageCache.set(url, { dataUri, at: now });
+    while (this.imageCache.size > IMAGE_CACHE_MAX_ENTRIES) {
+      const oldest = this.imageCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.imageCache.delete(oldest);
+    }
+    return dataUri;
+  }
+
+  private async fetchImageAsBase64(url: string): Promise<string | undefined> {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
       if (!response.ok) {
@@ -275,13 +254,13 @@ export class OpenRouterProvider implements AiProvider {
       }
 
       const contentLength = response.headers.get('content-length');
-      if (contentLength && Number.parseInt(contentLength, 10) > MAX_SIZE) {
+      if (contentLength && Number.parseInt(contentLength, 10) > MAX_IMAGE_BYTES) {
         logger.warn(`Image too large (${contentLength} bytes), skipping: ${url}`);
         return undefined;
       }
 
       let buffer: Buffer = Buffer.from(await response.arrayBuffer());
-      if (buffer.byteLength > MAX_SIZE) {
+      if (buffer.byteLength > MAX_IMAGE_BYTES) {
         logger.warn(`Image too large (${buffer.byteLength} bytes), skipping: ${url}`);
         return undefined;
       }
@@ -293,9 +272,12 @@ export class OpenRouterProvider implements AiProvider {
         const width = metadata.width ?? 0;
         const height = metadata.height ?? 0;
 
-        if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-          logger.info(`Resizing image from ${width}x${height} (max ${MAX_DIMENSION}px): ${url}`);
-          buffer = await image.resize({ width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'inside' }).png().toBuffer();
+        if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
+          logger.info(`Resizing image from ${width}x${height} (max ${MAX_IMAGE_DIMENSION}px): ${url}`);
+          buffer = await image
+            .resize({ width: MAX_IMAGE_DIMENSION, height: MAX_IMAGE_DIMENSION, fit: 'inside' })
+            .png()
+            .toBuffer();
           resized = true;
         }
       } catch (resizeError) {
@@ -355,15 +337,13 @@ export function parseOpenRouterResponse(response: OpenAI.ChatCompletion): Provid
   const toolCalls = extractToolCalls(msg);
   const outputEntries: ConversationEntry[] = [];
 
-  if (toolCalls.length > 0) {
-    for (const call of toolCalls) {
-      outputEntries.push({
-        kind: 'tool_call',
-        id: call.id,
-        name: call.name,
-        arguments: call.arguments,
-      });
-    }
+  for (const call of toolCalls) {
+    outputEntries.push({
+      kind: 'tool_call',
+      id: call.id,
+      name: call.name,
+      arguments: call.arguments,
+    });
   }
 
   if (text) {

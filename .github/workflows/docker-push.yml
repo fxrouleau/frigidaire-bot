@@ -1,9 +1,11 @@
-name: docker-push.yml
+name: Build and push prod image
+
 on:
   workflow_dispatch:
   push:
     paths:
         - 'Dockerfile'
+        - 'docker/**'
         - 'docker-compose.yaml'
         - '.github/workflows/**'
         - 'package.json'
@@ -16,6 +18,13 @@ on:
         - 'biome.json'
     branches:
       - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-push-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   docker:
@@ -63,7 +72,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |

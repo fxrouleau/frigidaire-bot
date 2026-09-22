@@ -1,10 +1,10 @@
-import { type Client, Events } from 'discord.js';
+import { Events } from 'discord.js';
+import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
 
-module.exports = {
-  name: Events.ClientReady,
+export default defineEvent(Events.ClientReady, {
   once: true,
-  execute(client: Client) {
-    logger.info(`Ready! Logged in as ${client.user?.tag}`);
+  execute(client) {
+    logger.info(`Ready! Logged in as ${client.user.tag}`);
   },
-};
+});

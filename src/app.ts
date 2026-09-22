@@ -1,14 +1,25 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
-import { Client, GatewayIntentBits } from 'discord.js';
+import { Client, type ClientEvents, Events, GatewayIntentBits } from 'discord.js';
 import * as dotenv from 'dotenv';
 import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
-import { getMemoryStore } from './ai/tools';
+import { getMemoryStore } from './ai/memory';
+import { config, describeEffectiveConfig } from './config';
+import { resolveEventModule } from './eventModule';
 import { logger } from './logger';
 
-dotenv.config();
+dotenv.config({ quiet: true });
+
+logger.info(`Effective config: ${describeEffectiveConfig()}`);
+
+// A rejected promise nobody awaited must never take the process down (Node turns it into an
+// uncaught exception by default). Event handlers are already dispatched behind a catch below; this
+// covers everything else (timers, fire-and-forget maintenance).
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled promise rejection:', reason);
+});
 
 const client = new Client({
   intents: [
@@ -20,18 +31,30 @@ const client = new Client({
   ],
 });
 
+// Every file in src/events/ is an event handler (see src/eventModule.ts). Each one runs behind a
+// dispatcher that logs a throwing/rejecting handler instead of letting it crash the bot — a missing
+// permission in one channel used to be enough to take the whole process down.
 const eventsPath = path.join(__dirname, 'events');
 const eventFiles = fs
   .readdirSync(eventsPath)
   .filter((file) => (file.endsWith('.ts') || file.endsWith('.js')) && !file.includes('.test.'));
 
 for (const file of eventFiles) {
-  const filePath = path.join(eventsPath, file);
-  const event = require(filePath);
+  const event = resolveEventModule(require(path.join(eventsPath, file)));
+  if (!event) {
+    throw new Error(`src/events/${file} does not export an event module (use defineEvent()).`);
+  }
+
+  const dispatch = (...args: ClientEvents[keyof ClientEvents]) => {
+    Promise.resolve()
+      .then(() => (event.execute as (...a: unknown[]) => unknown)(...args))
+      .catch((error) => logger.error(`Event handler ${file} (${event.name}) failed:`, error));
+  };
+
   if (event.once) {
-    client.once(event.name, (...args) => event.execute(...args));
+    client.once(event.name, dispatch);
   } else {
-    client.on(event.name, (...args) => event.execute(...args));
+    client.on(event.name, dispatch);
   }
 }
 
@@ -51,7 +74,6 @@ try {
 // semantic search until a backfill picks them up) and for EMBEDDING_MODEL switches.
 try {
   const store = getMemoryStore();
-  const backfillIntervalMs = Number(process.env.BACKFILL_INTERVAL_MS) || 30 * 60 * 1000;
 
   const runBackfill = () =>
     void store
@@ -74,17 +96,26 @@ try {
       logger.warn('Ephemeral memory sweep failed:', error);
     }
     runBackfill();
-  }, backfillIntervalMs).unref();
+  }, config.memory.backfillIntervalMs).unref();
 } catch (error) {
   logger.warn('Embedding backfill setup failed:', error);
 }
 
 // Start personality learner after Discord client is ready
-client.once('ready', () => {
+client.once(Events.ClientReady, () => {
   personalityLearner.start(client);
 });
 
-client.login(process.env.CLIENT_SECRET);
+// A missing or rejected token is a configuration error: fail fast and loudly (the unhandledRejection
+// handler above would otherwise turn it into a log line and a process that quietly sits there).
+if (!config.discord.token) {
+  logger.error('CLIENT_SECRET is not set; the bot cannot log in.');
+  process.exit(1);
+}
+client.login(config.discord.token).catch((error) => {
+  logger.error('Discord login failed:', error);
+  process.exit(1);
+});
 
 // Graceful shutdown: the bot redeploys on every master merge (SIGTERM from Docker). Flush/close both
 // SQLite handles and the Discord connection so the next boot reads a clean WAL. Idempotent — a second

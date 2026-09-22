@@ -9,8 +9,8 @@ import { AgentOrchestrator } from './agent';
 import { ConversationPersistence } from './conversationPersistence';
 import type { ConversationState } from './conversationStore';
 import { loadErrorCapture } from './debugCapture';
+import { getMemoryStore, setMemoryStoreForTesting } from './memory';
 import { MemoryStore } from './memory/memoryStore';
-import { getMemoryStore, setMemoryStoreForTesting } from './tools';
 import type { ConversationEntry, ToolDefinition } from './types';
 
 const echoTool: ToolDefinition = {
@@ -68,7 +68,7 @@ describe('AgentOrchestrator.handleMention', () => {
     expect(fake.recorders.sendTyping.calls.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('injects the emoji section with restraint guidance, not use-encouragement', async () => {
+  it('injects the emojis as a reading glossary (names + meanings) without the posting syntax', async () => {
     // Seed a usable emoji so buildDeveloperPrompt includes the emoji section.
     getMemoryStore().upsertEmoji({ id: '111222333', name: 'trolle', animated: false });
     getMemoryStore().setEmojiCaption('111222333', 'a trollface');
@@ -79,24 +79,20 @@ describe('AgentOrchestrator.handleMention', () => {
 
     await orchestrator.handleMention(fake.message);
 
-    const developerEntry = provider.calls[0].messages.find(
-      (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
-    );
-    expect(developerEntry).toBeDefined();
-    const promptText = developerEntry!.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
+    const promptText = developerPromptText(provider);
 
-    // The emoji list itself is present (the model still needs to know what each emoji means)...
-    expect(promptText).toContain('<:trolle:111222333>');
-    expect(promptText).toContain('a trollface');
+    // The model still learns what each emoji means when it shows up in chat...
+    expect(promptText).toContain('EMOJI GLOSSARY');
+    expect(promptText).toContain('- trolle — a trollface');
+    // ...but never gets the syntax it would need to paste one from the prompt: deliberate use goes
+    // through the get_emoji tool, and the rule lives in the persona's behavior list.
+    expect(promptText).not.toContain('<:trolle:111222333>');
+    expect(promptText).toContain("Emojis: you basically don't use them");
+    expect(promptText).toContain('get_emoji');
 
-    // ...framed around restraint, not capability.
-    expect(promptText).toContain('SERVER EMOJIS (use sparingly)');
-    expect(promptText).toContain('NO emoji at all');
-    expect(promptText).toContain('Never use more than one per message');
-
-    // The old use-encouraging framing must be gone.
+    // The old menu-style framings must be gone.
     expect(promptText).not.toContain('EMOJIS YOU CAN USE');
-    expect(promptText).not.toContain('prefer emojis near the top');
+    expect(promptText).not.toContain('SERVER EMOJIS (use sparingly)');
   });
 
   it('annotates injected memory lines with their relative age and warns about stale current-state claims', async () => {
@@ -676,7 +672,6 @@ describe('AgentOrchestrator conversation persistence', () => {
       { kind: 'message', role: 'assistant', content: [{ type: 'text', text: 'earlier reply' }] },
     ];
     const persisted: ConversationState = {
-      providerId: 'fake',
       entries: restoredEntries,
       timestamp: Date.now(),
       injectedMemoryIds: [],
@@ -703,5 +698,123 @@ describe('AgentOrchestrator conversation persistence', () => {
     expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
 
     persistence.close();
+  });
+});
+
+describe('AgentOrchestrator robustness', () => {
+  it('serializes concurrent mentions in the same channel so the second turn sees the first reply', async () => {
+    const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
+    const orchestrator = makeOrchestrator(provider);
+    const a = createFakeMessage({ content: 'one', channelId: 'same', messageId: 'm1' });
+    const b = createFakeMessage({ content: 'two', channelId: 'same', messageId: 'm2' });
+
+    await Promise.all([orchestrator.handleMention(a.message), orchestrator.handleMention(b.message)]);
+
+    expect(provider.calls).toHaveLength(2);
+    const secondTurnAssistantTexts = provider.calls[1].messages
+      .filter((e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'assistant')
+      .map((e) => e.content.map((p) => (p.type === 'text' ? p.text : '')).join(''));
+    // Without serialization both turns read the same empty state and the second never saw 'first'.
+    expect(secondTurnAssistantTexts).toContain('first');
+    // The channel history was seeded exactly once — the second turn reused the first turn's state.
+    expect(a.recorders.messagesFetch.calls.length + b.recorders.messagesFetch.calls.length).toBe(1);
+    expect(a.recorders.reply.calls).toContainEqual(['first']);
+    expect(b.recorders.reply.calls).toContainEqual(['second']);
+  });
+
+  it('replies with the error message instead of throwing when the history fetch fails', async () => {
+    vi.stubEnv('DEBUG_CAPTURE', '0');
+    const provider = new FakeProvider([textResponse('unused')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'hi' });
+    (fake.message.channel.messages as unknown as { fetch: () => Promise<never> }).fetch = async () => {
+      throw new Error('Missing Access');
+    };
+
+    await expect(orchestrator.handleMention(fake.message)).resolves.toBeUndefined();
+
+    expect(fake.recorders.reply.calls.some(([arg]) => /encountered an error/.test(String(arg)))).toBe(true);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it('prefers the Discord media proxy URL for embed images over the third-party origin', async () => {
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({
+      content: 'look',
+      embeds: [{ imageUrl: 'https://origin.example/x.png', imageProxyUrl: 'https://media.discordapp.net/x.png' }],
+    });
+
+    await orchestrator.handleMention(fake.message);
+
+    const userEntries = provider.calls[0].messages.filter(
+      (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'user',
+    );
+    const imageUrls = userEntries.at(-1)!.content.filter((p) => p.type === 'image').map((p) => (p as { url: string }).url);
+    expect(imageUrls).toEqual(['https://media.discordapp.net/x.png']);
+  });
+});
+
+describe('AgentOrchestrator emoji guardrail', () => {
+  const TROLLE = '<:trolle:111222333>';
+  const KEKW = '<:kekw:444555666>';
+
+  beforeEach(() => {
+    getMemoryStore().upsertEmoji({ id: '111222333', name: 'trolle', animated: false });
+    getMemoryStore().upsertEmoji({ id: '444555666', name: 'kekw', animated: false });
+  });
+
+  it('keeps at most one custom emoji and drops ones the server does not have', async () => {
+    const provider = new FakeProvider([textResponse(`lmao ${TROLLE} ${KEKW} <:ghost:999999>`)]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'hello' });
+
+    await orchestrator.handleMention(fake.message);
+
+    expect(fake.recorders.reply.calls).toEqual([[`lmao ${TROLLE}`]]);
+  });
+
+  it('strips the emoji when the bot already used one in a recent reply and the user did not', async () => {
+    const provider = new FakeProvider([textResponse(`nice ${TROLLE}`), textResponse(`again ${TROLLE}`)]);
+    const orchestrator = makeOrchestrator(provider);
+    const turn1 = createFakeMessage({ content: 'hello', channelId: 'c', messageId: 'm1' });
+    const turn2 = createFakeMessage({ content: 'and?', channelId: 'c', messageId: 'm2' });
+
+    await orchestrator.handleMention(turn1.message);
+    await orchestrator.handleMention(turn2.message);
+
+    expect(turn1.recorders.reply.calls).toEqual([[`nice ${TROLLE}`]]);
+    expect(turn2.recorders.reply.calls).toEqual([['again']]);
+  });
+
+  it('allows mirroring an emoji the user just used', async () => {
+    const provider = new FakeProvider([textResponse(`nice ${TROLLE}`), textResponse(`back at you ${TROLLE}`)]);
+    const orchestrator = makeOrchestrator(provider);
+    const turn1 = createFakeMessage({ content: 'hello', channelId: 'c', messageId: 'm1' });
+    const turn2 = createFakeMessage({ content: `lol ${TROLLE}`, channelId: 'c', messageId: 'm2' });
+
+    await orchestrator.handleMention(turn1.message);
+    await orchestrator.handleMention(turn2.message);
+
+    expect(turn2.recorders.reply.calls).toEqual([[`back at you ${TROLLE}`]]);
+  });
+
+  it('rewrites the stored assistant entry to the posted text so the model never sees the stripped version', async () => {
+    const provider = new FakeProvider([
+      textResponse(`ok ${TROLLE}`),
+      textResponse(`sure ${TROLLE}`),
+      textResponse('third'),
+    ]);
+    const orchestrator = makeOrchestrator(provider);
+    const turns = ['m1', 'm2', 'm3'].map((id) => createFakeMessage({ content: 'hey', channelId: 'c', messageId: id }));
+
+    for (const turn of turns) await orchestrator.handleMention(turn.message);
+
+    const thirdTurnAssistantTexts = provider.calls[2].messages
+      .filter((e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'assistant')
+      .map((e) => e.content.map((p) => (p.type === 'text' ? p.text : '')).join(''));
+    expect(thirdTurnAssistantTexts).toContain(`ok ${TROLLE}`);
+    expect(thirdTurnAssistantTexts).toContain('sure');
+    expect(thirdTurnAssistantTexts).not.toContain(`sure ${TROLLE}`);
   });
 });

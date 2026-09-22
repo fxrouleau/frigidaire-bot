@@ -1,36 +1,12 @@
-import process from 'node:process';
-import OpenAI from 'openai';
+import { config } from '../config';
 import { logger } from '../logger';
-
-// Opus over Qwen here because Qwen3-VL, despite being a strong generalist vision model,
-// had no grasp of Twitch/meme-emote culture — it just kept describing every Pepe variant
-// as "green frog with wide eyes" regardless of whether it was monkaW, pepega, or FeelsGoodMan.
-// The captions are one-shot per emoji and cached forever, so paying Opus rates here is pennies.
-const DEFAULT_CAPTION_MODEL = 'anthropic/claude-opus-4.7';
-
-let cachedClient: OpenAI | undefined;
-
-function getClient(): OpenAI | undefined {
-  if (!process.env.OPENROUTER_API_KEY) return undefined;
-  if (!cachedClient) {
-    cachedClient = new OpenAI({
-      apiKey: process.env.OPENROUTER_API_KEY,
-      baseURL: 'https://openrouter.ai/api/v1',
-      defaultHeaders: { 'X-Title': 'Frigidaire Bot' },
-    });
-  }
-  return cachedClient;
-}
-
-export function emojiCdnUrl(emojiId: string, animated: boolean): string {
-  const ext = animated ? 'gif' : 'png';
-  return `https://cdn.discordapp.com/emojis/${emojiId}.${ext}?size=96&quality=lossless`;
-}
+import { getOpenRouterClient } from './openRouterClient';
+import { emojiCdnUrl } from './promptSections';
 
 /**
- * Captions a single Discord custom emoji via Qwen3-VL over OpenRouter.
- * Returns the caption string, or undefined if the captioning failed or the
- * OPENROUTER_API_KEY is unset. The caption is intentionally terse so it fits in
+ * Captions a single Discord custom emoji via a vision model over OpenRouter (EMOJI_CAPTION_MODEL,
+ * Claude Opus by default — see config.ts for why). Returns the caption string, or undefined if the
+ * captioning failed or OPENROUTER_API_KEY is unset. The caption is intentionally terse so it fits in
  * prompt preambles without blowing up token budgets.
  */
 export async function captionEmoji(params: {
@@ -39,13 +15,13 @@ export async function captionEmoji(params: {
   animated: boolean;
   model?: string;
 }): Promise<string | undefined> {
-  const openai = getClient();
+  const openai = getOpenRouterClient();
   if (!openai) {
     logger.warn(`emojiCaptioner: no OPENROUTER_API_KEY; skipping caption for ${params.name}`);
     return undefined;
   }
 
-  const model = params.model ?? process.env.EMOJI_CAPTION_MODEL ?? DEFAULT_CAPTION_MODEL;
+  const model = params.model ?? config.models.emojiCaption;
   const imageUrl = emojiCdnUrl(params.id, params.animated);
 
   logger.info(`emojiCaptioner: requesting caption for ${params.name} (${params.id}) via ${model}`);

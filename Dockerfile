@@ -24,18 +24,27 @@ FROM test AS ci
 RUN yarn check:ci && yarn typecheck && yarn build && yarn test
 
 # ---- build: compile TypeScript for prod ----
-FROM base AS build
-COPY --chown=node:node . .
+FROM test AS build
 RUN yarn build
+
+# ---- prod-deps: the runtime node_modules only (no biome/typescript/vitest/nodemon/ts-node) ----
+FROM base AS prod-deps
+RUN yarn workspaces focus --all --production
 
 # ---- prod: final stage = default build target ----
 FROM node:26-alpine AS prod
+# su-exec: the entrypoint starts as root only long enough to make the data volume writable by the
+# unprivileged `node` user, then drops privileges for the bot process itself.
+RUN apk add --no-cache su-exec
 # Baked in by CI (docker-push.yml) so the bot can announce which commit it's running.
 ARG GIT_SHA=""
-ENV GIT_SHA=$GIT_SHA
+ENV GIT_SHA=$GIT_SHA \
+    NODE_ENV=production
 WORKDIR /app
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/package.json ./
-RUN mkdir -p /app/data
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/package.json ./
+COPY --chown=node:node docker/entrypoint.sh /app/entrypoint.sh
+RUN mkdir -p /app/data && chown node:node /app/data && chmod +x /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["node", "dist/app.js"]

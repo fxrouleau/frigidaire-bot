@@ -1,13 +1,14 @@
 // A scripted AiProvider for tests: hand it a list of responses (or errors, or functions) and it
 // returns them in order from chat(), recording every input it received.
-import type { AiProvider, ConversationEntry, ProviderChatResponse, ProviderToolDefinition } from '../ai/types';
+import type {
+  AiProvider,
+  ChatInput,
+  ConversationEntry,
+  ProviderChatResponse,
+  ProviderToolDefinition,
+} from '../ai/types';
 
-export type ChatInput = {
-  messages: ConversationEntry[];
-  tools: ProviderToolDefinition[];
-  toolChoice?: 'auto' | 'none';
-  thoughts?: unknown;
-};
+export type { ChatInput };
 
 export type ScriptStep = ProviderChatResponse | { error: Error } | ((input: ChatInput) => ProviderChatResponse);
 
@@ -29,8 +30,6 @@ function isErrorStep(step: ScriptStep): step is { error: Error } {
 
 export class FakeProvider implements AiProvider {
   readonly id = 'fake';
-  readonly displayName = 'Fake Provider';
-  readonly personality = '';
   readonly defaultModel = 'fake-model';
   readonly supportedTools: ProviderToolDefinition[];
   readonly calls: ChatInput[] = [];

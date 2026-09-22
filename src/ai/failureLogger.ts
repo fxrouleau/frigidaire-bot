@@ -1,5 +1,5 @@
 import { logger } from '../logger';
-import { getMemoryStore } from './tools';
+import { getMemoryStore } from './memory';
 
 export type FailureCategory =
   | 'parse_failure'

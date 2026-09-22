@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
-import { setMemoryStoreForTesting } from '../ai/tools';
 import { createFakeChannel, createFakeClient } from '../test-support/fakeDiscord';
-import { execute, shouldAnnounce } from './deployAnnounce';
+import deployAnnounceEvent, { shouldAnnounce } from './deployAnnounce';
 
 const ENV_KEYS = ['REPORT_CHANNEL_ID', 'GIT_SHA', 'DEPLOY_ANNOUNCE_ENABLED'] as const;
 const CHANNEL_ID = 'report-1';
 
 let savedEnv: Record<string, string | undefined>;
 let store: MemoryStore;
+
+const execute = deployAnnounceEvent.execute;
 
 beforeEach(() => {
   savedEnv = {};
@@ -53,6 +55,11 @@ describe('shouldAnnounce', () => {
 });
 
 describe('deployAnnounce execute', () => {
+  it('is a once-only ClientReady handler', () => {
+    expect(deployAnnounceEvent.name).toBe('clientReady');
+    expect(deployAnnounceEvent.once).toBe(true);
+  });
+
   it('announces once with the 7-char sha and persists the full sha', async () => {
     const { fakeChannel, fakeClient } = setup();
     process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
@@ -95,11 +102,11 @@ describe('deployAnnounce execute', () => {
     expect(fakeClient.recorders.channelsFetch.calls).toHaveLength(0);
   });
 
-  it('is a no-op when DEPLOY_ANNOUNCE_ENABLED=false even with a fresh sha', async () => {
+  it.each(['false', '0', 'no'])('is a no-op when DEPLOY_ANNOUNCE_ENABLED=%s even with a fresh sha', async (flag) => {
     const { fakeChannel, fakeClient } = setup();
     process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
     process.env.GIT_SHA = 'abcdef1234567890';
-    process.env.DEPLOY_ANNOUNCE_ENABLED = 'false';
+    process.env.DEPLOY_ANNOUNCE_ENABLED = flag;
 
     await execute(fakeClient.client);
 
