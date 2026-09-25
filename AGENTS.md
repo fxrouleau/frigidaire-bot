@@ -13,7 +13,7 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 ## Tech stack
 
 - **Runtime**: Node.js 26 (`node:26-alpine`), TypeScript 5.9 (strict, `es2024`, CommonJS output)
-- **Package manager**: Yarn 4.7 via Corepack, node-modules linker
+- **Package manager**: Yarn 4.18 via Corepack, node-modules linker
 - **Discord**: discord.js 14
 - **AI**: OpenRouter through the `openai` SDK (chat completions + embeddings) and its `/api/alpha/decisions` endpoint (TypeSafe "System One" decision models, used by the message judge)
 - **Storage**: `better-sqlite3` — `./data/memory.db` (memories, FTS5, vectors, identities, emojis, learner/bot state) and `./data/conversations.db` (per-channel conversation cache)
@@ -316,4 +316,4 @@ Stages: `base` (deps) → `test` (full source) → `ci` (runs the gate) / `build
 - There is no `CLAUDE.md`; this file is the project instruction file (the harness reads `AGENTS.md`).
 - The memory *architecture* (atomic facts + retrieval injection) is due for a rework toward per-member profile documents + a consolidation job; that is a deliberate future task, not something to do incrementally.
 - Emoji caption quality ("what emoji means what") is a separate future task; the guardrail and glossary above only fix the *rate*.
-- Cloud / no-Docker fallback: `npm install && npx vitest run && npx tsc -p tsconfig.test.json && npx biome check --fix src/`; set `LEFTHOOK=0` when committing; never commit `package-lock.json`; regenerate `yarn.lock` with a Yarn 4 binary from npm (`npm pack @yarnpkg/cli-dist@4.7.0`) when dependencies change.
+- Cloud / no-Docker fallback: `npm install && npx vitest run && npx tsc -p tsconfig.test.json && npx biome check --fix src/`; set `LEFTHOOK=0` when committing; never commit `package-lock.json`; regenerate `yarn.lock` with a Yarn 4 binary from npm (`npm pack @yarnpkg/cli-dist@4.18.1`) when dependencies change.
