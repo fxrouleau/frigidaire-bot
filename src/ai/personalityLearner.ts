@@ -8,7 +8,15 @@ import { attributeMessage } from '../relay';
 import { getCachedTranscript } from './media';
 import { type Identity, LEARNER_SOURCES, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
 import { getOpenRouterClient } from './openRouterClient';
-import { checkNickname, foldMembers, type Member, matchMemberByName, memoryKeyFor, parseMemberName } from './people';
+import {
+  checkNickname,
+  checkRealName,
+  foldMembers,
+  type Member,
+  matchMemberByName,
+  memoryKeyFor,
+  parseMemberName,
+} from './people';
 import { formatEmojiLines, formatIdentityLines } from './promptSections';
 import { featureRequestOptions, type UsageFeature } from './usage';
 import { formatTimestampET } from './utils';
@@ -570,8 +578,8 @@ export class PersonalityLearner {
    * Applies one of the model's identity_updates. Its fields are untrusted JSON (null, numbers, a string
    * where a list belongs), and the model is a background guesser: it only fills in a real name when
    * none is on record (a name members gave through set_member_info is never replaced by a joke read as
-   * a real name), and adds a nickname only when set_member_info would and no other member goes by it in
-   * any form. Returns whether the identity changed.
+   * a real name), only takes one no other member goes by in any form, and adds a nickname only when
+   * set_member_info would and no other member goes by it in any form. Returns whether the identity changed.
    */
   private applyIdentityUpdate(update: unknown, label: string): boolean {
     if (!update || typeof update !== 'object') return false;
@@ -591,7 +599,12 @@ export class PersonalityLearner {
     if (irl === 'invalid') {
       logger.info(`${label}: ignoring a real name for ${who} that is not a name`);
     } else if (irl && !identity.irl_name) {
-      irlName = irl;
+      // Another member's name read as this one's real name (a joke, or two people mixed up) would make
+      // that name ambiguous for every lookup and for the startup stamp.
+      const check = checkRealName(this.store, mainId, identity.display_name, irl);
+      const reason = check.refusal ?? check.note;
+      if (reason) logger.info(`${label}: not recording "${irl}" as ${who}'s real name: ${reason}`);
+      else irlName = irl;
     } else if (irl && identity.irl_name && nameKey(irl) !== nameKey(identity.irl_name)) {
       logger.info(`${label}: keeping ${who}'s real name "${identity.irl_name}" over the suggested "${irl}"`);
     }
