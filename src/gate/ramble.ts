@@ -1,49 +1,66 @@
-// Ramble redirect: when a watched member goes on a long monologue in the main chat, the bot replies once
-// to their latest message with an in-character nudge toward the channel those belong in.
+// Ramble redirect: when a watched member's messages turn into one of their rambles (monologue-ish,
+// stream-of-consciousness, very weird rambling, the thing the group made a whole channel for), the bot
+// replies once to their latest message with an in-character nudge toward that channel.
 //
-// A free rule runs first (RAMBLE_MIN_MESSAGES messages holding RAMBLE_MIN_CHARS characters of prose within
-// RAMBLE_WINDOW_SECONDS, in a watched channel). Only then does one decision-model call confirm it is a
-// monologue and not a lively back-and-forth (~$0.0001: the state is a short transcript). A negative or
-// failed check waits for a couple more messages before asking again, a nudge starts a per-member cooldown
-// (persisted in bot.db so a redeploy mid-rant can't nudge twice), and the ramble channel itself is never
-// watched.
+// It fires on CONTENT, not volume ("not whenever he talks"). A free prefilter picks the moments worth a
+// look: RAMBLE_MIN_MESSAGES messages in a row from the member with nobody else in between (the bot
+// included) within RAMBLE_WINDOW_SECONDS, or one message of RAMBLE_LONG_MESSAGE_CHARS characters of
+// prose. Then the cheap chat model judges the run against real rambles from the ramble channel and the
+// member's normal messages (rambleJudge.ts, rambleExamples.ts), and only a confident "ramble" nudges.
+// A "no" waits for a couple more messages (or a new long one) before asking again, a nudge starts a
+// per-member cooldown (bot.db, so a redeploy mid-ramble can't nudge twice), and the ramble channel itself
+// is never watched. Side accounts count as their main account (LINKED_ACCOUNTS) for the run, the
+// watch list and the cooldown. A nudge is not a conversation: it never makes the member a gate partner
+// (the gate only counts routed turns, see addressedGate.ts).
 import type { Message } from 'discord.js';
-import { type DecisionsOptions, type NoulQuestion, askNoul } from '../ai/decisions';
 import { config } from '../config';
+import { canonicalUserId, isSamePerson } from '../linkedAccounts';
 import { logger } from '../logger';
 import { getBotDb } from '../storage/botDb';
-import { readableMarkup, stripMarkup, truncate } from './text';
+import { renderMessageText } from './addressedGate';
+import {
+  type RambleExampleRequest,
+  type RambleExampleSource,
+  type RambleExamples,
+  createArchiveRambleExamples,
+} from './rambleExamples';
+import { type RambleJudge, type RambleJudgeInput, type RambleLine, createChatRambleJudge } from './rambleJudge';
+import { stripMarkup } from './text';
 
 // In character: a friend telling another friend to take it elsewhere. `{channel}` becomes the channel link.
 export const RAMBLE_LINES: readonly string[] = [
   'this is a {channel} moment',
   'we have a whole channel for this. {channel}. go',
   "sir this is a wendy's. {channel} is that way",
-  'the committee has reviewed your essay and is forwarding it to {channel}',
-  "i'm not reading all that. {channel} will though",
+  'the committee has reviewed your thoughts and is forwarding them to {channel}',
+  "i'm not following all that. {channel} will though",
   '{channel} misses you. go talk to it',
   'ramble detected. relocating you to {channel}',
   'the ted talk continues in {channel}, not here',
   'somebody get this man a blog. or just {channel}',
   "you've unlocked a new channel: {channel}. please proceed",
   'free therapy session is in {channel}, walk-ins welcome',
+  "brother is transmitting from another dimension. {channel}'s got the antenna",
+  "that's a {channel} thought if i've ever seen one",
 ];
 
 const RECHECK_AFTER_MESSAGES = 2;
-const TRANSCRIPT_MAX_LINES = 16;
-const TRANSCRIPT_TEXT_MAX = 300;
-const BUFFER_MAX_PER_CHANNEL = 100;
+// A run of "lol" / "wait" / "what" is not worth a judge call however many messages it has.
+const MIN_RUN_PROSE_CHARS = 60;
+const BEFORE_CONTEXT_MESSAGES = 4;
+const BUFFER_MAX_PER_CHANNEL = 60;
 
 export type RambleSettings = {
   userIds: string[];
   channelId?: string;
   watchChannelIds: string[];
+  /** Where the member's normal messages come from for contrast; unset ⇒ the channel being watched. */
+  mainChannelId?: string;
   minMessages: number;
-  minChars: number;
+  longMessageChars: number;
   windowSeconds: number;
   cooldownMinutes: number;
   threshold: number;
-  model: string;
 };
 
 export function rambleSettingsFromConfig(): RambleSettings {
@@ -52,75 +69,13 @@ export function rambleSettingsFromConfig(): RambleSettings {
     userIds: ramble.userIds,
     channelId: ramble.channelId,
     watchChannelIds: ramble.watchChannelIds,
+    mainChannelId: config.server.mainChannelId,
     minMessages: ramble.minMessages,
-    minChars: ramble.minChars,
+    longMessageChars: ramble.longMessageChars,
     windowSeconds: ramble.windowSeconds,
     cooldownMinutes: ramble.cooldownMinutes,
     threshold: ramble.threshold,
-    model: config.gate.model,
   };
-}
-
-// ---- The decision-model question ----
-
-export type RambleInput = {
-  author: string;
-  /** The channel's messages during the window, oldest first; `self` marks the bot's own. */
-  transcript: Array<{ author: string; text: string; self?: boolean }>;
-};
-
-export type RambleCheck = (input: RambleInput) => Promise<number | undefined>;
-
-/** The author's share of the transcript, in words (decision models don't count reliably). */
-function describeShare(mine: number, total: number): string {
-  if (total === 0 || mine === total) return 'every message in `recent_chat`';
-  const share = mine / total;
-  if (share >= 0.8) return 'almost every message in `recent_chat`';
-  if (share >= 0.6) return 'most of the messages in `recent_chat`';
-  if (share >= 0.4) return 'about half of the messages in `recent_chat`';
-  return 'less than half of the messages in `recent_chat`';
-}
-
-export function buildRambleState(input: RambleInput): Record<string, unknown> {
-  const lines = input.transcript.slice(-TRANSCRIPT_MAX_LINES);
-  const mine = lines.filter((line) => !line.self && line.author === input.author).length;
-  return {
-    author: input.author,
-    recent_chat: lines.map((line) => ({
-      author: line.self ? `${line.author} (the bot)` : line.author,
-      text: truncate(line.text, TRANSCRIPT_TEXT_MAX),
-    })),
-    author_wrote: describeShare(mine, lines.length),
-  };
-}
-
-export const RAMBLE_QUESTION: NoulQuestion = {
-  type: 'noul',
-  instructions:
-    'Is `author` on a long rambling monologue or rant in `recent_chat`: posting long message after long message, mostly talking at the chat rather than having a back-and-forth with the others?',
-  criteria: {
-    true: [
-      '`author` keeps posting long messages about their own topic (a rant, a story, a theory, a stream of consciousness, a long complaint) while the others barely respond.',
-      'The others only chime in briefly, change the subject, or are not part of it: `author` is holding the floor.',
-    ],
-    false: [
-      "A real conversation: other people are actively replying and `author`'s messages answer them.",
-      '`author` is answering a question someone asked them, or is talking with the bot.',
-      'The messages are mostly links, pasted text, game stats, or several short messages that only add up to a lot.',
-    ],
-  },
-};
-
-export function createRambleCheck(
-  opts: Pick<DecisionsOptions, 'fetch' | 'apiKey' | 'timeoutMs'> & { model?: string } = {},
-): RambleCheck {
-  return (input) =>
-    askNoul(opts.model ?? config.gate.model, buildRambleState(input), RAMBLE_QUESTION, {
-      feature: 'ramble',
-      fetch: opts.fetch,
-      apiKey: opts.apiKey,
-      timeoutMs: opts.timeoutMs,
-    });
 }
 
 // ---- Cooldowns (bot.db) ----
@@ -139,7 +94,8 @@ const COOLDOWN_SCHEMA = `
 
 /**
  * Cooldowns in bot.db with an in-memory mirror: a database hiccup must not turn into a nudge on every
- * message, so the mirror alone still enforces the cooldown for as long as the process lives.
+ * message, so the mirror alone still enforces the cooldown for as long as the process lives. Keyed by
+ * the member's main account id (the watcher passes canonical ids).
  */
 export function createBotDbRambleCooldowns(): RambleCooldowns {
   const memory = new Map<string, number>();
@@ -181,30 +137,26 @@ export function createBotDbRambleCooldowns(): RambleCooldowns {
 
 // ---- The watcher ----
 
-function mentionName(message: Message, id: string, botId: string): string | undefined {
-  if (id === botId) return message.client.user.displayName || 'Frigidaire';
-  return (
-    message.mentions?.members?.get(id)?.displayName ||
-    message.mentions?.users?.get(id)?.displayName ||
-    message.mentions?.users?.get(id)?.username ||
-    undefined
-  );
-}
-
 type Buffered = {
   authorId: string;
   authorName: string;
+  /** What the judge reads: readable mentions/emojis, plus notes for images and files. */
   text: string;
-  /** Characters of prose (no links, emoji markup or mentions): what makes a ramble long. */
+  /** Characters of prose (no links, emoji markup or mentions). */
   chars: number;
   at: number;
+  /** The bot's own post: it breaks a run like anyone else talking. */
   self: boolean;
+  replyTo?: string;
 };
+
+export type RambleTrigger = 'run' | 'long';
 
 export type RambleOutcome =
   | 'off'
   | 'ignored'
   | 'below_rule'
+  | 'addressed_bot'
   | 'cooldown'
   | 'checking'
   | 'recheck_wait'
@@ -215,7 +167,8 @@ export type RambleOutcome =
 
 export type RambleWatcherOptions = {
   settings?: () => RambleSettings;
-  check?: RambleCheck;
+  judge?: RambleJudge;
+  examples?: RambleExampleSource;
   cooldowns?: RambleCooldowns;
   now?: () => number;
   /** Picks the nudge line; injectable so tests are deterministic. */
@@ -223,22 +176,58 @@ export type RambleWatcherOptions = {
   lines?: readonly string[];
 };
 
+const NO_EXAMPLES: RambleExamples = { rambles: [], ramblesAreTheirs: false, normal: [] };
+
+/**
+ * The member's current run (their trailing consecutive messages, nobody else in between) limited to the
+ * window, and the few messages right before it.
+ */
+function currentRun(buffer: Buffered[], windowSeconds: number): { run: Buffered[]; before: Buffered[] } {
+  const last = buffer.at(-1);
+  if (!last || last.self) return { run: [], before: [] };
+  const windowStart = last.at - windowSeconds * 1000;
+  let start = buffer.length;
+  while (start > 0) {
+    const entry = buffer[start - 1];
+    if (entry.self || !isSamePerson(entry.authorId, last.authorId) || entry.at < windowStart) break;
+    start--;
+  }
+  return {
+    run: buffer.slice(start),
+    before: buffer.slice(Math.max(0, start - BEFORE_CONTEXT_MESSAGES), start),
+  };
+}
+
+function replyTargetName(message: Message): string | undefined {
+  if (!message.reference?.messageId) return undefined;
+  const target = message.mentions?.repliedUser;
+  if (!target) return undefined;
+  return message.mentions?.members?.get(target.id)?.displayName || target.displayName || target.username || undefined;
+}
+
+/** Talking to the bot (a mention, or a reply to it) is a conversation, never a ramble. */
+function addressesBot(message: Message, botId: string): boolean {
+  return message.mentions?.users?.has(botId) === true || message.mentions?.repliedUser?.id === botId;
+}
+
 export class RambleWatcher {
   private readonly settings: () => RambleSettings;
-  private readonly check: RambleCheck;
+  private readonly judge: RambleJudge;
+  private readonly examples: RambleExampleSource;
   private readonly cooldowns: RambleCooldowns;
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly lines: readonly string[];
   private readonly buffers = new Map<string, Buffered[]>();
   private readonly inFlight = new Set<string>();
-  /** Per channel+member: timestamp of the newest message the last check covered. */
+  /** Per channel+member: timestamp of the newest message the last judgement covered. */
   private readonly lastCheckedAt = new Map<string, number>();
   private lastLine: string | undefined;
 
   constructor(opts: RambleWatcherOptions = {}) {
     this.settings = opts.settings ?? rambleSettingsFromConfig;
-    this.check = opts.check ?? createRambleCheck();
+    this.judge = opts.judge ?? createChatRambleJudge();
+    this.examples = opts.examples ?? createArchiveRambleExamples();
     this.cooldowns = opts.cooldowns ?? createBotDbRambleCooldowns();
     this.now = opts.now ?? Date.now;
     this.random = opts.random ?? Math.random;
@@ -253,80 +242,127 @@ export class RambleWatcher {
 
     const botId = message.client.user.id;
     const self = message.author.id === botId && !message.webhookId;
-    // Other bots and webhook posts (incl. the bot's own link-fix relays of a message already counted) are skipped.
+    // Other bots and webhook posts (incl. the bot's own link-fix relays of a message already counted)
+    // neither count nor break a run.
     if (!self && (message.author.bot || message.webhookId)) return 'ignored';
 
-    const windowStart = message.createdTimestamp - settings.windowSeconds * 1000;
-    const buffer = (this.buffers.get(channelId) ?? []).filter((entry) => entry.at >= windowStart);
-    const content = message.content ?? '';
-    buffer.push({
-      authorId: message.author.id,
-      authorName: message.member?.displayName || message.author.displayName || message.author.username,
-      // What the decision model reads: `@Name` and `:emoji:` rather than raw ids.
-      text: readableMarkup(content, (id) => mentionName(message, id, botId)),
-      chars: stripMarkup(content).length,
-      at: message.createdTimestamp,
-      self,
-    });
-    this.buffers.set(channelId, buffer.slice(-BUFFER_MAX_PER_CHANNEL));
+    const buffer = this.record(message, settings, botId, self);
+    if (self || !settings.userIds.some((id) => isSamePerson(id, message.author.id))) return 'ignored';
 
-    const userId = message.author.id;
-    if (self || !settings.userIds.includes(userId)) return 'ignored';
+    const current = buffer[buffer.length - 1];
+    const { run, before } = currentRun(buffer, settings.windowSeconds);
+    const prose = run.filter((entry) => entry.chars > 0);
+    const proseChars = prose.reduce((sum, entry) => sum + entry.chars, 0);
+    const long = current.chars >= settings.longMessageChars;
+    const trigger: RambleTrigger | undefined = long
+      ? 'long'
+      : prose.length >= settings.minMessages && proseChars >= MIN_RUN_PROSE_CHARS
+        ? 'run'
+        : undefined;
+    if (!trigger) return 'below_rule';
+    if (addressesBot(message, botId)) return 'addressed_bot';
 
-    const mine = buffer.filter((entry) => entry.authorId === userId && entry.chars > 0);
-    const totalChars = mine.reduce((sum, entry) => sum + entry.chars, 0);
-    if (mine.length < settings.minMessages || totalChars < settings.minChars) return 'below_rule';
-
-    if (this.inCooldown(userId, settings)) return 'cooldown';
-    const key = `${channelId}:${userId}`;
+    const personId = canonicalUserId(message.author.id);
+    if (this.inCooldown(personId, settings)) return 'cooldown';
+    const key = `${channelId}:${personId}`;
     if (this.inFlight.has(key)) return 'checking';
     const checkedAt = this.lastCheckedAt.get(key);
-    if (checkedAt !== undefined && mine.filter((entry) => entry.at > checkedAt).length < RECHECK_AFTER_MESSAGES) {
+    // After a "no", a new long message is new material on its own; a run needs a couple more messages.
+    if (
+      checkedAt !== undefined &&
+      !(long && current.at > checkedAt) &&
+      prose.filter((entry) => entry.at > checkedAt).length < RECHECK_AFTER_MESSAGES
+    ) {
       return 'recheck_wait';
     }
 
-    const author = mine[mine.length - 1].authorName;
     this.inFlight.add(key);
     try {
-      const probability = await this.safeCheck({
-        author,
-        transcript: buffer
-          .filter((entry) => entry.text.trim().length > 0)
-          .map((entry) => ({ author: entry.authorName, text: entry.text, ...(entry.self ? { self: true } : {}) })),
+      const examples = this.safeExamples({
+        userId: message.author.id,
+        rambleChannelId: settings.channelId,
+        normalChannelId: settings.mainChannelId ?? channelId,
       });
-      this.lastCheckedAt.set(key, message.createdTimestamp);
-      const tail = `channel=${channelId} author=${author} messages=${mine.length} chars=${totalChars}`;
-      if (probability === undefined) {
-        logger.warn(`ramble: no decision from the model, ${tail}`);
+      const input: RambleJudgeInput = {
+        author: current.authorName,
+        run: run
+          .filter((entry) => entry.text.length > 0)
+          .map((entry) => ({ text: entry.text, ...(entry.replyTo ? { replyTo: entry.replyTo } : {}) })),
+        before: before
+          .filter((entry) => entry.text.length > 0)
+          .map(
+            (entry): RambleLine => ({
+              author: entry.authorName,
+              text: entry.text,
+              ...(entry.self ? { self: true } : {}),
+            }),
+          ),
+        examples,
+      };
+      const verdict = await this.safeJudge(input);
+      this.lastCheckedAt.set(key, current.at);
+      const tail = `trigger=${trigger} channel=${channelId} author=${current.authorName} messages=${run.length} chars=${proseChars} examples=${examples.rambles.length}${examples.ramblesAreTheirs ? '' : '(others)'}/${examples.normal.length}`;
+      if (!verdict) {
+        logger.warn(`ramble: no verdict from the judge, ${tail}`);
         return 'no_answer';
       }
-      const verdict = `p=${probability.toFixed(2)} threshold=${settings.threshold}`;
-      if (probability < settings.threshold) {
-        logger.info(`ramble: not a ramble ${verdict} ${tail}`);
+      const described = `ramble=${verdict.ramble} confidence=${verdict.confidence.toFixed(2)} threshold=${settings.threshold}`;
+      if (!verdict.ramble || verdict.confidence < settings.threshold) {
+        logger.info(`ramble: not a ramble ${described} ${tail}`);
         return 'not_ramble';
       }
-      // Re-checked after the decision call: another channel may have nudged this member meanwhile.
-      if (this.inCooldown(userId, settings)) return 'cooldown';
+      // Re-checked after the judge call: another channel may have nudged this member meanwhile.
+      if (this.inCooldown(personId, settings)) return 'cooldown';
       // Recorded before sending, and kept when the send fails: a missing permission must not turn into
-      // a decision call (and a failed reply) on every message that follows.
-      this.cooldowns.recordNudge(userId, this.now());
-      logger.info(`ramble: NUDGE ${verdict} ${tail}`);
+      // a judge call (and a failed reply) on every message that follows.
+      this.cooldowns.recordNudge(personId, this.now());
+      logger.info(`ramble: NUDGE ${described} ${tail}`);
       return (await this.sendNudge(message, settings.channelId)) ? 'nudged' : 'nudge_failed';
     } finally {
       this.inFlight.delete(key);
     }
   }
 
-  private inCooldown(userId: string, settings: RambleSettings): boolean {
-    const last = this.cooldowns.lastNudgedAt(userId);
+  /** Adds the message to its channel's recent history and returns that history (oldest first). */
+  private record(message: Message, settings: RambleSettings, botId: string, self: boolean): Buffered[] {
+    const channelId = message.channel.id;
+    // Twice the window: the run itself, plus what was said right before it.
+    const keepFrom = message.createdTimestamp - 2 * settings.windowSeconds * 1000;
+    const buffer = (this.buffers.get(channelId) ?? []).filter((entry) => entry.at >= keepFrom);
+    const replyTo = replyTargetName(message);
+    buffer.push({
+      authorId: message.author.id,
+      authorName: message.member?.displayName || message.author.displayName || message.author.username,
+      text: renderMessageText(message, botId, message.client.user.displayName || 'Frigidaire'),
+      chars: stripMarkup(message.content ?? '').length,
+      at: message.createdTimestamp,
+      self,
+      ...(replyTo ? { replyTo } : {}),
+    });
+    const trimmed = buffer.slice(-BUFFER_MAX_PER_CHANNEL);
+    this.buffers.set(channelId, trimmed);
+    return trimmed;
+  }
+
+  private inCooldown(personId: string, settings: RambleSettings): boolean {
+    const last = this.cooldowns.lastNudgedAt(personId);
     return last !== undefined && this.now() - last < settings.cooldownMinutes * 60 * 1000;
   }
 
-  private async safeCheck(input: RambleInput): Promise<number | undefined> {
+  private safeExamples(request: RambleExampleRequest): RambleExamples {
     try {
-      return await this.check(input);
+      return this.examples(request);
     } catch (error) {
-      logger.warn('ramble: check threw:', error);
+      logger.warn('ramble: could not load examples, judging zero-shot:', error);
+      return NO_EXAMPLES;
+    }
+  }
+
+  private async safeJudge(input: RambleJudgeInput) {
+    try {
+      return await this.judge(input);
+    } catch (error) {
+      logger.warn('ramble: judge threw:', error);
       return undefined;
     }
   }

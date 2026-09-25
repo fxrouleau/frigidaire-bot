@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "description": "The ramble judge's answer from z-ai/glm-5.3-flash at reasoning effort 'low': the reasoning arrives in its own field, the content is the bare JSON verdict. Fictional chat; shape as OpenRouter returns chat completions for reasoning models.",
+  "status": 200,
+  "request": {
+    "model": "z-ai/glm-5.3-flash",
+    "max_tokens": 1500,
+    "reasoning": { "effort": "low" },
+    "provider": { "zdr": true },
+    "messages": [
+      { "role": "system", "content": "You judge one thing in a private Discord server between close friends: ..." },
+      { "role": "user", "content": "REAL RAMBLES by Gus, ... THE RUN TO JUDGE: ..." }
+    ]
+  },
+  "response": {
+    "id": "gen-test-ramble-001",
+    "provider": "Z.AI",
+    "model": "z-ai/glm-5.3-flash",
+    "object": "chat.completion",
+    "created": 1790000000,
+    "choices": [
+      {
+        "logprobs": null,
+        "finish_reason": "stop",
+        "native_finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "{\"ramble\": true, \"confidence\": 0.86}",
+          "refusal": null,
+          "reasoning": "Nobody engaged; the run drifts from pigeons to the moon landing like the examples."
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 1210,
+      "completion_tokens": 64,
+      "total_tokens": 1274,
+      "cost": 0.0000634,
+      "completion_tokens_details": { "reasoning_tokens": 48 }
+    }
+  }
+}
