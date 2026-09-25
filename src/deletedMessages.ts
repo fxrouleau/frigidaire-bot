@@ -6,10 +6,12 @@
 // content has to be captured up front. When one of those messages is deleted inside the window, the
 // judge decides whether it was one of their "edgy bouts" (DELETE_REPOST_MODE=edgy, the default) or
 // every deletion qualifies (always), and the message is reposted through a webhook wearing the
-// author's name and avatar.
+// author's name and avatar. A watched member's side account (LINKED_ACCOUNTS) is watched too, and its
+// messages are reposted as that account.
 import type { Message, PartialMessage } from 'discord.js';
 import { type MessageJudge, createEdgyJudge } from './ai/messageJudge';
 import { type DeleteRepostMode, config } from './config';
+import { isSamePerson } from './linkedAccounts';
 import { logger } from './logger';
 import { recordRelay } from './relay';
 import { type WebhookIdentity, isWebhookCapableChannel, sendViaWebhook } from './utils';
@@ -80,8 +82,9 @@ export class DeletedMessageReposter {
     this.now = opts.now ?? (() => Date.now());
   }
 
+  /** Listing either of a member's accounts in DELETE_REPOST_USER_IDS watches both. */
   isWatched(userId: string): boolean {
-    return this.userIds().includes(userId);
+    return this.userIds().some((id) => isSamePerson(id, userId));
   }
 
   /** Snapshots a freshly posted message when its author is watched. Cheap no-op for everyone else. */

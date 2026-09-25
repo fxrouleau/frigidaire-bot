@@ -4,9 +4,8 @@
 //     calibrated probability instead of prose, costs ~1/100th of a cent per call, and is served
 //     through OpenRouter's decisions endpoint (which is on OpenRouter's ZDR list). The endpoint is
 //     alpha and has been seen to hang, so calls carry a short timeout and one retry.
-//   - any chat model (the configured chat model by default): used when DELETE_REPOST_MODEL names a
-//     chat model, and as the fallback when the decision model fails or the message is image-only
-//     (the decision model can't see images).
+//   - any chat model: used when DELETE_REPOST_MODEL names a chat model, and as the fallback (CHAT_MODEL)
+//     when the decision model fails or the message is image-only (the decision model can't see images).
 //
 // The decisions call itself (timeout, retry, ZDR, usage) is shared: see decisions.ts.
 import type OpenAI from 'openai';

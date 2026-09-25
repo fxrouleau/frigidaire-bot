@@ -1,5 +1,5 @@
 import { ChannelType } from 'discord.js';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { JudgeInput } from './ai/messageJudge';
 import { DeletedMessageReposter } from './deletedMessages';
 import { createFakeMessage } from './test-support/fakeDiscord';
@@ -47,6 +47,10 @@ function jasonMessage(overrides: Parameters<typeof createFakeMessage>[0] = {}) {
   });
 }
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe('DeletedMessageReposter', () => {
   it('reposts a watched user\'s quickly deleted edgy message as them', async () => {
     const { reposter, judgeCalls, sendCalls } = makeReposter({ now: () => T0 + 10_000 });
@@ -62,6 +66,34 @@ describe('DeletedMessageReposter', () => {
     expect(channel.id).toBe('channel-1');
     expect(identity).toEqual({ name: 'Jason', avatar: 'https://cdn.example/avatar.png' });
     expect(payload).toEqual({ content: 'something edgy', files: [] });
+  });
+
+  it("watches a member's linked side account too, and reposts it as that account", async () => {
+    const MAIN = '100000000000000001';
+    const SIDE = '100000000000000002';
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${MAIN}`);
+    const sendCalls: SendCall[] = [];
+    const reposter = new DeletedMessageReposter({
+      userIds: () => [MAIN],
+      windowMs: () => 60_000,
+      mode: () => 'always',
+      fetchAttachment: async () => undefined,
+      send: (async (...args: SendCall) => {
+        sendCalls.push(args);
+        return { id: 'repost-1' };
+      }) as unknown as typeof sendViaWebhook,
+      now: () => T0 + 10_000,
+    });
+    const fake = jasonMessage({ authorId: SIDE, authorDisplayName: 'Jason Alt', messageId: 'm-alt' });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+    expect(sendCalls[0][1]).toMatchObject({ name: 'Jason Alt' });
+
+    // Listing the side account instead watches the main account as well.
+    const sideListed = new DeletedMessageReposter({ userIds: () => [SIDE], judge: async () => undefined });
+    expect(sideListed.isWatched(MAIN)).toBe(true);
+    expect(sideListed.isWatched('100000000000000003')).toBe(false);
   });
 
   it('ignores deletions by users who are not watched', async () => {

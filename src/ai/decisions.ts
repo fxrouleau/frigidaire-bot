@@ -14,8 +14,6 @@ import { logger } from '../logger';
 import { type UsageEntry, type UsageFeature, recordUsage } from './usage';
 
 export const DECISIONS_ENDPOINT = 'https://openrouter.ai/api/alpha/decisions';
-/** Pinned rather than `~typesafe/jev-latest`: thresholds are tuned against one model version. */
-export const DEFAULT_DECISION_MODEL = 'typesafe/jev-1.13';
 export const DECISIONS_TIMEOUT_MS = 6000;
 const MAX_ATTEMPTS = 2;
 

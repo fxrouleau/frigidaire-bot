@@ -76,6 +76,11 @@ export const DEFAULT_LEARNER_MODEL = 'z-ai/glm-5.3-flash';
 // cached forever, so paying Opus rates here is pennies.
 export const DEFAULT_EMOJI_CAPTION_MODEL = 'anthropic/claude-opus-4.7';
 export const DEFAULT_EMBEDDING_MODEL = 'qwen/qwen3-embedding-8b';
+/**
+ * The TypeSafe decision model (src/ai/decisions.ts) for the deleted-message judge and the gate. Pinned
+ * rather than `~typesafe/jev-latest`: thresholds are tuned against one model version.
+ */
+export const DEFAULT_DECISION_MODEL = 'typesafe/jev-1.13';
 // Qwen3-Embedding's documented asymmetric-retrieval format: queries carry a task instruction,
 // documents are embedded with no prefix at all. Getting this wrong silently costs retrieval quality.
 export const DEFAULT_EMBEDDING_QUERY_INSTRUCTION =
@@ -182,9 +187,13 @@ export const config = {
     get embedding(): string {
       return envString('EMBEDDING_MODEL') ?? DEFAULT_EMBEDDING_MODEL;
     },
-    /** Model that judges deleted messages (see deleteRepost). Defaults to the chat model. */
+    /**
+     * Model that judges deleted messages (see deleteRepost): the TypeSafe decision model by default (a
+     * calibrated yes/no for ~$0.00001), or any chat model id. Image-only messages and decision-model
+     * failures fall back to CHAT_MODEL.
+     */
     get messageJudge(): string {
-      return envString('DELETE_REPOST_MODEL') ?? this.chat;
+      return envString('DELETE_REPOST_MODEL') ?? DEFAULT_DECISION_MODEL;
     },
     /**
      * Chat models OpenRouter falls back to, in order, when the primary errors (down, rate-limited,
@@ -373,7 +382,10 @@ export const config = {
   },
 
   deleteRepost: {
-    /** Discord user ids whose quickly-deleted messages get reposted. Empty ⇒ feature off. */
+    /**
+     * Discord user ids whose quickly-deleted messages get reposted; a listed member's side account
+     * (LINKED_ACCOUNTS) counts too. Empty ⇒ feature off.
+     */
     get userIds(): string[] {
       return envCsv('DELETE_REPOST_USER_IDS');
     },
@@ -647,13 +659,12 @@ export const config = {
       return envNumber('GATE_THRESHOLD', 0.7, { min: 0, max: 1 });
     },
     /**
-     * TypeSafe decision model for the gate. Pinned rather than `~typesafe/jev-latest`
-     * because the thresholds are tuned against one model version. Only decision models are served by the
-     * decisions endpoint, so anything else (a chat model id) ⇒ the default.
+     * TypeSafe decision model for the gate (pinned: see DEFAULT_DECISION_MODEL). Only decision models are
+     * served by the decisions endpoint, so anything else (a chat model id) ⇒ the default.
      */
     get model(): string {
       const fromEnv = envString('GATE_MODEL');
-      return fromEnv && /^~?typesafe\//.test(fromEnv) ? fromEnv : 'typesafe/jev-1.13';
+      return fromEnv && /^~?typesafe\//.test(fromEnv) ? fromEnv : DEFAULT_DECISION_MODEL;
     },
   },
 

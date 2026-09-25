@@ -112,7 +112,8 @@ describe('config', () => {
     expect(config.models.learner).toBe('z-ai/glm-5.3-flash');
     expect(config.models.selfImprovement).toBe('z-ai/glm-5.3-flash');
     expect(config.models.image).toBe('google/gemini-3.1-flash-image');
-    expect(config.models.messageJudge).toBe('z-ai/glm-5.3-flash');
+    // The deleted-message judge is the decision model; the chat model is only its fallback.
+    expect(config.models.messageJudge).toBe('typesafe/jev-1.13');
   });
 
   it('reads CHAT_FALLBACK_MODELS in order, without duplicates or the primary', () => {
@@ -159,13 +160,15 @@ describe('config', () => {
     expect(config.models.chat).toBe('second/model');
   });
 
-  it('derives the self-improvement and judge models from their parents', () => {
+  it('derives the self-improvement model from the learner model; the judge does not follow CHAT_MODEL', () => {
     vi.stubEnv('LEARNER_MODEL', 'learner/model');
     vi.stubEnv('SELF_IMPROVEMENT_MODEL', undefined);
     expect(config.models.selfImprovement).toBe('learner/model');
     vi.stubEnv('CHAT_MODEL', 'chat/model');
     vi.stubEnv('DELETE_REPOST_MODEL', undefined);
-    expect(config.models.messageJudge).toBe('chat/model');
+    expect(config.models.messageJudge).toBe('typesafe/jev-1.13');
+    vi.stubEnv('DELETE_REPOST_MODEL', 'judge/chat-model');
+    expect(config.models.messageJudge).toBe('judge/chat-model');
   });
 
   it('never prints the API key in the startup summary', () => {
