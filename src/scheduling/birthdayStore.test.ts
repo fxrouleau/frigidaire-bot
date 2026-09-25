@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '../logger';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import {
   applySeed,
@@ -166,5 +167,52 @@ describe('seeding', () => {
 
   it('is a no-op without entries', () => {
     expect(applySeed([], NOW, TODAY)).toEqual({ added: 0, skipped: 0 });
+  });
+
+  it('warns when an edited entry disagrees with the saved birthday it can no longer change', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      applySeed([`${USER}:09-25`, '300000000000000002:01-02'], NOW, TODAY);
+      expect(warn).not.toHaveBeenCalled();
+
+      // The owner corrects one date on a later deploy; the other entry is unchanged.
+      expect(applySeed([`${USER}:09-26`, '300000000000000002:01-02'], NOW, TODAY)).toEqual({ added: 0, skipped: 2 });
+
+      expect(getBirthday(USER)).toMatchObject({ month: 9, day: 25, setBy: 'seed' });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain(
+        `BIRTHDAYS_SEED has ${USER} as September 26 but the saved birthday is September 25`,
+      );
+      expect(String(warn.mock.calls[0]?.[0])).toContain('set_birthday');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('names who saved a conflicting chat-set birthday, and stays quiet when only the seed lacks the year', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      saveBirthday({ userId: USER, date: { month: 3, day: 3, year: 1990 }, setBy: 'chat', now: 1, lastAnnouncedYear: null });
+      saveBirthday({ userId: '300000000000000002', date: { month: 1, day: 2, year: 1991 }, setBy: 'chat', now: 1, lastAnnouncedYear: null });
+
+      applySeed([`${USER}:1991-03-03`, '300000000000000002:01-02'], NOW, TODAY);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain('as March 3, 1991 but the saved birthday is March 3, 1990 (saved by chat)');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn about a seeded birthday that was forgotten since', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      applySeed([`${USER}:09-25`], NOW, TODAY);
+      deleteBirthday(USER);
+      applySeed([`${USER}:09-26`], NOW, TODAY);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
