@@ -130,6 +130,38 @@ describe('extractReadableText', () => {
   it('survives an unclosed script without swallowing everything before it', () => {
     expect(extractReadableText('<body><p>visible</p><script>never closed')).toBe('visible');
   });
+
+  it('turns cells into spaces, drops unknown tags and keeps a stray < with no > after it as text', () => {
+    expect(extractReadableText('<table><tr><td>a</td><th>b</th></tr></table><b>bold</b> 1 < 2')).toBe('a b\n\nbold 1 < 2');
+    expect(extractReadableText('<nav>menu<p>kept: an unclosed nav is just a tag</p>')).toContain('kept');
+  });
+
+  // Hostile pages (up to LINK_READER_MAX_BYTES, 2 MB by default) must not block the event loop: these
+  // took seconds at this size (and most of an hour at 2 MB) when every unclosed tag rescanned the page.
+  it.each([
+    ['unclosed chrome tags', '<nav>'.repeat(80_000)],
+    ['stray < with no >', `<p>${'<'.repeat(400_000)}`],
+    ['block tags with no >', '<p '.repeat(130_000)],
+    ['list items with no >', '<li '.repeat(100_000)],
+  ])('stays linear on %s', (_label, html) => {
+    const started = performance.now();
+    extractReadableText(html);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});
+
+describe('JSON-LD on hostile pages', () => {
+  it('stays linear on many unclosed ld+json scripts, and reads none nested in another script', () => {
+    const started = performance.now();
+    expect(extractJsonLd('<script type="application/ld+json">'.repeat(40_000))).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    // A browser ends the outer script at the first </script>: the inner one is never a tag.
+    const nested = '<script>document.write(\'<script type="application/ld+json">{"a":1}</script>\')</script>';
+    expect(extractJsonLd(nested)).toEqual([]);
+    expect(extractJsonLd('<script>var a = 1;</script><script type="application/ld+json">{"a":1}</script>')).toEqual([
+      { a: 1 },
+    ]);
+  });
 });
 
 describe('small helpers', () => {
