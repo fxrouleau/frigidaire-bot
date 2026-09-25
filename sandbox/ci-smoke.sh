@@ -1,7 +1,7 @@
 #!/bin/sh
 # Starts the given sandbox image with the same hardening as docker-compose.yaml and runs smoke_test.py
-# against it. Used by both CI workflows before an image is trusted (or pushed).
-#   sandbox/ci-smoke.sh frigidaire-sandbox:ci
+# against it: the gate an image should pass before it is trusted or pushed (needs Docker and python3).
+#   docker build -t frigidaire-sandbox:ci sandbox && sandbox/ci-smoke.sh frigidaire-sandbox:ci
 set -eu
 
 IMAGE="$1"

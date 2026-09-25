@@ -1,7 +1,7 @@
 // End-to-end: the real sidecar (sandbox/server.py) on a loopback port, driven through the bot's own client.
 // Skipped where python3 isn't available; CI's test image has it (the base stage installs it for native
 // modules), so this runs as part of the gate. The full image, with numpy & co and the container hardening,
-// is exercised by sandbox/smoke_test.py in the workflows instead.
+// is exercised by sandbox/ci-smoke.sh (Docker) instead.
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
