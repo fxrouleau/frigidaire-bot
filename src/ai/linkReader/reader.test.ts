@@ -165,6 +165,7 @@ describe('LinkReader video understanding', () => {
       url: 'https://video.twimg.com/v.mp4?final=1',
       contentType: 'video/mp4',
       context: 'A tweet posted by @someone; caption: tweet 222',
+      durationSecs: 12,
     });
     // The media probe never downloads the body.
     expect(fetch.calls.find((c) => c.url === 'https://video.twimg.com/v.mp4')?.options.accept).toEqual([]);
@@ -176,15 +177,25 @@ describe('LinkReader video understanding', () => {
     expect(cached?.ok && (cached.content.media[0] as LinkVideo).description).toBe('a cat knocks a glass off a table');
   });
 
-  it('skips videos longer than the limit', async () => {
+  it('hands a long video over too, with its duration, so the media feature skims it', async () => {
     const { reader, describeVideo } = setup({ [`${API}222`]: { body: videoTweet(1200) }, 'https://video.twimg.com/v.mp4': mp4 });
     const result = await reader.read('https://x.com/a/status/222', { watchVideos: true });
-    expect(describeVideo).not.toHaveBeenCalled();
-    expect(result.ok && (result.content.media[0] as LinkVideo).note).toBe('too long to watch (20:00); going by the text');
+    expect(describeVideo).toHaveBeenCalledTimes(1);
+    expect(describeVideo.mock.calls[0][0]).toMatchObject({ url: 'https://video.twimg.com/v.mp4', durationSecs: 1200 });
+    expect(result.ok && (result.content.media[0] as LinkVideo).description).toBe('a cat knocks a glass off a table');
   });
 
-  it('honors LINK_READER_VIDEO_MAX_SECS=0 (off)', async () => {
-    vi.stubEnv('LINK_READER_VIDEO_MAX_SECS', '0');
+  it('says so when the video file is over the download cap', async () => {
+    const { reader } = setup(
+      { [`${API}222`]: { body: videoTweet(1200) }, 'https://video.twimg.com/v.mp4': mp4 },
+      { status: 'too_large' },
+    );
+    const result = await reader.read('https://x.com/a/status/222', { watchVideos: true });
+    expect(result.ok && (result.content.media[0] as LinkVideo).note).toBe('too large to watch');
+  });
+
+  it('honors LINK_READER_WATCH_VIDEOS=false (off)', async () => {
+    vi.stubEnv('LINK_READER_WATCH_VIDEOS', 'false');
     const { reader, describeVideo } = setup({ [`${API}222`]: { body: videoTweet(12) }, 'https://video.twimg.com/v.mp4': mp4 });
     const result = await reader.read('https://x.com/a/status/222', { watchVideos: true });
     expect(describeVideo).not.toHaveBeenCalled();

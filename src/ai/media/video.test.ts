@@ -183,6 +183,25 @@ describe('VideoDescriber', () => {
     expect(String(userContent(requests[0]).at(-1)?.text)).toContain('It has no audio track.');
   });
 
+  it('skims a long linked video from its known duration, without probing it first', async () => {
+    const transcoder = createFakeTranscoder({
+      probe: { durationSecs: 30, hasAudio: true, hasVideo: true },
+      sampleVideo: { durationSecs: 1200, frames: [FRAME, FRAME], audio: TRANSCODED_MP3 },
+    });
+    const { describer, requests, transcribed } = setup([described], { transcoder, maxBytes: () => 1024 * 1024 });
+
+    const outcome = await describer.describe({ url: CLIP_URL, contentType: 'video/mp4', durationSecs: 1200 });
+
+    expect(outcome.status).toBe('ok');
+    expect(transcoder.calls.probe).toEqual([]);
+    expect(transcoder.calls.sampleVideo).toHaveLength(1);
+    expect(transcribed).toEqual([TRANSCODED_MP3]);
+    const text = String(userContent(requests[0]).at(-1)?.text);
+    expect(userContent(requests[0])[0].type).toBe('image_url');
+    expect(text).toContain('2 still frames sampled evenly, in order, from a 20:00 video');
+    expect(text).toContain("Transcript of the first 10:00 of its audio (the rest wasn't transcribed):\nno way, NO WAY");
+  });
+
   it('samples keyframes for containers the video endpoint does not take', async () => {
     const transcoder = createFakeTranscoder({ sampleVideo: { frames: [FRAME] } });
     const { describer, requests } = setup([described], { transcoder });
@@ -315,7 +334,8 @@ describe('VideoDescriber: follow-up questions', () => {
     await describer.ask({ url: CLIP_URL, question: 'who scores?' });
     const text = String(userContent(requests[0]).at(-1)?.text);
     expect(userContent(requests[0])[0].type).toBe('image_url');
-    expect(text).toContain('Transcript of its audio:\nno way, NO WAY');
+    // The soundtrack is cut at VOICE_MAX_SECONDS (600 here): the model is told how much it heard.
+    expect(text).toContain("Transcript of the first 10:00 of its audio (the rest wasn't transcribed):\nno way, NO WAY");
     expect(text).toContain('Answer this question about the video: "who scores?"');
   });
 });

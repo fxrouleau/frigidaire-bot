@@ -24,7 +24,6 @@ import { readInstagram, readTikTok } from './extractors/shortVideo';
 import { readTweet } from './extractors/twitter';
 import { readWebPage } from './extractors/web';
 import { readYouTube } from './extractors/youtube';
-import { formatDuration } from './format';
 import { checkUrlShape } from './netGuard';
 import { BlockedUrlError, FetchFailedError, type SafeFetch, createSafeFetch } from './safeFetch';
 import { type LinkTarget, identifyLink } from './targets';
@@ -322,15 +321,11 @@ export class LinkReader {
 
   /** A description of the video, or with `question` the answer to it; a note says why there is none. */
   private async describe(video: LinkVideo, content: LinkContent, question?: string): Promise<Partial<LinkVideo>> {
-    const maxSecs = config.linkReader.videoMaxSeconds;
-    if (maxSecs === 0) return { note: joinNotes(video.note, 'video understanding is turned off') };
+    if (!config.linkReader.watchVideos) return { note: joinNotes(video.note, 'video understanding is turned off') };
     // YouTube and players without a file: there is nothing to watch (the note already says why).
     if (!video.url) return question ? { note: joinNotes(video.note, "can't watch this one") } : {};
-    if (video.durationSecs !== undefined && video.durationSecs > maxSecs) {
-      return {
-        note: joinNotes(video.note, `too long to watch (${formatDuration(video.durationSecs)}); going by the text`),
-      };
-    }
+    // No length limit here: like an attachment, a long video is skimmed (keyframes + its soundtrack) by
+    // the media feature, which also enforces the download cap and the daily video budget.
     const file = await this.checkMedia(video.url, 'video/');
     if (!file) return { note: joinNotes(video.note, "the video file couldn't be opened") };
     const size = file.sizeBytes ?? video.sizeBytes;
@@ -344,6 +339,8 @@ export class LinkReader {
         url: file.url,
         contentType: file.contentType,
         context: videoContext(content),
+        // The post's own duration spares a probe and sends a long video straight to the skim.
+        ...(video.durationSecs !== undefined ? { durationSecs: video.durationSecs } : {}),
         ...(question ? { question } : {}),
       });
     } catch (error) {

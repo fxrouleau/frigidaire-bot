@@ -592,9 +592,12 @@ export const config = {
     get maxPageBytes(): number {
       return envInt('LINK_READER_MAX_BYTES', 2 * 1024 * 1024, { min: 64 * 1024, max: 16 * 1024 * 1024 });
     },
-    /** Longest linked video (seconds) that read_link hands to video understanding; 0 disables it. */
-    get videoMaxSeconds(): number {
-      return envInt('LINK_READER_VIDEO_MAX_SECS', 300, { min: 0, max: 3600 });
+    /**
+     * read_link hands a linked video to video understanding, like an attachment: bounded by the media
+     * download cap and VIDEO_DAILY_BUDGET_USD, and skimmed (keyframes + soundtrack) past VIDEO_MAX_SECONDS.
+     */
+    get watchVideos(): boolean {
+      return envBool('LINK_READER_WATCH_VIDEOS', true);
     },
   },
 
@@ -926,7 +929,10 @@ export function describeEffectiveConfig(): string {
       `wrapped:${onOff(archive.wrappedEnabled && archive.wrappedChannelId !== undefined)}`,
     ]),
     `media=transcribe:${media.transcriptionModel},video:${media.videoModel},videoBudget:${videoBudget},voiceAuto:${media.voiceAutoTranscribe ? (voiceChannels > 0 ? voiceChannels : 'all') : 'off'}`,
-    feature('linkReader', linkReader.enabled, [`previews:${onOff(linkReader.previewsEnabled)}`]),
+    feature('linkReader', linkReader.enabled, [
+      `previews:${onOff(linkReader.previewsEnabled)}`,
+      `videos:${onOff(linkReader.watchVideos)}`,
+    ]),
     feature(
       'gate',
       gate.enabled && gate.channelIds.length > 0,

@@ -358,7 +358,10 @@ export class VideoDescriber {
     }
 
     const heard =
-      attempt.heard ?? (sample.audio ? await this.transcriptLine(sample.audio, input.url) : 'It has no audio track.');
+      attempt.heard ??
+      (sample.audio
+        ? await this.transcriptLine(sample.audio, input.url, sample.durationSecs)
+        : 'It has no audio track.');
     const length = sample.durationSecs ? `${formatClock(sample.durationSecs)} ` : '';
     const intro =
       sample.frames.length > 0
@@ -401,7 +404,7 @@ export class VideoDescriber {
 
   /** The clip's soundtrack as a prompt line, for a native call to a model that can't hear. */
   private async soundtrackTranscript(attempt: Attempt): Promise<string> {
-    let track: { data: Buffer } | undefined;
+    let track: { data: Buffer; durationSecs?: number } | undefined;
     try {
       track = await this.transcoder.toMp3(attempt.data, this.maxAudioSeconds());
     } catch (error) {
@@ -409,14 +412,27 @@ export class VideoDescriber {
       logger.warn(`video: could not extract the audio track of ${redact(attempt.input.url)}:`, error);
       return "Its audio couldn't be transcribed.";
     }
-    attempt.heard = track ? await this.transcriptLine(track.data, attempt.input.url) : 'It has no audio track.';
+    attempt.heard = track
+      ? await this.transcriptLine(track.data, attempt.input.url, track.durationSecs)
+      : 'It has no audio track.';
     return attempt.heard;
   }
 
-  private async transcriptLine(audio: Buffer, url: string): Promise<string> {
+  /**
+   * The soundtrack's transcript as a prompt line. The track is cut at VOICE_MAX_SECONDS, so for a longer
+   * video (a skimmed link, say) the line says how much of it was heard.
+   */
+  private async transcriptLine(audio: Buffer, url: string, durationSecs: number | undefined): Promise<string> {
     const transcript = await this.transcriber.transcribeBuffer(audio, 'mp3', `video ${redact(url)}`);
     if (transcript.status !== 'ok') return "Its audio couldn't be transcribed.";
-    return transcript.text ? `Transcript of its audio:\n${transcript.text}` : 'Its audio has no speech.';
+    const cutAt = this.maxAudioSeconds();
+    const partial = durationSecs !== undefined && durationSecs > cutAt;
+    if (!transcript.text)
+      return partial ? `Its first ${formatClock(cutAt)} of audio has no speech.` : 'Its audio has no speech.';
+    const heading = partial
+      ? `Transcript of the first ${formatClock(cutAt)} of its audio (the rest wasn't transcribed):`
+      : 'Transcript of its audio:';
+    return `${heading}\n${transcript.text}`;
   }
 
   private async probeDuration(data: Buffer): Promise<number | undefined> {
