@@ -2,6 +2,7 @@
 // matching prefix) and records every call. Mirrors the real fetch's contract where extractors depend
 // on it: a body is only present when the response's content type matches `options.accept`, `url` is
 // the post-redirect URL, and `redirect: 'manual'` surfaces `location`.
+import type { ExtractorContext } from '../ai/linkReader/extractors/common';
 import type { FetchOptions, FetchResult, SafeFetch } from '../ai/linkReader/safeFetch';
 import { mimeMatches, parseContentType } from '../ai/linkReader/safeFetch';
 
@@ -78,4 +79,18 @@ export function htmlPage(meta: Record<string, string | string[]>, body = '', hea
     })
     .join('\n');
   return `<!doctype html><html lang="en"><head>${tags}${head}</head><body>${body}</body></html>`;
+}
+
+/** An ExtractorContext over a fake fetch, with an inspectable cooldown set. */
+export function fakeExtractorContext(fetch: SafeFetch): ExtractorContext & { cooledDown: Set<string> } {
+  const cooledDown = new Set<string>();
+  return {
+    fetch,
+    now: () => 1_000_000,
+    isCoolingDown: (key) => cooledDown.has(key),
+    coolDown: (key) => {
+      cooledDown.add(key);
+    },
+    cooledDown,
+  };
 }
