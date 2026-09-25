@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeMessage } from '../test-support/fakeDiscord';
 import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
 import { FakeProvider, errorStep, textResponse, toolCallResponse } from '../test-support/fakeProvider';
-import { AgentOrchestrator, ERROR_REPLIES } from './agent';
+import { AgentOrchestrator, EMPTY_REPLIES, ERROR_REPLIES } from './agent';
 import { ConversationPersistence } from './conversationPersistence';
 import type { ConversationState } from './conversationStore';
 import { loadErrorCapture } from './debugCapture';
@@ -281,9 +281,21 @@ describe('AgentOrchestrator.handleMention', () => {
 
     await orchestrator.handleMention(fake.message);
 
-    expect(
-      fake.recorders.reply.calls.some(([arg]) => typeof arg === 'string' && /further to add/.test(arg)),
-    ).toBe(true);
+    // An in-character line, not an assistant-style "I've processed the information…".
+    expect(fake.recorders.reply.calls).toHaveLength(1);
+    expect(EMPTY_REPLIES).toContain(fake.recorders.reply.calls[0][0]);
+    expect(getMemoryStore().getByCategory('parse_failure').length).toBeGreaterThan(0);
+  });
+
+  it('posts nothing when an unprompted turn comes back empty', async () => {
+    const provider = new FakeProvider([{ text: undefined, toolCalls: [], outputEntries: [] }]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'fridge would know' });
+
+    await orchestrator.handleMention(fake.message, { unprompted: true });
+
+    expect(fake.recorders.reply.calls).toHaveLength(0);
+    expect(fake.recorders.send.calls).toHaveLength(0);
     expect(getMemoryStore().getByCategory('parse_failure').length).toBeGreaterThan(0);
   });
 

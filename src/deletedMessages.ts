@@ -171,6 +171,7 @@ export class DeletedMessageReposter {
         authorId: snapshot.authorId,
         authorName: snapshot.identity.name,
         kind: 'regret',
+        originalId: snapshot.id,
       });
     }
     return 'reposted';

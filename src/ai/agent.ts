@@ -8,7 +8,7 @@ import {
 import { config } from '../config';
 import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
-import { type MessageAttribution, attributeMessage } from '../relay';
+import { type MessageAttribution, attributeMessage, getRelays } from '../relay';
 import { splitMessage } from '../utils';
 import type { ConversationPersistence } from './conversationPersistence';
 import { type ConversationState, ConversationStore } from './conversationStore';
@@ -103,10 +103,22 @@ export function describeNowET(now: Date = new Date()): string {
   return `${ET_WEEKDAY_FORMAT.format(now)} ${wallClock} ${zone}`;
 }
 
+/** What the bot says when the model came back with nothing to post on a turn someone asked for. In character. */
+export const EMPTY_REPLIES: readonly string[] = [
+  'blanked on that one, say it again',
+  'I had something for that and it just left my head. again?',
+  'drew a total blank there. run it back',
+  'my mind went fully empty for a sec. one more time?',
+];
+
+function pickLine(lines: readonly string[], random: () => number): string {
+  const index = Math.floor(random() * lines.length);
+  return lines[Math.min(Math.max(index, 0), lines.length - 1)];
+}
+
 /** Picks an error line; `random` returns [0, 1) like Math.random. */
 export function pickErrorReply(random: () => number = Math.random): string {
-  const index = Math.floor(random() * ERROR_REPLIES.length);
-  return ERROR_REPLIES[Math.min(Math.max(index, 0), ERROR_REPLIES.length - 1)];
+  return pickLine(ERROR_REPLIES, random);
 }
 
 /**
@@ -235,6 +247,11 @@ export type HandleMentionOptions = {
   unprompted?: boolean;
 };
 
+// Added to the dynamic context of a turn whose message a later turn already showed the model (it was
+// posted before a ping that got routed, and answered, first).
+export const LATE_MESSAGE_NOTE =
+  "This message came in before your last reply, so it also shows up earlier in the history. Answer it now, without repeating what you've already said.";
+
 // Added to the dynamic context of a turn the gate routed (see HandleMentionOptions.unprompted).
 export const UNPROMPTED_NOTE =
   "Nobody pinged you this time: the last message doesn't @-mention you or reply to you. You're chiming in on your own because it was clearly meant for you (you were named, or you're mid-conversation with them). Don't say they pinged, tagged or mentioned you; just answer like you were part of the conversation.";
@@ -310,6 +327,16 @@ export class AgentOrchestrator {
 
   private async processMention(message: Message, opts: HandleMentionOptions): Promise<void> {
     const channelId = message.channel.id;
+    // Turns can land out of order: the gate takes seconds to route a message while a ping posted right
+    // after it is routed at once. When a later turn already showed this message to the model, the bot has
+    // replied since with it in view: an unprompted turn on it would answer the conversation twice.
+    const alreadyInWindow = this.windowHasMessage(channelId, message.id);
+    if (opts.unprompted && alreadyInWindow) {
+      logger.info(
+        `Skipping the unprompted turn for message ${message.id} in #${channelId}: a later turn already answered with it in view.`,
+      );
+      return;
+    }
     const stopTyping = this.startTypingLoop(message);
     let provider: AiProvider | undefined;
     let workingEntries: ConversationEntry[] = [];
@@ -345,7 +372,10 @@ export class AgentOrchestrator {
       // outside the tool loop. The static prompt (entries[0]) is never touched, preserving provider
       // prefix-caching.
       const priorInjectedIds = state.injectedMemoryIds ?? [];
-      const dynamic = await this.buildDynamicContextEntry(message, this.safeStore(), priorInjectedIds, opts);
+      const dynamic = await this.buildDynamicContextEntry(message, this.safeStore(), priorInjectedIds, {
+        ...opts,
+        late: alreadyInWindow,
+      });
       let injectedMemoryIds = [...priorInjectedIds, ...dynamic.injectedIds];
 
       workingEntries = [
@@ -369,7 +399,7 @@ export class AgentOrchestrator {
       });
 
       stopTyping();
-      const sentIds = await this.sendReply(reply, message, turn);
+      const sentIds = await this.sendReply(reply, message, turn, opts);
       const replyEntry = finalResponse.outputEntries.find(
         (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'assistant',
       );
@@ -406,6 +436,12 @@ export class AgentOrchestrator {
     } finally {
       stopTyping();
     }
+  }
+
+  /** Whether the channel's live window already rendered this Discord message (as history, a turn or context). */
+  private windowHasMessage(channelId: string, messageId: string): boolean {
+    const state = this.store.get(channelId);
+    return state !== undefined && collectMessageIds(state.entries).has(messageId);
   }
 
   /**
@@ -649,7 +685,8 @@ export class AgentOrchestrator {
    * What was said in the channel since the window last looked (between the previous triggering message
    * and this one), rendered as history. Capped at the newest MAX_INTERVENING_MESSAGES; a skipped older
    * remainder is summarized in one developer line. Messages already in the window (the bot's own
-   * replies, anything quoted in a reply context) are not repeated. A fetch failure degrades to nothing.
+   * replies, anything quoted in a reply context, the relay of a message it already has) are not repeated.
+   * A fetch failure degrades to nothing.
    */
   private async buildInterveningEntries(message: Message, state: ConversationState): Promise<ConversationEntry[]> {
     const since = state.lastSeenMessageId;
@@ -664,8 +701,15 @@ export class AgentOrchestrator {
     }
 
     const known = collectMessageIds(state.entries);
+    // A relay of a message the window already shows is that message again: link fixing deletes a ping
+    // and reposts it through a webhook right after the turn that read it (the relay has a newer id).
+    const relays = getRelays(fetched.messages.filter((msg) => msg.webhookId).map((msg) => msg.id));
+    const alreadyShown = (msg: Message) => {
+      const originalId = relays.get(msg.id)?.originalId;
+      return known.has(msg.id) || (originalId !== undefined && known.has(originalId));
+    };
     const rendered = await Promise.all(
-      fetched.messages.filter((msg) => !known.has(msg.id)).map((msg) => this.renderHistoryMessage(msg)),
+      fetched.messages.filter((msg) => !alreadyShown(msg)).map((msg) => this.renderHistoryMessage(msg)),
     );
     const entries = rendered.filter((e): e is ConversationEntry => e !== undefined);
 
@@ -1006,12 +1050,13 @@ Right before each new message you get a context note with the current time (East
     message: Message,
     store: MemoryStore | undefined,
     alreadyInjectedIds: number[],
-    opts: HandleMentionOptions = {},
+    opts: HandleMentionOptions & { late?: boolean } = {},
   ): Promise<{ entry: ConversationEntry; injectedIds: number[] }> {
     const header = [
       `Current time: ${describeNowET()} (America/New_York).`,
       ...this.describeChannel(message),
       ...(opts.unprompted ? [UNPROMPTED_NOTE] : []),
+      ...(opts.late ? [LATE_MESSAGE_NOTE] : []),
     ].join('\n');
 
     const sections = store ? await this.buildMemorySections(message, store, alreadyInjectedIds) : undefined;
@@ -1337,7 +1382,12 @@ ${lines.join('\n')}
    * Sends the reply (text in Discord-sized chunks, this turn's files on the first chunk, 10 per message)
    * and returns the ids of the messages posted. A turn whose only output is a reaction sends nothing.
    */
-  private async sendReply(content: string | undefined, message: Message, turn: TurnEffects): Promise<string[]> {
+  private async sendReply(
+    content: string | undefined,
+    message: Message,
+    turn: TurnEffects,
+    opts: HandleMentionOptions,
+  ): Promise<string[]> {
     const sentIds: string[] = [];
     const record = (sent: Message | undefined) => {
       if (sent?.id) sentIds.push(sent.id);
@@ -1352,8 +1402,16 @@ ${lines.join('\n')}
       }
       if (turn.reactions.length > 0) return sentIds;
       const authorName = message.member?.displayName || message.author.username;
+      // Nobody asked on an unprompted turn: with nothing to say, the bot just doesn't chime in.
+      if (opts.unprompted) {
+        logFailure(
+          'parse_failure',
+          `Empty LLM response on an unprompted turn (message from ${authorName}); nothing posted`,
+        );
+        return sentIds;
+      }
       logFailure('parse_failure', `Empty LLM response for message from ${authorName}`);
-      record(await this.safeSend(message, "I've processed the information, but I don't have anything further to add."));
+      record(await this.safeSend(message, pickLine(EMPTY_REPLIES, this.random)));
       return sentIds;
     }
 

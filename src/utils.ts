@@ -273,6 +273,7 @@ export async function repostMessage(
       authorId: message.author.id,
       authorName: identity.name,
       kind: 'link_fix',
+      originalId: message.id,
     });
 
     options.onBeforeDelete?.();

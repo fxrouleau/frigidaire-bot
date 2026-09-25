@@ -37,6 +37,31 @@ describe('relay registry', () => {
     expect(bulk.get('r2')?.kind).toBe('regret');
   });
 
+  it('keeps the id of the member message a relay stands in for', () => {
+    recordRelay({ messageId: 'r1', originalId: 'm1', channelId: 'c', authorId: 'u1', authorName: 'Jasper', kind: 'link_fix' });
+    recordRelay({ messageId: 'r2', channelId: 'c', authorId: 'u2', authorName: 'Silas', kind: 'regret' });
+    expect(getRelay('r1')?.originalId).toBe('m1');
+    expect(getRelays(['r1', 'r2']).get('r2')).not.toHaveProperty('originalId');
+  });
+
+  it('adds original_id to a relay table created before the column existed', () => {
+    const legacy = new BotDb(':memory:');
+    legacy.db.exec(`
+      CREATE TABLE relayed_messages (
+        message_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, author_id TEXT NOT NULL,
+        author_name TEXT NOT NULL, kind TEXT NOT NULL, created_at INTEGER NOT NULL
+      );
+      INSERT INTO relayed_messages VALUES ('old', 'c', 'u1', 'Jasper', 'link_fix', 1);
+    `);
+    setBotDbForTesting(legacy);
+
+    recordRelay({ messageId: 'new', originalId: 'm2', channelId: 'c', authorId: 'u1', authorName: 'Jasper', kind: 'link_fix' });
+
+    expect(getRelay('old')).toMatchObject({ messageId: 'old', authorId: 'u1' });
+    expect(getRelay('old')).not.toHaveProperty('originalId');
+    expect(getRelay('new')?.originalId).toBe('m2');
+  });
+
   it('keeps the first record when the same message is recorded twice', () => {
     recordRelay({ messageId: 'r1', channelId: 'c', authorId: 'u1', authorName: 'Jasper', kind: 'link_fix' });
     recordRelay({ messageId: 'r1', channelId: 'c', authorId: 'u9', authorName: 'Other', kind: 'regret' });

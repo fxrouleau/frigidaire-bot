@@ -5,6 +5,7 @@ import type { ChatCompletionMessageParam } from 'openai/resources/chat/completio
 import sharp from 'sharp';
 import { config } from '../../config';
 import { logger } from '../../logger';
+import { IMAGE_PLACEHOLDER } from '../historyBudget';
 import type { SafeFetch } from '../linkReader/safeFetch';
 import { downloadMedia, redact } from '../media/download';
 import { requireOpenRouterClient } from '../openRouterClient';
@@ -33,17 +34,42 @@ export type OpenRouterProviderOptions = {
   fallbackModels?: string[];
   /** The guarded fetch for images on non-Discord hosts (default: the shared createSafeFetch()). */
   safeFetch?: SafeFetch;
+  /** Image cache bound in data-URI characters (default IMAGE_CACHE_MAX_BYTES; tests shrink it). */
+  imageCacheMaxBytes?: number;
 };
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const IMAGE_FETCH_TIMEOUT_MS = 10_000;
 const MAX_IMAGE_DIMENSION = 1568;
-// Every chat() call re-walks the whole conversation, so without a cache each image in the 25-message
-// seed history would be downloaded and decoded again on every tool round of every turn.
-const IMAGE_CACHE_MAX_ENTRIES = 100;
+// A request carries at most this many images, the newest; older ones go out as an [image] marker. A
+// window can span hundreds of messages (catch-up, a 500k-token budget), and without a cap every image it
+// ever saw would be sent, and downloaded, on every tool round. The cut moves in steps so the request
+// prefix (which providers cache) changes once per IMAGE_CAP_STEP new images rather than on every one.
+export const MAX_IMAGES_PER_REQUEST = 40;
+const IMAGE_CAP_STEP = 10;
+// A request's images download a few at a time rather than strictly one after another.
+const IMAGE_FETCH_CONCURRENCY = 4;
+// Every chat() call re-walks the whole conversation, so without a cache each image in the window would
+// be downloaded and decoded again on every tool round of every turn. An LRU (a hit moves to the newest
+// end and restarts its TTL), sized well above one request's images so every round of a turn hits, and
+// bounded by data-URI size as well as count (a resized PNG can be several MB of base64).
+const IMAGE_CACHE_MAX_ENTRIES = 150;
+const IMAGE_CACHE_MAX_BYTES = 256 * 1024 * 1024;
 const IMAGE_CACHE_TTL_MS = 15 * 60 * 1000;
 
-type CachedImage = { dataUri: Promise<string | undefined>; at: number };
+type CachedImage = { dataUri: Promise<string | undefined>; at: number; bytes: number };
+
+/** A request's images: how many of the oldest go out as a marker, and the data URIs of the rest. */
+type ImagePlan = { hidden: number; seen: number; dataUris: Map<string, string | undefined> };
+
+/**
+ * How many of a request's `total` images (oldest first) are sent as a marker instead: none up to `max`,
+ * then enough to get back under it, in multiples of `step`.
+ */
+export function imagesToHide(total: number, max = MAX_IMAGES_PER_REQUEST, step = IMAGE_CAP_STEP): number {
+  if (total <= max) return 0;
+  return Math.min(total, Math.ceil((total - max) / step) * step);
+}
 
 export class OpenRouterProvider implements AiProvider {
   public readonly id = 'openrouter';
@@ -54,6 +80,8 @@ export class OpenRouterProvider implements AiProvider {
   private readonly routing: Record<string, unknown>;
   private readonly fallbackModels: string[];
   private readonly imageCache = new Map<string, CachedImage>();
+  private imageCacheBytes = 0;
+  private readonly imageCacheMaxBytes: number;
   private readonly safeFetch?: SafeFetch;
 
   constructor(opts: OpenRouterProviderOptions = {}) {
@@ -62,6 +90,7 @@ export class OpenRouterProvider implements AiProvider {
     this.routing = opts.routing ?? { zdr: true, sort: 'throughput' };
     this.fallbackModels = (opts.fallbackModels ?? config.models.chatFallbacks).filter((m) => m !== this.defaultModel);
     this.safeFetch = opts.safeFetch;
+    this.imageCacheMaxBytes = opts.imageCacheMaxBytes ?? IMAGE_CACHE_MAX_BYTES;
 
     this.supportedTools = toolDefinitions
       .filter((tool) => tool.isEnabled?.() ?? true)
@@ -136,6 +165,7 @@ export class OpenRouterProvider implements AiProvider {
   }
 
   private async toOpenAIMessages(entries: ConversationEntry[]): Promise<ChatCompletionMessageParam[]> {
+    const images = await this.planImages(entries);
     const messages: ChatCompletionMessageParam[] = [];
     let i = 0;
 
@@ -173,16 +203,39 @@ export class OpenRouterProvider implements AiProvider {
         continue;
       }
 
-      messages.push(await this.toOpenAIMessage(entry));
+      messages.push(this.toOpenAIMessage(entry, images));
       i++;
     }
 
     return messages;
   }
 
-  private async toOpenAIMessage(
+  /**
+   * Picks the images a request sends (the newest MAX_IMAGES_PER_REQUEST, see imagesToHide) and resolves
+   * them to data URIs, IMAGE_FETCH_CONCURRENCY at a time. Only user messages carry images to the model.
+   */
+  private async planImages(entries: ConversationEntry[]): Promise<ImagePlan> {
+    const urls: string[] = [];
+    for (const entry of entries) {
+      if (entry.kind !== 'message' || entry.role !== 'user') continue;
+      for (const part of entry.content) if (part.type === 'image') urls.push(part.url);
+    }
+    const hidden = imagesToHide(urls.length);
+    const pending = [...new Set(urls.slice(hidden))];
+    const dataUris = new Map<string, string | undefined>();
+    const worker = async () => {
+      for (let url = pending.shift(); url !== undefined; url = pending.shift()) {
+        dataUris.set(url, await this.imageAsDataUri(url));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(IMAGE_FETCH_CONCURRENCY, pending.length) }, worker));
+    return { hidden, seen: 0, dataUris };
+  }
+
+  private toOpenAIMessage(
     entry: Exclude<ConversationEntry, { kind: 'tool_call' }>,
-  ): Promise<ChatCompletionMessageParam> {
+    images: ImagePlan,
+  ): ChatCompletionMessageParam {
     if (entry.kind === 'tool_result') {
       return {
         role: 'tool',
@@ -202,19 +255,23 @@ export class OpenRouterProvider implements AiProvider {
     }
 
     // user message
-    const parts = await this.buildContentParts(entry.content);
+    const parts = this.buildContentParts(entry.content, images);
     if (parts.length === 1 && parts[0].type === 'text') {
       return { role: 'user', content: parts[0].text };
     }
     return { role: 'user', content: parts };
   }
 
-  private async buildContentParts(content: NormalizedContentPart[]): Promise<ChatContentPart[]> {
+  private buildContentParts(content: NormalizedContentPart[], images: ImagePlan): ChatContentPart[] {
     if (content.length === 0) return [{ type: 'text', text: '' }];
     const parts: ChatContentPart[] = [];
     for (const part of content) {
       if (part.type === 'image') {
-        const dataUri = await this.imageAsDataUri(part.url);
+        if (images.seen++ < images.hidden) {
+          parts.push({ type: 'text', text: IMAGE_PLACEHOLDER });
+          continue;
+        }
+        const dataUri = images.dataUris.get(part.url);
         if (dataUri) {
           parts.push({ type: 'image_url', image_url: { url: dataUri, detail: 'auto' } });
         }
@@ -225,22 +282,46 @@ export class OpenRouterProvider implements AiProvider {
     return parts.length > 0 ? parts : [{ type: 'text', text: '' }];
   }
 
-  /** Memoized fetch + resize of an image URL (bounded, TTL'd); a failed fetch is cached too so it is not retried every round. */
+  /**
+   * Memoized fetch + resize of an image URL (LRU, TTL'd, bounded by count and size); a failed fetch is
+   * cached too so it is not retried every round. Never rejects.
+   */
   private imageAsDataUri(url: string): Promise<string | undefined> {
     if (url.startsWith('data:')) return Promise.resolve(url);
 
     const now = Date.now();
     const cached = this.imageCache.get(url);
-    if (cached && now - cached.at < IMAGE_CACHE_TTL_MS) return cached.dataUri;
-
-    const dataUri = this.fetchImageAsBase64(url);
-    this.imageCache.set(url, { dataUri, at: now });
-    while (this.imageCache.size > IMAGE_CACHE_MAX_ENTRIES) {
-      const oldest = this.imageCache.keys().next().value;
-      if (oldest === undefined) break;
-      this.imageCache.delete(oldest);
+    if (cached) {
+      this.imageCache.delete(url);
+      if (now - cached.at < IMAGE_CACHE_TTL_MS) {
+        cached.at = now;
+        this.imageCache.set(url, cached);
+        return cached.dataUri;
+      }
+      this.imageCacheBytes -= cached.bytes;
     }
-    return dataUri;
+
+    const entry: CachedImage = { dataUri: this.fetchImageAsBase64(url), at: now, bytes: 0 };
+    this.imageCache.set(url, entry);
+    void entry.dataUri.then((dataUri) => {
+      // Evicted (or replaced) while downloading: nothing of it is held any more.
+      if (!dataUri || this.imageCache.get(url) !== entry) return;
+      entry.bytes = dataUri.length;
+      this.imageCacheBytes += entry.bytes;
+      this.evictImages();
+    });
+    this.evictImages();
+    return entry.dataUri;
+  }
+
+  /** Drops the least recently used images until the cache is within bounds; the newest always stays. */
+  private evictImages(): void {
+    for (const [url, entry] of this.imageCache) {
+      const over = this.imageCache.size > IMAGE_CACHE_MAX_ENTRIES || this.imageCacheBytes > this.imageCacheMaxBytes;
+      if (!over || this.imageCache.size <= 1) break;
+      this.imageCache.delete(url);
+      this.imageCacheBytes -= entry.bytes;
+    }
   }
 
   private async fetchImageAsBase64(url: string): Promise<string | undefined> {

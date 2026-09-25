@@ -163,6 +163,62 @@ describe('catching up between pings', () => {
     expect(ping2.recorders.messagesFetch.calls).toEqual([[{ limit: 100, before: '1020' }]]);
   });
 
+  it('does not repeat a ping that link fixing reposted: the relay of a message already in the window is skipped', async () => {
+    const provider = new FakeProvider([textResponse('clean'), textResponse('two')]);
+    const agent = makeAgent(provider);
+    // Alice pings with a tweet; the turn sees it, then link fixing deletes it and reposts it as a relay.
+    const ping1 = createFakeMessage({
+      ...BASE,
+      messageId: '8000',
+      content: 'fridge look https://x.com/someone/status/42',
+      channelMessages: [],
+    });
+    await agent.handleMention(ping1.message);
+
+    const relayOfPing = chat('8001', 'fridge look https://fixvx.com/someone/status/42', {
+      webhookId: 'hook-1',
+      authorId: 'hook-1',
+      authorUsername: 'Alice',
+      authorDisplayName: 'Alice',
+    });
+    recordRelay({
+      messageId: '8001',
+      originalId: '8000',
+      channelId: CH,
+      authorId: ALICE,
+      authorName: 'Alice',
+      kind: 'link_fix',
+    });
+    // A relay of a message the window never saw is still shown.
+    const otherRelay = chat('8002', 'https://fixvx.com/other/status/7', {
+      webhookId: 'hook-2',
+      authorId: 'hook-2',
+      authorUsername: 'Carol',
+      authorDisplayName: 'Carol',
+    });
+    recordRelay({
+      messageId: '8002',
+      originalId: '7999',
+      channelId: CH,
+      authorId: CAROL,
+      authorName: 'Carol',
+      kind: 'link_fix',
+    });
+    const ping2 = createFakeMessage({
+      ...BASE,
+      messageId: '8003',
+      authorId: BOB,
+      authorDisplayName: 'Bob',
+      content: 'fridge thoughts?',
+      channelMessages: [relayOfPing, otherRelay],
+    });
+    await agent.handleMention(ping2.message);
+
+    const second = provider.calls[1].messages;
+    expect(countText(second, 'someone/status/42')).toBe(1);
+    expect(countText(second, 'other/status/7')).toBe(1);
+  });
+
   it("drops its own auto-transcript replies from seeded history and from the catch-up", async () => {
     const provider = new FakeProvider([textResponse('one'), textResponse('two')]);
     const agent = makeAgent(provider);
