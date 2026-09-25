@@ -270,3 +270,7 @@ package-lock.json
 
 # Private prod data dumps (never commit)
 memories.zip
+
+# Python bytecode (sandbox/ scripts run or compiled locally)
+__pycache__/
+*.pyc
