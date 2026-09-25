@@ -956,7 +956,13 @@ export function describeEffectiveConfig(): string {
     feature(
       'ramble',
       ramble.userIds.length > 0 && ramble.channelId !== undefined,
-      [`users:${ramble.userIds.length}`, `channels:${ramble.watchChannelIds.length}`],
+      [
+        `users:${ramble.userIds.length}`,
+        `channels:${ramble.watchChannelIds.length}`,
+        // The free prefilter: a run of this many messages, or one message this long, goes to the judge.
+        `run:${ramble.minMessages}`,
+        `long:${ramble.longMessageChars}`,
+      ],
       ramble.userIds.length > 0 ? 'no-channel' : undefined,
     ),
     feature('sandbox', sandbox.url !== undefined, [

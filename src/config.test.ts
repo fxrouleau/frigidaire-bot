@@ -335,6 +335,24 @@ describe('describeEffectiveConfig', () => {
     expect(tokens.some((token) => token.startsWith('selfImprovement='))).toBe(false);
   });
 
+  it('shows the ramble prefilter, the linked-video switch and the deleted-message judge', () => {
+    stubAll({
+      MAIN_CHANNEL_ID: '111111111111111111',
+      RAMBLE_USER_IDS: '666666666666666666',
+      RAMBLE_CHANNEL_ID: '777777777777777777',
+      RAMBLE_LONG_MESSAGE_CHARS: '900',
+      LINK_READER_WATCH_VIDEOS: 'false',
+      DELETE_REPOST_USER_IDS: '161616161616161616',
+    });
+    for (const name of ['RAMBLE_WATCH_CHANNELS', 'RAMBLE_MIN_MESSAGES', 'DELETE_REPOST_MODE', 'DELETE_REPOST_MODEL']) {
+      vi.stubEnv(name, undefined);
+    }
+    const tokens = describeEffectiveConfig().split(' ');
+    expect(tokens).toContain('ramble=on(users:1,channels:1,run:3,long:900)');
+    expect(tokens).toContain('linkReader=on(previews:on,videos:off)');
+    expect(tokens).toContain('deleteRepost=on(users:1,mode:edgy,judge:typesafe/jev-1.13)');
+  });
+
   it('shows an uncapped video budget as unlimited', () => {
     vi.stubEnv('VIDEO_DAILY_BUDGET_USD', '0');
     expect(describeEffectiveConfig()).toMatch(/(^| )media=\S*videoBudget:unlimited[,\s]/);
