@@ -31,7 +31,7 @@ export type ErrorCaptureSummary = {
 export type BuildDigestOptions = {
   periodStart: Date;
   periodEnd: Date;
-  /** Last successful digest run. Items updated at/after it are "new this week"; null ⇒ everything is new. */
+  /** Last successful digest run. Items updated at/after it are "new"; null (first digest) ⇒ everything is new. */
   watermark: Date | null;
   signals: DigestSignal[];
   failures: DigestFailure[];
@@ -40,25 +40,60 @@ export type BuildDigestOptions = {
   spend?: UsageSummary;
 };
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+// A digest normally runs a week (+ up to one check interval) after the last one. Within this band it is
+// "weekly" and its news is "this week"; outside it (the bot was down for a month, DIGEST_PERIOD_MS was
+// changed) the wording says what the period really is instead of calling five weeks "this week".
+const WEEK_BAND_MS = { min: 6 * DAY_MS, max: 8 * DAY_MS };
+
+export type DigestPeriod = {
+  /** The header's title: 'Weekly self-diagnosis digest', or 'Self-diagnosis digest' plus the span. */
+  title: string;
+  /** What "new" is relative to: 'this week', 'since the last digest', or 'so far' on the first digest. */
+  scope: string;
+};
+
+/** How a digest names its period, from its real length and whether a previous digest exists. */
+export function describePeriod(periodStart: Date, periodEnd: Date, watermark: Date | null): DigestPeriod {
+  const spanMs = periodEnd.getTime() - periodStart.getTime();
+  const weekly = spanMs >= WEEK_BAND_MS.min && spanMs <= WEEK_BAND_MS.max;
+  return {
+    title: weekly ? 'Weekly self-diagnosis digest' : `Self-diagnosis digest (${formatSpan(spanMs)})`,
+    // No previous digest ⇒ every active item counts as new, whatever the header's dates say.
+    scope: watermark === null ? 'so far' : weekly ? 'this week' : 'since the last digest',
+  };
+}
+
+/** '5 weeks', '10 days', '1 day', '6 hours' — rounded, for a header. */
+export function formatSpan(ms: number): string {
+  const days = ms / DAY_MS;
+  const unit = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  // Whole weeks only within ~half a day of a multiple of 7 (35.4 days is "5 weeks", 20 days is not "3 weeks").
+  if (days >= 14 && Math.abs(days / 7 - Math.round(days / 7)) < 0.075) return unit(Math.round(days / 7), 'week');
+  if (days >= 1) return unit(Math.round(days), 'day');
+  return unit(Math.max(1, Math.round(ms / (60 * 60 * 1000))), 'hour');
+}
+
 export function buildDigest(opts: BuildDigestOptions): string {
   const { periodStart, periodEnd, watermark, signals, failures, captures, spend } = opts;
 
-  const header = `🩺 Weekly self-diagnosis digest · ${isoDate(periodStart)} → ${isoDate(periodEnd)}`;
+  const period = describePeriod(periodStart, periodEnd, watermark);
+  const header = `🩺 ${period.title} · ${isoDate(periodStart)} → ${isoDate(periodEnd)}`;
   const newSignals = signals.filter((s) => isNew(s.updated_at, watermark));
   const newFailures = failures.filter((f) => isNew(f.updated_at, watermark));
   const backlogTotal = signals.length + failures.length;
 
   const spendSection = spend ? `\n\n${renderSpend(spend).join('\n')}` : '';
 
-  // Quiet week: nothing in self-diagnosis moved since the last run — collapse to one line (plus the
-  // spend, which is worth seeing every week).
+  // Quiet period: nothing in self-diagnosis moved since the last run — collapse to one line (plus the
+  // spend, which is worth seeing every time).
   if (newSignals.length === 0 && newFailures.length === 0) {
-    return `${header}\n\nNo new self-diagnosis signals this week. ${backlogTotal} active in backlog, ${captures.total} AI errors captured.${spendSection}`;
+    return `${header}\n\nNo new self-diagnosis signals ${period.scope}. ${backlogTotal} active in backlog, ${captures.total} AI errors captured.${spendSection}`;
   }
 
   const lines: string[] = [header, ''];
 
-  lines.push(`Improvement signals — ${signals.length} active (${newSignals.length} new this week)`);
+  lines.push(`Improvement signals — ${signals.length} active (${newSignals.length} new ${period.scope})`);
   for (const category of SIGNAL_CATEGORIES) {
     const items = signals.filter((s) => s.category === category);
     if (items.length === 0) continue;
@@ -70,7 +105,7 @@ export function buildDigest(opts: BuildDigestOptions): string {
   }
   lines.push('');
 
-  lines.push(`Runtime failures logged this week — ${newFailures.length}`);
+  lines.push(`Runtime failures logged ${period.scope} — ${newFailures.length}`);
   const failureCounts = countByCategory(newFailures);
   if (failureCounts.length > 0) {
     lines.push(`  ${failureCounts.map(([cat, n]) => `${cat}: ${n}`).join('   ')}`);

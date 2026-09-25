@@ -81,6 +81,19 @@ describe('runDigestCheck watermark gating', () => {
     expect(sent).toContain(`${eightDaysAgo.toISOString().slice(0, 10)} → ${today}`);
   });
 
+  it('after a long gap (bot down for weeks) says "since the last digest", not "this week"', async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    store.setState(WATERMARK_KEY, new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString());
+    await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot read receipts' });
+
+    await runDigestCheck(fakeClient.client);
+
+    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    expect(sent).toContain('🩺 Self-diagnosis digest (5 weeks)');
+    expect(sent).toContain('(1 new since the last digest)');
+    expect(sent).not.toContain('this week');
+  });
+
   it('does not post when the last run is within the period', async () => {
     process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
     store.setState(WATERMARK_KEY, new Date().toISOString());
