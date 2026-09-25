@@ -21,6 +21,8 @@ memories.zip
 # Git, editors, local tooling
 .git
 .github
+# Except the one workflow whose owner-only guard src/github/claudeWorkflow.test.ts checks in the CI gate.
+!.github/workflows/claude-feature-request.yml
 .idea/
 .vscode/
 .claude
