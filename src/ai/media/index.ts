@@ -6,11 +6,14 @@
 //     host serving it is verified zero-data-retention; otherwise a chat model with provider.zdr
 //   - video → VIDEO_MODEL (Gemini) watching the picture and hearing the soundtrack in one call
 //     (video.ts); long or huge clips → keyframes + the soundtrack's Whisper transcript
-//   - YouTube → metadata only (link reader): no ZDR host can fetch it, and it's too big to upload
+//   - YouTube → metadata only (link reader): YouTube exposes no file the bot could upload, and only
+//     Gemini on AI Studio (not zero-data-retention) takes YouTube URLs
+//   - a follow-up question about a video → the video model watches it again (watchVideo with a
+//     question; the watch_video tool, read_link's `question`), within VIDEO_DAILY_BUDGET_USD
 // Every chat-completions call carries provider.zdr; the STT endpoint is covered by the host check.
 //
-// Results are cached in bot.db (transcripts by message id, descriptions by URL), so whichever feature
-// pays for a recording first, every later reader gets it for free.
+// Results are cached in bot.db (transcripts by message id, descriptions by URL, answers by URL and
+// question), so whichever feature pays for a recording first, every later reader gets it for free.
 import type OpenAI from 'openai';
 import { config } from '../../config';
 import { logger } from '../../logger';

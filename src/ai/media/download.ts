@@ -188,14 +188,14 @@ async function downloadGuarded(url: string, opts: DownloadOptions): Promise<Down
       logger.warn(`media: download of ${redact(result.url)} failed with HTTP ${result.status}`);
       return { ok: false, reason: 'http' };
     }
-    const declared = Number(result.headers['content-length']);
-    if (result.truncated || (Number.isFinite(declared) && declared > opts.maxBytes)) {
-      return { ok: false, reason: 'too_large' };
-    }
     if (!result.body) {
       // The content-type allowlist said no (an HTML error page, a login wall): nothing was downloaded.
       logger.warn(`media: ${redact(result.url)} is ${result.contentType || 'untyped'}, not media; skipping`);
       return { ok: false, reason: 'http' };
+    }
+    const declared = Number(result.headers['content-length']);
+    if (result.truncated || (Number.isFinite(declared) && declared > opts.maxBytes)) {
+      return { ok: false, reason: 'too_large' };
     }
     return { ok: true, data: result.body, contentType: result.contentType || undefined };
   } catch (error) {
