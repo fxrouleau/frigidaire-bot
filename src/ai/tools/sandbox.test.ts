@@ -45,6 +45,7 @@ function runResult(overrides: Partial<SandboxRunResult> = {}): SandboxRunResult 
     stderr_truncated: false,
     files: [],
     files_omitted: [],
+    workspace_reset: false,
     ...overrides,
   };
 }
@@ -126,6 +127,44 @@ describe('run_code tool', () => {
 
     expect(bodyOf(calls[0]).timeout_seconds).toBe(7);
     expect(tool.description).toContain('killed after 7 s');
+  });
+
+  it('asks the sidecar to wipe the workspace only when reset_workspace is true, and says it happened', async () => {
+    const { fetch, calls } = fakeFetch((call) =>
+      jsonResponse(200, runResult({ stdout: 'fresh\n', workspace_reset: bodyOf(call).reset_workspace === true })),
+    );
+    const tool = createRunCodeTool({ url: 'http://sandbox:8080', fetch });
+
+    const reset = await tool.handler(makeCtx(), { language: 'bash', code: 'ls', reset_workspace: true });
+    const asString = await tool.handler(makeCtx(), { language: 'bash', code: 'ls', reset_workspace: 'true' });
+    const kept = await tool.handler(makeCtx(), { language: 'bash', code: 'ls', reset_workspace: false });
+    const junk = await tool.handler(makeCtx(), { language: 'bash', code: 'ls', reset_workspace: 'yes please' });
+
+    expect(calls.map((call) => bodyOf(call).reset_workspace)).toEqual([true, true, undefined, undefined]);
+    expect(reset).toBe('The workspace was wiped before this run.\nExit code 0 (0.0 s).\nstdout:\nfresh');
+    expect(asString).toContain('The workspace was wiped before this run.');
+    expect(kept).not.toContain('wiped');
+    expect(junk).not.toContain('wiped');
+  });
+
+  it('does not claim a clean slate when an outdated sidecar ignored the reset', async () => {
+    // A sidecar image from before reset_workspace existed: no workspace_reset field in its answer.
+    const { workspace_reset: _dropped, ...oldShape } = runResult({ stdout: 'old files\n' });
+    const { fetch } = fakeFetch(() => jsonResponse(200, oldShape));
+    const tool = createRunCodeTool({ url: 'http://sandbox:8080', fetch });
+
+    const output = await tool.handler(makeCtx(), { language: 'bash', code: 'ls', reset_workspace: true });
+
+    expect(output).toContain("didn't confirm the workspace wipe");
+    expect(output).not.toContain('was wiped');
+  });
+
+  it('describes reset_workspace to the model as opt-in', () => {
+    const tool = createRunCodeTool({ url: 'http://sandbox:8080' });
+    const properties = tool.parameters.properties as Record<string, { type: string }>;
+    expect(properties.reset_workspace.type).toBe('boolean');
+    expect(tool.parameters.required).toEqual(['language', 'code']);
+    expect(tool.description).toContain('reset_workspace: true');
   });
 
   it('rejects unusable arguments without calling the sidecar', async () => {
@@ -343,7 +382,14 @@ describe('sandbox helpers', () => {
       files: [{ name: 'ok.txt', size: 2, content_base64: b64('ok') }, { name: 'bad' }, 'junk'],
       files_omitted: [{ name: 'x', reason: 'too many' }, { nope: true }],
     });
-    expect(parsed).toMatchObject({ stdout: '', stderr: '', exit_code: 1, signal: null, timed_out: false });
+    expect(parsed).toMatchObject({
+      stdout: '',
+      stderr: '',
+      exit_code: 1,
+      signal: null,
+      timed_out: false,
+      workspace_reset: false,
+    });
     expect(parsed?.files.map((f) => f.name)).toEqual(['ok.txt']);
     expect(parsed?.files_omitted).toEqual([{ name: 'x', size: null, reason: 'too many' }]);
     expect(parseRunResult({ stdout: 'no exit code' })).toBeUndefined();

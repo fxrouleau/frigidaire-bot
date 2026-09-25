@@ -5,9 +5,10 @@ The bot's `run_code` tool POSTs snippets here instead of running them in its own
 the Discord token and the OpenRouter key. This container holds no secrets, so a prompt-injected snippet
 can burn CPU or scribble in /workspace but has nothing worth stealing.
 
-    POST /run     {"language": "python"|"bash"|"node", "code": "...", "timeout_seconds": 20}
+    POST /run     {"language": "python"|"bash"|"node", "code": "...", "timeout_seconds": 20,
+                   "reset_workspace": false}
                -> {"stdout", "stderr", "exit_code", "signal", "timed_out", "duration_ms",
-                   "stdout_truncated", "stderr_truncated", "files", "files_omitted"}
+                   "stdout_truncated", "stderr_truncated", "files", "files_omitted", "workspace_reset"}
     GET  /health  -> {"ok", "busy", "queued", "workspace_writable", "languages"}
 
 Each run executes as this server's own unprivileged user in the workspace, in a fresh session/process
@@ -17,6 +18,14 @@ descendant that escaped it with setsid() (this server is a child subreaper, so o
 rather than to PID 1 and can be found). Files the run wrote to <workspace>/out/ are returned base64
 encoded; that directory is emptied before every run. Runs are serialized behind one lock with a short
 waiting queue; the container is sized for one run at a time.
+
+Everything else in the workspace persists between runs on purpose (saved files, `pip install --user`,
+`npm install`), so one run can leave things behind for the next. What a run leaves behind must not change
+how the *tools* behave in later runs: Python runs with -P and without the workspace on sys.path (a planted
+json.py can't shadow the stdlib), the workspace's bin directories come after the system ones on PATH (a
+planted `jq` can't shadow /usr/bin/jq), node's builtins can't be shadowed by design and its package lookups
+are pinned to the run's own directory (see prepare_run_dir). Installed packages themselves are trusted
+until a run asks for "reset_workspace": true, which starts it on an empty workspace.
 
 Environment (all optional):
     SANDBOX_TOKEN            bearer token required on /run (unset => no auth; keep the port private)
@@ -66,10 +75,19 @@ MAX_OUT_BYTES = 8 * 1024 * 1024
 # How long to wait for the output pipes to drain after every process of the run is gone.
 READER_JOIN_SECONDS = 2.0
 
+# -P (3.11+): don't put the script's directory (or, for -c/-m, the cwd) first on sys.path. The script sits
+# in a fresh temp dir so that alone is harmless, but the flag documents the rule: nothing a run can write is
+# searched before the stdlib. PYTHONSAFEPATH (child_env) extends it to Python processes the run starts itself.
+PYTHON_SAFE_PATH = ['-P'] if sys.version_info >= (3, 11) else []
+
+# The run directory's package.json (see prepare_run_dir) has no "type" on purpose, so node detects ESM vs
+# CommonJS per file; node then warns on stderr about every ESM file, which the model would read as a problem.
+NODE_FLAGS = ['--disable-warning=MODULE_TYPELESS_PACKAGE_JSON']
+
 LANGUAGES: dict[str, tuple[list[str], str]] = {
-    'python': ([sys.executable], 'main.py'),
+    'python': ([sys.executable, *PYTHON_SAFE_PATH], 'main.py'),
     'bash': (['bash'], 'main.sh'),
-    'node': (['node'], 'main.js'),
+    'node': (['node', *NODE_FLAGS], 'main.js'),
 }
 
 # Environment variables a run may inherit from the server. Everything else (notably SANDBOX_TOKEN, and
@@ -401,6 +419,38 @@ def _read_regular_file(path: str, expected_size: int) -> bytes | None:
         os.close(fd)
 
 
+def _make_owner_writable(path: str) -> None:
+    """Gives the owner rwx on a directory (never through a symlink) so its entries can be listed and removed."""
+    with contextlib.suppress(OSError):
+        info = os.lstat(path)
+        if stat.S_ISDIR(info.st_mode) and (info.st_mode & 0o700) != 0o700:
+            os.chmod(path, stat.S_IMODE(info.st_mode) | 0o700)
+
+
+def wipe_workspace(workspace: str) -> int:
+    """Deletes everything inside the workspace (not the directory itself: it is the mounted volume).
+
+    A run may have left read-only or unreadable directories behind; it shares this server's uid, so the owner
+    bits can always be put back first. Symlinks are removed, never followed. Returns how many top-level
+    entries were removed; raises OSError when something could not be.
+    """
+    _make_owner_writable(workspace)
+    for dirpath, dirnames, _files in os.walk(workspace):
+        for name in dirnames:
+            _make_owner_writable(os.path.join(dirpath, name))
+    removed = 0
+    with os.scandir(workspace) as entries:
+        paths = [entry.path for entry in entries]
+    for path in paths:
+        info = os.lstat(path)
+        if stat.S_ISDIR(info.st_mode):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+        removed += 1
+    return removed
+
+
 def workspace_writable(settings: Settings) -> bool:
     return os.path.isdir(settings.workspace) and os.access(settings.workspace, os.W_OK | os.X_OK)
 
@@ -417,9 +467,11 @@ def child_env(settings: Settings, run_dir: str) -> dict[str, str]:
             'HOME': home,
             'PWD': home,
             'TMPDIR': run_dir,
-            # `pip install --user` and `npm install` land in the workspace and persist between runs.
-            'PATH': f'{home}/.local/bin:{home}/node_modules/.bin:{base_path}',
-            'PYTHONPATH': home,
+            # `pip install --user` and `npm install` land in the workspace and persist between runs. Their
+            # bin directories come last, so an installed tool is found but can't shadow a system command.
+            'PATH': f'{base_path}:{home}/.local/bin:{home}/node_modules/.bin',
+            # No PYTHONPATH: the workspace is deliberately not importable by default (see PYTHON_SAFE_PATH).
+            'PYTHONSAFEPATH': '1',
             'PYTHONUNBUFFERED': '1',
             'PYTHONDONTWRITEBYTECODE': '1',
             'PYTHONIOENCODING': 'utf-8',
@@ -466,11 +518,39 @@ def _wait_for_exit(pid: int, deadline: float) -> bool:
         time.sleep(0.01)
 
 
-def execute(settings: Settings, language: str, code: str, timeout_seconds: float) -> dict[str, Any]:
+def prepare_run_dir(run_dir: str, workspace: str) -> None:
+    """Pins node's lookups for the script to the run's own directory.
+
+    node resolves packages and the module type through every ancestor of the script: without these two
+    entries a run could plant /tmp/node_modules/<pkg> or /tmp/package.json and change later runs. The
+    node_modules link (dangling until something is installed) makes workspace packages win over anything
+    planted further up and lets `import` (ESM ignores NODE_PATH) find them; the empty package.json keeps
+    ESM/CommonJS detection per file.
+    """
+    os.symlink(os.path.join(workspace, 'node_modules'), os.path.join(run_dir, 'node_modules'))
+    with open(os.path.join(run_dir, 'package.json'), 'w', encoding='utf-8') as handle:
+        handle.write('{}\n')
+
+
+class WorkspaceResetError(Exception):
+    """The requested wipe did not complete; the run must not start on a half-wiped workspace."""
+
+
+def execute(
+    settings: Settings, language: str, code: str, timeout_seconds: float, reset_workspace: bool = False
+) -> dict[str, Any]:
     command, filename = LANGUAGES[language]
+    if reset_workspace:
+        try:
+            removed = wipe_workspace(settings.workspace)
+        # RecursionError: shutil.rmtree recurses before Python 3.13 and a run can plant a very deep tree.
+        except (OSError, RecursionError) as error:
+            raise WorkspaceResetError(str(error)) from error
+        log.info('workspace reset: removed %d entries', removed)
     reset_out_dir(settings.out_dir)
     run_dir = tempfile.mkdtemp(prefix='run-')
     try:
+        prepare_run_dir(run_dir, settings.workspace)
         script = os.path.join(run_dir, filename)
         with open(script, 'w', encoding='utf-8') as handle:
             handle.write(code)
@@ -530,6 +610,7 @@ def execute(settings: Settings, language: str, code: str, timeout_seconds: float
             'stderr_truncated': stderr_reader.truncated,
             'files': files,
             'files_omitted': omitted,
+            'workspace_reset': reset_workspace,
         }
         if strays:
             log.info('killed %d background process(es) left behind by the run', strays)
@@ -600,7 +681,7 @@ class RequestError(Exception):
         self.status = status
 
 
-def parse_run_request(body: bytes) -> tuple[str, str, float]:
+def parse_run_request(body: bytes) -> tuple[str, str, float, bool]:
     try:
         payload = json.loads(body.decode('utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -620,7 +701,12 @@ def parse_run_request(body: bytes) -> tuple[str, str, float]:
         timeout = DEFAULT_TIMEOUT_SECONDS
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout):
         raise RequestError(HTTPStatus.BAD_REQUEST, 'timeout_seconds must be a number')
-    return language, code, float(min(MAX_TIMEOUT_SECONDS, max(1, timeout)))
+    reset = payload.get('reset_workspace', False)
+    if reset is None:
+        reset = False
+    if not isinstance(reset, bool):
+        raise RequestError(HTTPStatus.BAD_REQUEST, 'reset_workspace must be a boolean')
+    return language, code, float(min(MAX_TIMEOUT_SECONDS, max(1, timeout))), reset
 
 
 def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandler]:
@@ -668,7 +754,7 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
                 self.send_json(HTTPStatus.UNAUTHORIZED, {'error': 'unauthorized'})
                 return
             try:
-                language, code, timeout = parse_run_request(self.read_body())
+                language, code, timeout, reset = parse_run_request(self.read_body())
             except RequestError as error:
                 self.send_json(error.status, {'error': str(error)})
                 return
@@ -682,12 +768,21 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
                 return
             try:
                 waited_ms = int((time.monotonic() - queued_at) * 1000)
+                # The workspace directory is this server's, not the run's: undo a `chmod a-w /workspace` a
+                # previous run may have done to break every later run.
+                _make_owner_writable(settings.workspace)
                 if not workspace_writable(settings):
                     log.error('workspace %s is not writable by uid %d', settings.workspace, os.getuid())
                     self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'error': 'sandbox workspace is not writable'})
                     return
                 try:
-                    result = execute(settings, language, code, timeout)
+                    result = execute(settings, language, code, timeout, reset)
+                except WorkspaceResetError as error:
+                    log.error('workspace reset failed: %s', error)
+                    self.send_json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR, {'error': f'could not reset the workspace: {error}'}
+                    )
+                    return
                 except OSError as error:
                     log.exception('run failed to start')
                     self.send_json(
@@ -699,7 +794,7 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
                 gate.release()
 
             log.info(
-                'run language=%s exit=%s timed_out=%s duration_ms=%d waited_ms=%d stdout=%dB stderr=%dB files=%d',
+                'run language=%s exit=%s timed_out=%s duration_ms=%d waited_ms=%d stdout=%dB stderr=%dB files=%d%s',
                 language,
                 result['exit_code'],
                 result['timed_out'],
@@ -708,6 +803,7 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
                 len(result['stdout']),
                 len(result['stderr']),
                 len(result['files']),
+                ' reset=True' if reset else '',
             )
             self.send_json(HTTPStatus.OK, result)
 

@@ -58,6 +58,8 @@ export type SandboxRunResult = {
   stderr_truncated: boolean;
   files: SandboxFile[];
   files_omitted: SandboxOmittedFile[];
+  /** True when the sidecar wiped /workspace before the run (it only does when asked). */
+  workspace_reset: boolean;
 };
 
 export type SandboxFailureKind =
@@ -74,7 +76,13 @@ export type SandboxOutcome =
   | { ok: true; result: SandboxRunResult }
   | { ok: false; kind: SandboxFailureKind; detail: string };
 
-export type SandboxRunRequest = { language: SandboxLanguage; code: string; timeoutSeconds: number };
+export type SandboxRunRequest = {
+  language: SandboxLanguage;
+  code: string;
+  timeoutSeconds: number;
+  /** Wipe /workspace (saved files, pip/npm installs) before the run. */
+  resetWorkspace?: boolean;
+};
 
 export type SandboxClientOptions = {
   /** Defaults to SANDBOX_URL. */
@@ -92,6 +100,11 @@ export type RunCodeToolOptions = SandboxClientOptions & {
 export function parseLanguage(raw: unknown): SandboxLanguage | undefined {
   if (typeof raw !== 'string') return undefined;
   return LANGUAGE_ALIASES[raw.trim().toLowerCase()];
+}
+
+// Models send booleans as strings now and then; only an unambiguous yes wipes anything.
+function parseFlag(raw: unknown): boolean {
+  return raw === true || (typeof raw === 'string' && raw.trim().toLowerCase() === 'true');
 }
 
 function parseTimeoutSeconds(raw: unknown, fallback: number): number {
@@ -145,6 +158,7 @@ export function parseRunResult(raw: unknown): SandboxRunResult | undefined {
     stderr_truncated: raw.stderr_truncated === true,
     files,
     files_omitted: omitted,
+    workspace_reset: raw.workspace_reset === true,
   };
 }
 
@@ -193,6 +207,7 @@ export async function runInSandbox(
         language: request.language,
         code: request.code,
         timeout_seconds: request.timeoutSeconds,
+        ...(request.resetWorkspace ? { reset_workspace: true } : {}),
       }),
       signal: AbortSignal.timeout(budgetSeconds * 1000),
     });
@@ -293,9 +308,17 @@ const SIGNAL_HINTS: Record<string, string> = {
 };
 
 /** The compact text the model gets back for a finished run. */
-export function formatRunResult(result: SandboxRunResult, files: AttachReport): string {
+export function formatRunResult(result: SandboxRunResult, files: AttachReport, resetRequested = false): string {
   const seconds = (result.duration_ms / 1000).toFixed(1);
   const lines: string[] = [];
+  if (resetRequested) {
+    // A sidecar image older than the reset option ignores the flag; say so rather than claim a clean slate.
+    lines.push(
+      result.workspace_reset
+        ? 'The workspace was wiped before this run.'
+        : "The sandbox didn't confirm the workspace wipe (it may be out of date), so earlier files may still be there.",
+    );
+  }
   if (result.timed_out) {
     lines.push(`Timed out after ${seconds} s and was killed; output so far is below.`);
   } else if (result.signal) {
@@ -362,6 +385,7 @@ function describeTool(defaultTimeoutSeconds: number): string {
     'Only stdout/stderr come back, so print() the answer.',
     "Anything saved to /workspace/out/ is attached to your reply (up to 5 files, 8 MB), e.g. plt.savefig('out/chart.png'); out/ is emptied before every run.",
     'Each run is a fresh process (variables do not carry over), but files in /workspace persist between runs and `pip install` works.',
+    'Pass reset_workspace: true to wipe /workspace (saved files and installs) before the run, only when leftovers from earlier runs get in the way or look tampered with.',
     'The sandbox has internet access but no secrets and no Discord access; its clock is Eastern time.',
     `Runs are killed after ${defaultTimeoutSeconds} s unless you pass timeout_seconds (max ${MAX_RUN_TIMEOUT_SECONDS}).`,
   ].join(' ');
@@ -384,6 +408,11 @@ export function createRunCodeTool(opts: RunCodeToolOptions = {}): ToolDefinition
           type: 'number',
           description: `Optional run time limit in seconds, 1-${MAX_RUN_TIMEOUT_SECONDS}. Raise it only for slow work like pip installs or big downloads.`,
         },
+        reset_workspace: {
+          type: 'boolean',
+          description:
+            'Optional. true wipes /workspace (files and pip/npm installs from earlier runs) before this run. Leave it off normally: files persist on purpose.',
+        },
       },
       required: ['language', 'code'],
       additionalProperties: false,
@@ -398,16 +427,17 @@ export function createRunCodeTool(opts: RunCodeToolOptions = {}): ToolDefinition
         return `That program is too long (${code.length} characters; the limit is ${MAX_CODE_CHARS}). Load big data from a URL or a file in /workspace instead of inlining it.`;
       }
       const timeoutSeconds = parseTimeoutSeconds(args.timeout_seconds, defaultTimeout());
+      const resetWorkspace = parseFlag(args.reset_workspace);
 
-      const outcome = await runInSandbox({ language, code, timeoutSeconds }, opts);
+      const outcome = await runInSandbox({ language, code, timeoutSeconds, resetWorkspace }, opts);
       if (!outcome.ok) return describeFailure(outcome);
 
       const { result } = outcome;
       const files = attachFiles(ctx.turn, result.files);
       logger.info(
-        `run_code: channel=${ctx.channelId} language=${language} exit=${result.exit_code} timed_out=${result.timed_out} duration_ms=${result.duration_ms} files=${files.attached.length}`,
+        `run_code: channel=${ctx.channelId} language=${language} exit=${result.exit_code} timed_out=${result.timed_out} duration_ms=${result.duration_ms} files=${files.attached.length}${resetWorkspace ? ` reset=${result.workspace_reset}` : ''}`,
       );
-      return formatRunResult(result, files);
+      return formatRunResult(result, files, resetWorkspace);
     },
   };
 }

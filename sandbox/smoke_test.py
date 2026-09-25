@@ -39,10 +39,14 @@ class Sandbox:
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read() or b'{}')
 
-    def run(self, language: str, code: str, timeout_seconds: int | None = None) -> dict[str, Any]:
+    def run(
+        self, language: str, code: str, timeout_seconds: int | None = None, reset_workspace: bool = False
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {'language': language, 'code': code}
         if timeout_seconds is not None:
             body['timeout_seconds'] = timeout_seconds
+        if reset_workspace:
+            body['reset_workspace'] = True
         status, payload = self.request('POST', '/run', body)
         if status != 200 or not isinstance(payload, dict):
             raise AssertionError(f'/run returned HTTP {status}: {payload}')
@@ -119,6 +123,25 @@ def main() -> int:
         result = sandbox.run('python', "print(open('note.txt').read().strip())")
         expect(result['stdout'].strip() == 'kept', 'workspace files did not persist', result)
 
+    def planted_files_do_not_shadow() -> None:
+        # What one run leaves in the workspace must not change the tools later runs use.
+        sandbox.run(
+            'bash',
+            'echo \'print("HIJACKED")\' > json.py; mkdir -p .local/bin;'
+            " printf '#!/bin/sh\\necho HIJACKED\\n' > .local/bin/jq; chmod +x .local/bin/jq",
+        )
+        python = sandbox.run('python', 'import json; print(json.dumps([1]))')
+        expect(python['stdout'].strip() == '[1]', 'a workspace json.py shadowed the stdlib', python)
+        nested = sandbox.run('bash', "python3 -c 'import json; print(json.dumps([2]))'; echo '{\"a\": 3}' | jq .a")
+        expect(nested['stdout'].split() == ['[2]', '3'], 'a workspace file shadowed a system tool', nested)
+        sandbox.run('bash', 'rm -rf json.py .local/bin/jq')
+
+    def reset_workspace_wipes() -> None:
+        sandbox.run('bash', 'mkdir -p junk/locked; echo x > junk/locked/f; chmod 500 junk/locked; echo y > .hidden')
+        result = sandbox.run('bash', 'ls -A', reset_workspace=True)
+        expect(result.get('workspace_reset') is True, 'the sandbox did not report the reset', result)
+        expect(result['stdout'].split() == ['out'], 'reset_workspace left files behind', result)
+
     def out_is_cleared() -> None:
         sandbox.run('bash', 'echo a > out/a.txt')
         result = sandbox.run('bash', 'ls out | wc -l')
@@ -159,6 +182,8 @@ def main() -> int:
         ('node', node_runs),
         ('identity and environment', identity_and_env),
         ('workspace persists', workspace_persists),
+        ('planted files do not shadow stdlib or tools', planted_files_do_not_shadow),
+        ('reset_workspace wipes the workspace', reset_workspace_wipes),
         ('out/ cleared per run', out_is_cleared),
         ('timeout', timeout_kills),
         ('escaped process killed', escaped_process_is_killed),
