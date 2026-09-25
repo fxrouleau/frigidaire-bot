@@ -35,12 +35,18 @@ export default defineEvent(Events.MessageCreate, {
 
     const translated = result.translated > 0 ? `, ${result.translated} translated` : '';
     logger.info(`linkfix: rewrote ${result.fixed} link(s)${translated} in message ${message.id}; reposting`);
-    const outcome = await repostMessage(message, result.content, {
-      // The bot is about to delete this message itself — that is not the author changing their mind.
-      onBeforeDelete: () => deletedMessageReposter.forget(message.id),
-    });
-    if (outcome.status !== 'reposted') {
-      logger.warn(`linkfix: message ${message.id} not reposted (${outcome.status}): ${outcome.reason}`);
+    try {
+      const outcome = await repostMessage(message, result.content, {
+        // The bot is about to delete this message itself — that is not the author changing their mind.
+        onBeforeDelete: () => deletedMessageReposter.forget(message.id),
+      });
+      if (outcome.status !== 'reposted') {
+        logger.warn(`linkfix: message ${message.id} not reposted (${outcome.status}): ${outcome.reason}`);
+      }
+    } catch (error) {
+      // Creating the webhook or sending through it failed (Manage Webhooks missing, rate limit, outage).
+      // Nothing was deleted: the original stays exactly as posted.
+      logger.warn(`linkfix: repost of message ${message.id} failed; the original is untouched:`, error);
     }
   },
 });

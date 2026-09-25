@@ -68,9 +68,13 @@ const PLATFORM_HOSTS: Record<Platform, RegExp> = {
   bluesky: /^(?:www\.)?bsky\.app$/i,
 };
 
+// Characters that only precede a URL when it is embedded in another one (query value, path, fragment).
+const EMBEDDED_URL_PREFIX = /^[=/%?&#]$/;
+
 /**
  * Every fixable link in the text, in order. Skipped: links wrapped in `<...>` (embeds suppressed on
- * purpose) and links inside inline code or fenced code blocks (shown as text, never embedded).
+ * purpose), links inside inline code or fenced code blocks (shown as text, never embedded), and post
+ * URLs that are part of a longer URL.
  * Trailing markdown delimiters and sentence punctuation are not part of a match.
  */
 export function findLinks(text: string): LinkMatch[] {
@@ -79,7 +83,10 @@ export function findLinks(text: string): LinkMatch[] {
   for (const platform of PLATFORMS) {
     for (const match of text.matchAll(URL_PATTERNS[platform])) {
       const index = match.index ?? 0;
-      if (index > 0 && text[index - 1] === '<') continue;
+      const before = index > 0 ? text[index - 1] : '';
+      if (before === '<') continue;
+      // A post URL inside another URL (`https://example.com/?u=https://x.com/…`) is part of that link.
+      if (EMBEDDED_URL_PREFIX.test(before)) continue;
       if (isInsideSpan(index, code)) continue;
       matches.push({ platform, url: trimLinkEnd(match[0], text.slice(0, index)), index });
     }
@@ -272,11 +279,12 @@ const EMBED_TAGS: Record<Platform, RegExp> = {
 };
 
 // "The fixer is up but has nothing for this post" pages that still answer 200 with OpenGraph tags:
-// InstaFix ("Post not found"), FxTwitter/FxBluesky ("Sorry, that post doesn't exist :("), vxReddit
-// ("Failed to get data from Reddit") and xbsky ("An error occurred" as the title).
+// InstaFix ("Post not found"), FxTwitter/FxBluesky ("Sorry, that post doesn't exist :("), vxTwitter
+// ("Failed to scan your link!" for a deleted tweet), vxReddit ("Failed to get data from Reddit") and
+// xbsky ("An error occurred" as the title).
 const NOT_FOUND_META = [
   /content="[^"]*(?:post|tweet|video|content|page) (?:not (?:found|available)|does(?:n(?:'|&#0?39;|&#x27;|’)t| not) exist)/i,
-  /content="failed to get (?:data|post)/i,
+  /content="failed to (?:get (?:data|post)|scan your link)/i,
   /(?:property|name)="og:title" content="an error occurred"/i,
 ];
 

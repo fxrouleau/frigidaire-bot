@@ -7,6 +7,8 @@ import {
   type Client,
   Collection,
   type Message,
+  MessageFlagsBitField,
+  MessageReferenceType,
   type OmitPartialGroupDMChannel,
 } from 'discord.js';
 import { type Recorder, createRecorder } from './recorder';
@@ -16,8 +18,11 @@ import { type Recorder, createRecorder } from './recorder';
 export type EventMessage = OmitPartialGroupDMChannel<Message>;
 
 export type FakeWebhook = {
+  id: string;
   send: Recorder<[unknown], Promise<unknown>>;
   delete: Recorder<[], Promise<unknown>>;
+  // webhook.deleteMessage(message, threadId?) — taking a repost back.
+  deleteMessage: Recorder<[unknown, string | undefined], Promise<void>>;
 };
 
 export type FakeMessageOptions = {
@@ -36,7 +41,13 @@ export type FakeMessageOptions = {
   // own relays) and on interaction responses.
   applicationId?: string | null;
   createdAt?: Date;
-  attachments?: Array<{ url: string; contentType: string | null; name?: string }>;
+  attachments?: Array<{
+    url: string;
+    contentType: string | null;
+    name?: string;
+    size?: number;
+    description?: string | null;
+  }>;
   embeds?: Array<{
     imageUrl?: string;
     imageProxyUrl?: string;
@@ -54,7 +65,24 @@ export type FakeMessageOptions = {
   mentionedUsers?: Array<{ id: string; displayName?: string; username?: string; member?: boolean }>;
   // The author of the message this one replies to, when Discord resolved it (reply pings on).
   repliedUserId?: string | null;
+  // Display data for `mentions.repliedUser`; a member display name also puts them in guild.members.cache.
+  repliedUserDisplayName?: string;
+  repliedMemberDisplayName?: string;
   referencedMessageId?: string | null;
+  referencedChannelId?: string;
+  referenceType?: MessageReferenceType;
+  // message.fetchReference() — defaults to fetchedMessageById[referencedMessageId], else rejects.
+  fetchReferenceImpl?: () => Promise<unknown>;
+  guildId?: string | null;
+  // MessageFlags bits (e.g. MessageFlags.SuppressNotifications).
+  flags?: number;
+  hasPoll?: boolean;
+  // Thread channel types only: the thread's state and its parent (which owns the webhook).
+  threadArchived?: boolean;
+  threadLocked?: boolean;
+  threadParentId?: string;
+  threadParentType?: ChannelType;
+  threadParentMissing?: boolean;
   memberIsNull?: boolean;
   historyMessages?: Message[];
   fetchedMessageById?: Record<string, Message>;
@@ -62,6 +90,8 @@ export type FakeMessageOptions = {
   sendImpl?: (content: unknown) => Promise<unknown>;
   // Make the fake webhook's send() reject (exercises repost error paths).
   webhookSendImpl?: (content: unknown) => Promise<unknown>;
+  // Make message.delete() reject (the author deleted it first, missing Manage Messages, ...).
+  deleteImpl?: () => Promise<unknown>;
 };
 
 export type FakeMessage = {
@@ -73,19 +103,30 @@ export type FakeMessage = {
     messagesFetch: Recorder<[unknown], Promise<unknown>>;
     delete: Recorder<[], Promise<unknown>>;
     createWebhook: Recorder<[unknown], Promise<unknown>>;
+    // createWebhook on a thread's parent channel (threads and forum posts can't own webhooks).
+    parentCreateWebhook: Recorder<[unknown], Promise<unknown>>;
   };
   webhooks: FakeWebhook[];
 };
 
+const THREAD_TYPES: ReadonlySet<ChannelType> = new Set([
+  ChannelType.PublicThread,
+  ChannelType.PrivateThread,
+  ChannelType.AnnouncementThread,
+]);
+
 let fakeWebhookMessageCounter = 0;
+let fakeWebhookCounter = 0;
 
 function createFakeWebhook(sendImpl?: (content: unknown) => Promise<unknown>): FakeWebhook {
   return {
+    id: `webhook-${++fakeWebhookCounter}`,
     // Like discord.js, send() resolves to the posted message (only its id matters to callers).
     send: createRecorder(async (content: unknown) =>
       sendImpl ? sendImpl(content) : ({ id: `webhook-message-${++fakeWebhookMessageCounter}` } as unknown),
     ),
     delete: createRecorder(async () => ({}) as unknown),
+    deleteMessage: createRecorder(async (_message: unknown, _threadId: string | undefined) => {}),
   };
 }
 
@@ -108,9 +149,18 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   const historyMessages = opts.historyMessages ?? [];
   const fetchedMessageById = opts.fetchedMessageById ?? {};
 
-  const attachments = new Collection<string, { contentType: string | null; url: string; name: string }>();
+  const attachments = new Collection<
+    string,
+    { contentType: string | null; url: string; name: string; size: number; description: string | null }
+  >();
   (opts.attachments ?? []).forEach((att, index) => {
-    attachments.set(`att-${index}`, { contentType: att.contentType, url: att.url, name: att.name ?? `file-${index}` });
+    attachments.set(`att-${index}`, {
+      contentType: att.contentType,
+      url: att.url,
+      name: att.name ?? `file-${index}`,
+      size: att.size ?? 0,
+      description: att.description ?? null,
+    });
   });
 
   const stickers = new Collection<string, { id: string; name: string; format: number }>();
@@ -147,12 +197,15 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   const reply = createRecorder<[unknown], Promise<unknown>>((c) => replyImpl(c));
   const send = createRecorder<[unknown], Promise<unknown>>((c) => sendImpl(c));
   const sendTyping = createRecorder<[], Promise<void>>(async () => {});
-  const deleteRecorder = createRecorder<[], Promise<unknown>>(async () => ({}) as unknown);
-  const createWebhook = createRecorder<[unknown], Promise<unknown>>(async (_options) => {
-    const hook = createFakeWebhook(opts.webhookSendImpl);
-    webhooks.push(hook);
-    return hook as unknown;
-  });
+  const deleteRecorder = createRecorder<[], Promise<unknown>>(opts.deleteImpl ?? (async () => ({}) as unknown));
+  const makeCreateWebhook = () =>
+    createRecorder<[unknown], Promise<unknown>>(async (_options) => {
+      const hook = createFakeWebhook(opts.webhookSendImpl);
+      webhooks.push(hook);
+      return hook as unknown;
+    });
+  const createWebhook = makeCreateWebhook();
+  const parentCreateWebhook = makeCreateWebhook();
   const messagesFetch = createRecorder<[unknown], Promise<unknown>>(async (arg) => {
     if (typeof arg === 'string') {
       const found = fetchedMessageById[arg];
@@ -167,6 +220,35 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     }
     return collection as unknown;
   });
+
+  const guildId =
+    opts.guildId !== undefined ? opts.guildId : channelType === ChannelType.DM ? null : 'guild-1';
+  const guildMembers = new Collection<string, { id: string; displayName: string }>();
+  if (opts.repliedUserId && opts.repliedMemberDisplayName) {
+    guildMembers.set(opts.repliedUserId, { id: opts.repliedUserId, displayName: opts.repliedMemberDisplayName });
+  }
+  const isThread = THREAD_TYPES.has(channelType);
+  const threadFields = isThread
+    ? {
+        archived: opts.threadArchived ?? false,
+        locked: opts.threadLocked ?? false,
+        parentId: opts.threadParentMissing ? null : (opts.threadParentId ?? 'parent-channel-1'),
+        parent: opts.threadParentMissing
+          ? null
+          : {
+              id: opts.threadParentId ?? 'parent-channel-1',
+              type: opts.threadParentType ?? ChannelType.GuildText,
+              createWebhook: parentCreateWebhook,
+            },
+      }
+    : {};
+  const fetchReference =
+    opts.fetchReferenceImpl ??
+    (async () => {
+      const found = referencedMessageId ? fetchedMessageById[referencedMessageId] : undefined;
+      if (!found) throw new Error('Unknown Message');
+      return found as unknown;
+    });
 
   const member = opts.memberIsNull
     ? null
@@ -197,9 +279,24 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     mentions: {
       users: mentionUsers,
       members: mentionMembers,
-      repliedUser: opts.repliedUserId ? { id: opts.repliedUserId } : null,
+      repliedUser: opts.repliedUserId
+        ? { id: opts.repliedUserId, displayName: opts.repliedUserDisplayName, username: opts.repliedUserDisplayName }
+        : null,
     },
-    reference: referencedMessageId ? { messageId: referencedMessageId } : null,
+    reference: referencedMessageId
+      ? {
+          messageId: referencedMessageId,
+          channelId: opts.referencedChannelId ?? channelId,
+          guildId,
+          type: opts.referenceType ?? MessageReferenceType.Default,
+        }
+      : null,
+    fetchReference,
+    guildId,
+    guild: guildId ? { id: guildId, members: { cache: guildMembers } } : null,
+    url: `https://discord.com/channels/${guildId ?? '@me'}/${channelId}/${messageId}`,
+    flags: new MessageFlagsBitField(opts.flags ?? 0).freeze(),
+    poll: opts.hasPoll ? { question: { text: 'poll?' } } : null,
     client: {
       user: { id: botUserId, displayName: botDisplayName },
     },
@@ -211,6 +308,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
       sendTyping,
       createWebhook,
       messages: { fetch: messagesFetch },
+      ...threadFields,
     },
     reply,
     delete: deleteRecorder,
@@ -218,7 +316,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
 
   return {
     message: built as unknown as EventMessage,
-    recorders: { reply, send, sendTyping, messagesFetch, delete: deleteRecorder, createWebhook },
+    recorders: { reply, send, sendTyping, messagesFetch, delete: deleteRecorder, createWebhook, parentCreateWebhook },
     webhooks,
   };
 }

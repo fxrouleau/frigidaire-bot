@@ -13,7 +13,7 @@ import {
   type WebhookType,
 } from 'discord.js';
 import { config } from './config';
-import { downloadAttachments, formatMegabytes } from './links/attachments';
+import { downloadAttachments, formatSize } from './links/attachments';
 import { replyContextLine } from './links/replyContext';
 import { logger } from './logger';
 import { recordRelay } from './relay';
@@ -170,7 +170,7 @@ export function repostBlocker(
   }
   const attachmentBytes = [...message.attachments.values()].reduce((sum, a) => sum + a.size, 0);
   if (attachmentBytes > maxAttachmentBytes) {
-    return `its attachments total ${formatMegabytes(attachmentBytes)}, over the ${formatMegabytes(maxAttachmentBytes)} repost cap`;
+    return `its attachments total ${formatSize(attachmentBytes)}, over the ${formatSize(maxAttachmentBytes)} repost cap`;
   }
   return undefined;
 }

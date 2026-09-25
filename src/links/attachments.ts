@@ -19,7 +19,10 @@ export type CarryOptions = {
 
 const DOWNLOAD_TIMEOUT_MS = 15_000;
 
-export function formatMegabytes(bytes: number): string {
+/** "512 B", "340 KB", "9.5 MB" — for log lines and skip reasons. */
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
@@ -69,7 +72,7 @@ async function downloadOne(
       return `${source.name} answered HTTP ${response.status}`;
     }
     const data = await readCapped(response, limit);
-    if (!data) return `${source.name} is larger than ${formatMegabytes(limit)}`;
+    if (!data) return `${source.name} is larger than ${formatSize(limit)}`;
     return source.description
       ? { attachment: data, name: source.name, description: source.description }
       : { attachment: data, name: source.name };
@@ -90,7 +93,7 @@ export async function downloadAttachments(sources: AttachmentSource[], options: 
   if (declared > options.maxTotalBytes) {
     return {
       ok: false,
-      reason: `attachments total ${formatMegabytes(declared)}, over the ${formatMegabytes(options.maxTotalBytes)} repost cap`,
+      reason: `attachments total ${formatSize(declared)}, over the ${formatSize(options.maxTotalBytes)} repost cap`,
     };
   }
 
@@ -107,7 +110,7 @@ export async function downloadAttachments(sources: AttachmentSource[], options: 
     logger.warn(`linkfix: attachments declared ${declared} bytes but downloaded ${total}`);
     return {
       ok: false,
-      reason: `attachments total ${formatMegabytes(total)}, over the ${formatMegabytes(options.maxTotalBytes)} repost cap`,
+      reason: `attachments total ${formatSize(total)}, over the ${formatSize(options.maxTotalBytes)} repost cap`,
     };
   }
   return { ok: true, files };

@@ -1,7 +1,9 @@
-import { ChannelType, type Message } from 'discord.js';
-import { describe, expect, it } from 'vitest';
+import { ChannelType, type Message, MessageFlags, MessageReferenceType } from 'discord.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getRelay } from './relay';
+import { BotDb, setBotDbForTesting } from './storage/botDb';
 import { createFakeMessage } from './test-support/fakeDiscord';
-import { repostMessage, splitMessage } from './utils';
+import { type RepostOutcome, repostBlocker, repostMessage, splitMessage, webhookTargetOf } from './utils';
 
 describe('splitMessage', () => {
   it('returns a single unchanged chunk for short text', () => {
@@ -69,14 +71,53 @@ describe('splitMessage', () => {
   });
 });
 
+type SentPayload = {
+  content: string;
+  files: Array<{ attachment: Buffer; name: string; description?: string }>;
+  allowedMentions?: { parse: string[] };
+  threadId?: string;
+  flags?: number;
+};
+
+function sentPayload(fake: ReturnType<typeof createFakeMessage>, hook = 0): SentPayload {
+  return fake.webhooks[hook].send.calls[0][0] as SentPayload;
+}
+
+/** A fetch that serves attachment bytes by URL and records every request. */
+function attachmentFetch(bodies: Record<string, Uint8Array<ArrayBuffer> | number>): typeof globalThis.fetch & { urls: string[] } {
+  const urls: string[] = [];
+  const fn = (async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    urls.push(url);
+    const body = bodies[url];
+    if (body === undefined) throw new TypeError('fetch failed');
+    if (typeof body === 'number') return new Response('', { status: body });
+    return new Response(body, { status: 200 });
+  }) as typeof globalThis.fetch;
+  return Object.assign(fn, { urls });
+}
+
+const noFetch = (async () => {
+  throw new Error('no network in this test');
+}) as typeof globalThis.fetch;
+
 describe('repostMessage', () => {
+  beforeEach(() => {
+    setBotDbForTesting(new BotDb(':memory:'));
+  });
+
+  afterEach(() => {
+    setBotDbForTesting(undefined);
+    vi.unstubAllEnvs();
+  });
+
   it('creates a webhook, sends the new content, deletes the original, and cleans up the webhook', async () => {
     const fake = createFakeMessage({
       content: 'original content',
       authorDisplayName: 'Cool Author',
     });
 
-    await repostMessage(fake.message, 'new content');
+    const outcome = await repostMessage(fake.message, 'new content', { fetch: noFetch });
 
     // Webhook created exactly once with a name + avatar.
     expect(fake.recorders.createWebhook.calls).toHaveLength(1);
@@ -91,8 +132,27 @@ describe('repostMessage', () => {
     expect(fake.webhooks).toHaveLength(1);
     const hook = fake.webhooks[0];
     expect(hook.send.calls).toHaveLength(1);
-    expect(hook.send.calls[0][0]).toBe('new content');
+    expect(sentPayload(fake)).toEqual({ content: 'new content', files: [], allowedMentions: { parse: [] } });
     expect(hook.delete.calls).toHaveLength(1);
+    expect(outcome.status).toBe('reposted');
+  });
+
+  it('never pings anyone again: the original already did (allowedMentions parse: [])', async () => {
+    const fake = createFakeMessage({ content: '<@123> @everyone https://x.com/u/status/1' });
+
+    await repostMessage(fake.message, '<@123> @everyone https://fixvx.com/u/status/1', { fetch: noFetch });
+
+    expect(sentPayload(fake).allowedMentions).toEqual({ parse: [] });
+  });
+
+  it('records the repost as a relay of the real author (so it counts as theirs downstream)', async () => {
+    const fake = createFakeMessage({ authorId: 'user-7', authorDisplayName: 'Jason', channelId: 'chan-9' });
+
+    const outcome = await repostMessage(fake.message, 'hi', { fetch: noFetch });
+
+    expect(outcome.status).toBe('reposted');
+    const repostId = (outcome as Extract<RepostOutcome, { status: 'reposted' }>).repostId;
+    expect(getRelay(repostId)).toMatchObject({ authorId: 'user-7', authorName: 'Jason', channelId: 'chan-9', kind: 'link_fix' });
   });
 
   it('prefers the member nickname over the author displayName for the webhook name', async () => {
@@ -101,7 +161,7 @@ describe('repostMessage', () => {
     const member = (fake.message as unknown as { member: { nickname: string | null } }).member;
     member.nickname = 'Nickname';
 
-    await repostMessage(fake.message, 'hi');
+    await repostMessage(fake.message, 'hi', { fetch: noFetch });
 
     const createArg = fake.recorders.createWebhook.calls[0][0] as { name: string };
     expect(createArg.name).toBe('Nickname');
@@ -112,7 +172,7 @@ describe('repostMessage', () => {
     const fake = createFakeMessage({
       webhookSendImpl: async () => {
         events.push('send');
-        return {};
+        return { id: 'repost-1' };
       },
     });
     const msg = fake.message as unknown as { delete: () => Promise<unknown> };
@@ -122,9 +182,9 @@ describe('repostMessage', () => {
       return realDelete();
     };
 
-    await repostMessage(fake.message, 'ordered');
+    await repostMessage(fake.message, 'ordered', { fetch: noFetch, onBeforeDelete: () => events.push('forget') });
 
-    expect(events).toEqual(['send', 'delete']);
+    expect(events).toEqual(['send', 'forget', 'delete']);
   });
 
   it('deletes the webhook and keeps the original when the send fails (no webhook leak)', async () => {
@@ -134,23 +194,277 @@ describe('repostMessage', () => {
       },
     });
 
-    await expect(repostMessage(fake.message, 'boom')).rejects.toThrow('Missing Permissions');
+    await expect(repostMessage(fake.message, 'boom', { fetch: noFetch })).rejects.toThrow('Missing Permissions');
 
     expect(fake.webhooks).toHaveLength(1);
     expect(fake.webhooks[0].delete.calls).toHaveLength(1);
     expect(fake.recorders.delete.calls).toHaveLength(0);
   });
 
-  it('refuses channels that cannot own a webhook (threads, DMs) without touching the message', async () => {
-    const fake = createFakeMessage({ channelType: ChannelType.PublicThread });
+  it('takes the repost back when the original cannot be deleted, so the message never appears twice', async () => {
+    const fake = createFakeMessage({
+      deleteImpl: async () => {
+        throw new Error('Unknown Message');
+      },
+    });
 
-    await expect(repostMessage(fake.message, 'x')).rejects.toThrow(/cannot own a webhook/);
+    const outcome = await repostMessage(fake.message, 'x', { fetch: noFetch });
 
+    expect(outcome).toEqual({ status: 'rolled-back', reason: 'the original could not be deleted (Unknown Message)' });
+    const hook = fake.webhooks[0];
+    expect(hook.deleteMessage.calls).toHaveLength(1);
+    expect(hook.deleteMessage.calls[0][1]).toBeUndefined();
+    expect(hook.delete.calls).toHaveLength(1);
+  });
+
+  it('refuses DMs without touching the message', async () => {
+    const fake = createFakeMessage({ channelType: ChannelType.DM });
+
+    const outcome = await repostMessage(fake.message, 'x', { fetch: noFetch });
+
+    expect(outcome.status).toBe('skipped');
     expect(fake.recorders.createWebhook.calls).toHaveLength(0);
     expect(fake.recorders.delete.calls).toHaveLength(0);
+  });
+
+  it('keeps @silent messages silent', async () => {
+    const fake = createFakeMessage({ flags: MessageFlags.SuppressNotifications });
+
+    await repostMessage(fake.message, 'shh', { fetch: noFetch });
+
+    expect(sentPayload(fake).flags).toBe(MessageFlags.SuppressNotifications);
+  });
+
+  describe('threads and forum posts', () => {
+    it('posts through a webhook on the parent channel with threadId', async () => {
+      const fake = createFakeMessage({
+        channelType: ChannelType.PublicThread,
+        channelId: 'thread-1',
+        threadParentId: 'parent-1',
+      });
+
+      const outcome = await repostMessage(fake.message, 'in a thread', { fetch: noFetch });
+
+      expect(outcome.status).toBe('reposted');
+      expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+      expect(fake.recorders.parentCreateWebhook.calls).toHaveLength(1);
+      expect(sentPayload(fake).threadId).toBe('thread-1');
+      expect(fake.recorders.delete.calls).toHaveLength(1);
+      const repostId = (outcome as Extract<RepostOutcome, { status: 'reposted' }>).repostId;
+      expect(getRelay(repostId)?.channelId).toBe('thread-1');
+    });
+
+    it('takes a thread repost back with the thread id when the original cannot be deleted', async () => {
+      const fake = createFakeMessage({
+        channelType: ChannelType.PrivateThread,
+        channelId: 'thread-2',
+        deleteImpl: async () => {
+          throw new Error('Missing Permissions');
+        },
+      });
+
+      await repostMessage(fake.message, 'x', { fetch: noFetch });
+
+      expect(fake.webhooks[0].deleteMessage.calls[0][1]).toBe('thread-2');
+    });
+
+    it('works in forum posts (reply messages, not the starter)', async () => {
+      const fake = createFakeMessage({
+        channelType: ChannelType.PublicThread,
+        channelId: 'post-1',
+        messageId: 'reply-in-post',
+        threadParentType: ChannelType.GuildForum,
+      });
+
+      expect((await repostMessage(fake.message, 'x', { fetch: noFetch })).status).toBe('reposted');
+      expect(sentPayload(fake).threadId).toBe('post-1');
+    });
+
+    it("never reposts a forum post's starter message (deleting it would delete the whole post)", async () => {
+      const fake = createFakeMessage({
+        channelType: ChannelType.PublicThread,
+        channelId: 'post-1',
+        messageId: 'post-1',
+        threadParentType: ChannelType.GuildForum,
+      });
+
+      const outcome = await repostMessage(fake.message, 'x', { fetch: noFetch });
+
+      expect(outcome).toEqual({ status: 'skipped', reason: expect.stringContaining('forum post') });
+      expect(fake.recorders.parentCreateWebhook.calls).toHaveLength(0);
+      expect(fake.recorders.delete.calls).toHaveLength(0);
+    });
+
+    it.each([
+      ['archived', { threadArchived: true }],
+      ['locked', { threadLocked: true }],
+      ['parentless', { threadParentMissing: true }],
+    ])('skips %s threads', async (_label, threadOptions) => {
+      const fake = createFakeMessage({ channelType: ChannelType.PublicThread, ...threadOptions });
+
+      expect((await repostMessage(fake.message, 'x', { fetch: noFetch })).status).toBe('skipped');
+      expect(fake.recorders.parentCreateWebhook.calls).toHaveLength(0);
+      expect(fake.recorders.delete.calls).toHaveLength(0);
+    });
+  });
+
+  describe('attachments', () => {
+    it('downloads every attachment and re-uploads it with its name and alt text', async () => {
+      const fetch = attachmentFetch({
+        'https://cdn.discordapp.com/a.png': new Uint8Array([1, 2, 3]),
+        'https://cdn.discordapp.com/SPOILER_b.mp4': new Uint8Array([4, 5]),
+      });
+      const fake = createFakeMessage({
+        attachments: [
+          { url: 'https://cdn.discordapp.com/a.png', contentType: 'image/png', name: 'a.png', size: 3, description: 'a cat' },
+          { url: 'https://cdn.discordapp.com/SPOILER_b.mp4', contentType: 'video/mp4', name: 'SPOILER_b.mp4', size: 2 },
+        ],
+      });
+
+      const outcome = await repostMessage(fake.message, 'look', { fetch });
+
+      expect(outcome.status).toBe('reposted');
+      const files = sentPayload(fake).files;
+      expect(files.map((f) => f.name)).toEqual(['a.png', 'SPOILER_b.mp4']);
+      expect(files[0].description).toBe('a cat');
+      expect([...files[0].attachment]).toEqual([1, 2, 3]);
+      expect([...files[1].attachment]).toEqual([4, 5]);
+    });
+
+    it('leaves the message untouched when an attachment cannot be downloaded', async () => {
+      const fetch = attachmentFetch({ 'https://cdn.discordapp.com/a.png': 403 });
+      const fake = createFakeMessage({
+        attachments: [{ url: 'https://cdn.discordapp.com/a.png', contentType: 'image/png', name: 'a.png', size: 3 }],
+      });
+
+      const outcome = await repostMessage(fake.message, 'look', { fetch });
+
+      expect(outcome).toEqual({ status: 'skipped', reason: 'a.png answered HTTP 403' });
+      expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+      expect(fake.recorders.delete.calls).toHaveLength(0);
+    });
+
+    it('leaves the message untouched when the attachments exceed the cap, without downloading', async () => {
+      const fetch = attachmentFetch({});
+      const fake = createFakeMessage({
+        attachments: [{ url: 'https://cdn.discordapp.com/big.mp4', contentType: 'video/mp4', size: 30 * 1024 * 1024 }],
+      });
+
+      const outcome = await repostMessage(fake.message, 'look', { fetch });
+
+      expect(outcome.status).toBe('skipped');
+      expect(fetch.urls).toEqual([]);
+      expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+    });
+
+    it('honors LINK_REPOST_MAX_ATTACHMENT_BYTES', async () => {
+      vi.stubEnv('LINK_REPOST_MAX_ATTACHMENT_BYTES', '100');
+      const fake = createFakeMessage({
+        attachments: [{ url: 'https://cdn.discordapp.com/a.png', contentType: 'image/png', size: 101 }],
+      });
+
+      expect(repostBlocker(fake.message)).toBe('its attachments total 101 B, over the 100 B repost cap');
+    });
+  });
+
+  describe('messages that cannot be carried over whole', () => {
+    it('refuses messages with stickers (webhooks cannot send them)', async () => {
+      const fake = createFakeMessage({ stickers: [{ id: 's1', name: 'pog', format: 1 }] });
+
+      const outcome = await repostMessage(fake.message, 'x', { fetch: noFetch });
+
+      expect(outcome).toEqual({ status: 'skipped', reason: expect.stringContaining('sticker') });
+      expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+      expect(fake.recorders.delete.calls).toHaveLength(0);
+    });
+
+    it('refuses polls', () => {
+      expect(repostBlocker(createFakeMessage({ hasPoll: true }).message)).toMatch(/poll/);
+    });
+
+    it('refuses a rewritten text too long for a webhook', async () => {
+      const fake = createFakeMessage({ content: 'x' });
+
+      const outcome = await repostMessage(fake.message, 'y'.repeat(2001), { fetch: noFetch });
+
+      expect(outcome.status).toBe('skipped');
+      expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+    });
+  });
+
+  describe('reply context', () => {
+    it('prepends a subtext line naming the replied-to member (server nickname) with a jump link', async () => {
+      const fake = createFakeMessage({
+        guildId: 'g1',
+        channelId: 'c1',
+        referencedMessageId: 'm0',
+        repliedUserId: 'u2',
+        repliedUserDisplayName: 'felix_global',
+        repliedMemberDisplayName: 'Felix',
+      });
+
+      await repostMessage(fake.message, 'agreed https://fixvx.com/u/status/1', { fetch: noFetch });
+
+      expect(sentPayload(fake).content).toBe(
+        '-# ↪ replying to Felix · https://discord.com/channels/g1/c1/m0\nagreed https://fixvx.com/u/status/1',
+      );
+    });
+
+    it('falls back to fetching the referenced message when Discord sent no replied user', async () => {
+      const referenced = createFakeMessage({ messageId: 'm0', authorDisplayName: 'Jason' }).message;
+      const fake = createFakeMessage({ guildId: 'g1', channelId: 'c1', referencedMessageId: 'm0', fetchedMessageById: { m0: referenced } });
+
+      await repostMessage(fake.message, 'yo', { fetch: noFetch });
+
+      expect(sentPayload(fake).content).toBe('-# ↪ replying to Jason · https://discord.com/channels/g1/c1/m0\nyo');
+    });
+
+    it('keeps just the jump link when the replied-to message is gone', async () => {
+      const fake = createFakeMessage({ guildId: 'g1', channelId: 'c1', referencedMessageId: 'deleted' });
+
+      await repostMessage(fake.message, 'yo', { fetch: noFetch });
+
+      expect(sentPayload(fake).content).toBe('-# ↪ replying to https://discord.com/channels/g1/c1/deleted\nyo');
+    });
+
+    it('adds nothing for forwards', async () => {
+      const fake = createFakeMessage({ referencedMessageId: 'm0', referenceType: MessageReferenceType.Forward });
+
+      await repostMessage(fake.message, 'yo', { fetch: noFetch });
+
+      expect(sentPayload(fake).content).toBe('yo');
+    });
+
+    it('drops the context line rather than the message when both would not fit', async () => {
+      const fake = createFakeMessage({ referencedMessageId: 'm0', repliedUserId: 'u2', repliedUserDisplayName: 'Felix' });
+      const body = 'z'.repeat(1990);
+
+      await repostMessage(fake.message, body, { fetch: noFetch });
+
+      expect(sentPayload(fake).content).toBe(body);
+    });
+  });
+});
+
+describe('webhookTargetOf', () => {
+  it.each([ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildVoice])(
+    'lets channel type %s own the webhook itself',
+    (type) => {
+      const { message } = createFakeMessage({ channelType: type });
+      expect(webhookTargetOf(message.channel)).toEqual({ channel: message.channel });
+    },
+  );
+
+  it('routes threads through their parent', () => {
+    const { message } = createFakeMessage({ channelType: ChannelType.AnnouncementThread, channelId: 't1' });
+    expect(webhookTargetOf(message.channel)?.threadId).toBe('t1');
+  });
+
+  it('has nothing for DMs', () => {
+    expect(webhookTargetOf(createFakeMessage({ channelType: ChannelType.DM }).message.channel)).toBeUndefined();
   });
 });
 
 // Type-only assertion that repostMessage accepts a Message — guards against signature drift.
-const _typecheck: (m: Message, c: string) => Promise<void> = repostMessage;
+const _typecheck: (m: Message, c: string) => Promise<RepostOutcome> = repostMessage;
 void _typecheck;
