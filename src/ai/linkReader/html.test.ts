@@ -77,6 +77,26 @@ describe('extractMetadata', () => {
   it('falls back to <title> when there is no og:title', () => {
     expect(extractMetadata('<title>Only &lt;title&gt;</title>', 'https://x.example/').title).toBe('Only <title>');
   });
+
+  it('bounds what a hostile page controls: titles, names, dates, language and URLs', () => {
+    const huge = 'x'.repeat(200_000);
+    const hostile = `<html lang="${huge}"><head><title>${huge}</title>
+      <meta property="og:title" content="${huge}"><meta property="og:site_name" content="${huge}">
+      <meta name="author" content="${huge}"><meta property="article:published_time" content="${huge}">
+      <meta property="og:type" content="${huge}">
+      <meta property="og:image" content="https://cdn.example/${huge}.jpg"><meta property="og:image" content="/ok.jpg">
+      <meta property="og:video" content="https://cdn.example/${huge}.mp4">
+      <link rel="canonical" href="https://example.com/${huge}"></head></html>`;
+    const meta = extractMetadata(hostile, 'https://example.com/page');
+    for (const value of [meta.title, meta.documentTitle, meta.siteName, meta.author, meta.publishedAt, meta.type]) {
+      expect(value?.length).toBe(500);
+      expect(value?.endsWith('…')).toBe(true);
+    }
+    expect(meta.lang).toBeUndefined();
+    expect(meta.canonicalUrl).toBeUndefined();
+    expect(meta.images).toEqual(['https://example.com/ok.jpg']);
+    expect(meta.videos).toEqual([]);
+  });
 });
 
 describe('JSON-LD', () => {
@@ -100,6 +120,17 @@ describe('JSON-LD', () => {
 
   it('returns undefined without an article-like node', () => {
     expect(findJsonLdArticle([{ '@type': 'Organization', name: 'X' }])).toBeUndefined();
+  });
+
+  it("bounds a hostile article's headline, author, type and date (the body is capped by its reader)", () => {
+    const huge = 'y'.repeat(100_000);
+    const article = findJsonLdArticle([
+      { '@type': [huge, 'Article'], headline: huge, author: { name: huge }, datePublished: huge, articleBody: huge },
+    ]);
+    for (const value of [article?.type, article?.headline, article?.author, article?.datePublished]) {
+      expect(value?.length).toBe(500);
+    }
+    expect(article?.body).toHaveLength(100_000);
   });
 });
 

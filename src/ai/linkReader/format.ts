@@ -59,10 +59,15 @@ function describeVideoLine(video: LinkVideo): string {
   return `${head}${details ? `: ${details}` : ''}`;
 }
 
+// Titles and names come from the linked page or post: bounded here whatever the extractor passed on.
+const TITLE_CHARS = 300;
+const NAME_CHARS = 150;
+
 function headline(content: LinkContent): string {
   const who = withHandle(content.author, content.handle);
-  const title = content.title ? `"${content.title}"` : undefined;
-  return [content.kind, title, who ? `by ${who}` : undefined, content.site ? `on ${content.site}` : undefined]
+  const title = content.title ? `"${oneLine(content.title, TITLE_CHARS)}"` : undefined;
+  const site = content.site ? oneLine(content.site, NAME_CHARS) : undefined;
+  return [content.kind, title, who ? `by ${oneLine(who, NAME_CHARS)}` : undefined, site ? `on ${site}` : undefined]
     .filter(Boolean)
     .join(' ');
 }

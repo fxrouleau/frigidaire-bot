@@ -255,8 +255,18 @@ export type PageMetadata = {
   meta: Record<string, string>;
 };
 
+// A page controls its title, names and URLs, and they ride into every model call that shows the link:
+// a real title is a line and a real URL a few hundred characters, not the 2 MB a page can hold.
+const MAX_LABEL_CHARS = 500;
+const MAX_URL_CHARS = 2048;
+
+/** A page-supplied title, name or date, cut to MAX_LABEL_CHARS. */
+function label(value: string | undefined): string | undefined {
+  return value !== undefined && value.length > MAX_LABEL_CHARS ? `${value.slice(0, MAX_LABEL_CHARS - 1)}…` : value;
+}
+
 function resolveUrl(value: string | undefined, baseUrl: string): string | undefined {
-  if (!value) return undefined;
+  if (!value || value.length > MAX_URL_CHARS) return undefined;
   try {
     const url = new URL(value.trim(), baseUrl);
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : undefined;
@@ -295,11 +305,13 @@ export function extractMetadata(html: string, baseUrl: string): PageMetadata {
         meta[key].push(content);
       }
     } else if (tag.name === 'title' && documentTitle === undefined) {
-      documentTitle = collapseWhitespace(decodeEntities(rawTextAfter(html, lower, tag))) || undefined;
+      documentTitle = label(collapseWhitespace(decodeEntities(rawTextAfter(html, lower, tag))) || undefined);
     } else if (tag.name === 'link' && !canonical && tag.attrs.rel?.toLowerCase().split(/\s+/).includes('canonical')) {
       canonical = resolveUrl(tag.attrs.href, baseUrl);
     } else if (tag.name === 'html' && !lang && tag.attrs.lang) {
-      lang = tag.attrs.lang.trim();
+      // A language tag ("en", "fr-CA"): anything longer isn't one.
+      const tagValue = tag.attrs.lang.trim();
+      if (tagValue.length <= 35) lang = tagValue;
     }
   }
 
@@ -331,21 +343,25 @@ export function extractMetadata(html: string, baseUrl: string): PageMetadata {
   for (const [key, values] of Object.entries(meta)) flatMeta[key] = values[0];
 
   return {
-    title: firstOf(meta, ['og:title', 'twitter:title']) ?? documentTitle,
+    title: label(firstOf(meta, ['og:title', 'twitter:title'])) ?? documentTitle,
     documentTitle,
     description: firstOf(meta, ['og:description', 'twitter:description', 'description']),
-    siteName: firstOf(meta, ['og:site_name', 'application-name']),
-    author: firstOf(meta, ['author', 'article:author', 'parsely-author', 'sailthru.author', 'dc.creator', 'byl']),
-    publishedAt: firstOf(meta, [
-      'article:published_time',
-      'datepublished',
-      'publish-date',
-      'pubdate',
-      'parsely-pub-date',
-      'dc.date',
-      'date',
-    ]),
-    type: firstOf(meta, ['og:type']),
+    siteName: label(firstOf(meta, ['og:site_name', 'application-name'])),
+    author: label(
+      firstOf(meta, ['author', 'article:author', 'parsely-author', 'sailthru.author', 'dc.creator', 'byl']),
+    ),
+    publishedAt: label(
+      firstOf(meta, [
+        'article:published_time',
+        'datepublished',
+        'publish-date',
+        'pubdate',
+        'parsely-pub-date',
+        'dc.date',
+        'date',
+      ]),
+    ),
+    type: label(firstOf(meta, ['og:type'])),
     canonicalUrl: canonical ?? resolveUrl(firstOf(meta, ['og:url']), baseUrl),
     lang,
     images,
@@ -452,12 +468,12 @@ export function findJsonLdArticle(blocks: unknown[]): JsonLdArticle | undefined 
   if (!best) return undefined;
   const body = stringField(best, 'articleBody') ?? stringField(best, 'text');
   return {
-    type: typesOf(best)[0],
-    headline: stringField(best, 'headline') ?? stringField(best, 'name'),
+    type: label(typesOf(best)[0]),
+    headline: label(stringField(best, 'headline') ?? stringField(best, 'name')),
     description: stringField(best, 'description'),
     body: body ? decodeEntities(body) : undefined,
-    author: nameOf(best.author) ?? nameOf(best.creator),
-    datePublished: stringField(best, 'datePublished') ?? stringField(best, 'uploadDate'),
+    author: label(nameOf(best.author) ?? nameOf(best.creator)),
+    datePublished: label(stringField(best, 'datePublished') ?? stringField(best, 'uploadDate')),
   };
 }
 
