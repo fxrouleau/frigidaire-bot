@@ -46,3 +46,25 @@ jobs:
         push: false
         cache-from: type=gha
         cache-to: type=gha,mode=max
+
+  # The code-execution sidecar (sandbox/): build it and run the smoke test against a container started with the same
+  # hardening as docker-compose.yaml. Its own cache scope keeps it from evicting the bot image's layers.
+  sandbox:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: docker/setup-buildx-action@v3
+
+    - name: Build sandbox image
+      uses: docker/build-push-action@v6
+      with:
+        context: sandbox
+        load: true
+        tags: frigidaire-sandbox:ci
+        cache-from: type=gha,scope=sandbox
+        cache-to: type=gha,mode=max,scope=sandbox
+
+    - name: Smoke-test the sandbox
+      run: sh sandbox/ci-smoke.sh frigidaire-sandbox:ci
