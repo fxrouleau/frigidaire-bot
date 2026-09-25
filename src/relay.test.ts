@@ -37,6 +37,28 @@ describe('relay registry', () => {
     expect(bulk.get('r2')?.kind).toBe('regret');
   });
 
+  it('keeps the id of the message a relay replaced', () => {
+    recordRelay({ messageId: 'r1', channelId: 'c', authorId: 'u1', authorName: 'Jasper', kind: 'link_fix', originalId: 'm1' });
+    expect(getRelay('r1')?.originalId).toBe('m1');
+    expect(getRelays(['r1']).get('r1')?.originalId).toBe('m1');
+  });
+
+  it('adds the original-id column to a table created before it existed, keeping its rows', () => {
+    const botDb = new BotDb(':memory:');
+    botDb.db.exec(`
+      CREATE TABLE relayed_messages (
+        message_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, author_id TEXT NOT NULL,
+        author_name TEXT NOT NULL, kind TEXT NOT NULL, created_at INTEGER NOT NULL
+      );
+      INSERT INTO relayed_messages VALUES ('old', 'c', 'u1', 'Jasper', 'link_fix', 5);
+    `);
+    setBotDbForTesting(botDb);
+
+    expect(getRelay('old')).toEqual({ messageId: 'old', channelId: 'c', authorId: 'u1', authorName: 'Jasper', kind: 'link_fix', createdAt: 5 });
+    recordRelay({ messageId: 'new', channelId: 'c', authorId: 'u1', authorName: 'Jasper', kind: 'regret', originalId: 'm2' });
+    expect(getRelay('new')?.originalId).toBe('m2');
+  });
+
   it('keeps the first record when the same message is recorded twice', () => {
     recordRelay({ messageId: 'r1', channelId: 'c', authorId: 'u1', authorName: 'Jasper', kind: 'link_fix' });
     recordRelay({ messageId: 'r1', channelId: 'c', authorId: 'u9', authorName: 'Other', kind: 'regret' });

@@ -163,6 +163,55 @@ describe('catching up between pings', () => {
     expect(ping2.recorders.messagesFetch.calls).toEqual([[{ limit: 100, before: '1020' }]]);
   });
 
+  it('does not bring back a pinged message as new when the link fix reposted it while it was being answered', async () => {
+    const provider = new FakeProvider([textResponse('looks fake'), textResponse('sure'), textResponse('ok')]);
+    const agent = makeAgent(provider);
+    const question = 'fridge what do you make of this https://x.com/u/status/1';
+    const ping1 = createFakeMessage({
+      ...BASE,
+      messageId: '1010',
+      content: question,
+      channelMessages: [],
+      replyImpl: async () => ({ id: '1012' }),
+    });
+    await agent.handleMention(ping1.message);
+
+    // Meanwhile the link fix reposted the question (as Alice) and deleted the original.
+    const relay = chat('1011', 'fridge what do you make of this https://fixvx.com/u/status/1', {
+      webhookId: 'hook-1',
+      authorId: 'hook-1',
+      authorUsername: 'Alice',
+      authorDisplayName: 'Alice',
+    });
+    recordRelay({ messageId: '1011', channelId: CH, authorId: ALICE, authorName: 'Alice', kind: 'link_fix', originalId: '1010' });
+    const ownReply = createFakeBotMessage({ messageId: '1012', content: 'looks fake', channelId: CH, botUserId: BOT_ID });
+    const bobTalk = chat('1013', 'it is real', { authorId: BOB, authorDisplayName: 'Bob' });
+    const log = [relay, ownReply.message, bobTalk];
+
+    const ping2 = createFakeMessage({ ...BASE, messageId: '1020', content: 'you sure?', channelMessages: log });
+    await agent.handleMention(ping2.message);
+
+    const second = provider.calls[1].messages;
+    expect(countText(second, 'what do you make of this')).toBe(1);
+    expect(indexOfText(second, question)).toBeGreaterThan(0);
+    expect(indexOfText(second, `Bob (id:${BOB}): it is real`)).toBeGreaterThan(indexOfText(second, question));
+
+    // Replying to the relay is replying to a message already in the window: no reply-context block.
+    const ping3 = createFakeMessage({
+      ...BASE,
+      messageId: '1030',
+      content: 'this one',
+      referencedMessageId: '1011',
+      channelMessages: [...log, ping2.message],
+    });
+    await agent.handleMention(ping3.message);
+
+    const third = provider.calls[2].messages;
+    expect(indexOfText(third, REPLY_CONTEXT)).toBe(-1);
+    expect(countText(third, 'what do you make of this')).toBe(1);
+    expect(textOf(third.at(-1))).toContain(`(replying to Alice — ${jumpLink('1011')}): this one`);
+  });
+
   it("drops its own auto-transcript replies from seeded history and from the catch-up", async () => {
     const provider = new FakeProvider([textResponse('one'), textResponse('two')]);
     const agent = makeAgent(provider);

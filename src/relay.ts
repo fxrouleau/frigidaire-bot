@@ -7,7 +7,7 @@ import { getMemoryStore } from './ai/memory';
 import { nameKey } from './ai/memory/memoryStore';
 import { canonicalUserId } from './linkedAccounts';
 import { logger } from './logger';
-import { getBotDb } from './storage/botDb';
+import { type BotDb, getBotDb } from './storage/botDb';
 
 export type RelayKind = 'link_fix' | 'regret';
 
@@ -18,6 +18,12 @@ export type RelayRecord = {
   authorName: string;
   kind: RelayKind;
   createdAt: number;
+  /**
+   * The member's message this relay replaced (deleted by the bot for a link fix, by the member for a
+   * regret). Lets a conversation that already holds the original recognize the relay as the same
+   * message. Absent for relays recorded before the column existed.
+   */
+  originalId?: string;
 };
 
 type RelayRow = {
@@ -27,6 +33,7 @@ type RelayRow = {
   author_name: string;
   kind: RelayKind;
   created_at: number;
+  original_id: string | null;
 };
 
 const SCHEMA = `
@@ -36,14 +43,26 @@ const SCHEMA = `
     author_id   TEXT    NOT NULL,
     author_name TEXT    NOT NULL,
     kind        TEXT    NOT NULL,
-    created_at  INTEGER NOT NULL
+    created_at  INTEGER NOT NULL,
+    original_id TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_relayed_messages_author ON relayed_messages(author_id);
 `;
 
+// Databases whose relayed_messages table is known to have every column (see db()).
+const migrated = new WeakSet<BotDb>();
+
 function db() {
   const botDb = getBotDb();
   botDb.ensureSchema('relayed_messages', SCHEMA);
+  if (!migrated.has(botDb)) {
+    // Additive migration: a table created before original_id existed gets the column (NULL for old rows).
+    const columns = botDb.db.prepare('PRAGMA table_info(relayed_messages)').all() as { name: string }[];
+    if (!columns.some((c) => c.name === 'original_id')) {
+      botDb.db.exec('ALTER TABLE relayed_messages ADD COLUMN original_id TEXT');
+    }
+    migrated.add(botDb);
+  }
   return botDb;
 }
 
@@ -55,6 +74,7 @@ function toRecord(row: RelayRow): RelayRecord {
     authorName: row.author_name,
     kind: row.kind,
     createdAt: row.created_at,
+    ...(row.original_id ? { originalId: row.original_id } : {}),
   };
 }
 
@@ -63,8 +83,8 @@ export function recordRelay(record: Omit<RelayRecord, 'createdAt'> & { createdAt
   try {
     db()
       .stmt(
-        `INSERT INTO relayed_messages (message_id, channel_id, author_id, author_name, kind, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO relayed_messages (message_id, channel_id, author_id, author_name, kind, created_at, original_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(message_id) DO NOTHING`,
       )
       .run(
@@ -74,6 +94,7 @@ export function recordRelay(record: Omit<RelayRecord, 'createdAt'> & { createdAt
         record.authorName,
         record.kind,
         record.createdAt ?? Date.now(),
+        record.originalId ?? null,
       );
   } catch (error) {
     logger.warn(`relay: failed to record relayed message ${record.messageId}:`, error);

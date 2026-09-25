@@ -240,8 +240,8 @@ describe('DeletedMessageReposter', () => {
       { content: 'a'.repeat(1500), allowedMentions: { parse: [] } },
       { content: 'b'.repeat(1500), allowedMentions: { parse: [] }, files: [{ attachment: bytes, name: 'pic.png' }] },
     ]);
-    expect(getRelay('repost-1-0')).toMatchObject({ authorId: JASPER, kind: 'regret' });
-    expect(getRelay('repost-1-1')).toMatchObject({ authorId: JASPER, kind: 'regret' });
+    expect(getRelay('repost-1-0')).toMatchObject({ authorId: JASPER, kind: 'regret', originalId: 'm1' });
+    expect(getRelay('repost-1-1')).toMatchObject({ authorId: JASPER, kind: 'regret', originalId: 'm1' });
   });
 
   it('judges an image whose bytes could not be decoded (or saved) by its name alone', async () => {

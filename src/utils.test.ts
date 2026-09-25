@@ -168,7 +168,13 @@ describe('repostMessage', () => {
 
     expect(outcome.status).toBe('reposted');
     const repostId = (outcome as Extract<RepostOutcome, { status: 'reposted' }>).repostId;
-    expect(getRelay(repostId)).toMatchObject({ authorId: 'user-7', authorName: 'Jasper', channelId: 'chan-9', kind: 'link_fix' });
+    expect(getRelay(repostId)).toMatchObject({
+      authorId: 'user-7',
+      authorName: 'Jasper',
+      channelId: 'chan-9',
+      kind: 'link_fix',
+      originalId: 'msg-1',
+    });
   });
 
   it('prefers the member nickname over the author displayName for the webhook name', async () => {
