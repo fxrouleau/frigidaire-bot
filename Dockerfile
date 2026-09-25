@@ -2,7 +2,9 @@
 
 # ---- base: dependencies only (cached unless package.json/yarn.lock/.yarnrc.yml change) ----
 FROM node:26-alpine AS base
-# Native module build tools (better-sqlite3, sharp)
+# node-gyp toolchain. better-sqlite3 13 ships N-API prebuilds (linuxmusl x64/arm64 included) and its binding.gyp
+# builds nothing when one matches, but Yarn still runs node-gyp on it, and it compiles from source on any other
+# platform. (sharp 0.35 needs none of this: its @img/sharp-linuxmusl-* packages are prebuilt.)
 RUN apk add --no-cache python3 make g++
 # Corepack is no longer bundled with Node 25+ — install it from npm
 RUN npm install -g corepack && corepack enable
