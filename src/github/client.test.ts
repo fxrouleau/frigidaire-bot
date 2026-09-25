@@ -175,12 +175,12 @@ describe('GitHubClient.getIssue', () => {
 describe('GitHubClient.createComment', () => {
   it('posts the body to the issue’s comments and returns the comment link', async () => {
     const { fake, client } = clientFor(createFakeGitHub({ issues: [{ number: 7, title: 'Polls', labels: [] }] }));
-    const comment = await client.createComment(7, '+1 from **Jason**');
+    const comment = await client.createComment(7, '+1 from **Jasper**');
 
     expect(comment.htmlUrl).toMatch(/^https:\/\/github\.com\/owner\/repo\/issues\/7#issuecomment-\d+$/);
     expect(fake.requests[0]).toMatchObject({ method: 'POST', path: '/repos/owner/repo/issues/7/comments' });
-    expect(fake.requests[0].body).toEqual({ body: '+1 from **Jason**' });
-    expect(fake.comments).toEqual([{ issueNumber: 7, body: '+1 from **Jason**', htmlUrl: comment.htmlUrl }]);
+    expect(fake.requests[0].body).toEqual({ body: '+1 from **Jasper**' });
+    expect(fake.comments).toEqual([{ issueNumber: 7, body: '+1 from **Jasper**', htmlUrl: comment.htmlUrl }]);
   });
 
   it('classifies a refused comment (locked issue) as forbidden', async () => {

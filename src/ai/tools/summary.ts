@@ -8,7 +8,7 @@
 // People: the summarizer gets a WHO'S WHO block for the people in the stretch — everyone who talked
 // and everyone the messages refer to (mentions, or any name they go by: display name, handle, IRL
 // name, nickname) — with a few durable memories about the most prominent ones as background, so it
-// understands references ("the depot" is where Jason works). The prompt fences that background off:
+// understands references ("the depot" is where Jasper works). The prompt fences that background off:
 // it explains the chat, it is never reported as something that happened in it.
 import { type Message, SnowflakeUtil } from 'discord.js';
 import type OpenAI from 'openai';
@@ -392,7 +392,7 @@ function backgroundFor(store: MemoryStore, person: StretchPerson): string[] {
   }
 }
 
-/** "Jason (@cigalefourmi) — real name Alex; also called J" */
+/** "Jasper (@lapinlune) — real name Alex; also called J" */
 function describePerson(person: StretchPerson): string {
   const identity = person.identity;
   const handle =

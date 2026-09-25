@@ -8,8 +8,8 @@ import { toolDefinitions } from '../tools';
 import { type ToolDefinition, type ToolHandlerContext, createTurnEffects } from '../types';
 import { birthdayTools } from './birthdays';
 
-const FELIX = '700000000000000001';
-const JASON = '700000000000000002';
+const REMI = '700000000000000001';
+const JASPER = '700000000000000002';
 const MARIE = '700000000000000003';
 // Friday 2026-09-25 10:00 EDT
 const NOW = new Date('2026-09-25T14:00:00Z');
@@ -20,8 +20,8 @@ function tool(name: string): ToolDefinition {
   return found;
 }
 
-function run(name: string, args: Record<string, unknown>, authorId = FELIX) {
-  const { message } = createFakeMessage({ authorId, authorDisplayName: authorId === FELIX ? 'fridge enjoyer' : 'x' });
+function run(name: string, args: Record<string, unknown>, authorId = REMI) {
+  const { message } = createFakeMessage({ authorId, authorDisplayName: authorId === REMI ? 'fridge enjoyer' : 'x' });
   const ctx = { message, channelId: message.channel.id, turn: createTurnEffects() } as unknown as ToolHandlerContext;
   return tool(name).handler(ctx, args);
 }
@@ -34,9 +34,9 @@ beforeEach(() => {
   setBotDbForTesting(new BotDb(':memory:'));
   memory = new MemoryStore(':memory:');
   setMemoryStoreForTesting(memory);
-  memory.upsertIdentity(FELIX, 'fridge enjoyer');
-  memory.upsertIdentity(JASON, 'Wheezer');
-  memory.updateIdentityMeta(JASON, { irl_name: 'Jason' });
+  memory.upsertIdentity(REMI, 'fridge enjoyer');
+  memory.upsertIdentity(JASPER, 'Wheelie');
+  memory.updateIdentityMeta(JASPER, { irl_name: 'Jasper' });
   memory.upsertIdentity(MARIE, 'Marie');
 });
 
@@ -58,14 +58,14 @@ describe('set_birthday', () => {
     expect(await run('set_birthday', { person: 'me', date: '10-01' })).toBe(
       "Saved fridge enjoyer's birthday: October 1. Next one is in 6 day(s).",
     );
-    expect(getBirthday(FELIX)).toMatchObject({ month: 10, day: 1, year: null, setBy: FELIX, lastAnnouncedYear: null });
+    expect(getBirthday(REMI)).toMatchObject({ month: 10, day: 1, year: null, setBy: REMI, lastAnnouncedYear: null });
   });
 
   it("saves someone else's birthday by IRL name, with the year", async () => {
-    expect(await run('set_birthday', { person: 'Jason', date: '1994-12-03' })).toBe(
-      "Saved Wheezer's birthday: December 3, 1994. Next one is in 69 day(s) (turning 32).",
+    expect(await run('set_birthday', { person: 'Jasper', date: '1994-12-03' })).toBe(
+      "Saved Wheelie's birthday: December 3, 1994. Next one is in 69 day(s) (turning 32).",
     );
-    expect(getBirthday(JASON)).toMatchObject({ month: 12, day: 3, year: 1994, setBy: FELIX });
+    expect(getBirthday(JASPER)).toMatchObject({ month: 12, day: 3, year: 1994, setBy: REMI });
   });
 
   it("marks a birthday that is today as announced, so the reply is the wish and there's no duplicate post", async () => {
@@ -75,13 +75,13 @@ describe('set_birthday', () => {
   });
 
   it('keeps the announcement state for a same-day correction and resets it for a new date', async () => {
-    saveBirthday({ userId: JASON, date: { month: 3, day: 1, year: null }, setBy: 'x', now: 0, lastAnnouncedYear: 2026 });
-    await run('set_birthday', { person: 'Wheezer', date: '1990-03-01' });
-    expect(getBirthday(JASON)).toMatchObject({ year: 1990, lastAnnouncedYear: 2026 });
+    saveBirthday({ userId: JASPER, date: { month: 3, day: 1, year: null }, setBy: 'x', now: 0, lastAnnouncedYear: 2026 });
+    await run('set_birthday', { person: 'Wheelie', date: '1990-03-01' });
+    expect(getBirthday(JASPER)).toMatchObject({ year: 1990, lastAnnouncedYear: 2026 });
 
-    const moved = await run('set_birthday', { person: 'Wheezer', date: '03-02' });
+    const moved = await run('set_birthday', { person: 'Wheelie', date: '03-02' });
     expect(moved).toContain('(was March 1, 1990)');
-    expect(getBirthday(JASON)).toMatchObject({ month: 3, day: 2, year: null, lastAnnouncedYear: null });
+    expect(getBirthday(JASPER)).toMatchObject({ month: 3, day: 2, year: null, lastAnnouncedYear: null });
   });
 
   it('refuses bad dates and unknown people without saving', async () => {
@@ -91,14 +91,14 @@ describe('set_birthday', () => {
     expect(await run('set_birthday', { person: 'Gandalf', date: '01-01' })).toMatch(
       /^Nothing saved\. I don't know who "Gandalf" is\./,
     );
-    expect(getBirthday(FELIX)).toBeUndefined();
+    expect(getBirthday(REMI)).toBeUndefined();
   });
 });
 
 describe('list_birthdays', () => {
   it('lists soonest first, today on top, with ages when known', async () => {
-    saveBirthday({ userId: JASON, date: { month: 1, day: 2, year: 1990 }, setBy: 'x', now: 0, lastAnnouncedYear: null });
-    saveBirthday({ userId: FELIX, date: { month: 9, day: 26, year: null }, setBy: 'x', now: 0, lastAnnouncedYear: null });
+    saveBirthday({ userId: JASPER, date: { month: 1, day: 2, year: 1990 }, setBy: 'x', now: 0, lastAnnouncedYear: null });
+    saveBirthday({ userId: REMI, date: { month: 9, day: 26, year: null }, setBy: 'x', now: 0, lastAnnouncedYear: null });
     saveBirthday({ userId: MARIE, date: { month: 9, day: 25, year: null }, setBy: 'x', now: 0, lastAnnouncedYear: null });
     saveBirthday({
       userId: '700000000000000009',
@@ -113,7 +113,7 @@ describe('list_birthdays', () => {
         '4 birthday(s), soonest first:',
         '- Marie: September 25 (TODAY)',
         '- fridge enjoyer: September 26 (tomorrow)',
-        '- Wheezer: January 2 (in 99 days, turning 37)',
+        '- Wheelie: January 2 (in 99 days, turning 37)',
         '- <@700000000000000009>: September 24 (in 364 days)',
       ].join('\n'),
     );
@@ -126,10 +126,10 @@ describe('list_birthdays', () => {
 
 describe('forget_birthday', () => {
   it('deletes a saved birthday and says when there was none', async () => {
-    await run('set_birthday', { person: 'Wheezer', date: '01-02' });
-    expect(await run('forget_birthday', { person: 'jason' })).toBe("Forgot Wheezer's birthday.");
-    expect(getBirthday(JASON)).toBeUndefined();
-    expect(await run('forget_birthday', { person: 'jason' })).toBe("I didn't have a birthday saved for Wheezer.");
+    await run('set_birthday', { person: 'Wheelie', date: '01-02' });
+    expect(await run('forget_birthday', { person: 'jasper' })).toBe("Forgot Wheelie's birthday.");
+    expect(getBirthday(JASPER)).toBeUndefined();
+    expect(await run('forget_birthday', { person: 'jasper' })).toBe("I didn't have a birthday saved for Wheelie.");
   });
 });
 
@@ -137,7 +137,7 @@ describe('birthdays with a linked side account (LINKED_ACCOUNTS)', () => {
   const SIDE = '700000000000000004';
 
   beforeEach(() => {
-    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASPER}`);
     memory.upsertIdentity(SIDE, 'JayAlt', 'jay_alt');
   });
 
@@ -147,13 +147,13 @@ describe('birthdays with a linked side account (LINKED_ACCOUNTS)', () => {
 
   it("files a birthday under the main account, whether named by the side account or set as \"me\" from it", async () => {
     expect(await run('set_birthday', { person: 'JayAlt', date: '12-03' })).toBe(
-      "Saved Wheezer's birthday: December 3. Next one is in 69 day(s).",
+      "Saved Wheelie's birthday: December 3. Next one is in 69 day(s).",
     );
-    expect(getBirthday(JASON)).toMatchObject({ month: 12, day: 3, setBy: FELIX });
+    expect(getBirthday(JASPER)).toMatchObject({ month: 12, day: 3, setBy: REMI });
     expect(getBirthday(SIDE)).toBeUndefined();
 
     await run('set_birthday', { person: 'me', date: '12-04' }, SIDE);
-    expect(getBirthday(JASON)).toMatchObject({ month: 12, day: 4, setBy: JASON });
-    expect(await run('forget_birthday', { person: 'me' }, SIDE)).toBe("Forgot Wheezer's birthday.");
+    expect(getBirthday(JASPER)).toMatchObject({ month: 12, day: 4, setBy: JASPER });
+    expect(await run('forget_birthday', { person: 'me' }, SIDE)).toBe("Forgot Wheelie's birthday.");
   });
 });

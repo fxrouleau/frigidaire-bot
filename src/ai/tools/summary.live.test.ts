@@ -20,15 +20,15 @@ describe.skipIf(!RUN_LIVE)('summarizeChannel live (paid, opt-in)', () => {
     // Background memories are context only: a fact nobody said in the chat must not show up in the summary.
     const store = new MemoryStore(':memory:');
     setMemoryStoreForTesting(store);
-    store.upsertIdentity('u1', 'Jason', 'cigalefourmi');
-    await store.save({ category: 'fact', subject: 'Jason', subject_user_id: 'u1', content: 'Keeps eleven pet iguanas' });
+    store.upsertIdentity('u1', 'Jasper', 'lapinlune');
+    await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: 'u1', content: 'Keeps eleven pet iguanas' });
 
     const now = new Date();
     const lines: [string, string, string][] = [
-      ['u1', 'Jason', 'who is down for wings friday at 8'],
-      ['u2', 'Simon', 'me, the usual place?'],
-      ['u1', 'Jason', 'yeah, and bring the switch for mario kart after'],
-      ['u3', 'Felix', 'cant, working late. save me some'],
+      ['u1', 'Jasper', 'who is down for wings friday at 8'],
+      ['u2', 'Silas', 'me, the usual place?'],
+      ['u1', 'Jasper', 'yeah, and bring the switch for mario kart after'],
+      ['u3', 'Remi', 'cant, working late. save me some'],
     ];
     const history = lines.map(([authorId, name, content], i) => {
       const createdAt = new Date(now.getTime() - (lines.length - i) * 5 * 60_000);
@@ -37,7 +37,7 @@ describe.skipIf(!RUN_LIVE)('summarizeChannel live (paid, opt-in)', () => {
     });
     const trigger = createFakeMessage({
       authorId: 'u3',
-      authorDisplayName: 'Felix',
+      authorDisplayName: 'Remi',
       content: 'catch me up',
       createdAt: now,
       messageId: SnowflakeUtil.generate({ timestamp: now }).toString(),
@@ -53,6 +53,6 @@ describe.skipIf(!RUN_LIVE)('summarizeChannel live (paid, opt-in)', () => {
     expect(result).not.toMatch(/model call failed|returned nothing/);
     expect(result.toLowerCase()).toContain('wings');
     expect(result.toLowerCase()).not.toContain('iguana');
-    expect(result).toContain('People in this stretch: Jason, Simon, Felix.');
+    expect(result).toContain('People in this stretch: Jasper, Silas, Remi.');
   }, 60_000);
 });

@@ -97,7 +97,7 @@ describe('intakeSkipReason', () => {
     const relay = message({ webhookId: 'hook', applicationId: 'bot-1', content: 'https://fixvx.com/a/status/1' });
     expect(intakeSkipReason(relay, SETTINGS)).toBeUndefined();
     expect(
-      intakeSkipReason(message({ referencedMessageId: '999', repliedUserId: 'dan', content: 'hahaha' }), SETTINGS),
+      intakeSkipReason(message({ referencedMessageId: '999', repliedUserId: 'dale', content: 'hahaha' }), SETTINGS),
     ).toBeUndefined();
   });
 
@@ -121,8 +121,8 @@ describe('snapshotOf', () => {
   it('describes a member post: readable text, attachments, embeds, reactions so far, images', () => {
     const post = message({
       content: 'look at this <:KEKW:300000000000000001>',
-      authorId: 'felix',
-      authorDisplayName: 'Felix',
+      authorId: 'remi',
+      authorDisplayName: 'Remi',
       attachments: [
         { url: 'https://cdn.discordapp.com/a.png', contentType: 'image/png', name: 'a.png' },
         { url: 'https://cdn.discordapp.com/b.mp4', contentType: 'video/mp4', name: 'b.mp4' },
@@ -144,8 +144,8 @@ describe('snapshotOf', () => {
       forwarded: ['original <:KEKW:300000000000000001> text'],
     });
     expect(snapshotOf(post)).toEqual({
-      authorId: 'felix',
-      authorName: 'Felix',
+      authorId: 'remi',
+      authorName: 'Remi',
       text: 'look at this :KEKW:',
       notes: [
         '[image attached: a.png]',
@@ -161,9 +161,9 @@ describe('snapshotOf', () => {
   });
 
   it('attributes a link-fix relay to the member it was posted for', () => {
-    recordRelay({ messageId: '1001', channelId: 'main', authorId: 'dan', authorName: 'Dan', kind: 'link_fix' });
-    const relay = message({ webhookId: 'hook', applicationId: 'bot-1', authorUsername: 'Dan', content: 'https://fixvx.com/a/status/1' });
-    expect(snapshotOf(relay)).toMatchObject({ authorId: 'dan', authorName: 'Dan', text: 'https://fixvx.com/a/status/1' });
+    recordRelay({ messageId: '1001', channelId: 'main', authorId: 'dale', authorName: 'Dale', kind: 'link_fix' });
+    const relay = message({ webhookId: 'hook', applicationId: 'bot-1', authorUsername: 'Dale', content: 'https://fixvx.com/a/status/1' });
+    expect(snapshotOf(relay)).toMatchObject({ authorId: 'dale', authorName: 'Dale', text: 'https://fixvx.com/a/status/1' });
   });
 
   it("is undefined for another integration's webhook", () => {
@@ -202,26 +202,26 @@ describe('contextOf', () => {
   it('lists the messages just before the post from the cache, oldest first, the bot labelled', () => {
     const base = Date.UTC(2026, 8, 25, 16, 0);
     const at = (minutes: number) => new Date(base + minutes * 60_000);
-    const old = message({ messageId: '1', content: 'too old', createdAt: at(-45), authorDisplayName: 'Dan' });
-    const a = message({ messageId: '2', content: 'who drives', createdAt: at(-5), authorDisplayName: 'Dan' });
+    const old = message({ messageId: '1', content: 'too old', createdAt: at(-45), authorDisplayName: 'Dale' });
+    const a = message({ messageId: '2', content: 'who drives', createdAt: at(-5), authorDisplayName: 'Dale' });
     const bot = message({ messageId: '3', content: 'not me', createdAt: at(-4), authorId: 'bot-1', authorIsBot: true });
     const other = message({ messageId: '4', content: 'beep', createdAt: at(-3), authorId: 'x', authorIsBot: true });
     const pic = message({
       messageId: '5',
       content: '',
       createdAt: at(-2),
-      authorDisplayName: 'Yi',
+      authorDisplayName: 'Yu',
       attachments: [{ url: 'https://cdn.discordapp.com/p.png', contentType: 'image/png', name: 'p.png' }],
     });
-    const later = message({ messageId: '7', content: 'after', createdAt: at(1), authorDisplayName: 'Dan' });
+    const later = message({ messageId: '7', content: 'after', createdAt: at(1), authorDisplayName: 'Dale' });
     const post = message({ messageId: '6', content: 'the post', createdAt: at(0), cached: [later, pic, other, bot, a, old] });
 
     expect(contextOf(post, 6)).toEqual([
-      { author: 'Dan', text: 'who drives' },
+      { author: 'Dale', text: 'who drives' },
       { author: 'Frigidaire (the bot)', text: 'not me' },
-      { author: 'Yi', text: '[image]' },
+      { author: 'Yu', text: '[image]' },
     ]);
-    expect(contextOf(post, 1)).toEqual([{ author: 'Yi', text: '[image]' }]);
+    expect(contextOf(post, 1)).toEqual([{ author: 'Yu', text: '[image]' }]);
   });
 });
 

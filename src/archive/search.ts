@@ -83,7 +83,7 @@ export type ResolvedAuthor = {
   ids: string[];
   names: string[];
   botOnly: boolean;
-  /** How the resolution reads to the model, e.g. "Felix" or "Felix, Félix R.". */
+  /** How the resolution reads to the model, e.g. "Remi" or "Remi, Rémi L.". */
   label: string;
 };
 
@@ -107,7 +107,7 @@ function safeIdentities(): Identity[] {
  * Resolves an "author" argument: an @-mention or raw id, "me", the bot itself, or any name a member
  * goes by (display name, Discord handle, first-seen name, IRL name, alias, on any of their linked
  * accounts) — exact matches first, then partial ones
- * (so "felix" finds "Felix R." and an IRL name "Félix Rouleau"). Falls back to author names seen in
+ * (so "remi" finds "Remi L." and an IRL name "Rémi Lachance"). Falls back to author names seen in
  * the archive for people the identity table doesn't know. Undefined when nobody matches.
  */
 export function resolveAuthor(

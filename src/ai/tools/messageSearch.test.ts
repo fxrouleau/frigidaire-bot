@@ -12,8 +12,8 @@ const MAIN = '100000000000000001';
 const CLIPS = '100000000000000002';
 const MODLOGS = '100000000000000004';
 const THREAD = '100000000000000003';
-const FELIX = '200000000000000001';
-const JASON = '200000000000000002';
+const REMI = '200000000000000001';
+const JASPER = '200000000000000002';
 const ASKER = '200000000000000003';
 // 2026-01-15 12:00 Eastern (EST, UTC-5).
 const T0 = Date.UTC(2026, 0, 15, 17, 0);
@@ -49,7 +49,7 @@ function asker(opts: AskerOptions = {}): Message {
     },
   });
   const channels = new Collection<string, unknown>([
-    [MAIN, guildChannel(MAIN, 'banana-combo')],
+    [MAIN, guildChannel(MAIN, 'bagel-bar')],
     [CLIPS, guildChannel(CLIPS, 'clips')],
     [MODLOGS, guildChannel(MODLOGS, 'mod-logs')],
   ]);
@@ -87,7 +87,7 @@ function context(args: Record<string, unknown>, message?: Message) {
 }
 
 function seedChannels() {
-  store.upsertChannel({ id: MAIN, guildId: GUILD_ID, name: 'banana-combo', parentId: null, type: ChannelType.GuildText });
+  store.upsertChannel({ id: MAIN, guildId: GUILD_ID, name: 'bagel-bar', parentId: null, type: ChannelType.GuildText });
   store.upsertChannel({ id: CLIPS, guildId: GUILD_ID, name: 'clips', parentId: null, type: ChannelType.GuildText });
   store.upsertChannel({ id: MODLOGS, guildId: GUILD_ID, name: 'mod-logs', parentId: null, type: ChannelType.GuildText });
   store.upsertChannel({
@@ -110,9 +110,9 @@ beforeEach(() => {
   setBotDbForTesting(new BotDb(':memory:'));
   memory = new MemoryStore(':memory:');
   setMemoryStoreForTesting(memory);
-  memory.upsertIdentity(FELIX, 'Felix');
-  memory.updateIdentityMeta(FELIX, { irl_name: 'Félix Rouleau', aliases_add: ['fridge'] });
-  memory.upsertIdentity(JASON, 'Jason');
+  memory.upsertIdentity(REMI, 'Remi');
+  memory.updateIdentityMeta(REMI, { irl_name: 'Rémi Lachance', aliases_add: ['fridge'] });
+  memory.upsertIdentity(JASPER, 'Jasper');
   memory.upsertIdentity(ASKER, 'Marc');
   vi.stubEnv('MAIN_CHANNEL_ID', '');
   vi.stubEnv('ARCHIVE_BACKFILL_CHANNELS', '');
@@ -141,12 +141,12 @@ describe('search_messages', () => {
 
   it('renders hits as "[date ET] #channel Author: content (jump link)", mentions and emojis made readable', async () => {
     seedChannels();
-    const hit = at(0, { content: 'pizza with <@200000000000000002> <:kekw:300000000000000001> tonight', authorId: FELIX });
-    store.upsertMessages([hit, at(1, { content: 'tacos', authorId: JASON })]);
+    const hit = at(0, { content: 'pizza with <@200000000000000002> <:kekw:300000000000000001> tonight', authorId: REMI });
+    store.upsertMessages([hit, at(1, { content: 'tacos', authorId: JASPER })]);
     const result = await search({ query: 'pizza' });
     expect(result).toContain('1 message(s) matching "pizza"');
     expect(result).toContain(
-      `[2026-01-15 12:00 ET] #banana-combo Felix: pizza with @Jason :kekw: tonight (https://discord.com/channels/${GUILD_ID}/${MAIN}/${hit.id})`,
+      `[2026-01-15 12:00 ET] #bagel-bar Remi: pizza with @Jasper :kekw: tonight (https://discord.com/channels/${GUILD_ID}/${MAIN}/${hit.id})`,
     );
     expect(result).not.toContain('tacos');
   });
@@ -164,7 +164,7 @@ describe('search_messages', () => {
         ],
       }),
     );
-    expect(await search({ query: 'take' })).toContain('Felix: the take [reactions: :kekw:×4 😂×2 ');
+    expect(await search({ query: 'take' })).toContain('Remi: the take [reactions: :kekw:×4 😂×2 ');
   });
 
   it('flags partial matches and truncates long messages', async () => {
@@ -183,8 +183,8 @@ describe('search_messages', () => {
   it('resolves authors by display name, IRL name, alias, partial name, mention, "me" and the bot', async () => {
     seedChannels();
     store.upsertMessages([
-      at(0, { content: 'cheese one', authorId: FELIX, authorName: 'Felix' }),
-      at(1, { content: 'cheese two', authorId: JASON, authorName: 'Jason' }),
+      at(0, { content: 'cheese one', authorId: REMI, authorName: 'Remi' }),
+      at(1, { content: 'cheese two', authorId: JASPER, authorName: 'Jasper' }),
       at(2, { content: 'cheese three', authorId: ASKER, authorName: 'Marc' }),
       at(3, { content: 'cheese four', authorId: BOT_USER_ID, authorName: 'Frigidaire', source: 'bot' }),
     ]);
@@ -192,13 +192,13 @@ describe('search_messages', () => {
       (await search({ query: 'cheese', author }))
         .split('\n')
         .slice(1)
-        .map((l) => l.match(/#banana-combo (\w+):/)?.[1]);
+        .map((l) => l.match(/#bagel-bar (\w+):/)?.[1]);
 
-    expect(await authorsOf('Felix')).toEqual(['Felix']);
-    expect(await authorsOf('felix rouleau')).toEqual(['Felix']);
-    expect(await authorsOf('Fridge')).toEqual(['Felix']);
-    expect(await authorsOf('jas')).toEqual(['Jason']);
-    expect(await authorsOf(`<@${JASON}>`)).toEqual(['Jason']);
+    expect(await authorsOf('Remi')).toEqual(['Remi']);
+    expect(await authorsOf('remi lachance')).toEqual(['Remi']);
+    expect(await authorsOf('Fridge')).toEqual(['Remi']);
+    expect(await authorsOf('jas')).toEqual(['Jasper']);
+    expect(await authorsOf(`<@${JASPER}>`)).toEqual(['Jasper']);
     expect(await authorsOf('me')).toEqual(['Marc']);
     expect(await authorsOf('you')).toEqual(['Frigidaire']);
     expect(await authorsOf('Frigidaire')).toEqual(['Frigidaire']);
@@ -207,15 +207,15 @@ describe('search_messages', () => {
 
   it("finds a member's messages by a linked side account's names or handle, under every account id (LINKED_ACCOUNTS)", async () => {
     const SIDE = '200000000000000009';
-    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
-    memory.upsertIdentity(JASON, 'Jason', 'cigalefourmi');
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASPER}`);
+    memory.upsertIdentity(JASPER, 'Jasper', 'lapinlune');
     memory.upsertIdentity(SIDE, 'JayAlt', 'jay_alt');
     seedChannels();
     store.upsertMessages([
-      at(0, { content: 'cheese one', authorId: JASON, authorName: 'Jason' }),
+      at(0, { content: 'cheese one', authorId: JASPER, authorName: 'Jasper' }),
       // Archived before LINKED_ACCOUNTS was set: still under the side account's own id.
       at(1, { content: 'cheese two', authorId: SIDE, authorName: 'JayAlt' }),
-      at(2, { content: 'cheese three', authorId: FELIX, authorName: 'Felix' }),
+      at(2, { content: 'cheese three', authorId: REMI, authorName: 'Remi' }),
     ]);
     const contentsBy = async (author: string) =>
       (await search({ query: 'cheese', author }))
@@ -223,7 +223,7 @@ describe('search_messages', () => {
         .slice(1)
         .map((l) => l.match(/: (cheese \w+)/)?.[1]);
 
-    for (const author of ['Jason', 'jay_alt', 'JayAlt', 'cigalefourmi', `<@${SIDE}>`]) {
+    for (const author of ['Jasper', 'jay_alt', 'JayAlt', 'lapinlune', `<@${SIDE}>`]) {
       expect((await contentsBy(author)).sort()).toEqual(['cheese one', 'cheese two']);
     }
   });
@@ -244,7 +244,7 @@ describe('search_messages', () => {
     const inClips = await search({ query: 'clip', channel: '#clips' });
     expect(inClips).toContain('clip here');
     expect(inClips).not.toContain('clip there');
-    const inMain = await search({ query: 'clip', channel: 'Banana Combo' });
+    const inMain = await search({ query: 'clip', channel: 'Bagel Bar' });
     expect(inMain).toContain('clip there');
     expect(inMain).toContain('#patch notes');
     expect(await search({ query: 'clip', channel: `<#${CLIPS}>` })).toContain('clip here');
@@ -282,13 +282,13 @@ describe('search_messages', () => {
 
   it('lists the latest messages when there is no query, with the total and a limit', async () => {
     seedChannels();
-    store.upsertMessages([0, 1, 2, 3, 4].map((i) => at(i, { content: `msg ${i}`, authorId: JASON })));
-    const result = await search({ author: 'Jason', limit: 2 });
-    expect(result).toContain('5 message(s) by Jason; the latest 2, oldest first');
+    store.upsertMessages([0, 1, 2, 3, 4].map((i) => at(i, { content: `msg ${i}`, authorId: JASPER })));
+    const result = await search({ author: 'Jasper', limit: 2 });
+    expect(result).toContain('5 message(s) by Jasper; the latest 2, oldest first');
     expect(result).toContain('msg 3');
     expect(result).toContain('msg 4');
     expect(result).not.toContain('msg 2');
-    expect(await search({ author: 'Jason', limit: '999' })).toContain('5 message(s) by Jason, oldest first');
+    expect(await search({ author: 'Jasper', limit: '999' })).toContain('5 message(s) by Jasper, oldest first');
   });
 
   it('appends the import notice while a configured channel is still backfilling', async () => {
@@ -314,7 +314,7 @@ describe('search_messages', () => {
 describe('get_message_context', () => {
   function seedConversation() {
     seedChannels();
-    const messages = [0, 1, 2, 3, 4, 5, 6].map((i) => at(i, { content: `line ${i}`, authorId: i % 2 ? JASON : FELIX }));
+    const messages = [0, 1, 2, 3, 4, 5, 6].map((i) => at(i, { content: `line ${i}`, authorId: i % 2 ? JASPER : REMI }));
     store.upsertMessages([...messages, at(3.5, { content: 'other channel', channelId: CLIPS })]);
     return messages;
   }
@@ -323,11 +323,11 @@ describe('get_message_context', () => {
     const messages = seedConversation();
     const byId = await context({ message: messages[3].id, before: 2, after: 1 });
     expect(byId.split('\n')).toEqual([
-      'Conversation around that message in #banana-combo (→ marks it):',
-      expect.stringContaining('Jason: line 1'),
-      expect.stringContaining('Felix: line 2'),
-      expect.stringMatching(/^→ .*Jason: line 3/),
-      expect.stringContaining('Felix: line 4'),
+      'Conversation around that message in #bagel-bar (→ marks it):',
+      expect.stringContaining('Jasper: line 1'),
+      expect.stringContaining('Remi: line 2'),
+      expect.stringMatching(/^→ .*Jasper: line 3/),
+      expect.stringContaining('Remi: line 4'),
     ]);
     const link = `https://discord.com/channels/${GUILD_ID}/${MAIN}/${messages[3].id}`;
     const byLink = await context({ message: link, before: '0', after: 0 });

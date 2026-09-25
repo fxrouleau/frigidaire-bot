@@ -24,7 +24,7 @@ describe('collectEmojiUsage', () => {
   it('counts reactions and typed uses, with the answered message for bare uses', () => {
     store.upsertMessages([
       archiveInput({ id: snowflake(at(0)), createdAt: at(0), content: 'my flight got cancelled for the third time' }),
-      archiveInput({ id: snowflake(at(1)), createdAt: at(1), content: `<:SAJ:${SAJ}>`, authorName: 'Dan' }),
+      archiveInput({ id: snowflake(at(1)), createdAt: at(1), content: `<:SAJ:${SAJ}>`, authorName: 'Dale' }),
       archiveInput({ id: snowflake(at(2)), createdAt: at(2), content: 'the printer is on fire again' }),
       archiveInput({
         id: snowflake(at(3)),

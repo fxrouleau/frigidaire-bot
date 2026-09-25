@@ -108,7 +108,7 @@ describe('usage tracking through the real SDK', () => {
     const client = createOpenRouterClient({ apiKey: 'sk-test', fetch, maxRetries: 0 });
     const provider = new OpenRouterEmbeddingProvider({ client, model: 'qwen/qwen3-embedding-8b' });
 
-    await provider.embed(['Felix: likes pizza'], 'document');
+    await provider.embed(['Remi: likes pizza'], 'document');
     await flushPendingUsage();
 
     expect(ledgerByFeature()).toEqual({ embedding: { requests: 1, costUsd: 0.00000005 } });

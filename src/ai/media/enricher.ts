@@ -1,6 +1,6 @@
 // Media enricher: turns voice messages / audio / video attachments into model-visible text.
 //
-//   [voice message from Felix, 0:42: <transcript>]
+//   [voice message from Remi, 0:42: <transcript>]
 //   [video msg:<message id>: <description>]
 //
 // The message id on a video line is the handle the chat model passes to watch_video to ask a follow-up

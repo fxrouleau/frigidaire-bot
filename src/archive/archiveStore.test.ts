@@ -5,8 +5,8 @@ import { ArchiveStore, compareSnowflakes, ftsTerms, normalizeReactions } from '.
 const CHANNEL = '100000000000000001';
 const OTHER_CHANNEL = '100000000000000002';
 const THREAD = '100000000000000003';
-const FELIX = '200000000000000001';
-const JASON = '200000000000000002';
+const REMI = '200000000000000001';
+const JASPER = '200000000000000002';
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 0, 15, 17, 0);
 
@@ -27,14 +27,14 @@ function ids(hits: { id: string }[]): string[] {
 describe('ArchiveStore — FTS consistency', () => {
   it('keeps the external-content index exact across insert, edit, delete, transcript and relay updates', () => {
     const a = archiveInput({ id: snowflake(T0, 1), content: 'pizza tonight at the usual place' });
-    const b = archiveInput({ id: snowflake(T0, 2), content: 'who wants tacos', authorId: JASON, authorName: 'Jason' });
+    const b = archiveInput({ id: snowflake(T0, 2), content: 'who wants tacos', authorId: JASPER, authorName: 'Jasper' });
     const c = archiveInput({
       id: snowflake(T0, 3),
       content: '',
       hasAudio: true,
       source: 'relay',
       authorId: null,
-      authorName: 'Jason',
+      authorName: 'Jasper',
     });
     store.upsertMessages([a, b, c]);
     store.checkFtsIntegrity();
@@ -48,7 +48,7 @@ describe('ArchiveStore — FTS consistency', () => {
 
     // Transcript and relay attribution arrive later; both are indexed columns.
     expect(store.setTranscript(c.id, 'bring the charcoal')).toBe(true);
-    expect(store.setRelayInfo(c.id, { authorId: JASON, authorName: 'Jason R', relayKind: 'regret' })).toBe(true);
+    expect(store.setRelayInfo(c.id, { authorId: JASPER, authorName: 'Jasper R', relayKind: 'regret' })).toBe(true);
     store.checkFtsIntegrity();
     expect(ids(store.search('charcoal', {}, 10).hits)).toEqual([c.id]);
 
@@ -99,7 +99,7 @@ describe('ArchiveStore — FTS consistency', () => {
       embeds: [],
       reactions: [],
       deletedAt: T0 + 5000,
-      authorId: FELIX,
+      authorId: REMI,
     });
   });
 
@@ -142,7 +142,7 @@ describe('ArchiveStore — upsert semantics', () => {
     const a = archiveInput({ hasAudio: true, transcript: 'hello there' });
     store.upsertMessage(a);
     store.upsertMessage({ ...a, transcript: null, authorId: null, extraText: 'late embed' });
-    expect(store.getMessage(a.id)).toMatchObject({ transcript: 'hello there', authorId: FELIX, extraText: 'late embed' });
+    expect(store.getMessage(a.id)).toMatchObject({ transcript: 'hello there', authorId: REMI, extraText: 'late embed' });
   });
 
   it('stores reactions in canonical order and treats a reordered set as unchanged', () => {
@@ -199,8 +199,8 @@ describe('ArchiveStore — search', () => {
   });
 
   it('applies author, bot, channel (threads included), visibility and time filters; never returns deleted rows', () => {
-    const felix = archiveInput({ id: snowflake(T0, 1), content: 'cheese', createdAt: T0 });
-    const jason = archiveInput({ id: snowflake(T0, 2), content: 'cheese', authorId: JASON, authorName: 'Jason' });
+    const remi = archiveInput({ id: snowflake(T0, 1), content: 'cheese', createdAt: T0 });
+    const jasper = archiveInput({ id: snowflake(T0, 2), content: 'cheese', authorId: JASPER, authorName: 'Jasper' });
     const legacy = archiveInput({
       id: snowflake(T0, 3),
       content: 'cheese',
@@ -212,16 +212,16 @@ describe('ArchiveStore — search', () => {
     const thread = archiveInput({ id: snowflake(T0, 5), content: 'cheese', channelId: THREAD, parentChannelId: CHANNEL });
     const other = archiveInput({ id: snowflake(T0 + DAY), createdAt: T0 + DAY, content: 'cheese', channelId: OTHER_CHANNEL });
     const deleted = archiveInput({ id: snowflake(T0, 7), content: 'cheese' });
-    store.upsertMessages([felix, jason, legacy, bot, thread, other, deleted]);
+    store.upsertMessages([remi, jasper, legacy, bot, thread, other, deleted]);
     store.markDeleted([deleted.id], T0 + 1);
 
     const search = (filters: Parameters<ArchiveStore['search']>[1]) => ids(store.search('cheese', filters, 20).hits).sort();
 
     expect(search({})).toHaveLength(6);
-    expect(search({ authorIds: [JASON] })).toEqual([jason.id]);
+    expect(search({ authorIds: [JASPER] })).toEqual([jasper.id]);
     expect(search({ authorIds: [], authorNames: ['oldtimer'] })).toEqual([legacy.id]);
     expect(search({ botOnly: true })).toEqual([bot.id]);
-    expect(search({ channelIds: [CHANNEL] })).toEqual([felix.id, jason.id, legacy.id, bot.id, thread.id].sort());
+    expect(search({ channelIds: [CHANNEL] })).toEqual([remi.id, jasper.id, legacy.id, bot.id, thread.id].sort());
     expect(search({ allowedChannelIds: [OTHER_CHANNEL] })).toEqual([other.id]);
     expect(search({ afterMs: T0 + 1000 })).toEqual([other.id]);
     expect(search({ beforeMs: T0 + 1000, channelIds: [OTHER_CHANNEL] })).toEqual([]);
@@ -237,7 +237,7 @@ describe('ArchiveStore — search', () => {
       archiveInput({ id: snowflake(T0 + i * 1000), createdAt: T0 + i * 1000, content: `m${i}` }),
     );
     store.upsertMessages(inputs);
-    const { messages, total } = store.listRecent({ authorIds: [FELIX] }, 2);
+    const { messages, total } = store.listRecent({ authorIds: [REMI] }, 2);
     expect(total).toBe(4);
     expect(messages.map((m) => m.content)).toEqual(['m2', 'm3']);
   });
@@ -290,8 +290,8 @@ describe('ArchiveStore — reads', () => {
   });
 
   it('keeps channel rows and finds archived author names', () => {
-    store.upsertChannel({ id: CHANNEL, guildId: 'g', name: 'banana-combo', parentId: null, type: 0 }, T0);
-    store.upsertChannel({ id: CHANNEL, guildId: 'g', name: 'banana-combo', parentId: null, type: 0 }, T0 + 1);
+    store.upsertChannel({ id: CHANNEL, guildId: 'g', name: 'bagel-bar', parentId: null, type: 0 }, T0);
+    store.upsertChannel({ id: CHANNEL, guildId: 'g', name: 'bagel-bar', parentId: null, type: 0 }, T0 + 1);
     expect(store.getChannel(CHANNEL)?.updatedAt).toBe(T0); // unchanged ⇒ not rewritten
     store.upsertChannel({ id: CHANNEL, guildId: 'g', name: 'renamed', parentId: null, type: 0 }, T0 + 2);
     expect(store.listChannels().map((c) => c.name)).toEqual(['renamed']);

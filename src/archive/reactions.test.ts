@@ -288,7 +288,7 @@ describe('getReactionProfile', () => {
       ['renamed', 1],
       ['second joke', 1],
     ]);
-    expect(kekw.samples[0]).toMatchObject({ authorName: 'Felix', channelId: CHANNEL });
+    expect(kekw.samples[0]).toMatchObject({ authorName: 'Remi', channelId: CHANNEL });
   });
 
   it('falls back to what an image-only sample carried', () => {

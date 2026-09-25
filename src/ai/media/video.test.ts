@@ -66,7 +66,7 @@ describe('VideoDescriber', () => {
   it('sends a small clip whole, as a data URL, with ZDR routing and the video tag', async () => {
     const { describer, requests } = setup([described]);
 
-    const outcome = await describer.describe({ url: CLIP_URL, contentType: 'video/mp4', context: 'Posted by Wheezer.' });
+    const outcome = await describer.describe({ url: CLIP_URL, contentType: 'video/mp4', context: 'Posted by Wheelie.' });
 
     expect(outcome).toEqual({ status: 'ok', text: DESCRIPTION, cached: false });
     const [request] = requests;
@@ -77,7 +77,7 @@ describe('VideoDescriber', () => {
       type: 'video_url',
       video_url: { url: `data:video/mp4;base64,${MP4_BYTES.toString('base64')}` },
     });
-    expect(String(prompt.text)).toContain('Context from the chat: Posted by Wheezer.');
+    expect(String(prompt.text)).toContain('Context from the chat: Posted by Wheelie.');
     // Gemini hears the soundtrack itself: no separate transcript, and the catalog's lowest effort.
     expect(String(prompt.text)).not.toContain('not hear it');
     expect(request.body.reasoning).toEqual({ effort: 'minimal' });

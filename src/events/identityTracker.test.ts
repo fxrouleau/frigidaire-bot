@@ -14,27 +14,27 @@ describe('identityTracker event', () => {
   });
 
   it('keeps the identity on the member’s current server display name', () => {
-    identityTracker.execute(createFakeMessage({ authorId: 'u1', authorDisplayName: 'Wheezer' }).message);
-    identityTracker.execute(createFakeMessage({ authorId: 'u1', authorDisplayName: 'Wheez' }).message);
+    identityTracker.execute(createFakeMessage({ authorId: 'u1', authorDisplayName: 'Wheelie' }).message);
+    identityTracker.execute(createFakeMessage({ authorId: 'u1', authorDisplayName: 'Wheels' }).message);
 
     const identity = getMemoryStore().getIdentityById('u1');
-    expect(identity?.display_name).toBe('Wheez');
-    expect(identity?.canonical_name).toBe('Wheezer');
+    expect(identity?.display_name).toBe('Wheels');
+    expect(identity?.canonical_name).toBe('Wheelie');
   });
 
   it('falls back to the global display name, not the username, when there is no member', () => {
     identityTracker.execute(
-      createFakeMessage({ authorId: 'u2', authorDisplayName: 'Jason', authorUsername: 'jason_1999', memberIsNull: true }).message,
+      createFakeMessage({ authorId: 'u2', authorDisplayName: 'Jasper', authorUsername: 'jasper_1999', memberIsNull: true }).message,
     );
-    expect(getMemoryStore().getIdentityById('u2')?.display_name).toBe('Jason');
+    expect(getMemoryStore().getIdentityById('u2')?.display_name).toBe('Jasper');
   });
 
   it('records the Discord handle and keeps it current', () => {
-    identityTracker.execute(createFakeMessage({ authorId: 'u3', authorDisplayName: 'Jason', authorUsername: 'cigalefourmi' }).message);
-    expect(getMemoryStore().getIdentityById('u3')?.username).toBe('cigalefourmi');
+    identityTracker.execute(createFakeMessage({ authorId: 'u3', authorDisplayName: 'Jasper', authorUsername: 'lapinlune' }).message);
+    expect(getMemoryStore().getIdentityById('u3')?.username).toBe('lapinlune');
 
-    identityTracker.execute(createFakeMessage({ authorId: 'u3', authorDisplayName: 'Jason', authorUsername: 'cigale2' }).message);
-    expect(getMemoryStore().getIdentityById('u3')?.username).toBe('cigale2');
+    identityTracker.execute(createFakeMessage({ authorId: 'u3', authorDisplayName: 'Jasper', authorUsername: 'lapin2' }).message);
+    expect(getMemoryStore().getIdentityById('u3')?.username).toBe('lapin2');
   });
 
   it('ignores bots and webhook posts (relays are attributed through the relay registry)', () => {
@@ -47,14 +47,14 @@ describe('identityTracker event', () => {
     vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
     try {
       const store = getMemoryStore();
-      store.upsertIdentity('100000000000000001', 'Tony', 'tony_main');
+      store.upsertIdentity('100000000000000001', 'Toby', 'toby_main');
       identityTracker.execute(
-        createFakeMessage({ authorId: '100000000000000002', authorDisplayName: 'Ptoughneigh', authorUsername: 'triceclone' })
+        createFakeMessage({ authorId: '100000000000000002', authorDisplayName: 'Tohbee', authorUsername: 'tobyclone' })
           .message,
       );
 
-      expect(store.getIdentityById('100000000000000002')).toMatchObject({ display_name: 'Ptoughneigh', username: 'triceclone' });
-      expect(store.getIdentityById('100000000000000001')).toMatchObject({ display_name: 'Tony', username: 'tony_main' });
+      expect(store.getIdentityById('100000000000000002')).toMatchObject({ display_name: 'Tohbee', username: 'tobyclone' });
+      expect(store.getIdentityById('100000000000000001')).toMatchObject({ display_name: 'Toby', username: 'toby_main' });
     } finally {
       vi.unstubAllEnvs();
     }

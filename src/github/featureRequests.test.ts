@@ -17,7 +17,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const START = Date.parse('2026-09-25T15:00:00Z');
 
-const requester = { userId: 'user-1', displayName: 'Jason', jumpUrl: 'https://discord.com/channels/g/c/m' };
+const requester = { userId: 'user-1', displayName: 'Jasper', jumpUrl: 'https://discord.com/channels/g/c/m' };
 
 function draft(title: string): IssueDraft {
   return { title, description: `Please build: ${title}`, acceptanceCriteria: [] };
@@ -67,7 +67,7 @@ describe('FeatureRequestService: filing', () => {
     expect(outcome).toMatchObject({ kind: 'filed', issue: { number: 1, htmlUrl: 'https://github.com/owner/repo/issues/1' } });
     const [create] = creates();
     expect(create?.body).toMatchObject({ title: 'Add polls', labels: ['feature-request', 'from-discord'] });
-    expect((create?.body as { body: string }).body).toContain('🤖 Filed by Frigidaire for **Jason**');
+    expect((create?.body as { body: string }).body).toContain('🤖 Filed by Frigidaire for **Jasper**');
     expect(rows()).toEqual([{ user_id: 'user-1', status: 'filed', issue_number: 1 }]);
   });
 
@@ -247,7 +247,7 @@ describe('FeatureRequestService: duplicates of an open issue get a +1 comment', 
     expect(fake.comments).toHaveLength(1);
     expect(fake.comments[0].issueNumber).toBe(7);
     expect(fake.comments[0].body).toContain(
-      '🤖 Filed by Frigidaire for **Jason** (+1: they asked for this too) · [the request on Discord](https://discord.com/channels/g/c/m)\n\nIt should work in threads too.',
+      '🤖 Filed by Frigidaire for **Jasper** (+1: they asked for this too) · [the request on Discord](https://discord.com/channels/g/c/m)\n\nIt should work in threads too.',
     );
     expect(commentRows()).toEqual([{ user_id: 'user-1', repo: 'owner/repo', issue_number: 7, status: 'posted' }]);
   });
@@ -283,7 +283,7 @@ describe('FeatureRequestService: duplicates of an open issue get a +1 comment', 
     const again = await service.submit(request('Add polls', back), requester);
     expect(again).toMatchObject({ kind: 'duplicate', support: { kind: 'already_backed', ownRequest: false } });
 
-    const other = await service.submit(request('Add polls', back), { ...requester, userId: 'user-2', displayName: 'Tony' });
+    const other = await service.submit(request('Add polls', back), { ...requester, userId: 'user-2', displayName: 'Toby' });
     expect(other).toMatchObject({ support: { kind: 'commented' } });
     expect(fake.comments.map((c) => c.issueNumber)).toEqual([3, 3]);
   });
@@ -421,7 +421,7 @@ describe('FeatureRequestService: candidates and the model’s decision', () => {
 
     expect(outcome).toMatchObject({ kind: 'filed', issue: { number: 6 }, relatedTo: { number: 4 } });
     const body = (creates()[0].body as { body: string }).body;
-    expect(body.startsWith('🤖 Filed by Frigidaire for **Jason**')).toBe(true);
+    expect(body.startsWith('🤖 Filed by Frigidaire for **Jasper**')).toBe(true);
     expect(body).toContain(')\n\nRelated: #4\n\n### What');
   });
 

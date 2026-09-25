@@ -23,9 +23,9 @@ import {
 } from './people';
 
 // Fake ids only (the repo is public).
-const WHEEZER = '111111111111111111';
-const JASON = '222222222222222222';
-const SIMON = '333333333333333333';
+const WHEELIE = '111111111111111111';
+const JASPER = '222222222222222222';
+const SILAS = '333333333333333333';
 const NEWGUY = '444444444444444444';
 const BOT = '999999999999999999';
 
@@ -35,15 +35,15 @@ beforeEach(() => {
   setBotDbForTesting(new BotDb(':memory:'));
   store = new MemoryStore(':memory:');
   setMemoryStoreForTesting(store);
-  // Wheezer was first seen as "OldNick", is called Derrick IRL and "D" by the group.
-  store.upsertIdentity(WHEEZER, 'OldNick');
-  store.upsertIdentity(WHEEZER, 'Wheezer', 'wheezy_d');
-  store.updateIdentityMeta(WHEEZER, { irl_name: 'Derrick', aliases_add: ['D', 'Wheez'] });
-  // Jason's Discord handle is "cigalefourmi" (the learner once filed memories under it).
-  store.upsertIdentity(JASON, 'Jason', 'cigalefourmi');
-  store.updateIdentityMeta(JASON, { irl_name: 'Alex' });
-  store.upsertIdentity(SIMON, 'Simon');
-  store.updateIdentityMeta(SIMON, { irl_name: 'Alex', aliases_add: ['D'] });
+  // Wheelie was first seen as "OldNick", is called Dorian IRL and "D" by the group.
+  store.upsertIdentity(WHEELIE, 'OldNick');
+  store.upsertIdentity(WHEELIE, 'Wheelie', 'wheelie_d');
+  store.updateIdentityMeta(WHEELIE, { irl_name: 'Dorian', aliases_add: ['D', 'Wheels'] });
+  // Jasper's Discord handle is "lapinlune" (the learner once filed memories under it).
+  store.upsertIdentity(JASPER, 'Jasper', 'lapinlune');
+  store.updateIdentityMeta(JASPER, { irl_name: 'Alex' });
+  store.upsertIdentity(SILAS, 'Silas');
+  store.updateIdentityMeta(SILAS, { irl_name: 'Alex', aliases_add: ['D'] });
 });
 
 afterEach(() => {
@@ -76,17 +76,17 @@ describe('nameKey', () => {
 
 describe('cleanSubject', () => {
   it('strips decoration copied from prompts', () => {
-    expect(cleanSubject('@Wheezer')).toBe('Wheezer');
-    expect(cleanSubject(`Wheezer (id:${WHEEZER})`)).toBe('Wheezer');
-    expect(cleanSubject(' "Jason" ')).toBe('Jason');
+    expect(cleanSubject('@Wheelie')).toBe('Wheelie');
+    expect(cleanSubject(`Wheelie (id:${WHEELIE})`)).toBe('Wheelie');
+    expect(cleanSubject(' "Jasper" ')).toBe('Jasper');
     expect(cleanSubject('server')).toBe('server');
   });
 });
 
 describe('namesOf', () => {
   it('lists every name a member may be filed under, extra names first, without duplicates', () => {
-    const wheezer = store.getIdentityById(WHEEZER);
-    expect(namesOf(wheezer, ['Wheezer', ' '])).toEqual(['Wheezer', 'wheezy_d', 'OldNick', 'Derrick', 'D', 'Wheez']);
+    const wheelie = store.getIdentityById(WHEELIE);
+    expect(namesOf(wheelie, ['Wheelie', ' '])).toEqual(['Wheelie', 'wheelie_d', 'OldNick', 'Dorian', 'D', 'Wheels']);
     expect(namesOf(undefined, ['Solo'])).toEqual(['Solo']);
   });
 });
@@ -95,35 +95,35 @@ describe('findMembersByName / matchMemberByName (name tiers)', () => {
   const members = () => foldMembers(store.getAllIdentities());
 
   it('matches display names, Discord handles, first-seen and IRL names and aliases, case-insensitively', () => {
-    expect(matchMemberByName(members(), 'wheezer')?.userId).toBe(WHEEZER);
-    expect(matchMemberByName(members(), 'CigaleFourmi')?.userId).toBe(JASON);
-    expect(matchMemberByName(members(), 'OLDNICK')?.userId).toBe(WHEEZER);
-    expect(matchMemberByName(members(), 'derrick')?.userId).toBe(WHEEZER);
-    expect(matchMemberByName(members(), 'wheez')?.userId).toBe(WHEEZER);
+    expect(matchMemberByName(members(), 'wheelie')?.userId).toBe(WHEELIE);
+    expect(matchMemberByName(members(), 'LapinLune')?.userId).toBe(JASPER);
+    expect(matchMemberByName(members(), 'OLDNICK')?.userId).toBe(WHEELIE);
+    expect(matchMemberByName(members(), 'dorian')?.userId).toBe(WHEELIE);
+    expect(matchMemberByName(members(), 'wheels')?.userId).toBe(WHEELIE);
   });
 
   it('never guesses between two members sharing a name at the same strength', () => {
-    expect(findMembersByName(members(), 'Alex').map((m) => m.userId)).toEqual([JASON, SIMON]); // two IRL Alexes
+    expect(findMembersByName(members(), 'Alex').map((m) => m.userId)).toEqual([JASPER, SILAS]); // two IRL Alexes
     expect(matchMemberByName(members(), 'Alex')).toBeUndefined();
     expect(matchMemberByName(members(), 'D')).toBeUndefined(); // shared alias
   });
 
   it('prefers a stronger tier: display name over nickname, display name over handle', () => {
-    store.updateIdentityMeta(SIMON, { aliases_add: ['Jason'] });
-    expect(matchMemberByName(members(), 'Jason')?.userId).toBe(JASON);
-    store.upsertIdentity(NEWGUY, 'cigalefourmi');
-    expect(matchMemberByName(members(), 'cigalefourmi')?.userId).toBe(NEWGUY);
+    store.updateIdentityMeta(SILAS, { aliases_add: ['Jasper'] });
+    expect(matchMemberByName(members(), 'Jasper')?.userId).toBe(JASPER);
+    store.upsertIdentity(NEWGUY, 'lapinlune');
+    expect(matchMemberByName(members(), 'lapinlune')?.userId).toBe(NEWGUY);
   });
 
   it('counts the first word of an IRL name only when it is unique and nobody has it as a stronger name', () => {
-    const felix = identity('1', 'fridge enjoyer', { irl_name: 'Felix Rouleau' });
-    expect(matchMemberByName(foldMembers([felix]), 'felix')?.userId).toBe('1');
-    // Someone actually called Felix: "felix" means them.
-    expect(matchMemberByName(foldMembers([felix, identity('2', 'Felix')]), 'felix')?.userId).toBe('2');
+    const remi = identity('1', 'fridge enjoyer', { irl_name: 'Remi Lachance' });
+    expect(matchMemberByName(foldMembers([remi]), 'remi')?.userId).toBe('1');
+    // Someone actually called Remi: "remi" means them.
+    expect(matchMemberByName(foldMembers([remi, identity('2', 'Remi')]), 'remi')?.userId).toBe('2');
     // Two members share the IRL first name: neither is matched by it (full names still work).
-    const other = identity('3', 'FT', { irl_name: 'Felix Tremblay' });
-    expect(matchMemberByName(foldMembers([felix, other]), 'felix')).toBeUndefined();
-    expect(matchMemberByName(foldMembers([felix, other]), 'felix tremblay')?.userId).toBe('3');
+    const other = identity('3', 'FT', { irl_name: 'Remi Tremblay' });
+    expect(matchMemberByName(foldMembers([remi, other]), 'remi')).toBeUndefined();
+    expect(matchMemberByName(foldMembers([remi, other]), 'remi tremblay')?.userId).toBe('3');
   });
 
   it('returns nothing for unknown or empty names and skips inactive identities', () => {
@@ -135,33 +135,33 @@ describe('findMembersByName / matchMemberByName (name tiers)', () => {
 
 describe('resolvePerson (memory tools)', () => {
   it('resolves a name to the member, filed under their current display name with every known name', () => {
-    expect(resolvePerson(store, 'Derrick')).toEqual({
-      userId: WHEEZER,
-      displayName: 'Wheezer',
-      names: ['Wheezer', 'wheezy_d', 'OldNick', 'Derrick', 'D', 'Wheez'],
+    expect(resolvePerson(store, 'Dorian')).toEqual({
+      userId: WHEELIE,
+      displayName: 'Wheelie',
+      names: ['Wheelie', 'wheelie_d', 'OldNick', 'Dorian', 'D', 'Wheels'],
     });
   });
 
   it('resolves a Discord handle to the member, whose names include it', () => {
-    const person = resolvePerson(store, '@cigalefourmi');
-    expect(person?.userId).toBe(JASON);
-    expect(person?.displayName).toBe('Jason');
-    expect(person?.names).toContain('cigalefourmi');
+    const person = resolvePerson(store, '@lapinlune');
+    expect(person?.userId).toBe(JASPER);
+    expect(person?.displayName).toBe('Jasper');
+    expect(person?.names).toContain('lapinlune');
   });
 
   it('resolves "me"/"I"/"myself" to the person talking', () => {
-    const { message } = createFakeMessage({ authorId: JASON, authorDisplayName: 'Jason' });
+    const { message } = createFakeMessage({ authorId: JASPER, authorDisplayName: 'Jasper' });
     for (const self of ['me', 'I', 'Myself']) {
-      expect(resolvePerson(store, self, message)?.userId).toBe(JASON);
+      expect(resolvePerson(store, self, message)?.userId).toBe(JASPER);
     }
     // Without a message there is no speaker to resolve to.
     expect(resolvePerson(store, 'me')).toBeUndefined();
   });
 
   it('resolves "me" in a relayed message to its real author', () => {
-    recordRelay({ messageId: 'relay-1', channelId: 'c', authorId: SIMON, authorName: 'Simon', kind: 'regret' });
-    const { message } = createFakeMessage({ messageId: 'relay-1', webhookId: 'wh', authorUsername: 'Simon' });
-    expect(resolvePerson(store, 'me', message)?.displayName).toBe('Simon');
+    recordRelay({ messageId: 'relay-1', channelId: 'c', authorId: SILAS, authorName: 'Silas', kind: 'regret' });
+    const { message } = createFakeMessage({ messageId: 'relay-1', webhookId: 'wh', authorUsername: 'Silas' });
+    expect(resolvePerson(store, 'me', message)?.displayName).toBe('Silas');
   });
 
   it('resolves a user @-mentioned in the triggering message, using their live display name', () => {
@@ -178,13 +178,13 @@ describe('resolvePerson (memory tools)', () => {
   });
 
   it('prefers a member @-mentioned in the message when a name is shared', () => {
-    store.upsertIdentity(NEWGUY, 'Simon');
+    store.upsertIdentity(NEWGUY, 'Silas');
     const { message } = createFakeMessage({
-      content: `<@${NEWGUY}> is the other Simon`,
-      mentionedUsers: [{ id: NEWGUY, displayName: 'Simon' }],
+      content: `<@${NEWGUY}> is the other Silas`,
+      mentionedUsers: [{ id: NEWGUY, displayName: 'Silas' }],
     });
-    expect(resolvePerson(store, 'Simon')).toBeUndefined();
-    expect(resolvePerson(store, 'Simon', message)?.userId).toBe(NEWGUY);
+    expect(resolvePerson(store, 'Silas')).toBeUndefined();
+    expect(resolvePerson(store, 'Silas', message)?.userId).toBe(NEWGUY);
   });
 
   it('never resolves to the bot itself', () => {
@@ -197,11 +197,11 @@ describe('resolvePerson (memory tools)', () => {
   });
 
   it('resolves explicit ids: mention tokens, (id:…) suffixes and bare snowflakes', () => {
-    expect(resolvePerson(store, `<@!${WHEEZER}>`)?.displayName).toBe('Wheezer');
-    expect(resolvePerson(store, `Jay (id:${JASON})`)?.displayName).toBe('Jason');
-    expect(resolvePerson(store, SIMON)?.displayName).toBe('Simon');
+    expect(resolvePerson(store, `<@!${WHEELIE}>`)?.displayName).toBe('Wheelie');
+    expect(resolvePerson(store, `Jay (id:${JASPER})`)?.displayName).toBe('Jasper');
+    expect(resolvePerson(store, SILAS)?.displayName).toBe('Silas');
     // An id nobody knows falls back to the name written next to it; a bare unknown id resolves to nobody.
-    expect(resolvePerson(store, 'Wheezer (id:555555555555555555)')?.userId).toBe(WHEEZER);
+    expect(resolvePerson(store, 'Wheelie (id:555555555555555555)')?.userId).toBe(WHEELIE);
     expect(resolvePerson(store, '<@555555555555555555>')).toBeUndefined();
   });
 
@@ -217,25 +217,25 @@ describe('resolvePerson (memory tools)', () => {
 });
 
 describe('resolvePersonRef (reminders and birthdays: fuzzy, with explanations)', () => {
-  const FELIX = '100000000000000001';
-  const WHEEZ = '100000000000000002';
+  const REMI = '100000000000000001';
+  const WHEELS = '100000000000000002';
   const JAY = '100000000000000003';
   const MARIE = '100000000000000004';
 
   beforeEach(() => {
     store = new MemoryStore(':memory:');
     setMemoryStoreForTesting(store);
-    store.upsertIdentity(FELIX, 'fridge enjoyer');
-    store.updateIdentityMeta(FELIX, { irl_name: 'Felix Rouleau', aliases_add: ['Flex'] });
-    store.upsertIdentity(WHEEZ, 'Wheezer');
-    store.updateIdentityMeta(WHEEZ, { irl_name: 'Jason' });
+    store.upsertIdentity(REMI, 'fridge enjoyer');
+    store.updateIdentityMeta(REMI, { irl_name: 'Remi Lachance', aliases_add: ['Flex'] });
+    store.upsertIdentity(WHEELS, 'Wheelie');
+    store.updateIdentityMeta(WHEELS, { irl_name: 'Jasper' });
     store.upsertIdentity(JAY, 'Jaybird');
     store.upsertIdentity(MARIE, 'Mariè');
   });
 
   function directoryFor(opts: Parameters<typeof createFakeMessage>[0] = {}) {
     return buildPeopleDirectory(
-      createFakeMessage({ authorId: FELIX, authorDisplayName: 'fridge enjoyer', ...opts }).message,
+      createFakeMessage({ authorId: REMI, authorDisplayName: 'fridge enjoyer', ...opts }).message,
     );
   }
 
@@ -245,12 +245,12 @@ describe('resolvePersonRef (reminders and birthdays: fuzzy, with explanations)',
   }
 
   it('resolves display names, IRL names (full or first), aliases and canonical names, case-insensitively', () => {
-    expect(resolvedId('wheezer')).toBe(WHEEZ);
-    expect(resolvedId('@Wheezer')).toBe(WHEEZ);
-    expect(resolvedId('Jason')).toBe(WHEEZ);
-    expect(resolvedId('felix rouleau')).toBe(FELIX);
-    expect(resolvedId('Felix')).toBe(FELIX);
-    expect(resolvedId('flex')).toBe(FELIX);
+    expect(resolvedId('wheelie')).toBe(WHEELS);
+    expect(resolvedId('@Wheelie')).toBe(WHEELS);
+    expect(resolvedId('Jasper')).toBe(WHEELS);
+    expect(resolvedId('remi lachance')).toBe(REMI);
+    expect(resolvedId('Remi')).toBe(REMI);
+    expect(resolvedId('flex')).toBe(REMI);
   });
 
   it('ignores accents and surrounding quotes', () => {
@@ -259,8 +259,8 @@ describe('resolvePersonRef (reminders and birthdays: fuzzy, with explanations)',
   });
 
   it('resolves mention tokens and raw ids of known people', () => {
-    expect(resolvedId(`<@${WHEEZ}>`)).toBe(WHEEZ);
-    expect(resolvedId(`<@!${WHEEZ}>`)).toBe(WHEEZ);
+    expect(resolvedId(`<@${WHEELS}>`)).toBe(WHEELS);
+    expect(resolvedId(`<@!${WHEELS}>`)).toBe(WHEELS);
     expect(resolvedId(JAY)).toBe(JAY);
   });
 
@@ -272,8 +272,8 @@ describe('resolvePersonRef (reminders and birthdays: fuzzy, with explanations)',
   });
 
   it('maps "me" to the requester', () => {
-    expect(resolvedId('me')).toBe(FELIX);
-    expect(resolvedId('Myself')).toBe(FELIX);
+    expect(resolvedId('me')).toBe(REMI);
+    expect(resolvedId('Myself')).toBe(REMI);
   });
 
   it('refuses crowds and the bot', () => {
@@ -287,8 +287,8 @@ describe('resolvePersonRef (reminders and birthdays: fuzzy, with explanations)',
   it('falls back to a word inside a longer name, then a unique prefix of 3+ characters', () => {
     store.upsertIdentity('100000000000000006', 'big gamer');
     expect(resolvedId('gamer')).toBe('100000000000000006');
-    expect(resolvedId('whee')).toBe(WHEEZ);
-    expect(resolvedId('jas')).toBe(WHEEZ); // only Wheezer's IRL name starts with "jas"
+    expect(resolvedId('whee')).toBe(WHEELS);
+    expect(resolvedId('jas')).toBe(WHEELS); // only Wheelie's IRL name starts with "jas"
     // Two letters are too short for a prefix match, and match no whole name or word.
     expect(resolvedId('ja')).toBeUndefined();
   });
@@ -308,7 +308,7 @@ describe('resolvePersonRef (reminders and birthdays: fuzzy, with explanations)',
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toContain('I don\'t know who "Gandalf" is.');
-      expect(result.error).toContain('Wheezer');
+      expect(result.error).toContain('Wheelie');
     }
   });
 
@@ -323,99 +323,99 @@ describe('resolvePersonRef (reminders and birthdays: fuzzy, with explanations)',
 
   it('resolvePeopleRefs deduplicates people named twice and stops at the first unknown', () => {
     const dir = directoryFor();
-    const resolved = resolvePeopleRefs(['Wheezer', 'jason', 'me'], dir);
+    const resolved = resolvePeopleRefs(['Wheelie', 'jasper', 'me'], dir);
     expect(resolved.ok && resolved.people.map((p) => [p.userId, p.displayName])).toEqual([
-      [WHEEZ, 'Wheezer'],
-      [FELIX, 'fridge enjoyer'],
+      [WHEELS, 'Wheelie'],
+      [REMI, 'fridge enjoyer'],
     ]);
-    expect(resolvePeopleRefs(['Wheezer', 'Gandalf'], dir).ok).toBe(false);
+    expect(resolvePeopleRefs(['Wheelie', 'Gandalf'], dir).ok).toBe(false);
   });
 });
 
 describe('requesterOf / currentName', () => {
   it('attributes a relayed webhook message to the member it was posted for', () => {
-    recordRelay({ messageId: 'relay-1', channelId: 'channel-1', authorId: JASON, authorName: 'Jason', kind: 'link_fix' });
+    recordRelay({ messageId: 'relay-1', channelId: 'channel-1', authorId: JASPER, authorName: 'Jasper', kind: 'link_fix' });
     const relayed = createFakeMessage({ messageId: 'relay-1', webhookId: 'hook-1', authorId: 'hook-1' }).message;
-    expect(requesterOf(relayed)).toMatchObject({ userId: JASON, displayName: 'Jason' });
+    expect(requesterOf(relayed)).toMatchObject({ userId: JASPER, displayName: 'Jasper' });
   });
 
   it('uses the author of a regular message', () => {
-    const message = createFakeMessage({ authorId: SIMON, authorDisplayName: 'Simon' }).message;
-    expect(requesterOf(message)).toMatchObject({ userId: SIMON, displayName: 'Simon' });
+    const message = createFakeMessage({ authorId: SILAS, authorDisplayName: 'Silas' }).message;
+    expect(requesterOf(message)).toMatchObject({ userId: SILAS, displayName: 'Silas' });
   });
 
   it('prefers the identity display name and falls back otherwise', () => {
-    expect(currentName(WHEEZER, 'old name')).toBe('Wheezer');
+    expect(currentName(WHEELIE, 'old name')).toBe('Wheelie');
     expect(currentName('unknown', 'fallback')).toBe('fallback');
   });
 });
 
 describe('linked side accounts (LINKED_ACCOUNTS)', () => {
-  const TONY = '120000000000000001';
-  const TONY_SIDE = '120000000000000002';
+  const TOBY = '120000000000000001';
+  const TOBY_SIDE = '120000000000000002';
 
   beforeEach(() => {
-    vi.stubEnv('LINKED_ACCOUNTS', `${TONY_SIDE}:${TONY}`);
-    store.upsertIdentity(TONY, 'Tony', 'tony_main');
-    store.upsertIdentity(TONY_SIDE, 'Ptoughneigh', 'triceclone');
+    vi.stubEnv('LINKED_ACCOUNTS', `${TOBY_SIDE}:${TOBY}`);
+    store.upsertIdentity(TOBY, 'Toby', 'toby_main');
+    store.upsertIdentity(TOBY_SIDE, 'Tohbee', 'tobyclone');
   });
 
   it('folds a side account into its main account as one member', () => {
     const members = foldMembers(store.getAllIdentities());
-    const tony = members.filter((m) => m.userId === TONY);
-    expect(tony).toHaveLength(1);
-    expect(tony[0].displayName).toBe('Tony');
-    expect(tony[0].sideAccounts.map((i) => i.discord_user_id)).toEqual([TONY_SIDE]);
-    expect(tony[0].names).toEqual(['Tony', 'tony_main', 'Ptoughneigh', 'triceclone']);
-    expect(members.some((m) => m.userId === TONY_SIDE)).toBe(false);
+    const toby = members.filter((m) => m.userId === TOBY);
+    expect(toby).toHaveLength(1);
+    expect(toby[0].displayName).toBe('Toby');
+    expect(toby[0].sideAccounts.map((i) => i.discord_user_id)).toEqual([TOBY_SIDE]);
+    expect(toby[0].names).toEqual(['Toby', 'toby_main', 'Tohbee', 'tobyclone']);
+    expect(members.some((m) => m.userId === TOBY_SIDE)).toBe(false);
   });
 
   it("resolves the side account's names, mention and id to the main account", () => {
-    for (const ref of ['Ptoughneigh', '@triceclone', `<@${TONY_SIDE}>`, TONY_SIDE, 'tony']) {
-      expect(resolvePerson(store, ref)?.userId).toBe(TONY);
+    for (const ref of ['Tohbee', '@tobyclone', `<@${TOBY_SIDE}>`, TOBY_SIDE, 'toby']) {
+      expect(resolvePerson(store, ref)?.userId).toBe(TOBY);
     }
-    expect(resolvePerson(store, 'triceclone')?.displayName).toBe('Tony');
+    expect(resolvePerson(store, 'tobyclone')?.displayName).toBe('Toby');
   });
 
   it('treats a name both accounts share as one person, not an ambiguity', () => {
-    store.upsertIdentity(TONY_SIDE, 'Tony', 'triceclone');
-    expect(resolvePerson(store, 'Tony')?.userId).toBe(TONY);
+    store.upsertIdentity(TOBY_SIDE, 'Toby', 'tobyclone');
+    expect(resolvePerson(store, 'Toby')?.userId).toBe(TOBY);
   });
 
   it('resolves "me" from the side account to the main account', () => {
-    const { message } = createFakeMessage({ authorId: TONY_SIDE, authorDisplayName: 'Ptoughneigh' });
-    expect(resolvePerson(store, 'me', message)).toMatchObject({ userId: TONY, displayName: 'Tony' });
-    expect(requesterOf(message).userId).toBe(TONY);
+    const { message } = createFakeMessage({ authorId: TOBY_SIDE, authorDisplayName: 'Tohbee' });
+    expect(resolvePerson(store, 'me', message)).toMatchObject({ userId: TOBY, displayName: 'Toby' });
+    expect(requesterOf(message).userId).toBe(TOBY);
   });
 
   it('labels a member known only by a side account under the main id', () => {
     store = new MemoryStore(':memory:');
     setMemoryStoreForTesting(store);
-    store.upsertIdentity(TONY_SIDE, 'Ptoughneigh', 'triceclone');
-    expect(resolvePerson(store, 'Ptoughneigh')).toMatchObject({ userId: TONY, displayName: 'Ptoughneigh' });
+    store.upsertIdentity(TOBY_SIDE, 'Tohbee', 'tobyclone');
+    expect(resolvePerson(store, 'Tohbee')).toMatchObject({ userId: TOBY, displayName: 'Tohbee' });
   });
 
   it('memoryKeyFor: the main id and every name of every account, from either id', () => {
-    const expected = { userId: TONY, names: ['Tony (live)', 'Tony', 'tony_main', 'Ptoughneigh', 'triceclone'] };
-    expect(memoryKeyFor(store, TONY, ['Tony (live)'])).toEqual(expected);
-    expect(memoryKeyFor(store, TONY_SIDE, ['Tony (live)'])).toEqual(expected);
+    const expected = { userId: TOBY, names: ['Toby (live)', 'Toby', 'toby_main', 'Tohbee', 'tobyclone'] };
+    expect(memoryKeyFor(store, TOBY, ['Toby (live)'])).toEqual(expected);
+    expect(memoryKeyFor(store, TOBY_SIDE, ['Toby (live)'])).toEqual(expected);
   });
 
   it("finds the member in text by the side account's names or mention, counted once per reference", () => {
-    const refs = findPeopleInText(store, `ptoughneigh said <@${TONY_SIDE}> and tony are the same guy`);
-    expect(refs.map((r) => [r.userId, r.count])).toEqual([[TONY, 3]]);
+    const refs = findPeopleInText(store, `tohbee said <@${TOBY_SIDE}> and toby are the same guy`);
+    expect(refs.map((r) => [r.userId, r.count])).toEqual([[TOBY, 3]]);
   });
 
   it('currentName of a side account id is the main account name', () => {
-    expect(currentName(TONY_SIDE, 'fallback')).toBe('Tony');
+    expect(currentName(TOBY_SIDE, 'fallback')).toBe('Toby');
   });
 });
 
 describe('memoryKeyFor', () => {
   it('collects every name, including the Discord handle, for someone without linked accounts', () => {
-    expect(memoryKeyFor(store, JASON, ['Jason (live)', '  ', undefined])).toEqual({
-      userId: JASON,
-      names: ['Jason (live)', 'Jason', 'cigalefourmi', 'Alex'],
+    expect(memoryKeyFor(store, JASPER, ['Jasper (live)', '  ', undefined])).toEqual({
+      userId: JASPER,
+      names: ['Jasper (live)', 'Jasper', 'lapinlune', 'Alex'],
     });
   });
 
@@ -428,23 +428,23 @@ describe('findPeopleInText', () => {
   it('finds members by mention token, display name, handle, IRL name and nickname, most referenced first', () => {
     const refs = findPeopleInText(
       store,
-      `did <@${SIMON}> see what cigalefourmi posted? Jason is unhinged. Derrick and wheez agree, lol Jason`,
+      `did <@${SILAS}> see what lapinlune posted? Jasper is unhinged. Dorian and wheels agree, lol Jasper`,
     );
     expect(refs.map((r) => [r.displayName, r.count])).toEqual([
-      ['Jason', 3],
-      ['Wheezer', 2],
-      ['Simon', 1],
+      ['Jasper', 3],
+      ['Wheelie', 2],
+      ['Silas', 1],
     ]);
-    expect(refs[0].member.identity?.username).toBe('cigalefourmi');
-    expect(refs[1].names).toContain('Derrick');
+    expect(refs[0].member.identity?.username).toBe('lapinlune');
+    expect(refs[1].names).toContain('Dorian');
   });
 
   it('matches whole words only, case- and accent-insensitively, next to punctuation', () => {
     const names = (text: string) => findPeopleInText(store, text).map((r) => r.displayName);
-    expect(names("wheezer's car")).toEqual(['Wheezer']);
-    expect(names('(@JASON)')).toEqual(['Jason']);
-    expect(names('WHEEZÉR?')).toEqual(['Wheezer']);
-    expect(names('wheezers jasonic simonsays')).toEqual([]);
+    expect(names("wheelie's car")).toEqual(['Wheelie']);
+    expect(names('(@JASPER)')).toEqual(['Jasper']);
+    expect(names('WHEELIÉ?')).toEqual(['Wheelie']);
+    expect(names('wheelies jasperic silassays')).toEqual([]);
   });
 
   it('matches multi-word names across any whitespace, the longer name winning', () => {
@@ -458,17 +458,17 @@ describe('findPeopleInText', () => {
   });
 
   it('skips shared names, short nicknames, links, emoji and role/channel tokens instead of guessing', () => {
-    const text = 'Alex said :D at https://x.com/cigalefourmi/status/1 <:jason:123456789012345678> <#123456789012345678>';
+    const text = 'Alex said :D at https://x.com/lapinlune/status/1 <:jasper:123456789012345678> <#123456789012345678>';
     expect(findPeopleInText(store, text)).toEqual([]);
   });
 
   it('never matches names under three letters, except IRL names down to two', () => {
     store.upsertIdentity('500000000000000003', 'Ed');
-    store.upsertIdentity('500000000000000004', 'kizanz');
-    store.updateIdentityMeta('500000000000000004', { irl_name: 'Yi' });
+    store.upsertIdentity('500000000000000004', 'zorbix');
+    store.updateIdentityMeta('500000000000000004', { irl_name: 'Yu' });
     const names = (text: string) => findPeopleInText(store, text).map((r) => r.displayName);
     expect(names('ed is here')).toEqual([]);
-    expect(names('yi is here')).toEqual(['kizanz']);
+    expect(names('yu is here')).toEqual(['zorbix']);
   });
 
   it('matches an IRL first name only when it is unambiguous', () => {
@@ -488,8 +488,8 @@ describe('findPeopleInText', () => {
     store.updateIdentityMeta('500000000000000008', { aliases_add: ['Frigidaire'] });
     expect(findPeopleInText(store, 'the fridge')).toEqual([]);
     expect(findPeopleInText(store, 'frigidaire what do you think', { excludeNames: ['Frigidaire'] })).toEqual([]);
-    expect(findPeopleInText(store, 'jason and wheezer', { excludeUserIds: [JASON] }).map((r) => r.userId)).toEqual([
-      WHEEZER,
+    expect(findPeopleInText(store, 'jasper and wheelie', { excludeUserIds: [JASPER] }).map((r) => r.userId)).toEqual([
+      WHEELIE,
     ]);
   });
 
@@ -499,9 +499,9 @@ describe('findPeopleInText', () => {
 
   it('builds a reusable matcher whose order is the order people come up in', () => {
     const match = createPeopleMatcher(store.getAllIdentities());
-    expect([...match(`Simon and Jason and <@${WHEEZER}>`).keys()]).toEqual([SIMON, JASON, WHEEZER]);
-    expect([...match(`<@${WHEEZER}> then Simon`).keys()]).toEqual([WHEEZER, SIMON]);
-    expect(createPeopleMatcher([])('Jason <@1>').size).toBe(0);
+    expect([...match(`Silas and Jasper and <@${WHEELIE}>`).keys()]).toEqual([SILAS, JASPER, WHEELIE]);
+    expect([...match(`<@${WHEELIE}> then Silas`).keys()]).toEqual([WHEELIE, SILAS]);
+    expect(createPeopleMatcher([])('Jasper <@1>').size).toBe(0);
   });
 });
 

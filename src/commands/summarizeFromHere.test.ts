@@ -44,10 +44,10 @@ describe('Summarize from here', () => {
     const { interaction, responses } = createFakeMessageCommandInteraction(target.message, {
       commandName: 'Summarize from here',
       invokerId: 'user-5',
-      invokerDisplayName: 'Felix',
+      invokerDisplayName: 'Remi',
     });
     const { deps, recorders } = createFakeCommandDeps({
-      summarize: async () => ({ ok: true, text: 'Jason lost at League again. <@123>' }),
+      summarize: async () => ({ ok: true, text: 'Jasper lost at League again. <@123>' }),
     });
 
     await handleContextMenuCommand(interaction, deps);
@@ -61,7 +61,7 @@ describe('Summarize from here', () => {
 
     expect(target.recorders.reply.calls).toHaveLength(1);
     const posted = target.recorders.reply.calls[0][0] as { content: string; allowedMentions: unknown };
-    expect(posted.content).toBe('-# summary from here to now · asked by Felix\nJason lost at League again. <@123>');
+    expect(posted.content).toBe('-# summary from here to now · asked by Remi\nJasper lost at League again. <@123>');
     expect(posted.allowedMentions).toEqual({ parse: [], repliedUser: false });
 
     // The invoker's side stayed private the whole time.

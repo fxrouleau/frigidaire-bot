@@ -36,7 +36,7 @@ export type Identity = {
   display_name: string;
   canonical_name: string;
   /**
-   * Discord handle (`user.username`, e.g. "cigalefourmi"): NULL until the member is next seen after the
+   * Discord handle (`user.username`, e.g. "lapinlune"): NULL until the member is next seen after the
    * column was added. Optional in the type so hand-built identities (tests, fakes) need not name it;
    * rows read from the table always carry the key.
    */
@@ -147,7 +147,7 @@ export function buildEmbeddingInput(memory: Pick<MemoryInput, 'subject' | 'conte
 
 /**
  * Default per-category ephemeral-memory TTLs (in hours), env-overridable. Ephemeral observations
- * ("Jason shared a photo of a hotdog", "movie night happened on Saturday") should be retrievable
+ * ("Jasper shared a photo of a hotdog", "movie night happened on Saturday") should be retrievable
  * while fresh and then expire — they're moments, not durable facts. A TTL of 0 disables expiry
  * for that category.
  */
@@ -836,7 +836,7 @@ export class MemoryStore {
    * 2. Every active memory without a subject_user_id whose subject is a name exactly one member goes by
    *    — display name, Discord handle, first-seen name, IRL name or nickname, case-insensitively, on
    *    any of their accounts — gets that member's MAIN id. (Real case: the learner filed memories under
-   *    "cigalefourmi", which is a member's handle, not his display name.)
+   *    "lapinlune", which is a member's handle, not his display name.)
    *
    * Step 2 is stricter than interactive lookups (src/ai/people.ts), which let a display name outrank
    * another member's nickname: these rows are old and their subject was whatever the name meant back

@@ -10,13 +10,13 @@ import {
 
 describe('Observation type', () => {
   it('accepts existing personality categories', () => {
-    const obs: Observation = { category: 'fact', subject: 'Felix', content: 'Likes cats' };
+    const obs: Observation = { category: 'fact', subject: 'Remi', content: 'Likes cats' };
     expect(obs.category).toBe('fact');
 
-    const obs2: Observation = { category: 'preference', subject: 'Felix', content: 'Prefers tea' };
+    const obs2: Observation = { category: 'preference', subject: 'Remi', content: 'Prefers tea' };
     expect(obs2.category).toBe('preference');
 
-    const obs3: Observation = { category: 'personality', subject: 'Felix', content: 'Dry humor' };
+    const obs3: Observation = { category: 'personality', subject: 'Remi', content: 'Dry humor' };
     expect(obs3.category).toBe('personality');
 
     const obs4: Observation = { category: 'event', subject: 'server', content: 'Game night' };
@@ -41,7 +41,7 @@ describe('Observation type', () => {
   });
 
   it('accepts the ephemeral image category (expired by the TTL sweep)', () => {
-    const obs: Observation = { category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' };
+    const obs: Observation = { category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' };
     expect(obs.category).toBe('image');
   });
 
@@ -100,10 +100,10 @@ describe('parseLearnerOutput', () => {
   it('parses the canonical object format', () => {
     const raw = `{
       "observations": [
-        {"category": "fact", "subject": "Wheezer", "subject_user_id": "123", "content": "Likes cats"}
+        {"category": "fact", "subject": "Wheelie", "subject_user_id": "123", "content": "Likes cats"}
       ],
       "identity_updates": [
-        {"discord_user_id": "123", "irl_name": "Derrick"}
+        {"discord_user_id": "123", "irl_name": "Dorian"}
       ]
     }`;
     const parsed = parseLearnerOutput(raw);
@@ -111,7 +111,7 @@ describe('parseLearnerOutput', () => {
     expect(parsed?.observations).toHaveLength(1);
     expect(parsed?.observations[0].subject_user_id).toBe('123');
     expect(parsed?.identity_updates).toHaveLength(1);
-    expect(parsed?.identity_updates?.[0].irl_name).toBe('Derrick');
+    expect(parsed?.identity_updates?.[0].irl_name).toBe('Dorian');
   });
 
   it('accepts object without identity_updates', () => {
@@ -122,10 +122,10 @@ describe('parseLearnerOutput', () => {
   });
 
   it('falls back to legacy array format', () => {
-    const raw = '[{"category": "fact", "subject": "Jason", "content": "Likes TFT"}]';
+    const raw = '[{"category": "fact", "subject": "Jasper", "content": "Likes TFT"}]';
     const parsed = parseLearnerOutput(raw);
     expect(parsed?.observations).toHaveLength(1);
-    expect(parsed?.observations[0].subject).toBe('Jason');
+    expect(parsed?.observations[0].subject).toBe('Jasper');
     expect(parsed?.identity_updates).toBeUndefined();
   });
 
@@ -195,7 +195,7 @@ describe('buildPersonalityPrompt (memory-quality rules)', () => {
     expect(prompt).toContain('the name their identities entry\n   below starts with (never the "formerly" name)');
     expect(prompt).toContain('"subject_user_id" MUST be their Discord ID');
     // The earlier canonical-name keying is gone — prod canonical names are stale first-seen usernames
-    // ('gigacheese', 'chinkichanga'), and keying on them would split the memory keyspace.
+    // ('megabrie', 'wafflehammer'), and keying on them would split the memory keyspace.
     expect(prompt).not.toContain('canonical name from the known server identities list');
   });
 
@@ -210,7 +210,7 @@ describe('buildPersonalityPrompt (memory-quality rules)', () => {
   });
 
   it('contains no content-censoring instructions (observations stay verbatim)', () => {
-    // Felix's explicit exclusion: authentic observations are kept as-is, never sanitized.
+    // Remi's explicit exclusion: authentic observations are kept as-is, never sanitized.
     expect(prompt).not.toMatch(/censor/i);
     expect(prompt).not.toMatch(/paraphras/i);
     expect(prompt).not.toMatch(/never quote/i);

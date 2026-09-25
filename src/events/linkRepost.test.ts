@@ -164,11 +164,11 @@ describe('linkRepost event', () => {
   });
 
   it('keeps a spoilered link spoilered', async () => {
-    const fake = createFakeMessage({ content: 'no way ||https://x.com/jason/status/123||' });
+    const fake = createFakeMessage({ content: 'no way ||https://x.com/jasper/status/123||' });
 
     await linkRepostEvent.execute(fake.message);
 
-    expect(sentContent(fake)).toBe('no way ||https://tw.test/jason/status/123||');
+    expect(sentContent(fake)).toBe('no way ||https://tw.test/jasper/status/123||');
   });
 
   it('adds the reply context line when the original was a reply', async () => {
@@ -178,12 +178,12 @@ describe('linkRepost event', () => {
       channelId: 'c1',
       referencedMessageId: 'm0',
       repliedUserId: 'u2',
-      repliedMemberDisplayName: 'Felix',
+      repliedMemberDisplayName: 'Remi',
     });
 
     await linkRepostEvent.execute(fake.message);
 
-    expect(sentContent(fake)).toBe('-# ↪ replying to Felix · https://discord.com/channels/g1/c1/m0\nhttps://tw.test/u/status/1');
+    expect(sentContent(fake)).toBe('-# ↪ replying to Remi · https://discord.com/channels/g1/c1/m0\nhttps://tw.test/u/status/1');
   });
 
   it('does not repost a message the author edited while its links were being fixed', async () => {

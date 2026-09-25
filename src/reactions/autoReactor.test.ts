@@ -15,8 +15,8 @@ import { AutoReactLedger } from './ledger';
 const T0 = Date.UTC(2026, 8, 25, 16, 0);
 const MIN = 60_000;
 const KEKW = '300000000000000001';
-const FELIX = '200000000000000001';
-const DAN = '200000000000000002';
+const REMI = '200000000000000001';
+const DALE = '200000000000000002';
 
 const READY_GUIDE: ReactionGuide = {
   messages: 1000,
@@ -120,15 +120,15 @@ function candidate(
       snapshot === null
         ? undefined
         : {
-            authorId: FELIX,
-            authorName: 'Felix',
+            authorId: REMI,
+            authorName: 'Remi',
             text: 'I parallel parked into a hydrant',
             notes: [],
             imageUrls: [],
             botReacted: false,
             ...snapshot,
           },
-    context: (limit) => [{ author: 'Dan', text: `context (limit ${limit})` }],
+    context: (limit) => [{ author: 'Dale', text: `context (limit ${limit})` }],
     react: async (emoji) => {
       await react(emoji);
       reacted.push(emoji);
@@ -159,12 +159,12 @@ describe('AutoReactor: flow', () => {
 
     const input = h.judge.mock.calls[0][0];
     expect(input.post).toEqual({
-      author: 'Felix',
+      author: 'Remi',
       text: 'I parallel parked into a hydrant',
       notes: [],
       images: ['data:https://cdn.discordapp.com/a.png'],
     });
-    expect(input.context).toEqual([{ author: 'Dan', text: 'context (limit 6)' }]);
+    expect(input.context).toEqual([{ author: 'Dale', text: 'context (limit 6)' }]);
     expect(input.guide).toBe(READY_GUIDE);
   });
 
@@ -220,7 +220,7 @@ describe('AutoReactor: shadow mode', () => {
     expect(post.reacted).toEqual([]);
     expect(h.report).toHaveBeenCalledTimes(1);
     const line = h.report.mock.calls[0][0];
-    expect(line).toContain(`would react <:KEKW:${KEKW}> to Felix's post https://discord.com/channels/g/main/m1`);
+    expect(line).toContain(`would react <:KEKW:${KEKW}> to Remi's post https://discord.com/channels/g/main/m1`);
     expect(line).toContain('why: legendary fail');
     expect(h.ledger.since(0)).toMatchObject([{ messageId: 'm1', mode: 'shadow' }]);
 
@@ -288,7 +288,7 @@ describe('AutoReactor: gates', () => {
 
   it('skips a post the bot replied to', async () => {
     const h = harness();
-    h.reactor.noteBotMessage('main', { repliedToId: 'm1', partnerId: DAN });
+    h.reactor.noteBotMessage('main', { repliedToId: 'm1', partnerId: DALE });
     expect(await h.reactor.evaluate(candidate('m1'))).toEqual({ status: 'skipped', reason: 'bot replied' });
   });
 
@@ -309,23 +309,23 @@ describe('AutoReactor: gates', () => {
 
   it('skips a post whose author is mid-exchange with the bot (the gate answers those)', async () => {
     const h = harness();
-    h.reactor.noteBotMessage('main', { repliedToId: 'earlier', partnerId: FELIX });
+    h.reactor.noteBotMessage('main', { repliedToId: 'earlier', partnerId: REMI });
     h.clock.now += 60_000;
     expect(await h.reactor.evaluate(candidate('m1'))).toEqual({
       status: 'skipped',
       reason: 'author is talking with the bot',
     });
     // Other channels and other members are unaffected; the window ends.
-    expect(await h.reactor.evaluate({ ...candidate('m2', { authorId: DAN }) })).toMatchObject({ status: 'reacted' });
+    expect(await h.reactor.evaluate({ ...candidate('m2', { authorId: DALE }) })).toMatchObject({ status: 'reacted' });
     h.clock.now += 45 * MIN;
     expect(await h.reactor.evaluate(candidate('m3'))).toMatchObject({ status: 'reacted' });
   });
 
   it('treats a linked side account as the same person', async () => {
-    vi.stubEnv('LINKED_ACCOUNTS', `200000000000000009:${FELIX}`);
+    vi.stubEnv('LINKED_ACCOUNTS', `200000000000000009:${REMI}`);
     try {
       const h = harness();
-      h.reactor.noteBotMessage('main', { repliedToId: 'earlier', partnerId: FELIX });
+      h.reactor.noteBotMessage('main', { repliedToId: 'earlier', partnerId: REMI });
       expect(await h.reactor.evaluate(candidate('m1', { authorId: '200000000000000009' }))).toMatchObject({
         reason: 'author is talking with the bot',
       });

@@ -445,7 +445,7 @@ export class PersonalityLearner {
 
     // The shared SERVER PEOPLE lines: each starts with the member's current display name (the subject to
     // use), then their @handle and id. The handle is spelled out because the model once filed memories
-    // under "cigalefourmi", a handle, instead of the member. Side accounts are folded into their member.
+    // under "lapinlune", a handle, instead of the member. Side accounts are folded into their member.
     const lines = formatIdentityLines(identities);
     return `\nKnown server identities (each line starts with the member's CURRENT display name, then their @Discord handle and Discord ID). A Discord handle, a "formerly" name or an "also posts as" account is never a subject: use the name the line starts with and its id. Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${lines.join('\n')}\n`;
   }

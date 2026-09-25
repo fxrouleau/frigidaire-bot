@@ -157,29 +157,29 @@ describe('ensureTargetChannel', () => {
 
 describe('resolveTargetAuthor', () => {
   it("uses a human author's live server name", async () => {
-    const { guild, recorders } = createFakeGuild({ members: { 'user-7': 'Jason (live)' } });
+    const { guild, recorders } = createFakeGuild({ members: { 'user-7': 'Jasper (live)' } });
     const { message } = createFakeTargetMessage({
       authorId: 'user-7',
-      authorDisplayName: 'Jason',
-      authorUsername: 'cigalefourmi',
+      authorDisplayName: 'Jasper',
+      authorUsername: 'lapinlune',
       guild,
     });
-    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-7', name: 'Jason (live)', username: 'cigalefourmi' });
+    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-7', name: 'Jasper (live)', username: 'lapinlune' });
     expect(recorders.membersFetch.calls).toEqual([['user-7']]);
   });
 
   it('falls back to the message name when the member left the server', async () => {
     const { guild } = createFakeGuild();
-    const { message } = createFakeTargetMessage({ authorId: 'user-7', authorDisplayName: 'Jason', guild });
-    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-7', name: 'Jason', username: 'testuser' });
+    const { message } = createFakeTargetMessage({ authorId: 'user-7', authorDisplayName: 'Jasper', guild });
+    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-7', name: 'Jasper', username: 'testuser' });
   });
 
   it('credits a link-fix repost to the member it was posted for', async () => {
-    recordRelay({ messageId: 'relay-1', channelId: 'channel-1', authorId: 'user-8', authorName: 'Simon', kind: 'link_fix' });
-    const { guild } = createFakeGuild({ members: { 'user-8': 'Simon B' } });
-    const { message } = createFakeTargetMessage({ messageId: 'relay-1', webhookId: 'hook-1', authorUsername: 'Simon', guild });
+    recordRelay({ messageId: 'relay-1', channelId: 'channel-1', authorId: 'user-8', authorName: 'Silas', kind: 'link_fix' });
+    const { guild } = createFakeGuild({ members: { 'user-8': 'Silas B' } });
+    const { message } = createFakeTargetMessage({ messageId: 'relay-1', webhookId: 'hook-1', authorUsername: 'Silas', guild });
     // No username: the message's author is the webhook, whose "username" is only the name it posted under.
-    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-8', name: 'Simon B' });
+    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-8', name: 'Silas B' });
   });
 
   it('is undefined for bots and foreign webhooks', async () => {
@@ -192,14 +192,14 @@ describe('resolveTargetAuthor', () => {
   it("credits a linked side account's message to the main account, under the main account's live name", async () => {
     vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
     try {
-      const { guild, recorders } = createFakeGuild({ members: { '100000000000000001': 'Tony' } });
+      const { guild, recorders } = createFakeGuild({ members: { '100000000000000001': 'Toby' } });
       const { message } = createFakeTargetMessage({
         authorId: '100000000000000002',
-        authorDisplayName: 'Ptoughneigh',
-        authorUsername: 'triceclone',
+        authorDisplayName: 'Tohbee',
+        authorUsername: 'tobyclone',
         guild,
       });
-      expect(await resolveTargetAuthor(message)).toEqual({ id: '100000000000000001', name: 'Tony', username: 'triceclone' });
+      expect(await resolveTargetAuthor(message)).toEqual({ id: '100000000000000001', name: 'Toby', username: 'tobyclone' });
       expect(recorders.membersFetch.calls).toEqual([['100000000000000001']]);
     } finally {
       vi.unstubAllEnvs();
@@ -229,8 +229,8 @@ describe('small helpers', () => {
   });
 
   it('readableText uses the mention-resolved text', () => {
-    const { message } = createFakeTargetMessage({ content: 'hi <@1>', cleanContent: 'hi @Jason' });
-    expect(readableText(message)).toBe('hi @Jason');
+    const { message } = createFakeTargetMessage({ content: 'hi <@1>', cleanContent: 'hi @Jasper' });
+    expect(readableText(message)).toBe('hi @Jasper');
   });
 
   it('formats durations as m:ss', () => {

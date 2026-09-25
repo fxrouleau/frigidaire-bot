@@ -4,7 +4,7 @@
   "status": 200,
   "request": {
     "model": "qwen/qwen3-embedding-8b",
-    "input": ["Felix: Felix loves pizza", "weather: It was sunny in Montreal today"],
+    "input": ["Remi: Remi loves pizza", "weather: It was sunny in Montreal today"],
     "encoding_format": "float",
     "provider": { "zdr": true }
   },

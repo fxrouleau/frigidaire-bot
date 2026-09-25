@@ -231,7 +231,7 @@ const RECENCY_DAYS = 90;
 const DAY_MS = 86_400_000;
 
 // Column weights for bm25(): content, author_name, transcript, extra_text. The author column is weighted
-// down so "felix pizza" prefers Felix's messages about pizza over any message that merely says "felix".
+// down so "remi pizza" prefers Remi's messages about pizza over any message that merely says "remi".
 const BM25_WEIGHTS = '1.0, 0.4, 1.0, 0.6';
 
 const SCHEMA = `

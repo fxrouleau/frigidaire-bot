@@ -32,8 +32,8 @@ const MAIN = '100000000000000001';
 const CLIPS = '100000000000000002';
 const MODLOGS = '100000000000000004';
 const REPORT = '100000000000000005';
-const FELIX = '200000000000000001';
-const JASON = '200000000000000002';
+const REMI = '200000000000000001';
+const JASPER = '200000000000000002';
 const EVERYONE_ROLE = GUILD_ID;
 const MOD_ROLE = '400000000000000001';
 const MINUTE = 60_000;
@@ -139,7 +139,7 @@ function sampleStats(overrides: Partial<WrappedStats> = {}): WrappedStats {
     totalMessages: 1234,
     activeMembers: 3,
     topMembers: [
-      { authorId: FELIX, authorName: 'Felix', count: 700 },
+      { authorId: REMI, authorName: 'Remi', count: 700 },
       { authorId: null, authorName: 'Ghost_y', count: 34 },
     ],
     busiestDay: { date: '2026-08-14', count: 210 },
@@ -150,29 +150,29 @@ function sampleStats(overrides: Partial<WrappedStats> = {}): WrappedStats {
       { platform: 'twitter', count: 5 },
       { platform: 'other', count: 2 },
     ],
-    voice: { total: 3, top: { authorId: JASON, authorName: 'Jason', count: 2 } },
+    voice: { total: 3, top: { authorId: JASPER, authorName: 'Jasper', count: 2 } },
     regrets: {
       total: 4,
       top: [
-        { authorId: JASON, authorName: 'Jason', count: 3 },
-        { authorId: FELIX, authorName: 'Felix', count: 1 },
+        { authorId: JASPER, authorName: 'Jasper', count: 3 },
+        { authorId: REMI, authorName: 'Remi', count: 1 },
       ],
     },
-    edits: { total: 9, top: { authorId: FELIX, authorName: 'Felix', count: 5 } },
-    deletions: { total: 1, top: { authorId: JASON, authorName: 'Jason', count: 1 } },
+    edits: { total: 9, top: { authorId: REMI, authorName: 'Remi', count: 5 } },
+    deletions: { total: 1, top: { authorId: JASPER, authorName: 'Jasper', count: 1 } },
     longest: {
-      authorId: FELIX,
-      authorName: 'Felix',
+      authorId: REMI,
+      authorName: 'Remi',
       length: 812,
       content: `**hear me out** ${'word '.repeat(60)}`,
       messageId: '600000000000000001',
       channelId: MAIN,
       guildId: GUILD_ID,
     },
-    botPings: { total: 40, top: { authorId: JASON, authorName: 'Jason', count: 30 }, botReplies: 38 },
+    botPings: { total: 40, top: { authorId: JASPER, authorName: 'Jasper', count: 30 }, botReplies: 38 },
     mostReacted: {
-      authorId: JASON,
-      authorName: 'Jason',
+      authorId: JASPER,
+      authorName: 'Jasper',
       total: 14,
       reactions: [
         { id: '300000000000000001', name: 'kekw', animated: false, count: 9 },
@@ -198,27 +198,27 @@ const renderOptions = {
 describe('renderWrapped', () => {
   it('renders every section deterministically', () => {
     const period = yearPeriod(2026);
-    const text = renderWrapped(period, sampleStats(), { ...renderOptions, intro: 'Felix_needs a hobby' });
-    expect(text).toBe(renderWrapped(period, sampleStats(), { ...renderOptions, intro: 'Felix_needs a hobby' }));
+    const text = renderWrapped(period, sampleStats(), { ...renderOptions, intro: 'Remi_needs a hobby' });
+    expect(text).toBe(renderWrapped(period, sampleStats(), { ...renderOptions, intro: 'Remi_needs a hobby' }));
     const lines = text.split('\n');
     expect(lines[0]).toBe('📦 **Frigidaire Wrapped — 2026**');
-    expect(lines[1]).toBe('*Felix\\_needs a hobby*');
+    expect(lines[1]).toBe('*Remi\\_needs a hobby*');
     expect(text).toContain('💬 **1,234** messages from **3** people');
-    expect(text).toContain(`1. <@${FELIX}> — 700`);
+    expect(text).toContain(`1. <@${REMI}> — 700`);
     expect(text).toContain('2. **Ghost_y** — 34');
     expect(text).toContain('📅 Busiest day **Fri, Aug 14** (210 messages) · peak hour **11 PM–12 AM** ET');
     expect(text).toContain(`📍 Top channel: <#${MAIN}> (1,000 messages)`);
     expect(text).toContain('😂 Top emojis: <:kekw:300000000000000001> ×12');
     expect(text).toContain(
-      `🔥 Most reacted message of the year: <@${JASON}> — 14 reactions (<:kekw:300000000000000001> ×9 😂 ×4 💀 ×1) — "the \\*depot\\* is hiring" https://discord.com/channels/${GUILD_ID}/${MAIN}/600000000000000002`,
+      `🔥 Most reacted message of the year: <@${JASPER}> — 14 reactions (<:kekw:300000000000000001> ×9 😂 ×4 💀 ×1) — "the \\*depot\\* is hiring" https://discord.com/channels/${GUILD_ID}/${MAIN}/600000000000000002`,
     );
     expect(text).toContain('🔗 Links: Twitter/X 5 · other 2');
-    expect(text).toContain(`🎙️ Voice messages: 3 — most from <@${JASON}> (2)`);
-    expect(text).toContain(`🫣 Most regretted: <@${JASON}> — 3 messages deleted and put right back; runners-up <@${FELIX}> (1)`);
-    expect(text).toContain(`✏️ 9 edits (<@${FELIX}>: 5) · 🗑️ 1 deletion (<@${JASON}>: 1)`);
-    expect(text).toContain(`📜 Ramble of the year: <@${FELIX}> with 812 characters — "\\*\\*hear me out\\*\\* word`);
+    expect(text).toContain(`🎙️ Voice messages: 3 — most from <@${JASPER}> (2)`);
+    expect(text).toContain(`🫣 Most regretted: <@${JASPER}> — 3 messages deleted and put right back; runners-up <@${REMI}> (1)`);
+    expect(text).toContain(`✏️ 9 edits (<@${REMI}>: 5) · 🗑️ 1 deletion (<@${JASPER}>: 1)`);
+    expect(text).toContain(`📜 Ramble of the year: <@${REMI}> with 812 characters — "\\*\\*hear me out\\*\\* word`);
     expect(text).toContain(`https://discord.com/channels/${GUILD_ID}/${MAIN}/600000000000000001`);
-    expect(text).toContain(`🤖 You pinged me 40 times (<@${JASON}>: 30); I answered 38 times`);
+    expect(text).toContain(`🤖 You pinged me 40 times (<@${JASPER}>: 30); I answered 38 times`);
     expect(text).not.toContain('month');
   });
 
@@ -237,7 +237,7 @@ describe('renderWrapped', () => {
       }),
       renderOptions,
     );
-    expect(text).toContain(`🔥 Most reacted message of the year: <@${JASON}> — 1 reaction (😂 ×1) — [meme\\_final.png] https://`);
+    expect(text).toContain(`🔥 Most reacted message of the year: <@${JASPER}> — 1 reaction (😂 ×1) — [meme\\_final.png] https://`);
   });
 
   it('leaves out lines with nothing to report, and marks a partial year, banner and footnotes', () => {
@@ -270,8 +270,8 @@ describe('renderWrapped', () => {
 
 describe('intro line', () => {
   it('cleans quotes, labels and extra lines', () => {
-    expect(cleanIntro('"Jason pinged the bot 30 times. Get a job."')).toBe('Jason pinged the bot 30 times. Get a job.');
-    expect(cleanIntro('\n\nIntro: **Felix wrote a novel**\nsecond line')).toBe('Felix wrote a novel');
+    expect(cleanIntro('"Jasper pinged the bot 30 times. Get a job."')).toBe('Jasper pinged the bot 30 times. Get a job.');
+    expect(cleanIntro('\n\nIntro: **Remi wrote a novel**\nsecond line')).toBe('Remi wrote a novel');
     expect(cleanIntro('   ')).toBeUndefined();
     expect(cleanIntro(null)).toBeUndefined();
     expect(cleanIntro('x'.repeat(400))).toHaveLength(280);
@@ -304,8 +304,8 @@ describe('intro line', () => {
     expect(seen.headers?.get(FEATURE_HEADER)).toBe('wrapped');
     const prompt = JSON.stringify(seen.body?.messages);
     expect(prompt).toContain('Year: 2026.');
-    expect(prompt).toContain('Felix (700)');
-    expect(prompt).toContain('Most reacted message: Jason (14 reactions)');
+    expect(prompt).toContain('Remi (700)');
+    expect(prompt).toContain('Most reacted message: Jasper (14 reactions)');
     expect(prompt).not.toContain('hear me out'); // no message text leaves the archive
     expect(prompt).not.toContain('depot');
   });
@@ -325,7 +325,7 @@ describe('intro line', () => {
 type Sent = { channelId: string; content: string; allowedMentions: { parse: never[] } };
 
 /**
- * A guild where #banana-combo and #clips are public, and #mod-logs and #bot-testing (the report
+ * A guild where #bagel-bar and #clips are public, and #mod-logs and #bot-testing (the report
  * channel) are mods-only.
  */
 function fakeGuildChannels(sent: Sent[], sendImpl?: (channelId: string, content: string) => Promise<{ id: string }>) {
@@ -364,7 +364,7 @@ function fakeGuildChannels(sent: Sent[], sendImpl?: (channelId: string, content:
 
 function seedStore(store: ArchiveStore, at: number) {
   for (const [id, name] of [
-    [MAIN, 'banana-combo'],
+    [MAIN, 'bagel-bar'],
     [CLIPS, 'clips'],
     [MODLOGS, 'mod-logs'],
   ]) {
@@ -375,7 +375,7 @@ function seedStore(store: ArchiveStore, at: number) {
       id: snowflake(at, 1),
       createdAt: at,
       content: 'public <:kekw:300000000000000001>',
-      authorId: FELIX,
+      authorId: REMI,
       reactions: [{ id: null, name: '😂', count: 2, me: true }],
     }),
     archiveInput({
@@ -383,8 +383,8 @@ function seedStore(store: ArchiveStore, at: number) {
       createdAt: at + MINUTE,
       content: 'clip',
       channelId: CLIPS,
-      authorId: JASON,
-      authorName: 'Jason',
+      authorId: JASPER,
+      authorName: 'Jasper',
       reactions: [{ id: '300000000000000001', name: 'kekw', count: 3 }],
     }),
     archiveInput({
@@ -392,8 +392,8 @@ function seedStore(store: ArchiveStore, at: number) {
       createdAt: at + 2 * MINUTE,
       content: `private mod stuff ${'x'.repeat(500)}`,
       channelId: MODLOGS,
-      authorId: JASON,
-      authorName: 'Jason',
+      authorId: JASPER,
+      authorName: 'Jasper',
       reactions: [{ id: null, name: '👀', count: 9 }],
     }),
   ]);
@@ -445,8 +445,8 @@ describe('runWrappedCheck', () => {
     expect(text).toContain('*what a year*');
     expect(text).toContain('💬 **2** messages from **2** people');
     expect(text).toContain('<:kekw:300000000000000001> ×1');
-    // Jason's clip (3 kekw) beats Felix's message (2 😂, one of them the bot's own); mod-logs never counts.
-    expect(text).toContain(`🔥 Most reacted message of the year: <@${JASON}> — 3 reactions (<:kekw:300000000000000001> ×3) — "clip"`);
+    // Jasper's clip (3 kekw) beats Remi's message (2 😂, one of them the bot's own); mod-logs never counts.
+    expect(text).toContain(`🔥 Most reacted message of the year: <@${JASPER}> — 3 reactions (<:kekw:300000000000000001> ×3) — "clip"`);
     expect(text).not.toContain('private mod stuff');
     expect(text).not.toContain('👀');
     expect(d.intro).toHaveBeenCalledTimes(1);

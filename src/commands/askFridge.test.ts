@@ -23,7 +23,7 @@ const warned = () => log.mock.calls.some((c: unknown[]) => String(c[0]).includes
 
 describe('Ask Fridge', () => {
   it('acknowledges privately right away and runs the agent on the target without waiting for it', async () => {
-    const { guild, recorders: guildRecorders } = createFakeGuild({ members: { 'user-7': 'Jason' } });
+    const { guild, recorders: guildRecorders } = createFakeGuild({ members: { 'user-7': 'Jasper' } });
     const target = createFakeTargetMessage({ authorId: 'user-7', content: 'is a hotdog a sandwich', guild });
     const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Ask Fridge' });
 

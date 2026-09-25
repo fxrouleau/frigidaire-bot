@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 function voiceMessage() {
-  const { guild } = createFakeGuild({ members: { 'user-7': 'Jason' } });
+  const { guild } = createFakeGuild({ members: { 'user-7': 'Jasper' } });
   return createFakeTargetMessage({
     messageId: 'voice-1',
     authorId: 'user-7',
@@ -43,14 +43,14 @@ describe('Transcribe', () => {
     const target = voiceMessage();
     const { interaction, responses } = createFakeMessageCommandInteraction(target.message, {
       commandName: 'Transcribe',
-      invokerDisplayName: 'Felix',
+      invokerDisplayName: 'Remi',
     });
     const { deps, recorders } = createFakeCommandDeps({ transcribeAudio: async () => 'yo @everyone come play\nnow' });
 
     await handleContextMenuCommand(interaction, deps);
 
     expect(recorders.transcribeAudio.calls[0][0]).toMatchObject({ url: 'https://cdn/voice-message.ogg', messageId: 'voice-1' });
-    expect(postedContent(target)).toBe('-# transcript · asked by Felix\n> yo @everyone come play\n> now');
+    expect(postedContent(target)).toBe('-# transcript · asked by Remi\n> yo @everyone come play\n> now');
     expect(target.recorders.reply.calls[0][0]).toMatchObject({ allowedMentions: { parse: [], repliedUser: false } });
     expect(responses.map((r) => r.method)).toEqual(['deferReply', 'editReply']);
     expect(responses.every((r) => r.ephemeral)).toBe(true);
@@ -68,12 +68,12 @@ describe('Transcribe', () => {
   });
 
   it('describes video attachments with context, labelling each item', async () => {
-    const { guild } = createFakeGuild({ members: { 'user-7': 'Jason' } });
+    const { guild } = createFakeGuild({ members: { 'user-7': 'Jasper' } });
     const target = createFakeTargetMessage({
       authorId: 'user-7',
       guild,
       content: 'look at this <@9>',
-      cleanContent: 'look at this @Simon',
+      cleanContent: 'look at this @Silas',
       mediaAttachments: [{ url: 'https://cdn/clip.mp4', contentType: 'video/mp4', name: 'clip.mp4', duration: 75 }],
     });
     const { interaction } = createFakeMessageCommandInteraction(target.message, { commandName: 'Transcribe' });
@@ -86,7 +86,7 @@ describe('Transcribe', () => {
     expect(recorders.watchVideo.calls[0][0]).toEqual({
       url: 'https://cdn/clip.mp4',
       contentType: 'video/mp4',
-      context: 'Shared in a Discord chat by Jason with the message: look at this @Simon',
+      context: 'Shared in a Discord chat by Jasper with the message: look at this @Silas',
       durationSecs: 75,
     });
     expect(postedContent(target)).toBe(

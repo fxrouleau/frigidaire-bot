@@ -299,7 +299,7 @@ const rememberFactTool: ToolDefinition = {
 
     const store = getMemoryStore();
     // A person's memories are keyed by their Discord id and filed under their CURRENT display name, so
-    // "Derrick", "@Wheezer" and "me" all land on the same member and survive renames. Anything else
+    // "Dorian", "@Wheelie" and "me" all land on the same member and survive renames. Anything else
     // ('server', a topic, someone the bot has never seen) is kept as written.
     const person = resolveSubject(store, rawSubject, ctx.message);
     const cleaned = cleanSubject(rawSubject) || rawSubject;

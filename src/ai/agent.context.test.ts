@@ -32,8 +32,8 @@ const ALICE = '100000000000000001';
 const BOB = '100000000000000002';
 const CAROL = '100000000000000003';
 const DAVE = '100000000000000004';
-const WHEEZER = '100000000000000042';
-const JASON = '100000000000000005';
+const WHEELIE = '100000000000000042';
+const JASPER = '100000000000000005';
 const OTHER_BOT = '800000000000000001';
 
 type MessageEntry = Extract<ConversationEntry, { kind: 'message' }>;
@@ -479,7 +479,7 @@ describe('channel awareness and the current time', () => {
       ...BASE,
       messageId: '7000',
       content: 'hi',
-      channelName: 'banana-combo',
+      channelName: 'bagel-bar',
       channelTopic: 'no   thoughts,\nonly vibes',
       channelMessages: [],
     });
@@ -489,7 +489,7 @@ describe('channel awareness and the current time', () => {
     const messages = provider.calls[0].messages;
     const dynamic = dynamicEntryText(messages);
     expect(dynamic).toMatch(/^Current time: [A-Z][a-z]+day \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2} E[SD]T \(America\/New_York\)\./);
-    expect(dynamic).toContain('Channel: #banana-combo — no thoughts, only vibes');
+    expect(dynamic).toContain('Channel: #bagel-bar — no thoughts, only vibes');
     expect(dynamic).toContain('About this channel: the main hangout where basically everything happens');
     const staticPrompt = textOf(messages[0]);
     expect(staticPrompt).not.toMatch(/current time is/i);
@@ -564,37 +564,37 @@ describe('memories by person', () => {
 
   it("shows an @-mentioned person's memories under their current display name", async () => {
     const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider(), relevanceThreshold: 0.99 });
-    store.upsertIdentity(WHEEZER, 'OldWheez');
-    store.upsertIdentity(WHEEZER, 'Wheezer');
-    await store.save({ category: 'fact', subject: 'OldWheez', content: 'plays valorant nightly', subject_user_id: WHEEZER });
+    store.upsertIdentity(WHEELIE, 'OldWheels');
+    store.upsertIdentity(WHEELIE, 'Wheelie');
+    await store.save({ category: 'fact', subject: 'OldWheels', content: 'plays valorant nightly', subject_user_id: WHEELIE });
     setMemoryStoreForTesting(store);
     const provider = new FakeProvider([textResponse('ok')]);
     const agent = makeAgent(provider);
     const ping = createFakeMessage({
       ...BASE,
-      content: `whats up with <@${WHEEZER}>`,
-      mentionedUsers: [{ id: WHEEZER, displayName: 'Wheezer' }],
+      content: `whats up with <@${WHEELIE}>`,
+      mentionedUsers: [{ id: WHEELIE, displayName: 'Wheelie' }],
       channelMessages: [],
     });
 
     await agent.handleMention(ping.message);
 
-    expect(dynamicEntryText(provider.calls[0].messages)).toContain('- Wheezer: plays valorant nightly');
+    expect(dynamicEntryText(provider.calls[0].messages)).toContain('- Wheelie: plays valorant nightly');
   });
 
   it('pulls memories for people named in plain text, never the speaker or the bot', async () => {
     const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider(), relevanceThreshold: 0.99 });
-    store.upsertIdentity(JASON, 'Jason');
+    store.upsertIdentity(JASPER, 'Jasper');
     store.upsertIdentity(ALICE, 'Alice');
     store.upsertIdentity(BOT_ID, 'Frigidaire');
-    await store.save({ category: 'fact', subject: 'Jason', content: 'owes everyone money', subject_user_id: JASON });
+    await store.save({ category: 'fact', subject: 'Jasper', content: 'owes everyone money', subject_user_id: JASPER });
     await store.save({ category: 'fact', subject: 'Frigidaire', content: 'is a fridge', subject_user_id: BOT_ID });
     setMemoryStoreForTesting(store);
     const provider = new FakeProvider([textResponse('ok')]);
     const agent = makeAgent(provider);
     const ping = createFakeMessage({
       ...BASE,
-      content: 'frigidaire did jason ever pay you back',
+      content: 'frigidaire did jasper ever pay you back',
       botDisplayName: 'Frigidaire',
       channelMessages: [],
     });
@@ -603,26 +603,26 @@ describe('memories by person', () => {
 
     const dynamic = dynamicEntryText(provider.calls[0].messages);
     expect(dynamic).toContain('What you know about others mentioned in this message:');
-    expect(dynamic).toContain('- Jason: owes everyone money');
+    expect(dynamic).toContain('- Jasper: owes everyone money');
     expect(dynamic).not.toContain('is a fridge');
   });
 
   it('pulls memories for people named by Discord handle or IRL first name', async () => {
     const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider(), relevanceThreshold: 0.99 });
-    store.upsertIdentity(JASON, 'Jason', 'cigalefourmi');
+    store.upsertIdentity(JASPER, 'Jasper', 'lapinlune');
     store.upsertIdentity(CAROL, 'xX_Car_Xx');
     store.updateIdentityMeta(CAROL, { irl_name: 'Caroline Smith' });
-    await store.save({ category: 'fact', subject: 'Jason', content: 'owes everyone money', subject_user_id: JASON });
+    await store.save({ category: 'fact', subject: 'Jasper', content: 'owes everyone money', subject_user_id: JASPER });
     await store.save({ category: 'fact', subject: 'xX_Car_Xx', content: 'drives a forklift', subject_user_id: CAROL });
     setMemoryStoreForTesting(store);
     const provider = new FakeProvider([textResponse('ok')]);
     const agent = makeAgent(provider);
-    const ping = createFakeMessage({ ...BASE, content: 'did cigalefourmi and caroline ever meet', channelMessages: [] });
+    const ping = createFakeMessage({ ...BASE, content: 'did lapinlune and caroline ever meet', channelMessages: [] });
 
     await agent.handleMention(ping.message);
 
     const dynamic = dynamicEntryText(provider.calls[0].messages);
-    expect(dynamic).toContain('- Jason: owes everyone money');
+    expect(dynamic).toContain('- Jasper: owes everyone money');
     expect(dynamic).toContain('- xX_Car_Xx: drives a forklift');
   });
 
@@ -1030,7 +1030,7 @@ describe('helpers', () => {
 
   it('compareSnowflakes orders numerically, not lexically', () => {
     expect(compareSnowflakes('999', '1000')).toBeLessThan(0);
-    expect(compareSnowflakes('1447258877794975997', '961358115645845654')).toBeGreaterThan(0);
+    expect(compareSnowflakes('1400000000000000001', '900000000000000042')).toBeGreaterThan(0);
     expect(compareSnowflakes('42', '42')).toBe(0);
   });
 });

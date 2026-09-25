@@ -29,11 +29,11 @@ describe('OpenRouterEmbeddingProvider request building', () => {
 
   it('sends model, the input array, and float encoding format', async () => {
     const { provider, requests } = setup();
-    await provider.embed(['Felix loves pizza', 'It was sunny today'], 'document');
+    await provider.embed(['Remi loves pizza', 'It was sunny today'], 'document');
 
     const body = requests[0] as EmbeddingsRequestBody;
     expect(body.model).toBe('test-embedding-model');
-    expect(body.input).toEqual(['Felix loves pizza', 'It was sunny today']);
+    expect(body.input).toEqual(['Remi loves pizza', 'It was sunny today']);
     expect(body.encoding_format).toBe('float');
   });
 
@@ -55,11 +55,11 @@ describe('OpenRouterEmbeddingProvider request building', () => {
 
   it('prefixes every query-kind text with the qwen3 instruct template', async () => {
     const { provider, requests } = setup();
-    await provider.embed(['what does Felix like to eat', 'who plays minecraft'], 'query');
+    await provider.embed(['what does Remi like to eat', 'who plays minecraft'], 'query');
 
     const body = requests[0] as EmbeddingsRequestBody;
     expect(body.input).toHaveLength(2);
-    expect(body.input?.[0]).toMatch(/^Instruct: .+\nQuery: what does Felix like to eat$/);
+    expect(body.input?.[0]).toMatch(/^Instruct: .+\nQuery: what does Remi like to eat$/);
     expect(body.input?.[1]).toMatch(/^Instruct: .+\nQuery: who plays minecraft$/);
   });
 
@@ -75,10 +75,10 @@ describe('OpenRouterEmbeddingProvider request building', () => {
 
   it('does not prefix document-kind texts', async () => {
     const { provider, requests } = setup();
-    await provider.embed(['Felix: Felix loves pizza', 'weather: It was sunny today'], 'document');
+    await provider.embed(['Remi: Remi loves pizza', 'weather: It was sunny today'], 'document');
 
     const body = requests[0] as EmbeddingsRequestBody;
-    expect(body.input).toEqual(['Felix: Felix loves pizza', 'weather: It was sunny today']);
+    expect(body.input).toEqual(['Remi: Remi loves pizza', 'weather: It was sunny today']);
     expect(body.input?.join('\n')).not.toContain('Instruct:');
   });
 
@@ -260,8 +260,8 @@ describe('makeDefaultEmbeddingProvider', () => {
 describe('FakeEmbeddingProvider', () => {
   it('returns deterministic L2-normalized vectors', async () => {
     const fake = new FakeEmbeddingProvider();
-    const [a1] = await fake.embed(['Felix loves pizza'], 'document');
-    const [a2] = await fake.embed(['Felix loves pizza'], 'document');
+    const [a1] = await fake.embed(['Remi loves pizza'], 'document');
+    const [a2] = await fake.embed(['Remi loves pizza'], 'document');
 
     expect(Array.from(a1)).toEqual(Array.from(a2));
     expect(Math.sqrt(dot(a1, a1))).toBeCloseTo(1, 5);
@@ -270,7 +270,7 @@ describe('FakeEmbeddingProvider', () => {
   it('gives texts sharing words a high cosine and disjoint texts a low cosine', async () => {
     const fake = new FakeEmbeddingProvider();
     const [pizza, food, weather] = await fake.embed(
-      ['Felix loves pizza', 'Felix loves pasta', 'thunderstorms expected tomorrow'],
+      ['Remi loves pizza', 'Remi loves pasta', 'thunderstorms expected tomorrow'],
       'document',
     );
 
@@ -283,20 +283,20 @@ describe('FakeEmbeddingProvider', () => {
 
   it('is case-insensitive', async () => {
     const fake = new FakeEmbeddingProvider();
-    const [lower, upper] = await fake.embed(['felix loves pizza', 'FELIX LOVES PIZZA'], 'document');
+    const [lower, upper] = await fake.embed(['remi loves pizza', 'REMI LOVES PIZZA'], 'document');
     expect(cosineSimilarity(lower, upper)).toBeCloseTo(1, 5);
   });
 
   it('ignores punctuation when tokenizing (subject-prefix inputs match bare-word queries)', async () => {
     const fake = new FakeEmbeddingProvider();
 
-    // 'Felix:' (buildEmbeddingInput's subject prefix) must hash like 'Felix', as real embedders tokenize.
-    const [withColon, bare] = await fake.embed(['Felix: loves pizza', 'Felix loves pizza'], 'document');
+    // 'Remi:' (buildEmbeddingInput's subject prefix) must hash like 'Remi', as real embedders tokenize.
+    const [withColon, bare] = await fake.embed(['Remi: loves pizza', 'Remi loves pizza'], 'document');
     expect(cosineSimilarity(withColon, bare)).toBeCloseTo(1, 5);
 
     // And a query containing the bare subject word now scores > 0 against a subject-prefixed document.
-    const [doc] = await fake.embed(['Felix: Felix loves pizza'], 'document');
-    const [query] = await fake.embed(['Felix'], 'query');
+    const [doc] = await fake.embed(['Remi: Remi loves pizza'], 'document');
+    const [query] = await fake.embed(['Remi'], 'query');
     expect(cosineSimilarity(query, doc)).toBeGreaterThan(0.3);
 
     // Unicode letters survive tokenization (not stripped along with punctuation).
@@ -330,7 +330,7 @@ describe('FakeEmbeddingProvider', () => {
 
   it('exposes vectorFor() matching what embed() returns', async () => {
     const fake = new FakeEmbeddingProvider();
-    const [embedded] = await fake.embed(['Felix loves pizza'], 'document');
-    expect(Array.from(FakeEmbeddingProvider.vectorFor('Felix loves pizza'))).toEqual(Array.from(embedded));
+    const [embedded] = await fake.embed(['Remi loves pizza'], 'document');
+    expect(Array.from(FakeEmbeddingProvider.vectorFor('Remi loves pizza'))).toEqual(Array.from(embedded));
   });
 });

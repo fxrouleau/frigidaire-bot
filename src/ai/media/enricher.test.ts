@@ -37,7 +37,7 @@ function fakeDeps(
 function voiceMessage(extra: Parameters<typeof createFakeMessage>[0] = {}) {
   return createFakeMessage({
     messageId: 'voice-1',
-    authorDisplayName: 'Felix',
+    authorDisplayName: 'Remi',
     flags: MessageFlags.IsVoiceMessage,
     attachments: [{ url: VOICE_URL, contentType: 'audio/ogg', duration: 42.3 }],
     ...extra,
@@ -60,7 +60,7 @@ describe('media enricher', () => {
 
     const parts = await createMediaEnricher(deps).enrich(voiceMessage(), 'current');
 
-    expect(parts).toEqual([{ type: 'text', text: '[voice message from Felix, 0:42: yo who is on tonight]' }]);
+    expect(parts).toEqual([{ type: 'text', text: '[voice message from Remi, 0:42: yo who is on tonight]' }]);
     expect(transcribed).toEqual([
       { url: VOICE_URL, contentType: 'audio/ogg', messageId: 'voice-1', durationSecs: 42.3 },
     ]);
@@ -77,20 +77,20 @@ describe('media enricher', () => {
     const enricher = createMediaEnricher(deps);
 
     expect(await enricher.enrich(voiceMessage(), 'history')).toEqual([
-      { type: 'text', text: '[voice message from Felix, 0:42: already heard this one]' },
+      { type: 'text', text: '[voice message from Remi, 0:42: already heard this one]' },
     ]);
     expect(await enricher.enrich(voiceMessage({ messageId: 'voice-2' }), 'history')).toEqual([
-      { type: 'text', text: '[voice message from Felix, 0:42 — not transcribed]' },
+      { type: 'text', text: '[voice message from Remi, 0:42 — not transcribed]' },
     ]);
     expect(transcribed).toEqual([]);
   });
 
   it.each([
-    [{ status: 'ok', text: '', cached: false } as const, '[voice message from Felix, 0:42: (no speech)]'],
-    [{ status: 'too_long', durationSecs: 900 } as const, '[voice message from Felix, 0:42 — too long to transcribe]'],
-    [{ status: 'too_large' } as const, '[voice message from Felix, 0:42 — too large to transcribe]'],
-    [{ status: 'failed' } as const, "[voice message from Felix, 0:42 — couldn't transcribe it]"],
-    [{ status: 'unavailable' } as const, "[voice message from Felix, 0:42 — couldn't transcribe it]"],
+    [{ status: 'ok', text: '', cached: false } as const, '[voice message from Remi, 0:42: (no speech)]'],
+    [{ status: 'too_long', durationSecs: 900 } as const, '[voice message from Remi, 0:42 — too long to transcribe]'],
+    [{ status: 'too_large' } as const, '[voice message from Remi, 0:42 — too large to transcribe]'],
+    [{ status: 'failed' } as const, "[voice message from Remi, 0:42 — couldn't transcribe it]"],
+    [{ status: 'unavailable' } as const, "[voice message from Remi, 0:42 — couldn't transcribe it]"],
   ])('leaves a marker when there is no transcript (%o)', async (outcome, expected) => {
     const { deps } = fakeDeps({ transcript: outcome });
     expect(await createMediaEnricher(deps).enrich(voiceMessage(), 'current')).toEqual([{ type: 'text', text: expected }]);
@@ -100,7 +100,7 @@ describe('media enricher', () => {
     const { deps, transcribed } = fakeDeps();
     const { message } = createFakeMessage({
       messageId: 'm5',
-      authorDisplayName: 'Simon',
+      authorDisplayName: 'Silas',
       attachments: [
         { url: 'https://cdn.discordapp.com/a/b/one.mp3', contentType: 'audio/mpeg', name: 'one.mp3', id: 'a1' },
         { url: 'https://cdn.discordapp.com/a/b/two.m4a', contentType: 'audio/mp4', name: 'two.m4a', id: 'a2' },
@@ -110,8 +110,8 @@ describe('media enricher', () => {
     const parts = await createMediaEnricher(deps).enrich(message, 'current');
 
     expect(parts.map((p) => (p.type === 'text' ? p.text : ''))).toEqual([
-      '[audio file "one.mp3" from Simon: yo who is on tonight]',
-      '[audio file "two.m4a" from Simon: yo who is on tonight]',
+      '[audio file "one.mp3" from Silas: yo who is on tonight]',
+      '[audio file "two.m4a" from Silas: yo who is on tonight]',
     ]);
     expect(transcribed.map((t) => t.messageId)).toEqual(['m5', 'm5:a2']);
   });
@@ -131,7 +131,7 @@ describe('media enricher', () => {
   it('describes a posted video, passing who posted it and what they said', async () => {
     const { deps, described } = fakeDeps();
     const { message } = createFakeMessage({
-      authorDisplayName: 'Wheezer',
+      authorDisplayName: 'Wheelie',
       content: 'LMAOOO look at him',
       attachments: [{ url: CLIP_URL, contentType: 'video/mp4', name: 'clip.mp4', duration: null }],
     });
@@ -143,7 +143,7 @@ describe('media enricher', () => {
       {
         url: CLIP_URL,
         contentType: 'video/mp4',
-        context: 'Posted by Wheezer with the message: LMAOOO look at him',
+        context: 'Posted by Wheelie with the message: LMAOOO look at him',
         durationSecs: null,
       },
     ]);
@@ -185,7 +185,7 @@ describe('media enricher', () => {
   it('renders audio before video when a message has both', async () => {
     const { deps } = fakeDeps();
     const { message } = createFakeMessage({
-      authorDisplayName: 'Felix',
+      authorDisplayName: 'Remi',
       attachments: [
         { url: CLIP_URL, contentType: 'video/mp4', name: 'clip.mp4' },
         { url: 'https://cdn.discordapp.com/a/b/memo.mp3', contentType: 'audio/mpeg', name: 'memo.mp3' },
@@ -194,7 +194,7 @@ describe('media enricher', () => {
     const texts = (await createMediaEnricher(deps).enrich(message, 'current')).map((p) =>
       p.type === 'text' ? p.text : '',
     );
-    expect(texts[0]).toMatch(/^\[audio file "memo.mp3" from Felix/);
+    expect(texts[0]).toMatch(/^\[audio file "memo.mp3" from Remi/);
     expect(texts[1]).toMatch(/^\[video msg:/);
   });
 });
@@ -211,7 +211,7 @@ describe('default media enricher', () => {
   it('reads transcripts other features already stored', async () => {
     storeTranscript('voice-1', 'stored by the auto-transcript', 'google/gemini-3.5-flash-lite');
     expect(await mediaEnricher.enrich(voiceMessage(), 'history')).toEqual([
-      { type: 'text', text: '[voice message from Felix, 0:42: stored by the auto-transcript]' },
+      { type: 'text', text: '[voice message from Remi, 0:42: stored by the auto-transcript]' },
     ]);
   });
 });

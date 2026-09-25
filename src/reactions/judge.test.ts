@@ -16,11 +16,11 @@ const GUIDE: ReactionGuide = {
 const INPUT: JudgeInput = {
   guide: GUIDE,
   context: [
-    { author: 'Dan', text: 'who is driving tonight' },
+    { author: 'Dale', text: 'who is driving tonight' },
     { author: 'Frigidaire (the bot)', text: 'not me' },
   ],
   post: {
-    author: 'Felix',
+    author: 'Remi',
     text: 'I just parallel parked into a hydrant',
     notes: ['[reactions so far: 😂×2]'],
     images: ['data:image/jpeg;base64,AAAA'],
@@ -69,8 +69,8 @@ describe('prompts', () => {
 
   it('shows the context, then the post with its notes', () => {
     const text = buildUserText(INPUT);
-    expect(text).toContain('Recent messages (oldest first):\nDan: who is driving tonight\nFrigidaire (the bot): not me');
-    expect(text).toContain('THE POST TO JUDGE, by Felix:\nI just parallel parked into a hydrant\n[reactions so far: 😂×2]');
+    expect(text).toContain('Recent messages (oldest first):\nDale: who is driving tonight\nFrigidaire (the bot): not me');
+    expect(text).toContain('THE POST TO JUDGE, by Remi:\nI just parallel parked into a hydrant\n[reactions so far: 😂×2]');
     expect(text).toContain('(1 image(s) from the post attached)');
     expect(buildUserText({ ...INPUT, context: [] })).not.toContain('Recent messages');
   });

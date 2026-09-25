@@ -25,7 +25,7 @@ export function archiveInput(
     channelId: '100000000000000001',
     parentChannelId: null,
     authorId: '200000000000000001',
-    authorName: 'Felix',
+    authorName: 'Remi',
     source: 'human',
     relayKind: null,
     content: '',
@@ -116,11 +116,11 @@ export function archivableMessage(opts: ArchivableMessageOptions = {}): Message 
     reference: opts.replyToId ? { messageId: opts.replyToId } : null,
     author: {
       id: opts.authorId ?? '200000000000000001',
-      username: (opts.authorName ?? 'Felix').toLowerCase(),
-      displayName: opts.authorName ?? 'Felix',
+      username: (opts.authorName ?? 'Remi').toLowerCase(),
+      displayName: opts.authorName ?? 'Remi',
       bot: opts.authorBot ?? Boolean(opts.webhookId),
     },
-    member: opts.webhookId ? null : { displayName: opts.authorName ?? 'Felix' },
+    member: opts.webhookId ? null : { displayName: opts.authorName ?? 'Remi' },
     attachments,
     embeds: (opts.embeds ?? []).map((e) => ({
       title: e.title ?? null,
@@ -135,7 +135,7 @@ export function archivableMessage(opts: ArchivableMessageOptions = {}): Message 
     channel: {
       id: opts.channelId ?? '100000000000000001',
       type: channelType,
-      name: opts.channelName ?? 'banana-combo',
+      name: opts.channelName ?? 'bagel-bar',
       parentId: opts.parentId ?? null,
       guildId,
     },

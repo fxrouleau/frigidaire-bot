@@ -25,12 +25,12 @@ afterEach(() => {
 });
 
 function frenchMessage(extra: Parameters<typeof createFakeTargetMessage>[0] = {}) {
-  const { guild } = createFakeGuild({ members: { 'user-7': 'Jason' } });
+  const { guild } = createFakeGuild({ members: { 'user-7': 'Jasper' } });
   return createFakeTargetMessage({
     authorId: 'user-7',
     guild,
     content: "<@9> c'est tiguidou, on se voit à soir",
-    cleanContent: "@Simon c'est tiguidou, on se voit à soir",
+    cleanContent: "@Silas c'est tiguidou, on se voit à soir",
     ...extra,
   });
 }
@@ -40,7 +40,7 @@ describe('Translate', () => {
     const target = frenchMessage();
     const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Translate' });
     const { deps, recorders } = createFakeCommandDeps({
-      complete: async () => "@Simon it's all good, see you tonight",
+      complete: async () => "@Silas it's all good, see you tonight",
     });
 
     await handleContextMenuCommand(interaction, deps);
@@ -48,13 +48,13 @@ describe('Translate', () => {
     expect(recorders.complete.calls).toHaveLength(1);
     const request = recorders.complete.calls[0][0];
     expect(request.system).toBe(TRANSLATE_SYSTEM_PROMPT);
-    expect(request.user).toBe("<<<\n@Simon c'est tiguidou, on se voit à soir\n>>>");
+    expect(request.user).toBe("<<<\n@Silas c'est tiguidou, on se voit à soir\n>>>");
 
     expect(responses.map((r) => [r.method, r.ephemeral])).toEqual([
       ['deferReply', true],
       ['editReply', true],
     ]);
-    expect(responses[1].content).toBe("**Jason**, translated:\n> @Simon it's all good, see you tonight");
+    expect(responses[1].content).toBe("**Jasper**, translated:\n> @Silas it's all good, see you tonight");
     // Nothing public.
     expect(target.recorders.reply.calls).toHaveLength(0);
     expect(target.recorders.send.calls).toHaveLength(0);

@@ -14,7 +14,7 @@ const START = Date.parse('2026-09-25T15:00:00Z');
 function makeMessage(opts: { authorId?: string; displayName?: string; bot?: boolean } = {}): EventMessage {
   const { message } = createFakeMessage({
     authorId: opts.authorId ?? 'user-1',
-    authorDisplayName: opts.displayName ?? 'Jason',
+    authorDisplayName: opts.displayName ?? 'Jasper',
     authorIsBot: opts.bot ?? false,
     channelId: 'channel-9',
     messageId: 'message-42',
@@ -109,7 +109,7 @@ describe('request_feature handler', () => {
     expect(issue.body).toContain('Let members start a poll with options and see results.');
     expect(issue.body).toContain('- [ ] A poll can be started');
     expect(issue.body).toContain(
-      '🤖 Filed by Frigidaire for **Jason** · [the request on Discord](https://discord.com/channels/guild-7/channel-9/message-42)',
+      '🤖 Filed by Frigidaire for **Jasper** · [the request on Discord](https://discord.com/channels/guild-7/channel-9/message-42)',
     );
   });
 
@@ -144,11 +144,11 @@ describe('request_feature handler', () => {
     const { run, createdIssues } = setup({ fake });
     const result = await run({ title: 'Add a poll', description: 'Polls please, with @everyone pinged.' });
     expect(result).toContain('Not filed again: it\'s the same as open issue #12 "Polls": https://github.com/owner/repo/issues/12');
-    expect(result).toContain("Added Jason's +1 to it (https://github.com/owner/repo/issues/12#issuecomment-");
+    expect(result).toContain("Added Jasper's +1 to it (https://github.com/owner/repo/issues/12#issuecomment-");
     expect(result).toContain('call request_feature again with decision "new"');
     expect(createdIssues()).toHaveLength(0);
     // Without extra_details, the +1 carries the member's own description (sanitized, no plain @).
-    expect(fake.comments[0].body).toContain('🤖 Filed by Frigidaire for **Jason**');
+    expect(fake.comments[0].body).toContain('🤖 Filed by Frigidaire for **Jasper**');
     expect(fake.comments[0].body).toContain('\n\nPolls please, with ＠everyone pinged.');
     expect(fake.comments[0].body).toContain('https://discord.com/channels/guild-7/channel-9/message-42');
   });
@@ -158,7 +158,7 @@ describe('request_feature handler', () => {
     const { run } = setup();
     expect(await run({ title: 'Add polls', description: 'Polls.' })).toContain('Filed');
     const limited = await run({ title: 'Add weather', description: 'Weather.' });
-    expect(limited).toContain('Jason already filed 1 feature request in the last 24 hours');
+    expect(limited).toContain('Jasper already filed 1 feature request in the last 24 hours');
     expect(limited).toContain('after 2026-09-26 11:00 ET');
   });
 
@@ -261,8 +261,8 @@ describe('request_feature: existing issues and the decision call', () => {
     const { run, createdIssues } = setup({ fake });
     await run(ranked);
     const result = await run({ ...ranked, decision: 'duplicate_of', issue_number: 4, extra_details: 'Ranked choice would be nice.' });
-    expect(result).toContain("Added Jason's +1 to it");
-    expect(fake.comments[0].body.startsWith('🤖 Filed by Frigidaire for **Jason** (+1: they asked for this too)')).toBe(true);
+    expect(result).toContain("Added Jasper's +1 to it");
+    expect(fake.comments[0].body.startsWith('🤖 Filed by Frigidaire for **Jasper** (+1: they asked for this too)')).toBe(true);
     expect(fake.comments[0].body).toContain('\n\nRanked choice would be nice.\n\n');
     expect(createdIssues()).toHaveLength(0);
   });
@@ -300,7 +300,7 @@ describe('request_feature: existing issues and the decision call', () => {
     const fake = createFakeGitHub({ issues: pollIssues });
     const { run } = setup({ fake });
     const back = { ...ranked, decision: 'duplicate_of', issue_number: 4 };
-    expect(await run(back, makeMessage({ authorId: main }))).toContain("Added Jason's +1");
+    expect(await run(back, makeMessage({ authorId: main }))).toContain("Added Jasper's +1");
     expect(await run(back, makeMessage({ authorId: side }))).toContain('already backed it before');
     expect(fake.comments).toHaveLength(1);
   });
@@ -323,7 +323,7 @@ describe('request_feature: existing issues and the decision call', () => {
     });
     const { run } = setup({ fake });
     const result = await run({ ...ranked, decision: 'duplicate_of', issue_number: 4 });
-    expect(result).toContain("Adding Jason's +1 failed: the bot's GitHub token is missing a permission");
+    expect(result).toContain("Adding Jasper's +1 failed: the bot's GitHub token is missing a permission");
     expect(result).toContain('https://github.com/owner/repo/issues/4');
     const logged = getMemoryStore().getByCategory('tool_error', 10);
     expect(logged.map((m) => m.content).join('\n')).toContain('request_feature could not add a +1 comment (forbidden, HTTP 403)');
@@ -347,7 +347,7 @@ describe('request_feature: recently closed issues', () => {
     const { run, createdIssues } = setup({ fake: createFakeGitHub({ issues: [closedIssue('completed')] }) });
     const result = await run(reminder);
     expect(result).toContain('Not filed: that already exists. issue #2 "Reminder command" was closed as completed on 2026-09-15');
-    expect(result).toContain('Tell Jason it was added in #2');
+    expect(result).toContain('Tell Jasper it was added in #2');
     expect(result).toContain('decision "new"');
     expect(createdIssues()).toHaveLength(0);
 

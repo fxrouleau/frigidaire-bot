@@ -88,9 +88,9 @@ describe('makeAudienceAccess', () => {
 
 describe('rendering helpers', () => {
   it('makes Discord markup readable and builds jump links', () => {
-    const ctx = { nameOfUser: (id: string) => (id === '1' ? 'Felix' : undefined), nameOfChannel: () => 'clips' };
+    const ctx = { nameOfUser: (id: string) => (id === '1' ? 'Remi' : undefined), nameOfChannel: () => 'clips' };
     expect(renderContent('<@1> <@!2> <@&3> <#4> <a:party:5> <t:1768496400:R>\nnext', ctx)).toBe(
-      '@Felix @someone @role #clips :party: 2026-01-15 12:00 ET ↵ next',
+      '@Remi @someone @role #clips :party: 2026-01-15 12:00 ET ↵ next',
     );
     expect(jumpLink({ guildId: null, channelId: '4', id: '5' })).toBe('https://discord.com/channels/@me/4/5');
   });

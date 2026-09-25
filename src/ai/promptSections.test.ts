@@ -23,26 +23,26 @@ afterEach(() => {
 
 describe('formatIdentityLines (SERVER PEOPLE)', () => {
   it('shows the display name, @handle, id, real name, nicknames and the first-seen name', () => {
-    const wheezer = identity('100000000000000001', 'Wheezer', {
-      username: 'wheezy_d',
+    const wheelie = identity('100000000000000001', 'Wheelie', {
+      username: 'wheelie_d',
       canonical_name: 'OldNick',
-      irl_name: 'Derrick',
-      aliases: ['D', 'Wheez'],
+      irl_name: 'Dorian',
+      aliases: ['D', 'Wheels'],
     });
-    expect(formatIdentityLines([wheezer])).toEqual([
-      '- Wheezer @wheezy_d (id:100000000000000001) — real name Derrick; also called D, Wheez; formerly OldNick',
+    expect(formatIdentityLines([wheelie])).toEqual([
+      '- Wheelie @wheelie_d (id:100000000000000001) — real name Dorian; also called D, Wheels; formerly OldNick',
     ]);
   });
 
   it('keeps a bare line when there is nothing else to say, and skips a handle that is just the name', () => {
-    expect(formatIdentityLines([identity('100000000000000002', 'Simon', { username: 'simon' })])).toEqual([
-      '- Simon (id:100000000000000002)',
+    expect(formatIdentityLines([identity('100000000000000002', 'Silas', { username: 'silas' })])).toEqual([
+      '- Silas (id:100000000000000002)',
     ]);
   });
 
   it('still shows a real name that equals the display name (it tells the model the name is real)', () => {
-    expect(formatIdentityLines([identity('100000000000000003', 'Yi', { irl_name: 'Yi', username: 'kizanz' })])).toEqual([
-      '- Yi @kizanz (id:100000000000000003) — real name Yi',
+    expect(formatIdentityLines([identity('100000000000000003', 'Yu', { irl_name: 'Yu', username: 'zorbix' })])).toEqual([
+      '- Yu @zorbix (id:100000000000000003) — real name Yu',
     ]);
   });
 
@@ -53,20 +53,20 @@ describe('formatIdentityLines (SERVER PEOPLE)', () => {
   it("folds a linked side account into its member's line instead of listing another person", () => {
     vi.stubEnv('LINKED_ACCOUNTS', '100000000000000006:100000000000000005');
     const lines = formatIdentityLines([
-      identity('100000000000000006', 'Ptoughneigh', { username: 'triceclone', aliases: ['Tricey'] }),
-      identity('100000000000000005', 'Tony', { username: 'tony_main', irl_name: 'Anthony' }),
-      identity('100000000000000001', 'Wheezer'),
+      identity('100000000000000006', 'Tohbee', { username: 'tobyclone', aliases: ['Tobes'] }),
+      identity('100000000000000005', 'Toby', { username: 'toby_main', irl_name: 'Tobias' }),
+      identity('100000000000000001', 'Wheelie'),
     ]);
     expect(lines).toEqual([
-      '- Tony @tony_main (id:100000000000000005) — real name Anthony; also called Tricey; also posts as Ptoughneigh @triceclone (id:100000000000000006)',
-      '- Wheezer (id:100000000000000001)',
+      '- Toby @toby_main (id:100000000000000005) — real name Tobias; also called Tobes; also posts as Tohbee @tobyclone (id:100000000000000006)',
+      '- Wheelie (id:100000000000000001)',
     ]);
   });
 
   it('labels a member only seen on their side account under the main id', () => {
     vi.stubEnv('LINKED_ACCOUNTS', '100000000000000006:100000000000000005');
-    expect(formatIdentityLines([identity('100000000000000006', 'Ptoughneigh', { username: 'triceclone' })])).toEqual([
-      '- Ptoughneigh (id:100000000000000005) — also posts as Ptoughneigh @triceclone (id:100000000000000006)',
+    expect(formatIdentityLines([identity('100000000000000006', 'Tohbee', { username: 'tobyclone' })])).toEqual([
+      '- Tohbee (id:100000000000000005) — also posts as Tohbee @tobyclone (id:100000000000000006)',
     ]);
   });
 });

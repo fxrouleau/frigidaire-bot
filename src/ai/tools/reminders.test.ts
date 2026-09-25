@@ -8,8 +8,8 @@ import { toolDefinitions } from '../tools';
 import { type ToolDefinition, type ToolHandlerContext, createTurnEffects } from '../types';
 import { reminderTools, resolveDueTime } from './reminders';
 
-const FELIX = '600000000000000001';
-const JASON = '600000000000000002';
+const REMI = '600000000000000001';
+const JASPER = '600000000000000002';
 const STRANGER = '600000000000000003';
 // Friday 2026-09-25 14:00 EDT
 const NOW = new Date('2026-09-25T18:00:00Z');
@@ -22,7 +22,7 @@ function tool(name: string): ToolDefinition {
 
 function ctxFor(opts: Parameters<typeof createFakeMessage>[0] = {}) {
   const fake = createFakeMessage({
-    authorId: FELIX,
+    authorId: REMI,
     authorDisplayName: 'fridge enjoyer',
     channelId: 'channel-1',
     messageId: 'msg-42',
@@ -49,9 +49,9 @@ beforeEach(() => {
   setBotDbForTesting(new BotDb(':memory:'));
   memory = new MemoryStore(':memory:');
   setMemoryStoreForTesting(memory);
-  memory.upsertIdentity(FELIX, 'fridge enjoyer');
-  memory.upsertIdentity(JASON, 'Wheezer');
-  memory.updateIdentityMeta(JASON, { irl_name: 'Jason' });
+  memory.upsertIdentity(REMI, 'fridge enjoyer');
+  memory.upsertIdentity(JASPER, 'Wheelie');
+  memory.updateIdentityMeta(JASPER, { irl_name: 'Jasper' });
   vi.stubEnv('REMINDERS_MAX_PER_USER', '');
 });
 
@@ -118,9 +118,9 @@ describe('set_reminder', () => {
     expect(getReminder(1)).toMatchObject({
       guildId: 'guild-1',
       channelId: 'channel-1',
-      requesterId: FELIX,
+      requesterId: REMI,
       requesterName: 'fridge enjoyer',
-      targetIds: [FELIX],
+      targetIds: [REMI],
       text: 'take the pizza out',
       dueAt: Date.parse('2026-09-25T18:20:00Z'),
       sourceUrl: 'https://discord.com/channels/guild-1/channel-1/msg-42',
@@ -131,16 +131,16 @@ describe('set_reminder', () => {
   it('reminds other people by name, IRL name or mention', async () => {
     const result = await run(
       'set_reminder',
-      { text: 'ranked tonight', at: '2026-09-25 21:00', for: ['Jason', 'me', '<@600000000000000009>'] },
+      { text: 'ranked tonight', at: '2026-09-25 21:00', for: ['Jasper', 'me', '<@600000000000000009>'] },
       { mentionedUsers: [{ id: '600000000000000009', displayName: 'Newbie' }] },
     );
-    expect(result).toContain('set for Wheezer, fridge enjoyer, Newbie: Fri 2026-09-25 21:00 ET (in 7h)');
-    expect(getReminder(1)?.targetIds).toEqual([JASON, FELIX, '600000000000000009']);
+    expect(result).toContain('set for Wheelie, fridge enjoyer, Newbie: Fri 2026-09-25 21:00 ET (in 7h)');
+    expect(getReminder(1)?.targetIds).toEqual([JASPER, REMI, '600000000000000009']);
   });
 
   it('accepts a comma-separated string for "for"', async () => {
-    await run('set_reminder', { text: 'x', in_minutes: 5, for: 'Wheezer, me' });
-    expect(getReminder(1)?.targetIds).toEqual([JASON, FELIX]);
+    await run('set_reminder', { text: 'x', in_minutes: 5, for: 'Wheelie, me' });
+    expect(getReminder(1)?.targetIds).toEqual([JASPER, REMI]);
   });
 
   it('creates nothing when someone cannot be resolved', async () => {
@@ -163,7 +163,7 @@ describe('set_reminder', () => {
     const third = await run('set_reminder', { text: 'three', in_minutes: 5 });
     expect(third).toBe('No reminder set: fridge enjoyer already has 2 pending reminders (the limit). Cancel some first.');
     // Someone else still can.
-    expect(await run('set_reminder', { text: 'mine', in_minutes: 5 }, { authorId: JASON })).toContain('Reminder #3');
+    expect(await run('set_reminder', { text: 'mine', in_minutes: 5 }, { authorId: JASPER })).toContain('Reminder #3');
   });
 });
 
@@ -171,21 +171,21 @@ describe('set_reminder / cancel_reminder with a linked side account (LINKED_ACCO
   const SIDE = '600000000000000004';
 
   beforeEach(() => {
-    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASPER}`);
     memory.upsertIdentity(SIDE, 'JayAlt', 'jay_alt');
   });
 
   it("targets the main account when the side account's name or mention is used, and for \"me\" from it", async () => {
     await run('set_reminder', { text: 'ranked', in_minutes: 5, for: ['JayAlt', `<@${SIDE}>`, '@jay_alt'] });
-    expect(getReminder(1)?.targetIds).toEqual([JASON]);
+    expect(getReminder(1)?.targetIds).toEqual([JASPER]);
 
     const result = await run('set_reminder', { text: 'gym', in_minutes: 5 }, { authorId: SIDE, authorDisplayName: 'JayAlt' });
-    expect(result).toContain('set for Wheezer:');
-    expect(getReminder(2)).toMatchObject({ requesterId: JASON, requesterName: 'Wheezer', targetIds: [JASON] });
+    expect(result).toContain('set for Wheelie:');
+    expect(getReminder(2)).toMatchObject({ requesterId: JASPER, requesterName: 'Wheelie', targetIds: [JASPER] });
   });
 
   it('lets the person cancel from either account', async () => {
-    await run('set_reminder', { text: 'gym', in_minutes: 30, for: ['Wheezer'] });
+    await run('set_reminder', { text: 'gym', in_minutes: 30, for: ['Wheelie'] });
     expect(await run('cancel_reminder', { id: 1 }, { authorId: SIDE, authorDisplayName: 'JayAlt' })).toBe(
       'Cancelled reminder #1 ("gym").',
     );
@@ -195,14 +195,14 @@ describe('set_reminder / cancel_reminder with a linked side account (LINKED_ACCO
 describe('list_reminders', () => {
   it('lists this channel only, soonest first, with who and when in ET', async () => {
     await run('set_reminder', { text: 'later thing', in_minutes: 120 });
-    await run('set_reminder', { text: 'soon thing', in_minutes: 10, for: ['Wheezer'] });
+    await run('set_reminder', { text: 'soon thing', in_minutes: 10, for: ['Wheelie'] });
     await run('set_reminder', { text: 'elsewhere', in_minutes: 5 }, { channelId: 'channel-2' });
 
     const result = await run('list_reminders', {});
     expect(result).toBe(
       [
         '2 pending reminder(s) in this channel (now Fri 2026-09-25 14:00 ET):',
-        '#2 · for Wheezer · Fri 2026-09-25 14:10 ET (in 10m) · "soon thing" (set by fridge enjoyer)',
+        '#2 · for Wheelie · Fri 2026-09-25 14:10 ET (in 10m) · "soon thing" (set by fridge enjoyer)',
         '#1 · for fridge enjoyer · Fri 2026-09-25 16:00 ET (in 2h) · "later thing" (set by fridge enjoyer)',
       ].join('\n'),
     );
@@ -215,13 +215,13 @@ describe('list_reminders', () => {
 
 describe('cancel_reminder', () => {
   it('lets the requester or a target cancel, and refuses anyone else', async () => {
-    await run('set_reminder', { text: 'gym', in_minutes: 30, for: ['Wheezer'] });
+    await run('set_reminder', { text: 'gym', in_minutes: 30, for: ['Wheelie'] });
     await run('set_reminder', { text: 'laundry', in_minutes: 30 });
 
     expect(await run('cancel_reminder', { id: 1 }, { authorId: STRANGER, authorDisplayName: 'Rando' })).toBe(
       "Rando can't cancel reminder #1: only the person who set it (fridge enjoyer) or someone it's for can.",
     );
-    expect(await run('cancel_reminder', { id: '#1' }, { authorId: JASON })).toBe('Cancelled reminder #1 ("gym").');
+    expect(await run('cancel_reminder', { id: '#1' }, { authorId: JASPER })).toBe('Cancelled reminder #1 ("gym").');
     expect(await run('cancel_reminder', { id: 2 })).toBe('Cancelled reminder #2 ("laundry").');
     expect(listPendingInChannel('channel-1')).toEqual([]);
   });
@@ -230,9 +230,9 @@ describe('cancel_reminder', () => {
     const id = insertReminder({
       guildId: null,
       channelId: 'channel-1',
-      requesterId: FELIX,
+      requesterId: REMI,
       requesterName: 'fridge enjoyer',
-      targetIds: [FELIX],
+      targetIds: [REMI],
       text: 'old',
       dueAt: NOW.getTime() - 1000,
       sourceUrl: null,

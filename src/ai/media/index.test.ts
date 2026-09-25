@@ -74,7 +74,7 @@ describe('media entry points', () => {
 
   it('watchVideo returns the description and caches it per URL', async () => {
     install([loadFixture('video-description')]);
-    const outcome = await watchVideo({ url: CLIP_URL, contentType: 'video/mp4', context: 'shared by Jason' });
+    const outcome = await watchVideo({ url: CLIP_URL, contentType: 'video/mp4', context: 'shared by Jasper' });
     expect(outcome).toMatchObject({ status: 'ok', text: expect.stringMatching(/^League of Legends clip/) });
     expect(getCachedVideoDescription(CLIP_URL)).toBe(outcome.status === 'ok' ? outcome.text : 'no description');
   });

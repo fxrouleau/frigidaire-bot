@@ -5,7 +5,7 @@ import { DeletedMessageReposter } from './deletedMessages';
 import { createFakeMessage } from './test-support/fakeDiscord';
 import type { sendViaWebhook } from './utils';
 
-const JASON = 'jason-id';
+const JASPER = 'jasper-id';
 const T0 = 1_000_000;
 
 type SendCall = Parameters<typeof sendViaWebhook>;
@@ -19,7 +19,7 @@ function makeReposter(opts: {
   const judgeCalls: JudgeInput[] = [];
   const sendCalls: SendCall[] = [];
   const reposter = new DeletedMessageReposter({
-    userIds: () => [JASON],
+    userIds: () => [JASPER],
     windowMs: () => 60_000,
     mode: () => opts.mode ?? 'edgy',
     judge: async (input) => {
@@ -36,10 +36,10 @@ function makeReposter(opts: {
   return { reposter, judgeCalls, sendCalls };
 }
 
-function jasonMessage(overrides: Parameters<typeof createFakeMessage>[0] = {}) {
+function jasperMessage(overrides: Parameters<typeof createFakeMessage>[0] = {}) {
   return createFakeMessage({
-    authorId: JASON,
-    authorDisplayName: 'Jason',
+    authorId: JASPER,
+    authorDisplayName: 'Jasper',
     messageId: 'm1',
     content: 'something edgy',
     createdAt: new Date(T0),
@@ -54,17 +54,17 @@ afterEach(() => {
 describe('DeletedMessageReposter', () => {
   it('reposts a watched user\'s quickly deleted edgy message as them', async () => {
     const { reposter, judgeCalls, sendCalls } = makeReposter({ now: () => T0 + 10_000 });
-    const fake = jasonMessage();
+    const fake = jasperMessage();
 
     reposter.observe(fake.message);
     const outcome = await reposter.handleDelete(fake.message);
 
     expect(outcome).toBe('reposted');
-    expect(judgeCalls).toEqual([{ author: 'Jason', text: 'something edgy', imageUrls: [], attachmentNames: [] }]);
+    expect(judgeCalls).toEqual([{ author: 'Jasper', text: 'something edgy', imageUrls: [], attachmentNames: [] }]);
     expect(sendCalls).toHaveLength(1);
     const [channel, identity, payload] = sendCalls[0];
     expect(channel.id).toBe('channel-1');
-    expect(identity).toEqual({ name: 'Jason', avatar: 'https://cdn.example/avatar.png' });
+    expect(identity).toEqual({ name: 'Jasper', avatar: 'https://cdn.example/avatar.png' });
     expect(payload).toEqual({ content: 'something edgy', files: [] });
   });
 
@@ -84,11 +84,11 @@ describe('DeletedMessageReposter', () => {
       }) as unknown as typeof sendViaWebhook,
       now: () => T0 + 10_000,
     });
-    const fake = jasonMessage({ authorId: SIDE, authorDisplayName: 'Jason Alt', messageId: 'm-alt' });
+    const fake = jasperMessage({ authorId: SIDE, authorDisplayName: 'Jasper Alt', messageId: 'm-alt' });
 
     reposter.observe(fake.message);
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
-    expect(sendCalls[0][1]).toMatchObject({ name: 'Jason Alt' });
+    expect(sendCalls[0][1]).toMatchObject({ name: 'Jasper Alt' });
 
     // Listing the side account instead watches the main account as well.
     const sideListed = new DeletedMessageReposter({ userIds: () => [SIDE], judge: async () => undefined });
@@ -107,12 +107,12 @@ describe('DeletedMessageReposter', () => {
 
   it('ignores messages it never saw (posted before the bot started, or already expired)', async () => {
     const { reposter } = makeReposter();
-    expect(await reposter.handleDelete(jasonMessage().message)).toBe('ignored');
+    expect(await reposter.handleDelete(jasperMessage().message)).toBe('ignored');
   });
 
   it('does not repost when the judge says the message was not edgy', async () => {
     const { reposter, sendCalls } = makeReposter({ verdict: false });
-    const fake = jasonMessage();
+    const fake = jasperMessage();
 
     reposter.observe(fake.message);
     expect(await reposter.handleDelete(fake.message)).toBe('not-edgy');
@@ -121,7 +121,7 @@ describe('DeletedMessageReposter', () => {
 
   it('fails closed (no repost) when the judge cannot decide', async () => {
     const { reposter, sendCalls } = makeReposter({ verdict: undefined });
-    const fake = jasonMessage();
+    const fake = jasperMessage();
 
     reposter.observe(fake.message);
     expect(await reposter.handleDelete(fake.message)).toBe('undecided');
@@ -130,7 +130,7 @@ describe('DeletedMessageReposter', () => {
 
   it('skips the judge entirely in "always" mode', async () => {
     const { reposter, judgeCalls, sendCalls } = makeReposter({ mode: 'always', verdict: false });
-    const fake = jasonMessage();
+    const fake = jasperMessage();
 
     reposter.observe(fake.message);
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
@@ -141,7 +141,7 @@ describe('DeletedMessageReposter', () => {
   it('lets a deletion outside the window go (that is a real cleanup, not a regret)', async () => {
     let now = T0;
     const { reposter, sendCalls } = makeReposter({ now: () => now });
-    const fake = jasonMessage();
+    const fake = jasperMessage();
 
     reposter.observe(fake.message);
     now = T0 + 61_000;
@@ -151,7 +151,7 @@ describe('DeletedMessageReposter', () => {
 
   it('does not react to a deletion the bot itself performed (link repost)', async () => {
     const { reposter, sendCalls } = makeReposter();
-    const fake = jasonMessage();
+    const fake = jasperMessage();
 
     reposter.observe(fake.message);
     reposter.forget(fake.message.id);
@@ -161,21 +161,21 @@ describe('DeletedMessageReposter', () => {
 
   it('never snapshots bot or webhook messages (its own reposts included)', () => {
     const { reposter } = makeReposter();
-    reposter.observe(createFakeMessage({ authorId: JASON, authorIsBot: true, content: 'x' }).message);
-    reposter.observe(createFakeMessage({ authorId: JASON, webhookId: 'wh-1', content: 'x' }).message);
+    reposter.observe(createFakeMessage({ authorId: JASPER, authorIsBot: true, content: 'x' }).message);
+    reposter.observe(createFakeMessage({ authorId: JASPER, webhookId: 'wh-1', content: 'x' }).message);
     expect(reposter.size).toBe(0);
   });
 
   it('never snapshots messages from channels that cannot own a webhook', () => {
     const { reposter } = makeReposter();
-    reposter.observe(jasonMessage({ channelType: ChannelType.PublicThread }).message);
+    reposter.observe(jasperMessage({ channelType: ChannelType.PublicThread }).message);
     expect(reposter.size).toBe(0);
   });
 
   it('re-uploads attachments captured at post time and tells the judge about images', async () => {
     const bytes = Buffer.from('png-bytes');
     const { reposter, judgeCalls, sendCalls } = makeReposter({ attachmentBytes: bytes });
-    const fake = jasonMessage({
+    const fake = jasperMessage({
       content: '',
       attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/spicy.png', contentType: 'image/png', name: 'spicy.png' }],
     });
@@ -184,7 +184,7 @@ describe('DeletedMessageReposter', () => {
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
 
     expect(judgeCalls[0]).toEqual({
-      author: 'Jason',
+      author: 'Jasper',
       text: '',
       imageUrls: ['https://cdn.discordapp.com/attachments/1/2/spicy.png'],
       attachmentNames: ['spicy.png'],
@@ -195,7 +195,7 @@ describe('DeletedMessageReposter', () => {
 
   it('still reposts the text when an attachment could not be downloaded', async () => {
     const { reposter, sendCalls } = makeReposter({ attachmentBytes: undefined });
-    const fake = jasonMessage({
+    const fake = jasperMessage({
       attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/big.mp4', contentType: 'video/mp4', name: 'big.mp4' }],
     });
 
@@ -206,7 +206,7 @@ describe('DeletedMessageReposter', () => {
 
   it('reports "empty" when there is nothing left to repost', async () => {
     const { reposter, sendCalls } = makeReposter({ mode: 'always', attachmentBytes: undefined });
-    const fake = jasonMessage({
+    const fake = jasperMessage({
       content: '',
       attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/gone.png', contentType: 'image/png' }],
     });
@@ -219,17 +219,17 @@ describe('DeletedMessageReposter', () => {
   it('forgets snapshots once they are older than the window', () => {
     let now = T0;
     const { reposter } = makeReposter({ now: () => now });
-    reposter.observe(jasonMessage({ messageId: 'old' }).message);
+    reposter.observe(jasperMessage({ messageId: 'old' }).message);
 
     now = T0 + 120_000;
-    reposter.observe(jasonMessage({ messageId: 'new', createdAt: new Date(now) }).message);
+    reposter.observe(jasperMessage({ messageId: 'new', createdAt: new Date(now) }).message);
 
     expect(reposter.size).toBe(1);
   });
 
   it('uses the server nickname as the webhook name when there is one', async () => {
     const { reposter, sendCalls } = makeReposter({ mode: 'always' });
-    const fake = jasonMessage();
+    const fake = jasperMessage();
     (fake.message as unknown as { member: { nickname: string | null } }).member.nickname = 'Jay';
 
     reposter.observe(fake.message);

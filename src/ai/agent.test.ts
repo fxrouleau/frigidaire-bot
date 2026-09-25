@@ -380,7 +380,7 @@ function lastQuery(embeddings: FakeEmbeddingProvider): string {
 // Discord ids are numeric snowflakes; the mention regex matches `\d+` only (as the original strip
 // regex did), so tests must use numeric ids.
 const BOT_ID = '900000000000000001';
-const WHEEZER_ID = '100000000000000042';
+const WHEELIE_ID = '100000000000000042';
 const SPEAKER_ID = '111111111111111111';
 const STRANGER_ID = '222222222222222222';
 
@@ -392,22 +392,22 @@ describe('AgentOrchestrator @-mention resolution', () => {
     const provider = new FakeProvider([textResponse('Hi')]);
     const orchestrator = makeOrchestrator(provider);
     const fake = createFakeMessage({
-      content: `whats up with <@${WHEEZER_ID}>`,
+      content: `whats up with <@${WHEELIE_ID}>`,
       botUserId: BOT_ID,
-      mentionedUsers: [{ id: WHEEZER_ID, displayName: 'Wheezer' }],
+      mentionedUsers: [{ id: WHEELIE_ID, displayName: 'Wheelie' }],
     });
 
     await orchestrator.handleMention(fake.message);
 
     const query = lastQuery(embeddings);
-    expect(query).toContain('@Wheezer');
+    expect(query).toContain('@Wheelie');
     expect(query).not.toContain('<@');
   });
 
   it('falls back to the identities table when a mention has no live display data', async () => {
     const embeddings = new FakeEmbeddingProvider();
     const store = new MemoryStore(':memory:', { embeddings });
-    store.upsertIdentity(WHEEZER_ID, 'Wheezer');
+    store.upsertIdentity(WHEELIE_ID, 'Wheelie');
     setMemoryStoreForTesting(store);
 
     const provider = new FakeProvider([textResponse('Hi')]);
@@ -415,14 +415,14 @@ describe('AgentOrchestrator @-mention resolution', () => {
     // mentionedUserIds populates mentions.users with a bare entry (no display name), forcing the
     // identities-table fallback.
     const fake = createFakeMessage({
-      content: `hows <@${WHEEZER_ID}> doing`,
+      content: `hows <@${WHEELIE_ID}> doing`,
       botUserId: BOT_ID,
-      mentionedUserIds: [WHEEZER_ID],
+      mentionedUserIds: [WHEELIE_ID],
     });
 
     await orchestrator.handleMention(fake.message);
 
-    expect(lastQuery(embeddings)).toContain('@Wheezer');
+    expect(lastQuery(embeddings)).toContain('@Wheelie');
   });
 
   it("strips the bot's own trigger mention from the query", async () => {
@@ -467,24 +467,24 @@ describe('AgentOrchestrator @-mention resolution', () => {
 
   it('injects subject memories for a mentioned user', async () => {
     // High relevance gate so the contextual-search leg returns nothing and the dedicated mentioned
-    // pull is the only thing that can surface Wheezer's memory.
+    // pull is the only thing that can surface Wheelie's memory.
     const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider(), relevanceThreshold: 0.99 });
-    await store.save({ category: 'fact', subject: 'Wheezer', content: 'plays valorant every night' });
+    await store.save({ category: 'fact', subject: 'Wheelie', content: 'plays valorant every night' });
     setMemoryStoreForTesting(store);
 
     const provider = new FakeProvider([textResponse('Hi')]);
     const orchestrator = makeOrchestrator(provider);
     const fake = createFakeMessage({
-      content: `whats up with <@${WHEEZER_ID}>`,
+      content: `whats up with <@${WHEELIE_ID}>`,
       botUserId: BOT_ID,
-      mentionedUsers: [{ id: WHEEZER_ID, displayName: 'Wheezer' }],
+      mentionedUsers: [{ id: WHEELIE_ID, displayName: 'Wheelie' }],
     });
 
     await orchestrator.handleMention(fake.message);
 
     const dynamicText = dynamicContextText(provider, 0);
     expect(dynamicText).toContain('What you know about others mentioned in this message:');
-    expect(dynamicText).toContain('- Wheezer: plays valorant every night');
+    expect(dynamicText).toContain('- Wheelie: plays valorant every night');
   });
 
   it('excludes the bot and the speaker from the mentioned-subjects pull', async () => {
@@ -517,15 +517,15 @@ describe('AgentOrchestrator @-mention resolution', () => {
     const provider = new FakeProvider([textResponse('Hi')]);
     const orchestrator = makeOrchestrator(provider);
     const fake = createFakeMessage({
-      content: `yo <@${WHEEZER_ID}> you up`,
+      content: `yo <@${WHEELIE_ID}> you up`,
       botUserId: BOT_ID,
-      mentionedUsers: [{ id: WHEEZER_ID, displayName: 'Wheezer' }],
+      mentionedUsers: [{ id: WHEELIE_ID, displayName: 'Wheelie' }],
     });
 
     await orchestrator.handleMention(fake.message);
 
     const userText = lastUserText(provider);
-    expect(userText).toContain('@Wheezer');
+    expect(userText).toContain('@Wheelie');
     expect(userText).not.toContain('<@');
   });
 });
@@ -533,27 +533,27 @@ describe('AgentOrchestrator @-mention resolution', () => {
 describe('AgentOrchestrator per-turn memory refresh', () => {
   it('refreshes contextual retrieval on a second mention', async () => {
     // relevanceThreshold 0.99 keeps the contextual leg empty so only the dedicated mentioned pull can
-    // surface Wheezer — proving retrieval re-ran on turn 2 rather than reusing a frozen prompt.
+    // surface Wheelie — proving retrieval re-ran on turn 2 rather than reusing a frozen prompt.
     const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider(), relevanceThreshold: 0.99 });
-    await store.save({ category: 'fact', subject: 'Wheezer', content: 'plays valorant every night' });
+    await store.save({ category: 'fact', subject: 'Wheelie', content: 'plays valorant every night' });
     setMemoryStoreForTesting(store);
 
     const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
     const orchestrator = makeOrchestrator(provider);
     const turn1 = createFakeMessage({ content: 'hows it going', channelId: 'c', messageId: 'm1', botUserId: BOT_ID });
     const turn2 = createFakeMessage({
-      content: `whats up with <@${WHEEZER_ID}>`,
+      content: `whats up with <@${WHEELIE_ID}>`,
       channelId: 'c',
       messageId: 'm2',
       botUserId: BOT_ID,
-      mentionedUsers: [{ id: WHEEZER_ID, displayName: 'Wheezer' }],
+      mentionedUsers: [{ id: WHEELIE_ID, displayName: 'Wheelie' }],
     });
 
     await orchestrator.handleMention(turn1.message);
     await orchestrator.handleMention(turn2.message);
 
     expect(dynamicContextText(provider, 0)).not.toContain('plays valorant every night');
-    expect(dynamicContextText(provider, 1)).toContain('- Wheezer: plays valorant every night');
+    expect(dynamicContextText(provider, 1)).toContain('- Wheelie: plays valorant every night');
   });
 
   it('keeps the static prompt byte-identical across mentions', async () => {

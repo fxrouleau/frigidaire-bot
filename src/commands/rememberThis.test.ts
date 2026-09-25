@@ -34,8 +34,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function jasonSays(content: string, extra: Parameters<typeof createFakeTargetMessage>[0] = {}) {
-  const { guild } = createFakeGuild({ members: { 'user-7': 'Jason' } });
+function jasperSays(content: string, extra: Parameters<typeof createFakeTargetMessage>[0] = {}) {
+  const { guild } = createFakeGuild({ members: { 'user-7': 'Jasper' } });
   return createFakeTargetMessage({ authorId: 'user-7', authorDisplayName: 'jay', guild, content, ...extra });
 }
 
@@ -73,19 +73,19 @@ describe('normalizeFact', () => {
 
 describe('buildRememberPrompt', () => {
   it("carries the learner's rules", () => {
-    const prompt = buildRememberPrompt('Jason');
+    const prompt = buildRememberPrompt('Jasper');
     expect(prompt).toContain('THE 30-DAY TEST');
     expect(prompt).toContain(`at most ${MAX_FACT_CHARS} characters`);
     expect(prompt).toContain('ALREADY KNOWN');
     expect(prompt).toMatch(/emoji/);
-    expect(prompt).toContain('Jason');
+    expect(prompt).toContain('Jasper');
   });
 });
 
 describe('Remember this', () => {
   it("saves one fact about the author under their current name and id, and confirms privately", async () => {
-    await store.save({ category: 'fact', subject: 'Jason', content: 'Still plays on PS4.', subject_user_id: 'user-7' });
-    const target = jasonSays('just got hired as a nurse at the Jewish General lol');
+    await store.save({ category: 'fact', subject: 'Jasper', content: 'Still plays on PS4.', subject_user_id: 'user-7' });
+    const target = jasperSays('just got hired as a nurse at the Jewish General lol');
     const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Remember this' });
     const { deps, recorders } = createFakeCommandDeps({
       store,
@@ -95,7 +95,7 @@ describe('Remember this', () => {
     await handleContextMenuCommand(interaction, deps);
 
     const request = recorders.complete.calls[0][0];
-    expect(request.system).toBe(buildRememberPrompt('Jason'));
+    expect(request.system).toBe(buildRememberPrompt('Jasper'));
     expect(request.user).toContain('Today (Eastern time): 2026-09-25');
     expect(request.user).toContain('- Still plays on PS4.');
     expect(request.user).toContain('just got hired as a nurse at the Jewish General lol');
@@ -103,24 +103,24 @@ describe('Remember this', () => {
     const saved = store.getForPerson({ userId: 'user-7', names: [] }).find((m) => m.source === 'command');
     expect(saved).toMatchObject({
       category: 'fact',
-      subject: 'Jason',
+      subject: 'Jasper',
       subject_user_id: 'user-7',
       content: 'Works as a nurse at the Jewish General Hospital.',
     });
     expect(responses.at(-1)).toMatchObject({
       method: 'editReply',
       ephemeral: true,
-      content: `got it, memory #${saved?.id} about Jason: Works as a nurse at the Jewish General Hospital.`,
+      content: `got it, memory #${saved?.id} about Jasper: Works as a nurse at the Jewish General Hospital.`,
     });
   });
 
   it("shows the model what is already known under any of the author's names (IRL name, Discord handle)", async () => {
-    store.upsertIdentity('user-7', 'Jason');
-    store.updateIdentityMeta('user-7', { irl_name: 'Jason M' });
-    await store.save({ category: 'fact', subject: 'Jason M', content: 'Grew up in Laval.' });
-    await store.save({ category: 'preference', subject: 'cigalefourmi', content: 'Mains Thresh.' });
-    await store.save({ category: 'fact', subject: 'Simon', content: 'Drives a Civic.' });
-    const target = jasonSays('moving back to laval next month', { authorUsername: 'cigalefourmi' });
+    store.upsertIdentity('user-7', 'Jasper');
+    store.updateIdentityMeta('user-7', { irl_name: 'Jasper M' });
+    await store.save({ category: 'fact', subject: 'Jasper M', content: 'Grew up in Laval.' });
+    await store.save({ category: 'preference', subject: 'lapinlune', content: 'Mains Thresh.' });
+    await store.save({ category: 'fact', subject: 'Silas', content: 'Drives a Civic.' });
+    const target = jasperSays('moving back to laval next month', { authorUsername: 'lapinlune' });
     const { interaction } = createFakeMessageCommandInteraction(target.message, { commandName: 'Remember this' });
     const { deps, recorders } = createFakeCommandDeps({ store, complete: async () => '{"fact": null}' });
 
@@ -133,7 +133,7 @@ describe('Remember this', () => {
   });
 
   it('reports when nothing durable is in the message, saving nothing', async () => {
-    const target = jasonSays('lmaooo');
+    const target = jasperSays('lmaooo');
     const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Remember this' });
     const { deps } = createFakeCommandDeps({ store, complete: async () => '{"fact": null, "reason": "Just a reaction."}' });
 
@@ -144,12 +144,12 @@ describe('Remember this', () => {
   });
 
   it('attributes a link-fix repost to the member it was posted for', async () => {
-    recordRelay({ messageId: 'relay-1', channelId: 'channel-1', authorId: 'user-8', authorName: 'Simon', kind: 'link_fix' });
-    const { guild } = createFakeGuild({ members: { 'user-8': 'Simon B' } });
+    recordRelay({ messageId: 'relay-1', channelId: 'channel-1', authorId: 'user-8', authorName: 'Silas', kind: 'link_fix' });
+    const { guild } = createFakeGuild({ members: { 'user-8': 'Silas B' } });
     const target = createFakeTargetMessage({
       messageId: 'relay-1',
       webhookId: 'hook-1',
-      authorUsername: 'Simon',
+      authorUsername: 'Silas',
       guild,
       content: 'my new car https://fxtwitter.com/x/status/1',
     });
@@ -158,21 +158,21 @@ describe('Remember this', () => {
 
     await handleContextMenuCommand(interaction, deps);
 
-    expect(store.getAllActive()[0]).toMatchObject({ subject: 'Simon B', subject_user_id: 'user-8', source: 'command' });
+    expect(store.getAllActive()[0]).toMatchObject({ subject: 'Silas B', subject_user_id: 'user-8', source: 'command' });
   });
 
   it("files a linked side account's message under the main account (LINKED_ACCOUNTS)", async () => {
     vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
     try {
-      store.upsertIdentity('100000000000000001', 'Tony', 'tony_main');
-      store.upsertIdentity('100000000000000002', 'Ptoughneigh', 'triceclone');
+      store.upsertIdentity('100000000000000001', 'Toby', 'toby_main');
+      store.upsertIdentity('100000000000000002', 'Tohbee', 'tobyclone');
       // Already known, filed under the side account's name: shown to the model as known.
-      await store.save({ category: 'fact', subject: 'Ptoughneigh', content: 'Owns a canoe.' });
-      const { guild } = createFakeGuild({ members: { '100000000000000001': 'Tony' } });
+      await store.save({ category: 'fact', subject: 'Tohbee', content: 'Owns a canoe.' });
+      const { guild } = createFakeGuild({ members: { '100000000000000001': 'Toby' } });
       const target = createFakeTargetMessage({
         authorId: '100000000000000002',
-        authorDisplayName: 'Ptoughneigh',
-        authorUsername: 'triceclone',
+        authorDisplayName: 'Tohbee',
+        authorUsername: 'tobyclone',
         guild,
         content: 'just moved to laval',
       });
@@ -183,7 +183,7 @@ describe('Remember this', () => {
 
       expect(recorders.complete.calls[0][0].user).toContain('- Owns a canoe.');
       expect(store.getAllActive().find((m) => m.source === 'command')).toMatchObject({
-        subject: 'Tony',
+        subject: 'Toby',
         subject_user_id: '100000000000000001',
         content: 'Lives in Laval.',
       });
@@ -193,7 +193,7 @@ describe('Remember this', () => {
   });
 
   it('uses the voice message transcript', async () => {
-    const target = jasonSays('', {
+    const target = jasperSays('', {
       voiceMessage: true,
       mediaAttachments: [{ url: 'https://cdn/v.ogg', contentType: 'audio/ogg' }],
     });
@@ -215,7 +215,7 @@ describe('Remember this', () => {
       { target: createFakeTargetMessage({ authorId: 'other-bot', authorIsBot: true, content: 'beep' }), line: REMEMBER_LINES.notAPerson },
       { target: createFakeTargetMessage({ authorId: 'bot-1', authorIsBot: true, content: 'me' }), line: REMEMBER_LINES.ownMessage },
       {
-        target: jasonSays('', { attachments: [{ url: 'https://cdn/p.png', contentType: 'image/png' }] }),
+        target: jasperSays('', { attachments: [{ url: 'https://cdn/p.png', contentType: 'image/png' }] }),
         line: REMEMBER_LINES.nothingToRead,
       },
     ];
@@ -231,11 +231,11 @@ describe('Remember this', () => {
   });
 
   it('handles an unparseable model answer and a model outage in character', async () => {
-    const garbled = createFakeMessageCommandInteraction(jasonSays('I hate cilantro').message, { commandName: 'Remember this' });
+    const garbled = createFakeMessageCommandInteraction(jasperSays('I hate cilantro').message, { commandName: 'Remember this' });
     await handleContextMenuCommand(garbled.interaction, createFakeCommandDeps({ store, complete: async () => 'hmm' }).deps);
     expect(garbled.responses.at(-1)?.content).toBe(REMEMBER_LINES.unreadable);
 
-    const down = createFakeMessageCommandInteraction(jasonSays('I hate cilantro').message, { commandName: 'Remember this' });
+    const down = createFakeMessageCommandInteraction(jasperSays('I hate cilantro').message, { commandName: 'Remember this' });
     await handleContextMenuCommand(
       down.interaction,
       createFakeCommandDeps({

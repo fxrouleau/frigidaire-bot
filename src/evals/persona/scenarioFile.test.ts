@@ -17,7 +17,7 @@ function validFile() {
     version: 1,
     bot: { name: 'Frigidaire', id: '900000000000000001' },
     cast: [
-      { name: 'Ana', id: '100000000000000001', aliases: ['annie'] },
+      { name: 'Ana', id: '100000000000000001', aliases: ['agathe'] },
       { name: 'Bo', id: '100000000000000002', username: 'bobo' },
     ],
     emojis: [{ id: '200000000000000001', name: 'KEKW', caption: 'laughing' }],
@@ -86,7 +86,7 @@ describe('the committed scenarios.json', () => {
 describe('parseScenarioFile', () => {
   it('fills defaults: username from the name, one allowed custom emoji, empty regex lists', () => {
     const parsed = parseScenarioFile(validFile());
-    expect(parsed.cast[0]).toMatchObject({ name: 'Ana', username: 'ana', aliases: ['annie'] });
+    expect(parsed.cast[0]).toMatchObject({ name: 'Ana', username: 'ana', aliases: ['agathe'] });
     expect(parsed.cast[1].username).toBe('bobo');
     const [scenario] = parsed.scenarios;
     expect(scenario.expectations).toMatchObject({ maxCustomEmojis: 1, mustMatch: [], mustNotMatch: ['just kidding'] });

@@ -18,7 +18,7 @@ const BOT_TESTING = '700000000000000002';
 const MAIN = '700000000000000003';
 const GONE = '700000000000000099';
 
-const NAMES: Record<string, string> = { [MOD_LOGS]: 'mod-logs', [BOT_TESTING]: 'bot-testing', [MAIN]: 'banana-combo' };
+const NAMES: Record<string, string> = { [MOD_LOGS]: 'mod-logs', [BOT_TESTING]: 'bot-testing', [MAIN]: 'bagel-bar' };
 const lookup: ChannelNameLookup = async (id) => NAMES[id];
 
 function namedChannel(id: string, name: string): Channel {
@@ -156,14 +156,14 @@ describe('channelEnvLog event', () => {
     vi.stubEnv('MAIN_CHANNEL_ID', MAIN);
     const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
     const { client } = createFakeClient({
-      channelsById: { [MOD_LOGS]: namedChannel(MOD_LOGS, 'mod-logs'), [MAIN]: namedChannel(MAIN, 'banana-combo') },
+      channelsById: { [MOD_LOGS]: namedChannel(MOD_LOGS, 'mod-logs'), [MAIN]: namedChannel(MAIN, 'bagel-bar') },
     });
 
     await channelEnvLogEvent.execute(client);
 
     expect(info.mock.calls.map((call) => call[0])).toEqual([
       `Channel config · LEARNER_IGNORE_CHANNELS: #mod-logs (1 unknown: ${GONE})`,
-      'Channel config · MAIN_CHANNEL_ID: #banana-combo',
+      'Channel config · MAIN_CHANNEL_ID: #bagel-bar',
     ]);
   });
 });

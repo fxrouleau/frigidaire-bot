@@ -3,7 +3,7 @@ import { wordOverlap } from './wordOverlap';
 
 describe('wordOverlap', () => {
   it('returns 1.0 for identical strings', () => {
-    expect(wordOverlap('Felix loves coding', 'Felix loves coding')).toBe(1.0);
+    expect(wordOverlap('Remi loves coding', 'Remi loves coding')).toBe(1.0);
   });
 
   it('returns 0.0 for completely different strings', () => {
@@ -11,7 +11,7 @@ describe('wordOverlap', () => {
   });
 
   it('returns > 0.6 for high meaningful overlap', () => {
-    const score = wordOverlap('Felix lives in Toronto Canada', 'Felix lives in Montreal Canada');
+    const score = wordOverlap('Remi lives in Toronto Canada', 'Remi lives in Montreal Canada');
     expect(score).toBeGreaterThan(0.6);
   });
 
@@ -31,13 +31,13 @@ describe('wordOverlap', () => {
   });
 
   it('handles single word strings', () => {
-    expect(wordOverlap('Felix', 'Felix')).toBe(1.0);
-    expect(wordOverlap('Felix', 'Alex')).toBe(0.0);
+    expect(wordOverlap('Remi', 'Remi')).toBe(1.0);
+    expect(wordOverlap('Remi', 'Alex')).toBe(0.0);
   });
 
   // Stop-word filtering tests
   it('returns low score for strings sharing only stop words', () => {
-    const score = wordOverlap('Felix is in the house', 'Alex is in the park');
+    const score = wordOverlap('Remi is in the house', 'Alex is in the park');
     expect(score).toBeLessThan(0.6);
   });
 
@@ -51,7 +51,7 @@ describe('wordOverlap', () => {
   });
 
   it('preserves meaningful overlap despite stop-word removal', () => {
-    const score = wordOverlap('Felix loves programming Python', 'Felix enjoys programming Python');
+    const score = wordOverlap('Remi loves programming Python', 'Remi enjoys programming Python');
     expect(score).toBeGreaterThan(0.6);
   });
 });

@@ -22,10 +22,10 @@ afterEach(() => {
 
 describe('runStartupMemoryMaintenance', () => {
   it('stamps before compacting, so rows it links to a member dedup on the same start', async () => {
-    store.upsertIdentity(MAIN, 'Jason', 'cigalefourmi');
-    await store.save({ category: 'fact', subject: 'Jason', subject_user_id: MAIN, content: 'Works nights at the depot' });
+    store.upsertIdentity(MAIN, 'Jasper', 'lapinlune');
+    await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: MAIN, content: 'Works nights at the depot' });
     // Filed under the handle, without an id: only the stamp can tell it's the same person.
-    await store.save({ category: 'fact', subject: 'cigalefourmi', content: 'Works nights at the depot' });
+    await store.save({ category: 'fact', subject: 'lapinlune', content: 'Works nights at the depot' });
 
     const result = runStartupMemoryMaintenance(store);
 
@@ -35,10 +35,10 @@ describe('runStartupMemoryMaintenance', () => {
 
   it("dedups a side account's rows with the main account's (LINKED_ACCOUNTS)", async () => {
     vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${MAIN}`);
-    store.upsertIdentity(MAIN, 'Tony');
-    store.upsertIdentity(SIDE, 'Ptoughneigh');
-    await store.save({ category: 'fact', subject: 'Tony', subject_user_id: MAIN, content: 'Owns a black lab named Moose' });
-    await store.save({ category: 'fact', subject: 'Ptoughneigh', subject_user_id: SIDE, content: 'Owns a black lab named Moose' });
+    store.upsertIdentity(MAIN, 'Toby');
+    store.upsertIdentity(SIDE, 'Tohbee');
+    await store.save({ category: 'fact', subject: 'Toby', subject_user_id: MAIN, content: 'Owns a black lab named Moose' });
+    await store.save({ category: 'fact', subject: 'Tohbee', subject_user_id: SIDE, content: 'Owns a black lab named Moose' });
 
     const result = runStartupMemoryMaintenance(store);
 

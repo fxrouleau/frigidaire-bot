@@ -22,7 +22,7 @@ function memory(id: number, content: string, category = 'fact'): Memory {
   return {
     id,
     category,
-    subject: 'Jason',
+    subject: 'Jasper',
     content,
     source: 'conversation',
     created_at: '2026-09-20 12:00:00',
@@ -34,15 +34,15 @@ function memory(id: number, content: string, category = 'fact'): Memory {
 
 describe('What does Fridge know?', () => {
   it("lists memories matched by id or any of the person's names, privately", async () => {
-    store.upsertIdentity('user-7', 'Jason');
+    store.upsertIdentity('user-7', 'Jasper');
     store.updateIdentityMeta('user-7', { aliases_add: ['Jay'] });
-    await store.save({ category: 'fact', subject: 'Jason', content: 'Still plays on PS4.', subject_user_id: 'user-7' });
+    await store.save({ category: 'fact', subject: 'Jasper', content: 'Still plays on PS4.', subject_user_id: 'user-7' });
     await store.save({ category: 'preference', subject: 'Jay', content: 'Hates cilantro.' });
-    await store.save({ category: 'fact', subject: 'Simon', content: 'Drives a Civic.' });
-    await store.save({ category: 'capability_gap', subject: 'Jason', content: 'Bot cannot read PDFs.', subject_user_id: 'user-7' });
+    await store.save({ category: 'fact', subject: 'Silas', content: 'Drives a Civic.' });
+    await store.save({ category: 'capability_gap', subject: 'Jasper', content: 'Bot cannot read PDFs.', subject_user_id: 'user-7' });
 
     const { interaction, responses } = createFakeUserCommandInteraction(
-      { id: 'user-7', username: 'jason99', memberDisplayName: 'Jason' },
+      { id: 'user-7', username: 'jasper99', memberDisplayName: 'Jasper' },
       { commandName: 'What does Fridge know?' },
     );
     // Real clock: the rows were just saved with SQLite's datetime('now').
@@ -51,7 +51,7 @@ describe('What does Fridge know?', () => {
     expect(responses).toHaveLength(1);
     expect(responses[0]).toMatchObject({ method: 'reply', ephemeral: true });
     const text = responses[0].content ?? '';
-    expect(text.split('\n')[0]).toBe('**What I know about Jason** (2)');
+    expect(text.split('\n')[0]).toBe('**What I know about Jasper** (2)');
     expect(text).toContain('Still plays on PS4.');
     expect(text).toContain('Hates cilantro.');
     expect(text).not.toContain('Civic');
@@ -61,13 +61,13 @@ describe('What does Fridge know?', () => {
   });
 
   it('also finds rows filed under the IRL name or the Discord handle', async () => {
-    store.upsertIdentity('user-7', 'Jason');
-    store.updateIdentityMeta('user-7', { irl_name: 'Jason M' });
-    await store.save({ category: 'fact', subject: 'Jason M', content: 'Grew up in Laval.' });
-    await store.save({ category: 'preference', subject: 'cigalefourmi', content: 'Mains Thresh.' });
+    store.upsertIdentity('user-7', 'Jasper');
+    store.updateIdentityMeta('user-7', { irl_name: 'Jasper M' });
+    await store.save({ category: 'fact', subject: 'Jasper M', content: 'Grew up in Laval.' });
+    await store.save({ category: 'preference', subject: 'lapinlune', content: 'Mains Thresh.' });
 
     const { interaction, responses } = createFakeUserCommandInteraction(
-      { id: 'user-7', username: 'cigalefourmi', memberDisplayName: 'Jason' },
+      { id: 'user-7', username: 'lapinlune', memberDisplayName: 'Jasper' },
       { commandName: 'What does Fridge know?' },
     );
     await handleContextMenuCommand(interaction, createFakeCommandDeps({ store, now: new Date() }).deps);
@@ -79,19 +79,19 @@ describe('What does Fridge know?', () => {
 
   it("shows a linked side account's member: the main account's name and memories (LINKED_ACCOUNTS)", async () => {
     vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
-    store.upsertIdentity('100000000000000001', 'Tony', 'tony_main');
-    store.upsertIdentity('100000000000000002', 'Ptoughneigh', 'triceclone');
-    await store.save({ category: 'fact', subject: 'Tony', content: 'Owns a canoe.', subject_user_id: '100000000000000001' });
-    await store.save({ category: 'fact', subject: 'Ptoughneigh', content: 'Lives in Laval.' });
+    store.upsertIdentity('100000000000000001', 'Toby', 'toby_main');
+    store.upsertIdentity('100000000000000002', 'Tohbee', 'tobyclone');
+    await store.save({ category: 'fact', subject: 'Toby', content: 'Owns a canoe.', subject_user_id: '100000000000000001' });
+    await store.save({ category: 'fact', subject: 'Tohbee', content: 'Lives in Laval.' });
 
     const { interaction, responses } = createFakeUserCommandInteraction(
-      { id: '100000000000000002', username: 'triceclone', memberDisplayName: 'Ptoughneigh' },
+      { id: '100000000000000002', username: 'tobyclone', memberDisplayName: 'Tohbee' },
       { commandName: 'What does Fridge know?' },
     );
     await handleContextMenuCommand(interaction, createFakeCommandDeps({ store, now: new Date() }).deps);
 
     const text = responses[0].content ?? '';
-    expect(text.split('\n')[0]).toBe('**What I know about Tony** (2)');
+    expect(text.split('\n')[0]).toBe('**What I know about Toby** (2)');
     expect(text).toContain('Owns a canoe.');
     expect(text).toContain('Lives in Laval.');
     vi.unstubAllEnvs();
@@ -108,7 +108,7 @@ describe('What does Fridge know?', () => {
 
   it('reports a broken memory store in character', async () => {
     const { interaction, responses } = createFakeUserCommandInteraction(
-      { id: 'user-7', memberDisplayName: 'Jason' },
+      { id: 'user-7', memberDisplayName: 'Jasper' },
       { commandName: 'What does Fridge know?' },
     );
     const broken = store;
@@ -121,20 +121,20 @@ describe('What does Fridge know?', () => {
 describe('renderMemoryList', () => {
   it(`shows at most ${MAX_LISTED_MEMORIES}, newest first, and says how many exist`, () => {
     const memories = Array.from({ length: 40 }, (_, i) => memory(100 - i, `fact number ${i}`));
-    const text = renderMemoryList('Jason', memories, NOW);
+    const text = renderMemoryList('Jasper', memories, NOW);
     const lines = text.split('\n');
-    expect(lines[0]).toBe(`**What I know about Jason** (newest ${MAX_LISTED_MEMORIES} of 40)`);
+    expect(lines[0]).toBe(`**What I know about Jasper** (newest ${MAX_LISTED_MEMORIES} of 40)`);
     expect(lines).toHaveLength(MAX_LISTED_MEMORIES + 1);
     expect(lines[1]).toBe('`#100` fact number 0 *(fact, 5d ago)*');
   });
 
   it('fits long memories into one message and counts only what is shown', () => {
     const memories = Array.from({ length: 25 }, (_, i) => memory(i + 1, `${'long content '.repeat(30)}${i}`));
-    const text = renderMemoryList('Jason', memories, NOW);
+    const text = renderMemoryList('Jasper', memories, NOW);
     expect(text.length).toBeLessThanOrEqual(2000);
     const shown = text.split('\n').length - 1;
     expect(shown).toBeLessThan(25);
-    expect(text.split('\n')[0]).toBe(`**What I know about Jason** (newest ${shown} of 25)`);
+    expect(text.split('\n')[0]).toBe(`**What I know about Jasper** (newest ${shown} of 25)`);
   });
 
   it('escapes markdown in names and contents', () => {

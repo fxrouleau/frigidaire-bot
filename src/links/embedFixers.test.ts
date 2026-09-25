@@ -480,8 +480,8 @@ describe('markdown safety', () => {
   const fixAll = () => fakeDeps({ 'https://tw.test/': html(OG_TWEET_HTML), 'https://ig.test/': html(OG_VIDEO_HTML) });
 
   it.each([
-    ['a spoiler stays spoilered', '||https://x.com/jason/status/123||', '||https://tw.test/jason/status/123||'],
-    ['a spoiler inside a sentence', 'lol ||https://x.com/jason/status/123|| rip', 'lol ||https://tw.test/jason/status/123|| rip'],
+    ['a spoiler stays spoilered', '||https://x.com/jasper/status/123||', '||https://tw.test/jasper/status/123||'],
+    ['a spoiler inside a sentence', 'lol ||https://x.com/jasper/status/123|| rip', 'lol ||https://tw.test/jasper/status/123|| rip'],
     ['a masked link keeps its )', '[this](https://x.com/u/status/1)', '[this](https://tw.test/u/status/1)'],
     [
       'a masked link whose text is the URL',

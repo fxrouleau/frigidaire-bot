@@ -9,7 +9,7 @@
 // member's MAIN account id, which is what memories, reminders, birthdays and the archive key on.
 //
 // Entry points:
-//  - lookupPerson(): one reference ("Wheezer", "me", "@Jason", "<@123>", "Felix (id:123)") → the one
+//  - lookupPerson(): one reference ("Wheelie", "me", "@Jasper", "<@123>", "Remi (id:123)") → the one
 //    member it means, or why it can't tell (unknown, ambiguous, a crowd, the bot). resolvePerson() and
 //    resolvePersonRef() wrap it for the memory tools and for the scheduling tools.
 //  - createPeopleMatcher() / findPeopleInText(): every member a piece of chat text refers to.
@@ -103,8 +103,8 @@ function namesOfAll(rows: Identity[], extra: (string | null | undefined)[] = [])
     ...extra,
     ...rows.flatMap((row) => [row.display_name, row.username, row.canonical_name, row.irl_name, ...row.aliases]),
   ];
-  // Exact-spelling dedup on purpose: getForPerson() compares subjects exactly, so "wheezer" and
-  // "Wheezer" are both worth asking for.
+  // Exact-spelling dedup on purpose: getForPerson() compares subjects exactly, so "wheelie" and
+  // "Wheelie" are both worth asking for.
   const seen = new Set<string>();
   const result: string[] = [];
   for (const name of names) {
@@ -116,7 +116,7 @@ function namesOfAll(rows: Identity[], extra: (string | null | undefined)[] = [])
   return result;
 }
 
-/** The first word of a multi-word IRL name ("Jason" of "Jason Smith"): what friends actually type. */
+/** The first word of a multi-word IRL name ("Jasper" of "Jasper Smith"): what friends actually type. */
 function irlFirstName(identity: Identity): string | undefined {
   const words = identity.irl_name?.trim().split(/\s+/) ?? [];
   return words.length > 1 ? words[0] : undefined;
@@ -357,7 +357,7 @@ function pick(hits: Member[]): PersonLookup | undefined {
  * snowflake; a side account's id means its main account) → "me" (the requester) → a crowd or the bot
  * (never a person) → a member @-mentioned in the message whose name it is → every member by name tier
  * (see findMembersByName). With `fuzzy` (reminders, birthdays), a word inside a longer name ("gamer" →
- * "big gamer") and then a prefix of 3+ characters ("whee" → "Wheezer") also count. Two candidates at
+ * "big gamer") and then a prefix of 3+ characters ("whee" → "Wheelie") also count. Two candidates at
  * the same step are reported as ambiguous, never guessed.
  */
 export function lookupPerson(directory: PeopleDirectory, rawRef: string, opts: { fuzzy?: boolean } = {}): PersonLookup {
@@ -375,7 +375,7 @@ export function lookupPerson(directory: PeopleDirectory, rawRef: string, opts: {
     }
     const member = directory.members.find((m) => m.userId === userId);
     if (member) return { ok: true, person: toResolved(member) };
-    // An id nobody knows: the name written next to it may still resolve ("Felix (id:999)").
+    // An id nobody knows: the name written next to it may still resolve ("Remi (id:999)").
     if (MENTION_TOKEN.test(raw) || BARE_SNOWFLAKE.test(shown) || !key) {
       return { ok: false, reason: 'unknown-id', id: explicitId };
     }
@@ -534,13 +534,13 @@ export function memoryKeyFor(
 export type PersonReference = ResolvedPerson & { member: Member; count: number };
 
 // Names shorter than this are never matched in free text ("Ed" would match every "ed" typo, "D" every
-// ":D"). IRL names are the exception down to two letters: real names like "Yi" are that short.
+// ":D"). IRL names are the exception down to two letters: real names like "Yu" are that short.
 const MIN_TEXT_NAME_LENGTH = 3;
 const MIN_IRL_NAME_LENGTH = 2;
 const MENTION_SPLIT = /(<@!?\d+>)/;
 const MENTION_ID = /^<@!?(\d+)>$/;
-// Blanked out before name matching: a handle inside a link ("twitter.com/jason/status/…"), an emoji
-// name (<:jason:123>), role/channel mentions and timestamps are not references to a member.
+// Blanked out before name matching: a handle inside a link ("twitter.com/jasper/status/…"), an emoji
+// name (<:jasper:123>), role/channel mentions and timestamps are not references to a member.
 const NOT_PROSE = /https?:\/\/\S+|<a?:\w+:\d+>|<[#@]&?!?\d+>|<t:-?\d+(?::\w)?>/g;
 
 function escapeRegExp(text: string): string {

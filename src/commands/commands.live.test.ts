@@ -46,11 +46,11 @@ describe.skipIf(!RUN_LIVE)('context-menu command prompts (live, paid, opt-in)', 
     'distills a durable fact as JSON, and declines a throwaway message',
     async () => {
       const user = (message: string) =>
-        `Today (Eastern time): 2026-09-25\nALREADY KNOWN about Jason:\n(nothing yet)\n\nMESSAGE from Jason:\n<<<\n${message}\n>>>`;
+        `Today (Eastern time): 2026-09-25\nALREADY KNOWN about Jasper:\n(nothing yet)\n\nMESSAGE from Jasper:\n<<<\n${message}\n>>>`;
 
       const durable = parseRememberDecision(
         (await complete({
-          system: buildRememberPrompt('Jason'),
+          system: buildRememberPrompt('Jasper'),
           user: user('finally done with school, I start as a nurse at the Jewish General on monday'),
           maxTokens: 1000,
           temperature: 0.1,
@@ -61,7 +61,7 @@ describe.skipIf(!RUN_LIVE)('context-menu command prompts (live, paid, opt-in)', 
 
       const throwaway = parseRememberDecision(
         (await complete({
-          system: buildRememberPrompt('Jason'),
+          system: buildRememberPrompt('Jasper'),
           user: user('LMAOOO no way'),
           maxTokens: 1000,
           temperature: 0.1,

@@ -1090,9 +1090,9 @@ Right before each new message you get a context note with the current time (East
     }
     for (const mem of contextualMemories) existingIds.add(mem.id);
 
-    // Pull memories for other people @-mentioned in the message, so "what's up with @Wheezer" surfaces
-    // what we know about Wheezer even when nothing keyword-matches — and for people named in plain text
-    // ("did jason ever pay you back"), which is how the server actually talks about someone.
+    // Pull memories for other people @-mentioned in the message, so "what's up with @Wheelie" surfaces
+    // what we know about Wheelie even when nothing keyword-matches — and for people named in plain text
+    // ("did jasper ever pay you back"), which is how the server actually talks about someone.
     const mentionedMemories = [
       ...this.collectMentionedSubjectMemories(message, store, existingIds),
       ...this.collectNamedPeopleMemories(message, store, existingIds),
@@ -1262,7 +1262,7 @@ ${lines.join('\n')}
     const authorLabel = attribution?.authorName ?? (msg.member?.displayName || msg.author.username);
     const authorId = attribution ? attribution.authorId : !msg.webhookId && !msg.author.bot ? msg.author.id : undefined;
     // Resolve @-mentions to readable names (same logic as the search query) so the model reads
-    // "@Wheezer" rather than a raw numeric id. Only touches the store when a mention is present.
+    // "@Wheelie" rather than a raw numeric id. Only touches the store when a mention is present.
     const rawContent = msg.content ?? '';
     const mentionStore = rawContent.includes('<@') ? this.safeStore() : undefined;
     const trimmed = resolveMentionTokens(rawContent, msg.client.user.id, (id) =>

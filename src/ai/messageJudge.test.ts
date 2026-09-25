@@ -8,9 +8,9 @@ import { createReplayClient } from '../test-support/openRouterFetch';
 import { DECISIONS_ENDPOINT, type JudgeInput, createEdgyJudge, isDecisionModel } from './messageJudge';
 import { FEATURE_HEADER } from './usage';
 
-const TEXT_INPUT: JudgeInput = { author: 'Jason', text: 'you are all clowns', imageUrls: [], attachmentNames: [] };
+const TEXT_INPUT: JudgeInput = { author: 'Jasper', text: 'you are all clowns', imageUrls: [], attachmentNames: [] };
 const IMAGE_ONLY_INPUT: JudgeInput = {
-  author: 'Jason',
+  author: 'Jasper',
   text: '',
   imageUrls: ['https://cdn.discordapp.com/attachments/1/2/spicy.png'],
   attachmentNames: ['spicy.png'],
@@ -75,7 +75,7 @@ describe('createEdgyJudge with a decision model', () => {
     expect(body.model).toBe('typesafe/jev-1.13');
     expect(body.provider).toEqual({ zdr: true });
     expect(body.state.message).toBe('you are all clowns');
-    expect(body.state.author).toBe('Jason');
+    expect(body.state.author).toBe('Jasper');
     expect(body.questions.edgy.type).toBe('noul');
   });
 

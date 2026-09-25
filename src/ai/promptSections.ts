@@ -36,7 +36,7 @@ function accountLabel(identity: Pick<Identity, 'display_name' | 'username' | 'di
 
 /**
  * One bullet per member, current display name first (the name memories are filed under):
- * "Wheezer @wheezy_d (id:…) — real name Derrick; also called D, Wheez; formerly OldNick; also posts as
+ * "Wheelie @wheelie_d (id:…) — real name Dorian; also called D, Wheels; formerly OldNick; also posts as
  * Alt @alt_handle (id:…)". A linked side account (LINKED_ACCOUNTS) is folded into its member's line and
  * never listed as a separate person. "formerly" is the first-seen display name, when it differs.
  */

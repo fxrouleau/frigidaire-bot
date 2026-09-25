@@ -18,7 +18,7 @@ function videoPost(id: string, url = CLIP, extra: Parameters<typeof createFakeMe
   return createFakeMessage({
     messageId: id,
     channelId: CH,
-    authorDisplayName: 'Jason',
+    authorDisplayName: 'Jasper',
     content: 'LMAOOO',
     attachments: [{ url, contentType: 'video/mp4', name: url.split('/').pop(), duration: 31 }],
     ...extra,
@@ -74,12 +74,12 @@ describe('watch_video', () => {
         url: CLIP,
         contentType: 'video/mp4',
         durationSecs: 31,
-        context: 'Posted by Jason with the message: LMAOOO',
+        context: 'Posted by Jasper with the message: LMAOOO',
         question: 'what does he yell at the end?',
       },
     ]);
     expect(output).toBe(
-      `${WATCH_RESULT_HEADER}\nWatched clip.mp4 from Jason (0:31) for: "what does he yell at the end?"\n${ANSWER}`,
+      `${WATCH_RESULT_HEADER}\nWatched clip.mp4 from Jasper (0:31) for: "what does he yell at the end?"\n${ANSWER}`,
     );
   });
 
@@ -203,14 +203,14 @@ describe('watch_video', () => {
     const { tool } = setup({ status: 'over_budget' });
     const output = await tool.handler(ctx(videoPost('900000000000000100')), { question: 'who?' });
     expect(output).toBe(
-      "Didn't watch clip.mp4 from Jason: not watched: out of popcorn money for today, the daily video budget is spent until midnight Eastern. Say so in your own words.",
+      "Didn't watch clip.mp4 from Jasper: not watched: out of popcorn money for today, the daily video budget is spent until midnight Eastern. Say so in your own words.",
     );
   });
 
   it('reports other outcomes plainly', async () => {
     const { tool } = setup({ status: 'too_large' });
     expect(await tool.handler(ctx(videoPost('900000000000000100')), { question: 'who?' })).toBe(
-      "Didn't watch clip.mp4 from Jason: too large to watch.",
+      "Didn't watch clip.mp4 from Jasper: too large to watch.",
     );
   });
 

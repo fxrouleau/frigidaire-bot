@@ -33,7 +33,7 @@ function fakeHistory(count: number, opts: { id?: string; name?: string; start?: 
   const history: FakeHistory = {
     id,
     type: ChannelType.GuildText,
-    name: opts.name ?? 'banana-combo',
+    name: opts.name ?? 'bagel-bar',
     guildId: GUILD_ID,
     parentId: null,
     createdTimestamp: start - MINUTE,
@@ -119,7 +119,7 @@ describe('backfill', () => {
     // No wait before the very first request, the configured delay before each later one.
     expect(sleeps).toEqual([1100, 1100]);
     expect(store.getBackfillState(CHANNEL)).toMatchObject({ done: true, pages: 3, fetched: 250 });
-    expect(store.getChannel(CHANNEL)?.name).toBe('banana-combo');
+    expect(store.getChannel(CHANNEL)?.name).toBe('bagel-bar');
 
     // A finished channel costs nothing on the next run.
     await new ArchiveSync(makeDeps()).run();
@@ -313,11 +313,11 @@ describe('discord.js adapters', () => {
     const source = historySourceOf({
       id: CHANNEL,
       type: ChannelType.GuildText,
-      name: 'banana-combo',
+      name: 'bagel-bar',
       isTextBased: () => true,
       messages: { fetch },
     });
-    expect(source?.name).toBe('banana-combo');
+    expect(source?.name).toBe('bagel-bar');
     expect(await source?.fetchPage({ before: '5', limit: 100 })).toHaveLength(1);
     expect(fetch).toHaveBeenCalledWith({ before: '5', limit: 100, cache: false });
 

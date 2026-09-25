@@ -67,12 +67,12 @@ describe('formatClock', () => {
 
 describe('speakerName', () => {
   it("uses the member's display name", () => {
-    expect(speakerName(createFakeMessage({ authorDisplayName: 'Wheezer' }).message)).toBe('Wheezer');
+    expect(speakerName(createFakeMessage({ authorDisplayName: 'Wheelie' }).message)).toBe('Wheelie');
   });
 
   it('credits a relayed message to the member it was posted for', () => {
-    recordRelay({ messageId: 'relay-1', channelId: 'c', authorId: 'u9', authorName: 'Jason', kind: 'link_fix' });
-    const { message } = createFakeMessage({ messageId: 'relay-1', webhookId: 'wh-1', authorUsername: 'Jason (webhook)' });
-    expect(speakerName(message)).toBe('Jason');
+    recordRelay({ messageId: 'relay-1', channelId: 'c', authorId: 'u9', authorName: 'Jasper', kind: 'link_fix' });
+    const { message } = createFakeMessage({ messageId: 'relay-1', webhookId: 'wh-1', authorUsername: 'Jasper (webhook)' });
+    expect(speakerName(message)).toBe('Jasper');
   });
 });

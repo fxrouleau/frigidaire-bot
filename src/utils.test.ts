@@ -153,13 +153,13 @@ describe('repostMessage', () => {
   });
 
   it('records the repost as a relay of the real author (so it counts as theirs downstream)', async () => {
-    const fake = createFakeMessage({ authorId: 'user-7', authorDisplayName: 'Jason', channelId: 'chan-9' });
+    const fake = createFakeMessage({ authorId: 'user-7', authorDisplayName: 'Jasper', channelId: 'chan-9' });
 
     const outcome = await repostMessage(fake.message, 'hi', { fetch: noFetch });
 
     expect(outcome.status).toBe('reposted');
     const repostId = (outcome as Extract<RepostOutcome, { status: 'reposted' }>).repostId;
-    expect(getRelay(repostId)).toMatchObject({ authorId: 'user-7', authorName: 'Jason', channelId: 'chan-9', kind: 'link_fix' });
+    expect(getRelay(repostId)).toMatchObject({ authorId: 'user-7', authorName: 'Jasper', channelId: 'chan-9', kind: 'link_fix' });
   });
 
   it('prefers the member nickname over the author displayName for the webhook name', async () => {
@@ -392,12 +392,12 @@ describe('repostMessage', () => {
         channel: { name: string; permissionsFor: (member: unknown) => PermissionsBitField };
       };
       message.guild.members.me = { id: 'bot-1' };
-      message.channel.name = 'banana-combo';
+      message.channel.name = 'bagel-bar';
       message.channel.permissionsFor = () => new PermissionsBitField([PermissionFlagsBits.ManageWebhooks]);
 
       const outcome = await repostMessage(fake.message, 'y', { fetch: noFetch });
 
-      expect(outcome).toEqual({ status: 'skipped', reason: 'the bot lacks ManageMessages in #banana-combo' });
+      expect(outcome).toEqual({ status: 'skipped', reason: 'the bot lacks ManageMessages in #bagel-bar' });
       expect(fake.recorders.createWebhook.calls).toHaveLength(0);
 
       message.channel.permissionsFor = () =>
@@ -426,24 +426,24 @@ describe('repostMessage', () => {
         channelId: 'c1',
         referencedMessageId: 'm0',
         repliedUserId: 'u2',
-        repliedUserDisplayName: 'felix_global',
-        repliedMemberDisplayName: 'Felix',
+        repliedUserDisplayName: 'remi_global',
+        repliedMemberDisplayName: 'Remi',
       });
 
       await repostMessage(fake.message, 'agreed https://fixvx.com/u/status/1', { fetch: noFetch });
 
       expect(sentPayload(fake).content).toBe(
-        '-# ↪ replying to Felix · https://discord.com/channels/g1/c1/m0\nagreed https://fixvx.com/u/status/1',
+        '-# ↪ replying to Remi · https://discord.com/channels/g1/c1/m0\nagreed https://fixvx.com/u/status/1',
       );
     });
 
     it('falls back to fetching the referenced message when Discord sent no replied user', async () => {
-      const referenced = createFakeMessage({ messageId: 'm0', authorDisplayName: 'Jason' }).message;
+      const referenced = createFakeMessage({ messageId: 'm0', authorDisplayName: 'Jasper' }).message;
       const fake = createFakeMessage({ guildId: 'g1', channelId: 'c1', referencedMessageId: 'm0', fetchedMessageById: { m0: referenced } });
 
       await repostMessage(fake.message, 'yo', { fetch: noFetch });
 
-      expect(sentPayload(fake).content).toBe('-# ↪ replying to Jason · https://discord.com/channels/g1/c1/m0\nyo');
+      expect(sentPayload(fake).content).toBe('-# ↪ replying to Jasper · https://discord.com/channels/g1/c1/m0\nyo');
     });
 
     it('keeps just the jump link when the replied-to message is gone', async () => {
@@ -463,7 +463,7 @@ describe('repostMessage', () => {
     });
 
     it('drops the context line rather than the message when both would not fit', async () => {
-      const fake = createFakeMessage({ referencedMessageId: 'm0', repliedUserId: 'u2', repliedUserDisplayName: 'Felix' });
+      const fake = createFakeMessage({ referencedMessageId: 'm0', repliedUserId: 'u2', repliedUserDisplayName: 'Remi' });
       const body = 'z'.repeat(1990);
 
       await repostMessage(fake.message, body, { fetch: noFetch });

@@ -15,15 +15,15 @@ const person = (authorName: string, count: number) => ({ authorId: null, authorN
 const STATS: WrappedStats = {
   totalMessages: 48_210,
   activeMembers: 9,
-  topMembers: [person('Jason', 14_002), person('Simon', 9_870), person('Felix', 6_311)],
+  topMembers: [person('Jasper', 14_002), person('Silas', 9_870), person('Remi', 6_311)],
   busiestHour: { hour: 23, count: 4_120 },
   topEmojis: [],
   links: [],
   voice: { total: 0 },
-  regrets: { total: 12, top: [person('Jason', 9)] },
-  edits: { total: 800, top: person('Felix', 402) },
+  regrets: { total: 12, top: [person('Jasper', 9)] },
+  edits: { total: 800, top: person('Remi', 402) },
   deletions: { total: 0 },
-  botPings: { total: 1_500, top: person('Simon', 700), botReplies: 1_480 },
+  botPings: { total: 1_500, top: person('Silas', 700), botReplies: 1_480 },
 };
 
 describe.skipIf(!RUN_LIVE)('Wrapped intro live (paid, opt-in)', () => {

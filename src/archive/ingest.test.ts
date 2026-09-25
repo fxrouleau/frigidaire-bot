@@ -32,8 +32,8 @@ vi.mock('../ai/media', () => ({
 
 const CHANNEL = '100000000000000001';
 const THREAD = '100000000000000003';
-const FELIX = '200000000000000001';
-const JASON = '200000000000000002';
+const REMI = '200000000000000001';
+const JASPER = '200000000000000002';
 const T0 = Date.UTC(2026, 0, 15, 17, 0);
 
 let store: ArchiveStore;
@@ -61,14 +61,14 @@ describe('toArchiveInput — what is archived and as whom', () => {
   it('archives a member message with its channel, reply and attribution', () => {
     const replyTo = snowflake(T0 - 1000);
     const input = toArchiveInput(
-      archivableMessage({ content: 'hello', authorId: FELIX, authorName: 'Felix', replyToId: replyTo }),
+      archivableMessage({ content: 'hello', authorId: REMI, authorName: 'Remi', replyToId: replyTo }),
     );
     expect(input).toMatchObject({
       guildId: GUILD_ID,
       channelId: CHANNEL,
       parentChannelId: null,
-      authorId: FELIX,
-      authorName: 'Felix',
+      authorId: REMI,
+      authorName: 'Remi',
       source: 'human',
       relayKind: null,
       content: 'hello',
@@ -108,32 +108,32 @@ describe('toArchiveInput — what is archived and as whom', () => {
 
   it('attributes a registered relay to the member it was posted for, with its kind', () => {
     const id = snowflake(T0, 3);
-    recordRelay({ messageId: id, channelId: CHANNEL, authorId: JASON, authorName: 'Jason', kind: 'regret' });
+    recordRelay({ messageId: id, channelId: CHANNEL, authorId: JASPER, authorName: 'Jasper', kind: 'regret' });
     const input = toArchiveInput(
-      archivableMessage({ id, webhookId: '555', applicationId: BOT_USER_ID, authorName: 'Jason', content: 'oops' }),
+      archivableMessage({ id, webhookId: '555', applicationId: BOT_USER_ID, authorName: 'Jasper', content: 'oops' }),
     );
-    expect(input).toMatchObject({ source: 'relay', authorId: JASON, relayKind: 'regret', content: 'oops' });
+    expect(input).toMatchObject({ source: 'relay', authorId: JASPER, relayKind: 'regret', content: 'oops' });
   });
 
   it('attributes an unregistered own-webhook relay by its webhook name, kind unknown for now', () => {
-    memory.upsertIdentity(JASON, 'Jason');
-    const input = toArchiveInput(archivableMessage({ webhookId: '555', applicationId: BOT_USER_ID, authorName: 'Jason' }));
-    expect(input).toMatchObject({ source: 'relay', authorId: JASON, relayKind: null });
+    memory.upsertIdentity(JASPER, 'Jasper');
+    const input = toArchiveInput(archivableMessage({ webhookId: '555', applicationId: BOT_USER_ID, authorName: 'Jasper' }));
+    expect(input).toMatchObject({ source: 'relay', authorId: JASPER, relayKind: null });
   });
 
   it("stores a linked side account's messages and relays under the main account id (LINKED_ACCOUNTS)", () => {
     const SIDE = '200000000000000009';
-    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
-    memory.upsertIdentity(JASON, 'Jason');
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASPER}`);
+    memory.upsertIdentity(JASPER, 'Jasper');
     const direct = toArchiveInput(archivableMessage({ authorId: SIDE, authorName: 'JayAlt', content: 'from my alt' }));
-    expect(direct).toMatchObject({ source: 'human', authorId: JASON, authorName: 'Jason' });
+    expect(direct).toMatchObject({ source: 'human', authorId: JASPER, authorName: 'Jasper' });
 
     const id = snowflake(T0, 4);
     recordRelay({ messageId: id, channelId: CHANNEL, authorId: SIDE, authorName: 'JayAlt', kind: 'link_fix' });
     const relayed = toArchiveInput(
       archivableMessage({ id, webhookId: '555', applicationId: BOT_USER_ID, authorName: 'JayAlt', content: 'a link' }),
     );
-    expect(relayed).toMatchObject({ source: 'relay', authorId: JASON });
+    expect(relayed).toMatchObject({ source: 'relay', authorId: JASPER });
   });
 
   it('records the parent of a thread message and honors ARCHIVE_IGNORE_CHANNELS for channels and their threads', () => {
@@ -184,7 +184,7 @@ describe('live ingest', () => {
   it('archives a new message and its channel; returns false for skipped ones', () => {
     expect(archiveNewMessage(archivableMessage({ content: 'first!' }))).toBe(true);
     expect(store.countMessages()).toBe(1);
-    expect(store.getChannel(CHANNEL)?.name).toBe('banana-combo');
+    expect(store.getChannel(CHANNEL)?.name).toBe('bagel-bar');
     expect(archiveNewMessage(archivableMessage({ authorBot: true, authorId: '999' }))).toBe(false);
   });
 
@@ -246,35 +246,35 @@ describe('live ingest', () => {
 
 describe('relay reconciliation and transcripts', () => {
   it('fills in the kind and real author once the relay registry has them', () => {
-    const relay = archiveInput({ source: 'relay', authorId: null, authorName: 'Jason', relayKind: null });
+    const relay = archiveInput({ source: 'relay', authorId: null, authorName: 'Jasper', relayKind: null });
     store.upsertMessage(relay);
     expect(reconcileRelays(store, { sinceMs: T0 - 1 })).toBe(0);
-    recordRelay({ messageId: relay.id, channelId: CHANNEL, authorId: JASON, authorName: 'Jason', kind: 'link_fix' });
+    recordRelay({ messageId: relay.id, channelId: CHANNEL, authorId: JASPER, authorName: 'Jasper', kind: 'link_fix' });
     expect(reconcileRelays(store, { sinceMs: T0 - 1 })).toBe(1);
-    expect(store.getMessage(relay.id)).toMatchObject({ authorId: JASON, relayKind: 'link_fix' });
+    expect(store.getMessage(relay.id)).toMatchObject({ authorId: JASPER, relayKind: 'link_fix' });
     expect(reconcileRelays(store, { sinceMs: T0 - 1 })).toBe(0);
   });
 
   it("reconciles a side account's relay to the main account id (LINKED_ACCOUNTS)", () => {
     const SIDE = '200000000000000009';
-    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASPER}`);
     const relay = archiveInput({ source: 'relay', authorId: null, authorName: 'JayAlt', relayKind: null });
     store.upsertMessage(relay);
     recordRelay({ messageId: relay.id, channelId: CHANNEL, authorId: SIDE, authorName: 'JayAlt', kind: 'link_fix' });
     expect(reconcileRelays(store, { sinceMs: T0 - 1 })).toBe(1);
-    expect(store.getMessage(relay.id)).toMatchObject({ authorId: JASON, relayKind: 'link_fix' });
+    expect(store.getMessage(relay.id)).toMatchObject({ authorId: JASPER, relayKind: 'link_fix' });
   });
 
   it('re-checks a relay archived before its registry row a few seconds later', () => {
     vi.useFakeTimers();
     const reconciler = new RelayReconciler(5000, () => store);
     const id = snowflake(T0, 7);
-    store.upsertMessage(archiveInput({ id, source: 'relay', authorId: null, authorName: 'Jason' }));
+    store.upsertMessage(archiveInput({ id, source: 'relay', authorId: null, authorName: 'Jasper' }));
     reconciler.schedule(id);
     reconciler.schedule(id);
-    recordRelay({ messageId: id, channelId: CHANNEL, authorId: JASON, authorName: 'Jason', kind: 'regret' });
+    recordRelay({ messageId: id, channelId: CHANNEL, authorId: JASPER, authorName: 'Jasper', kind: 'regret' });
     vi.advanceTimersByTime(5000);
-    expect(store.getMessage(id)).toMatchObject({ authorId: JASON, relayKind: 'regret' });
+    expect(store.getMessage(id)).toMatchObject({ authorId: JASPER, relayKind: 'regret' });
     expect(reconciler.flush()).toBe(0);
   });
 

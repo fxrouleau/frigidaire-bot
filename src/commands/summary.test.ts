@@ -35,11 +35,11 @@ describe('summarizeFromMessage', () => {
       summary: 'they planned a BBQ',
       header: 'Summary of #general from … (3 messages from 2 people):',
       caveats: [],
-      peopleFooter: 'People in this stretch: Jason, Simon.',
+      peopleFooter: 'People in this stretch: Jasper, Silas.',
     });
-    const result = await summarizeFromMessage({ message, start, end, requesterId: 'u-felix' }, summarize);
+    const result = await summarizeFromMessage({ message, start, end, requesterId: 'u-remi' }, summarize);
 
-    expect(summarize.calls).toEqual([[{ message, messageRole: 'target', start, end, requesterId: 'u-felix', audience: 'group' }]]);
+    expect(summarize.calls).toEqual([[{ message, messageRole: 'target', start, end, requesterId: 'u-remi', audience: 'group' }]]);
     // The range header and the people footer are for the chat model, not the channel.
     expect(result).toEqual({ ok: true, text: 'they planned a BBQ' });
   });
@@ -80,8 +80,8 @@ describe('summarizeFromMessage through the real pipeline', () => {
   beforeEach(() => {
     setBotDbForTesting(new BotDb(':memory:'));
     const store = new MemoryStore(':memory:');
-    store.upsertIdentity('u-jason', 'Jason');
-    store.upsertIdentity('u-simon', 'Simon');
+    store.upsertIdentity('u-jasper', 'Jasper');
+    store.upsertIdentity('u-silas', 'Silas');
     setMemoryStoreForTesting(store);
   });
 
@@ -90,22 +90,22 @@ describe('summarizeFromMessage through the real pipeline', () => {
     setMemoryStoreForTesting(undefined);
   });
 
-  function said(minutesAgo: number, who: 'jason' | 'simon', content: string): Message {
+  function said(minutesAgo: number, who: 'jasper' | 'silas', content: string): Message {
     const createdAt = new Date(NOW.getTime() - minutesAgo * MIN);
     seq += 1;
     const messageId = SnowflakeUtil.generate({ timestamp: createdAt, increment: BigInt(seq), workerId: 1n, processId: 1n }).toString();
-    const names = { jason: 'Jason', simon: 'Simon' };
+    const names = { jasper: 'Jasper', silas: 'Silas' };
     return createFakeMessage({ messageId, createdAt, authorId: `u-${who}`, authorDisplayName: names[who], content }).message;
   }
 
   it('summarizes the target and everything after it with one ZDR call tagged summary', async () => {
-    const target = said(40, 'jason', 'who is up for wings');
-    const history = [said(50, 'simon', 'older stuff'), target, said(30, 'simon', 'me'), said(20, 'jason', '7pm then')];
+    const target = said(40, 'jasper', 'who is up for wings');
+    const history = [said(50, 'silas', 'older stuff'), target, said(30, 'silas', 'me'), said(20, 'jasper', '7pm then')];
     const channel = target.channel as unknown as {
       name: string;
       messages: { fetch: (opts: FetchMessagesOptions) => Promise<Collection<string, Message>> };
     };
-    channel.name = 'banana-combo';
+    channel.name = 'bagel-bar';
     channel.messages.fetch = async (opts) => {
       const before = opts.before ? BigInt(opts.before) : undefined;
       const page = history
@@ -114,13 +114,13 @@ describe('summarizeFromMessage through the real pipeline', () => {
         .slice(0, opts.limit ?? 50);
       return new Collection(page.map((m) => [m.id, m]));
     };
-    const { client, requests } = createCapturingClient([{ body: chatCompletionBody('- Wings at 7pm (Jason, Simon)') }]);
+    const { client, requests } = createCapturingClient([{ body: chatCompletionBody('- Wings at 7pm (Jasper, Silas)') }]);
 
-    const result = await summarizeFromMessage({ message: target, start: target.createdAt, end: NOW, requesterId: 'u-simon' }, (opts) =>
+    const result = await summarizeFromMessage({ message: target, start: target.createdAt, end: NOW, requesterId: 'u-silas' }, (opts) =>
       summarizeChannelResult({ ...opts, client, now: () => NOW }),
     );
 
-    expect(result).toEqual({ ok: true, text: '- Wings at 7pm (Jason, Simon)' });
+    expect(result).toEqual({ ok: true, text: '- Wings at 7pm (Jasper, Silas)' });
     expect(requests).toHaveLength(1);
     expect(requests[0].body.provider).toEqual({ zdr: true });
     expect(requests[0].headers.get(FEATURE_HEADER)).toBe('summary');
@@ -129,8 +129,8 @@ describe('summarizeFromMessage through the real pipeline', () => {
     expect(system).toContain('posted as-is, straight into the chat');
     expect(system).not.toContain("handed to the group's bot");
     const prompt = JSON.stringify(requests[0].body.messages);
-    expect(prompt).toContain('Jason: who is up for wings');
-    expect(prompt).toContain('Jason: 7pm then');
+    expect(prompt).toContain('Jasper: who is up for wings');
+    expect(prompt).toContain('Jasper: 7pm then');
     expect(prompt).not.toContain('older stuff');
   });
 });

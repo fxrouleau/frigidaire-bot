@@ -136,9 +136,9 @@ describe('config', () => {
   });
 
   it('parses CHANNEL_NOTES as a JSON object of channel id to note', () => {
-    vi.stubEnv('CHANNEL_NOTES', '{"961358115645845654":" banana-combo: the main hangout ","1":42,"2":""}');
+    vi.stubEnv('CHANNEL_NOTES', '{"900000000000000042":" bagel-bar: the main hangout ","1":42,"2":""}');
     expect(config.agent.channelNotes).toEqual({
-      notes: { '961358115645845654': 'banana-combo: the main hangout' },
+      notes: { '900000000000000042': 'bagel-bar: the main hangout' },
       invalid: false,
     });
     // A single-quoted .env value still parses (config strips surrounding quotes).

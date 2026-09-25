@@ -38,8 +38,8 @@ describe.skipIf(!RUN_LIVE)('auto-react and usage captions (live, paid, opt-in)',
     async () => {
       const verdict = await judge({
         guide: GUIDE,
-        context: [{ author: 'Dan', text: 'who is bringing chairs saturday' }],
-        post: { author: 'Felix', text: 'I can bring 2 chairs, leaving around 6', notes: [], images: [] },
+        context: [{ author: 'Dale', text: 'who is bringing chairs saturday' }],
+        post: { author: 'Remi', text: 'I can bring 2 chairs, leaving around 6', notes: [], images: [] },
       });
       console.log('LIVE-AUTOREACT logistics:', JSON.stringify(verdict));
       expect(verdict).toBeDefined();
@@ -53,9 +53,9 @@ describe.skipIf(!RUN_LIVE)('auto-react and usage captions (live, paid, opt-in)',
     async () => {
       const verdict = await judge({
         guide: GUIDE,
-        context: [{ author: 'Dan', text: 'how did the driving test go' }],
+        context: [{ author: 'Dale', text: 'how did the driving test go' }],
         post: {
-          author: 'Felix',
+          author: 'Remi',
           text: 'failed the driving test before leaving the parking lot. reversed into the examiner’s own car',
           notes: ['[reactions so far: 😂×2]'],
           images: [],
