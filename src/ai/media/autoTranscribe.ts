@@ -22,6 +22,8 @@ const MAX_AUDIO_PER_MESSAGE = 3;
 // A 10-minute voice message (~1,500 words) runs ~4-5 messages; anything beyond that is cut.
 const MAX_REPLY_CHUNKS = 5;
 const WRAP_AT = 1800;
+// Room kept in each 2000-character message for its header line ("-# 🎙️ transcript (5/5)").
+const HEADER_ROOM = 40;
 
 // Guild channels a member can post a voice message in and the bot can reply in.
 const TRANSCRIBE_CHANNEL_TYPES: ReadonlySet<ChannelType> = new Set([
@@ -42,7 +44,9 @@ const TRANSCRIBE_CHANNEL_TYPES: ReadonlySet<ChannelType> = new Set([
 export function isTranscriptReply(message: Message): boolean {
   if (message.author.id !== message.client.user?.id) return false;
   const content = message.content ?? '';
-  return content.startsWith(TRANSCRIPT_HEADER) || content.startsWith(TOO_LONG_HEADER);
+  if (content.startsWith(TRANSCRIPT_HEADER) || content.startsWith(TOO_LONG_HEADER)) return true;
+  // Transcripts posted before every message of a long one carried the header: known by id.
+  return isStoredTranscriptReply(message.id);
 }
 
 /**
@@ -86,11 +90,12 @@ function wrapLine(line: string): string[] {
 }
 
 /**
- * The reply text, split into Discord-sized messages: a subtext header, then every transcript line as
- * a quote. Transcripts are escaped so a spoken "*" or "# " can't turn into formatting.
+ * The reply text, split into Discord-sized messages, each a subtext header ("(2/3)" when there are
+ * several) then transcript lines as quotes. Every message carries the header: it is how
+ * isTranscriptReply() tells each of them apart from the bot talking. Transcripts are escaped so a
+ * spoken "*" or "# " can't turn into formatting.
  */
 export function formatTranscriptReply(text: string): string[] {
-  const header = TRANSCRIPT_HEADER;
   const quoted = text
     .split('\n')
     .map((line) =>
@@ -98,11 +103,15 @@ export function formatTranscriptReply(text: string): string[] {
     )
     .flatMap(wrapLine)
     .map((line) => (line.length > 0 ? `> ${line}` : '>'));
-  const chunks = splitMessage([header, ...quoted].join('\n'), 2000);
-  if (chunks.length <= MAX_REPLY_CHUNKS) return chunks;
-  const kept = chunks.slice(0, MAX_REPLY_CHUNKS);
-  kept[MAX_REPLY_CHUNKS - 1] = `${kept[MAX_REPLY_CHUNKS - 1].slice(0, 1900)}\n-# (transcript cut short)`;
-  return kept;
+  let chunks = splitMessage(quoted.join('\n'), 2000 - HEADER_ROOM);
+  if (chunks.length > MAX_REPLY_CHUNKS) {
+    chunks = chunks.slice(0, MAX_REPLY_CHUNKS);
+    chunks[MAX_REPLY_CHUNKS - 1] = `${chunks[MAX_REPLY_CHUNKS - 1].slice(0, 1900)}\n-# (transcript cut short)`;
+  }
+  return chunks.map((chunk, index) => {
+    const header = chunks.length > 1 ? `${TRANSCRIPT_HEADER} (${index + 1}/${chunks.length})` : TRANSCRIPT_HEADER;
+    return `${header}\n${chunk}`;
+  });
 }
 
 export type VoiceAutoTranscriberOptions = {
