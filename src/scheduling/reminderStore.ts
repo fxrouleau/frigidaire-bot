@@ -20,6 +20,11 @@ export type Reminder = {
   /** Epoch ms. */
   dueAt: number;
   sourceUrl: string | null;
+  /**
+   * True unless the channel it was set in was visible to the whole server: its text must then never be
+   * reposted anywhere else (the main-channel fallback when that channel is gone or locked).
+   */
+  sourcePrivate: boolean;
   status: ReminderStatus;
   attempts: number;
   nextAttemptAt: number | null;
@@ -36,6 +41,7 @@ type ReminderRow = {
   text: string;
   due_at: number;
   source_url: string | null;
+  source_private: number;
   status: ReminderStatus;
   attempts: number;
   next_attempt_at: number | null;
@@ -55,6 +61,7 @@ const SCHEMA = `
     text             TEXT    NOT NULL,
     due_at           INTEGER NOT NULL,
     source_url       TEXT,
+    source_private   INTEGER NOT NULL DEFAULT 1,
     status           TEXT    NOT NULL DEFAULT 'pending',
     attempts         INTEGER NOT NULL DEFAULT 0,
     next_attempt_at  INTEGER,
@@ -74,6 +81,8 @@ const SCHEMA = `
 function db() {
   const botDb = getBotDb();
   botDb.ensureSchema('reminders', SCHEMA);
+  // Tables created before the column existed: an unknown source counts as private.
+  botDb.ensureColumn('reminders', 'source_private', 'INTEGER NOT NULL DEFAULT 1');
   return botDb;
 }
 
@@ -95,6 +104,7 @@ function toReminder(row: ReminderRow): Reminder {
     text: row.text,
     dueAt: row.due_at,
     sourceUrl: row.source_url,
+    sourcePrivate: row.source_private !== 0,
     status: row.status,
     attempts: row.attempts,
     nextAttemptAt: row.next_attempt_at,
@@ -111,14 +121,17 @@ export type NewReminder = {
   text: string;
   dueAt: number;
   sourceUrl: string | null;
+  /** See Reminder.sourcePrivate; when unsure, true. */
+  sourcePrivate: boolean;
   createdAt: number;
 };
 
 export function insertReminder(input: NewReminder): number {
   const result = db()
     .stmt(
-      `INSERT INTO reminders (guild_id, channel_id, requester_id, requester_name, target_ids, text, due_at, source_url, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO reminders (guild_id, channel_id, requester_id, requester_name, target_ids, text, due_at, source_url,
+                              source_private, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.guildId,
@@ -129,6 +142,7 @@ export function insertReminder(input: NewReminder): number {
       input.text,
       input.dueAt,
       input.sourceUrl,
+      input.sourcePrivate ? 1 : 0,
       input.createdAt,
     );
   return Number(result.lastInsertRowid);

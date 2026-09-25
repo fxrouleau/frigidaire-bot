@@ -140,6 +140,30 @@ describe('seeding', () => {
     expect(applySeed([`${USER}:09-25`, '300000000000000002:01-02'], NOW, TODAY)).toEqual({ added: 0, skipped: 2 });
   });
 
+  it('never re-seeds a birthday that was forgotten, even on a later boot', () => {
+    applySeed([`${USER}:09-25`], NOW, TODAY);
+    expect(deleteBirthday(USER)).toBe(true);
+
+    // The next restart applies the same BIRTHDAYS_SEED again.
+    expect(applySeed([`${USER}:09-25`], NOW, TODAY)).toEqual({ added: 0, skipped: 1 });
+    expect(getBirthday(USER)).toBeUndefined();
+  });
+
+  it('does not re-seed a chat-set birthday after it is forgotten either', () => {
+    saveBirthday({ userId: USER, date: { month: 3, day: 3, year: null }, setBy: 'chat', now: 1, lastAnnouncedYear: null });
+    applySeed([`${USER}:09-25`], NOW, TODAY);
+    deleteBirthday(USER);
+
+    expect(applySeed([`${USER}:09-25`], NOW, TODAY)).toEqual({ added: 0, skipped: 1 });
+    expect(getBirthday(USER)).toBeUndefined();
+  });
+
+  it('still seeds a user added to BIRTHDAYS_SEED later', () => {
+    applySeed([`${USER}:09-25`], NOW, TODAY);
+    expect(applySeed([`${USER}:09-25`, '300000000000000002:01-02'], NOW, TODAY)).toEqual({ added: 1, skipped: 1 });
+    expect(getBirthday('300000000000000002')).toMatchObject({ month: 1, day: 2, setBy: 'seed' });
+  });
+
   it('is a no-op without entries', () => {
     expect(applySeed([], NOW, TODAY)).toEqual({ added: 0, skipped: 0 });
   });

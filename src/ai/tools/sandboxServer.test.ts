@@ -21,17 +21,23 @@ const canRunServer =
   spawnSync('python3', ['-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)']).status === 0;
 
 /** Starts the server on a free port and resolves with its base URL once it logs that it's listening. */
-function startServer(workspace: string): Promise<{ child: ChildProcess; baseUrl: string; logs: () => string }> {
+function startServer(
+  workspace: string,
+  host = '127.0.0.1',
+): Promise<{ child: ChildProcess; baseUrl: string; logs: () => string }> {
   const child = spawn('python3', [SERVER_SCRIPT], {
     env: {
       PATH: process.env.PATH,
-      SANDBOX_HOST: '127.0.0.1',
+      SANDBOX_HOST: host,
       SANDBOX_PORT: '0',
       SANDBOX_WORKSPACE: workspace,
       SANDBOX_TOKEN: TOKEN,
       // RLIMIT_NPROC counts every process of the user; the test runner itself (as a non-root user in the
       // test container) can already be over the sidecar's default, which would fail any fork in a run.
       SANDBOX_MAX_PROCESSES: '1000000',
+      // Small enough for the disk-limit test to cross cheaply; far above what the other tests write.
+      SANDBOX_WORKSPACE_MAX_MB: '64',
+      SANDBOX_WORKSPACE_MAX_FILES: '2000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -44,7 +50,7 @@ function startServer(workspace: string): Promise<{ child: ChildProcess; baseUrl:
     }, 8000);
     const onData = (chunk: Buffer) => {
       output += chunk.toString();
-      const match = /sandbox listening on 127\.0\.0\.1:(\d+)/.exec(output);
+      const match = /sandbox listening on [\d.]+:(\d+)/.exec(output);
       if (match) {
         clearTimeout(timer);
         resolve({ child, baseUrl: `http://127.0.0.1:${match[1]}`, logs });
@@ -233,6 +239,83 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     expect(next).toMatchObject({ ok: true, result: { exit_code: 0, stdout: 'ok\n' } });
   });
 
+  it('drops a run a previous run queued behind itself once that run is over (its client is gone)', async () => {
+    // A run can't keep code going after it is killed by POSTing its own follow-up run to the sidecar: the
+    // request is queued behind the run, and by the time it gets the lock its client died with the run.
+    const marker = path.join(workspace, 'chained-marker');
+    const body = JSON.stringify({ language: 'bash', code: `echo chained > ${marker}` });
+    const request = [
+      'import urllib.request',
+      `req = urllib.request.Request(${JSON.stringify(`${server.baseUrl}/run`)}, data=${JSON.stringify(body)}.encode(),`,
+      `    headers={'Authorization': 'Bearer ${TOKEN}', 'Content-Type': 'application/json'})`,
+      'urllib.request.urlopen(req, timeout=60)',
+    ].join('\n');
+    const code = [
+      'import subprocess, sys, time',
+      `subprocess.Popen([sys.executable, '-c', ${JSON.stringify(request)}], start_new_session=True)`,
+      'time.sleep(1)',
+      "print('queued')",
+    ].join('\n');
+
+    const outcome = await runInSandbox({ language: 'python', code, timeoutSeconds: 10 }, client());
+    expect(outcome).toMatchObject({ ok: true, result: { exit_code: 0, stdout: 'queued\n' } });
+    // Give the queued request every chance to run.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    expect(existsSync(marker)).toBe(false);
+    expect(server.logs()).toMatch(/dropped a queued run: its client disconnected/);
+    const after = await runInSandbox({ language: 'bash', code: 'echo still-fine', timeoutSeconds: 10 }, client());
+    expect(after).toMatchObject({ ok: true, result: { stdout: 'still-fine\n' } });
+  });
+
+  it('empties out/ even when a run left a read-only or unreadable directory in it', async () => {
+    // Only meaningful as a non-root user (as in CI and in the container): root ignores the permission bits.
+    await runInSandbox(
+      { language: 'bash', code: 'mkdir -p out/x/y && touch out/x/y/f && chmod 500 out/x/y && chmod 000 out/x', timeoutSeconds: 10 },
+      client(),
+    );
+
+    const next = await runInSandbox({ language: 'bash', code: 'ls -A out | wc -l', timeoutSeconds: 10 }, client());
+
+    expect(next).toMatchObject({ ok: true, result: { exit_code: 0, stdout: '0\n' } });
+  });
+
+  it('kills a run that fills the disk past the workspace limit, then wipes the workspace', async () => {
+    // Every file stays under RLIMIT_FSIZE; only the workspace total is over. The sleep would outlast the test.
+    const outcome = await runInSandbox(
+      {
+        language: 'bash',
+        code: 'echo kept > out/result.txt; for i in $(seq 12); do head -c 8M /dev/zero > big$i; done; sleep 30',
+        timeoutSeconds: 40,
+      },
+      client(),
+    );
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      result: { disk_limit_exceeded: true, workspace_over_limit: true, workspace_limit_mb: 64, timed_out: false },
+    });
+    if (!outcome.ok) return;
+    expect(outcome.result.duration_ms).toBeLessThan(20_000);
+    // What the run put in out/ still comes back.
+    expect(outcome.result.files.map((f) => f.name)).toEqual(['result.txt']);
+    expect(existsSync(path.join(workspace, 'big1'))).toBe(false);
+    expect(server.logs()).toMatch(/workspace over its limit \(\d+ MB in \d+ entries; max 64 MB \/ 2000 entries\): wiping it/);
+
+    const next = await runInSandbox({ language: 'bash', code: 'ls -A', timeoutSeconds: 10 }, client());
+    expect(next).toMatchObject({ ok: true, result: { stdout: 'out\n', disk_limit_exceeded: false, workspace_over_limit: false } });
+  });
+
+  it('wipes a workspace left over its file-count limit, even files hidden in an unreadable directory', async () => {
+    const outcome = await runInSandbox(
+      { language: 'bash', code: 'mkdir hidden && cd hidden && touch $(seq 2500) && chmod 000 . && echo made', timeoutSeconds: 20 },
+      client(),
+    );
+
+    expect(outcome).toMatchObject({ ok: true, result: { stdout: 'made\n', workspace_over_limit: true } });
+    expect(existsSync(path.join(workspace, 'hidden'))).toBe(false);
+  });
+
   it('wipes the whole workspace on reset_workspace, without following symlinks out of it', async () => {
     const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'sandbox-outside-')));
     writeFileSync(path.join(outside, 'keep.txt'), 'not the sandbox');
@@ -266,5 +349,41 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe.skipIf(!canRunServer)('sandbox/server.py on a non-loopback address (as in its container)', () => {
+  let workspace: string;
+  let server: Awaited<ReturnType<typeof startServer>>;
+
+  beforeAll(async () => {
+    workspace = realpathSync(mkdtempSync(path.join(tmpdir(), 'sandbox-server-test-')));
+    server = await startServer(workspace, '0.0.0.0');
+  });
+
+  afterAll(async () => {
+    if (server?.child.exitCode === null) {
+      const exited = new Promise((resolve) => server.child.once('exit', resolve));
+      server.child.kill('SIGTERM');
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
+      server.child.kill('SIGKILL');
+    }
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it('refuses /run from its own machine: only the bot, on another host, may start runs', async () => {
+    // The bot reaches the sidecar over the compose network; a request from loopback or the container's own
+    // address can only come from a run (which can read the token from /proc/1/environ, so auth is no help).
+    const port = new URL(server.baseUrl).port;
+    const outcome = await runInSandbox(
+      { language: 'bash', code: 'touch should-not-exist', timeoutSeconds: 5 },
+      { url: `http://127.0.0.1:${port}`, token: TOKEN },
+    );
+
+    expect(outcome).toMatchObject({ ok: false, kind: 'unauthorized', detail: 'runs cannot start other runs' });
+    expect(existsSync(path.join(workspace, 'should-not-exist'))).toBe(false);
+    expect(server.logs()).toMatch(/refused \/run from 127\.0\.0\.1: a local client/);
+    // /health stays open to the container's own healthcheck.
+    expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(200);
   });
 });

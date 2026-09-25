@@ -60,6 +60,12 @@ export type SandboxRunResult = {
   files_omitted: SandboxOmittedFile[];
   /** True when the sidecar wiped /workspace before the run (it only does when asked). */
   workspace_reset: boolean;
+  /** The run was killed because /workspace went over the sidecar's disk limit. */
+  disk_limit_exceeded: boolean;
+  /** /workspace was over its limit after the run, so the sidecar wiped it (outputs in `files` still came back). */
+  workspace_over_limit: boolean;
+  /** The sidecar's SANDBOX_WORKSPACE_MAX_MB; null from a sidecar without the limit. */
+  workspace_limit_mb: number | null;
 };
 
 export type SandboxFailureKind =
@@ -159,6 +165,9 @@ export function parseRunResult(raw: unknown): SandboxRunResult | undefined {
     files,
     files_omitted: omitted,
     workspace_reset: raw.workspace_reset === true,
+    disk_limit_exceeded: raw.disk_limit_exceeded === true,
+    workspace_over_limit: raw.workspace_over_limit === true,
+    workspace_limit_mb: typeof raw.workspace_limit_mb === 'number' ? raw.workspace_limit_mb : null,
   };
 }
 
@@ -319,8 +328,11 @@ export function formatRunResult(result: SandboxRunResult, files: AttachReport, r
         : "The sandbox didn't confirm the workspace wipe (it may be out of date), so earlier files may still be there.",
     );
   }
+  const diskLimit = result.workspace_limit_mb !== null ? ` (${result.workspace_limit_mb} MB)` : '';
   if (result.timed_out) {
     lines.push(`Timed out after ${seconds} s and was killed; output so far is below.`);
+  } else if (result.disk_limit_exceeded) {
+    lines.push(`Killed after ${seconds} s: /workspace went over the sandbox's disk limit${diskLimit}.`);
   } else if (result.signal) {
     const hint = SIGNAL_HINTS[result.signal];
     lines.push(`Killed by ${result.signal}${hint ? ` (${hint})` : ''} after ${seconds} s.`);
@@ -351,6 +363,11 @@ export function formatRunResult(result: SandboxRunResult, files: AttachReport, r
     ...files.skipped.map((f) => `${f.name} (${f.reason})`),
   ];
   if (notAttached.length > 0) lines.push(`Not attached: ${notAttached.join('; ')}.`);
+  if (result.workspace_over_limit) {
+    lines.push(
+      `/workspace was over its size limit${diskLimit} after this run, so the sandbox wiped it: saved files and installed packages are gone.`,
+    );
+  }
   return lines.join('\n');
 }
 
@@ -372,7 +389,13 @@ function describeFailure(outcome: Extract<SandboxOutcome, { ok: false }>): strin
       const hint = outcome.kind === 'unauthorized' ? '; SANDBOX_TOKEN must match on the bot and the sandbox' : '';
       logger.error(`run_code: sandbox ${outcome.kind} (${outcome.detail})${hint}`);
       logFailure('tool_error', `run_code: sandbox ${outcome.kind} (${outcome.detail})`);
-      return "The code sandbox isn't working right now, so nothing ran. Say so, or work it out by hand and say that's what you did; don't present a guess as a computed result.";
+      // The sidecar answered but failed (e.g. something an earlier run left in /workspace): a clean slate
+      // is the one thing the model can try.
+      const retry =
+        outcome.kind === 'server_error'
+          ? ` It reported: ${outcome.detail}. If you haven't yet, retry once with reset_workspace: true (it wipes files from earlier runs).`
+          : '';
+      return `The code sandbox isn't working right now, so nothing ran.${retry} Otherwise say so, or work it out by hand and say that's what you did; don't present a guess as a computed result.`;
     }
   }
 }
@@ -384,7 +407,7 @@ function describeTool(defaultTimeoutSeconds: number): string {
     'Languages: python (numpy, pandas, matplotlib, sympy, requests preinstalled), bash (curl, jq, bc) or node.',
     'Only stdout/stderr come back, so print() the answer.',
     "Anything saved to /workspace/out/ is attached to your reply (up to 5 files, 8 MB), e.g. plt.savefig('out/chart.png'); out/ is emptied before every run.",
-    'Each run is a fresh process (variables do not carry over), but files in /workspace persist between runs and `pip install` works.',
+    'Each run is a fresh process (variables do not carry over), but files in /workspace persist between runs and `pip install` works, within a disk limit (going over it kills the run and wipes /workspace).',
     'Pass reset_workspace: true to wipe /workspace (saved files and installs) before the run, only when leftovers from earlier runs get in the way or look tampered with.',
     'The sandbox has internet access but no secrets and no Discord access; its clock is Eastern time.',
     `Runs are killed after ${defaultTimeoutSeconds} s unless you pass timeout_seconds (max ${MAX_RUN_TIMEOUT_SECONDS}).`,

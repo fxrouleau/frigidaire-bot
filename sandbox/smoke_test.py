@@ -109,7 +109,8 @@ def main() -> int:
     def identity_and_env() -> None:
         code = (
             'id -u; echo "tz=$TZ"; env | grep -c SANDBOX_ || true; '
-            'cat /proc/$PPID/environ >/dev/null 2>&1 && echo leak || echo sealed'
+            'cat /proc/$PPID/environ >/dev/null 2>&1 && echo leak || echo sealed; '
+            'cat /proc/1/environ >/dev/null 2>&1 && echo leak || echo sealed; echo "ppid=$PPID"'
         )
         result = sandbox.run('bash', code)
         lines = result['stdout'].split()
@@ -117,6 +118,34 @@ def main() -> int:
         expect(lines[1] == 'tz=America/New_York', 'TZ should be Eastern', result)
         expect(lines[2] == '0', 'SANDBOX_* variables leaked into the run environment', result)
         expect(lines[3] == 'sealed', "the server's environment is readable from a run", result)
+        expect(lines[4] == 'sealed', "PID 1's environment (SANDBOX_TOKEN) is readable from a run", result)
+        expect(lines[5] == 'ppid=1', 'the server should be PID 1 (a run could SIGSTOP it otherwise)', result)
+
+    def run_cannot_start_runs() -> None:
+        # Runs share the server's uid, so the refusal must not depend on the token staying secret: /run turns
+        # away every client on the container's own addresses, token or not.
+        code = (
+            "token=$(tr '\\0' '\\n' 2>/dev/null < /proc/1/environ | sed -n 's/^SANDBOX_TOKEN=//p'); "
+            'for host in 127.0.0.1 $(hostname -i); do '
+            'curl -s -o /dev/null -w "%{http_code}\\n" -X POST -H "Authorization: Bearer $token" '
+            '-H "Content-Type: application/json" --data \'{"language":"bash","code":"touch chained"}\' '
+            '"http://$host:8080/run"; done; ls chained 2>/dev/null || echo no-chained-run'
+        )
+        result = sandbox.run('bash', code)
+        lines = result['stdout'].split()
+        expect(len(lines) >= 3 and set(lines[:-1]) == {'403'}, 'a run could call /run on its own sandbox', result)
+        expect(lines[-1] == 'no-chained-run', 'a run started another run', result)
+
+    def server_survives_signals() -> None:
+        # The server is PID 1: a run sharing its uid still can't freeze or kill it.
+        sandbox.run('bash', 'kill -STOP $PPID; kill -KILL $PPID; echo sent', timeout_seconds=5)
+        result = sandbox.run('bash', 'echo alive', timeout_seconds=5)
+        expect(result['stdout'].strip() == 'alive', 'a run froze or killed the server', result)
+
+    def out_dir_locked_by_a_run() -> None:
+        sandbox.run('bash', 'mkdir -p out/x/y && touch out/x/y/f && chmod 500 out/x/y && chmod 000 out/x')
+        result = sandbox.run('bash', 'ls out | wc -l')
+        expect(result['stdout'].strip() == '0', 'a read-only directory in out/ broke the next run', result)
 
     def workspace_persists() -> None:
         sandbox.run('bash', 'echo kept > note.txt')
@@ -157,6 +186,20 @@ def main() -> int:
         result = sandbox.run('bash', f'kill -0 {pid} 2>/dev/null && echo alive || echo gone')
         expect(result['stdout'].strip() == 'gone', 'a setsid() background process survived the run', result)
 
+    def disk_limit() -> None:
+        # ci-smoke.sh starts the container with a small SANDBOX_WORKSPACE_MAX_MB; skip against a real-sized one.
+        limit = sandbox.run('bash', 'true').get('workspace_limit_mb')
+        expect(isinstance(limit, int), 'the sandbox reports no workspace limit')
+        if limit > 256:
+            return
+        chunks = limit // 8 + 4
+        code = f'for i in $(seq {chunks}); do head -c 8M /dev/zero > big$i; done; sleep 20'
+        result = sandbox.run('bash', code, timeout_seconds=30)
+        expect(result['disk_limit_exceeded'] is True, 'a run that filled the workspace was not killed', result)
+        expect(result['workspace_over_limit'] is True, 'the over-limit workspace was not wiped', result)
+        after = sandbox.run('bash', 'ls big1 2>/dev/null || echo wiped')
+        expect(after['stdout'].strip() == 'wiped', 'the over-limit workspace was not wiped', after)
+
     def memory_limit() -> None:
         result = sandbox.run('python', 'x = bytearray(3 * 1024 ** 3)')
         expect(result['exit_code'] != 0 and 'MemoryError' in result['stderr'], 'memory limit not enforced', result)
@@ -181,6 +224,9 @@ def main() -> int:
         ('bash tools', bash_tools),
         ('node', node_runs),
         ('identity and environment', identity_and_env),
+        ('a run cannot start runs', run_cannot_start_runs),
+        ('a run cannot freeze or kill the server', server_survives_signals),
+        ('a locked directory in out/ does not break later runs', out_dir_locked_by_a_run),
         ('workspace persists', workspace_persists),
         ('planted files do not shadow stdlib or tools', planted_files_do_not_shadow),
         ('reset_workspace wipes the workspace', reset_workspace_wipes),
@@ -188,6 +234,7 @@ def main() -> int:
         ('timeout', timeout_kills),
         ('escaped process killed', escaped_process_is_killed),
         ('memory limit', memory_limit),
+        ('workspace disk limit', disk_limit),
         ('auth', auth_required),
         ('hardening', hardening),
     ]

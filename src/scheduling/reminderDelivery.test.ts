@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
@@ -22,6 +22,7 @@ function newReminder(overrides: Partial<NewReminder> = {}): NewReminder {
     text: 'take the pizza out',
     dueAt: NOW,
     sourceUrl: 'https://discord.com/channels/guild-1/channel-1/msg-1',
+    sourcePrivate: false,
     createdAt: NOW - 30 * MINUTE,
     ...overrides,
   };
@@ -40,6 +41,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   setBotDbForTesting(undefined);
   setMemoryStoreForTesting(undefined);
 });
@@ -218,8 +220,49 @@ describe('deliverDueReminders', () => {
     });
 
     expect(report.sent).toBe(1);
+    expect(String(main.sent[0].content)).toContain('take the pizza out');
     expect(String(main.sent[0].content)).toContain("couldn't post in <#deleted-thread>");
     expect(getReminder(id)?.status).toBe('sent');
+  });
+
+  it('never repeats the text of a reminder set somewhere private when it falls back to the main channel', async () => {
+    const main = createPostableChannel({ id: 'main' });
+    const { client } = createSchedulingClient({ main: main.channel });
+    const id = insertReminder(newReminder({ channelId: 'private-thread', text: 'buy the surprise cake', sourcePrivate: true }));
+
+    await deliverDueReminders({ client, now: NOW, startedAt: NOW - 3_600_000, fallbackChannelId: 'main' });
+
+    const content = String(main.sent[0].content);
+    expect(content).not.toContain('cake');
+    expect(content).toBe(
+      `⏰ <@${ALICE}> <@${BOB}> reminder #${id} is due, but it was set somewhere private, so its text stays there\n` +
+        "-# set by Alice · https://discord.com/channels/guild-1/channel-1/msg-1 · couldn't post in <#private-thread>",
+    );
+    expect(main.sent[0].allowedMentions).toEqual({ parse: [], users: [ALICE, BOB] });
+    expect(getReminder(id)?.status).toBe('sent');
+  });
+
+  it('posts a private reminder in full in its own channel', async () => {
+    const thread = createPostableChannel({ id: 'private-thread' });
+    const { client } = createSchedulingClient({ 'private-thread': thread.channel });
+    insertReminder(newReminder({ channelId: 'private-thread', text: 'buy the surprise cake', sourcePrivate: true }));
+
+    await deliverDueReminders({ client, now: NOW, startedAt: NOW - 3_600_000, fallbackChannelId: 'main' });
+
+    expect(String(thread.sent[0].content)).toContain('buy the surprise cake');
+  });
+
+  it('pings every linked account of a target, so a member on their side account still gets it', async () => {
+    const SIDE = '200000000000000009';
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${ALICE}`);
+    const target = createPostableChannel({ id: 'channel-1' });
+    const { client } = createSchedulingClient({ 'channel-1': target.channel });
+    insertReminder(newReminder());
+
+    await deliverDueReminders({ client, now: NOW, startedAt: NOW - 3_600_000 });
+
+    expect(String(target.sent[0].content)).toMatch(/^⏰ <@200000000000000001> <@200000000000000009> <@200000000000000002> take/);
+    expect(target.sent[0].allowedMentions).toEqual({ parse: [], users: [ALICE, SIDE, BOB] });
   });
 
   it('falls back to the main channel when it may not post in the original one', async () => {

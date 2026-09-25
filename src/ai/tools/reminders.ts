@@ -2,7 +2,7 @@
 // the scheduler (src/scheduling/scheduler.ts); polls are posted straight into the channel.
 import { config } from '../../config';
 import { logger } from '../../logger';
-import { jumpLink } from '../../scheduling/discord';
+import { isVisibleToEveryone, jumpLink } from '../../scheduling/discord';
 import { buildPoll, postPoll } from '../../scheduling/polls';
 import {
   type Reminder,
@@ -57,8 +57,9 @@ export function resolveDueTime(at: unknown, inMinutes: unknown, now: Date): DueT
       return { ok: false, error: `in_minutes must be a number of minutes; got ${JSON.stringify(inMinutes)}.` };
     }
     if (minutes < 1) return { ok: false, error: 'Reminders must be at least 1 minute out.' };
-    // Whole seconds: nobody needs sub-second precision and it keeps the stored due time readable.
-    dueAt = new Date(Math.round((now.getTime() + minutes * MINUTE_MS) / 1000) * 1000);
+    // Whole seconds: nobody needs sub-second precision and it keeps the stored due time readable. Rounded
+    // up, never down: "in 1 minute" asked at hh:mm:ss.234 must not come out 59.8 s away and fail the minimum.
+    dueAt = new Date(Math.ceil((now.getTime() + minutes * MINUTE_MS) / 1000) * 1000);
   } else {
     if (typeof at === 'string' && DATE_ONLY.test(at.trim())) {
       return {
@@ -155,6 +156,7 @@ const setReminderTool: ToolDefinition = {
       text,
       dueAt: due.dueAt.getTime(),
       sourceUrl: jumpLink(ctx.message),
+      sourcePrivate: !isVisibleToEveryone(ctx.message.channel),
       createdAt: now.getTime(),
     });
     logger.info(

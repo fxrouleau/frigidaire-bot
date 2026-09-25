@@ -1,3 +1,4 @@
+import { ChannelType, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getReminder, insertReminder, listPendingInChannel } from '../../scheduling/reminderStore';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
@@ -100,6 +101,17 @@ describe('resolveDueTime', () => {
     if (!result.ok) expect(result.error).toContain('Include a clock time, e.g. "2026-09-26 09:00"');
   });
 
+  it('accepts "in 1 minute" whatever the current millisecond is (the due time rounds up to a whole second)', () => {
+    for (const ms of [0, 1, 234, 499, 500, 999]) {
+      const now = new Date(NOW.getTime() + ms);
+      const result = resolveDueTime(undefined, 1, now);
+      expect(result.ok, `ms=${ms}`).toBe(true);
+      if (!result.ok) continue;
+      expect(result.dueAt.getTime() % 1000).toBe(0);
+      expect(result.dueAt.getTime() - now.getTime()).toBeGreaterThanOrEqual(60_000);
+    }
+  });
+
   it('reads in_minutes relative to now and at as Eastern wall-clock', () => {
     const relative = resolveDueTime(undefined, '90', NOW);
     expect(relative.ok && relative.dueAt.toISOString()).toBe('2026-09-25T19:30:00.000Z');
@@ -154,6 +166,36 @@ describe('set_reminder', () => {
     expect(await run('set_reminder', { text: 'x'.repeat(1001), in_minutes: 5 })).toContain('under 1000');
     expect(await run('set_reminder', { text: 'x', in_minutes: 5, at: '2026-09-25 15:00' })).toContain('exactly one');
     expect(getReminder(1)).toBeUndefined();
+  });
+
+  describe('remembers whether the channel is private (its text must never be reposted in the main channel)', () => {
+    function runIn(channel: { type?: ChannelType; everyoneCanView?: boolean }) {
+      const { ctx } = ctxFor({ channelType: channel.type ?? ChannelType.GuildText });
+      if (channel.everyoneCanView !== undefined) {
+        const everyone = { id: 'guild-1' };
+        Object.assign(ctx.message.channel, {
+          guild: { roles: { everyone } },
+          permissionsFor: (role: unknown) =>
+            role === everyone
+              ? new PermissionsBitField(channel.everyoneCanView ? PermissionFlagsBits.ViewChannel : 0n)
+              : null,
+        });
+      }
+      return tool('set_reminder').handler(ctx, { text: 'x', in_minutes: 5 });
+    }
+
+    it('a channel everyone can read is public', async () => {
+      await runIn({ everyoneCanView: true });
+      expect(getReminder(1)?.sourcePrivate).toBe(false);
+    });
+
+    it('a channel @everyone cannot view, a private thread, or a channel it cannot check is private', async () => {
+      await runIn({ everyoneCanView: false });
+      await runIn({ type: ChannelType.PrivateThread, everyoneCanView: true });
+      await runIn({});
+      await runIn({ type: ChannelType.DM });
+      expect([1, 2, 3, 4].map((id) => getReminder(id)?.sourcePrivate)).toEqual([true, true, true, true]);
+    });
   });
 
   it('caps pending reminders per requester', async () => {
@@ -236,6 +278,7 @@ describe('cancel_reminder', () => {
       text: 'old',
       dueAt: NOW.getTime() - 1000,
       sourceUrl: null,
+      sourcePrivate: false,
       createdAt: 0,
     });
     await run('cancel_reminder', { id });
