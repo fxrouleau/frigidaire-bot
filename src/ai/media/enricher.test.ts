@@ -182,6 +182,24 @@ describe('media enricher', () => {
     expect(history.described).toEqual([]);
   });
 
+  it('gives each video on a message its own handle (msg:<id>, then msg:<id>#2)', async () => {
+    const { deps } = fakeDeps();
+    const { message } = createFakeMessage({
+      messageId: 'two-clips',
+      attachments: [
+        { url: CLIP_URL, contentType: 'video/mp4', name: 'clip.mp4' },
+        { url: 'https://cdn.discordapp.com/a/b/other.mp4', contentType: 'video/mp4', name: 'other.mp4' },
+      ],
+    });
+    const texts = (await createMediaEnricher(deps).enrich(message, 'current')).map((p) =>
+      p.type === 'text' ? p.text : '',
+    );
+    expect(texts).toEqual([
+      '[video msg:two-clips: A cat knocks a glass off a table.]',
+      '[video msg:two-clips#2: A cat knocks a glass off a table.]',
+    ]);
+  });
+
   it('renders audio before video when a message has both', async () => {
     const { deps } = fakeDeps();
     const { message } = createFakeMessage({

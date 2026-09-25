@@ -139,6 +139,29 @@ describe('watch_video', () => {
     expect(watched[0].url).toBe(OLD_CLIP);
   });
 
+  it('picks the second clip on a message by its msg:<id>#2 handle', async () => {
+    const { tool, watched } = setup();
+    const target = createFakeMessage({
+      messageId: '900000000000000042',
+      channelId: CH,
+      authorDisplayName: 'Jasper',
+      content: 'two angles',
+      attachments: [
+        { url: CLIP, contentType: 'video/mp4', name: 'clip.mp4', duration: 31 },
+        { url: OLD_CLIP, contentType: 'video/mp4', name: 'older.mp4', duration: 12 },
+      ],
+    }).message;
+    const { message } = asker({ fetchedMessageById: { [target.id]: target } });
+
+    const second = await tool.handler(ctx(message), { question: 'who scores?', message_or_url: 'msg:900000000000000042#2' });
+    await tool.handler(ctx(message), { question: 'who scores?', message_or_url: 'msg:900000000000000042' });
+    const missing = await tool.handler(ctx(message), { question: 'who scores?', message_or_url: 'msg:900000000000000042#3' });
+
+    expect(watched.map((w) => w.url)).toEqual([OLD_CLIP, CLIP]);
+    expect(second).toContain('Watched older.mp4 from Jasper (0:12)');
+    expect(missing).toBe('That message has no video #3.');
+  });
+
   it('follows a jump link to this channel, and refuses other servers', async () => {
     const { tool, watched } = setup();
     const target = videoPost('900000000000000042', OLD_CLIP);

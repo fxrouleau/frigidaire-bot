@@ -26,6 +26,14 @@ export function videoAttachments(message: Message): Attachment[] {
 }
 
 /**
+ * The handle a [video …] line gives a message's clip, which watch_video takes back: `msg:<id>` for the
+ * first video attachment, `msg:<id>#2` for the second, and so on (`index` counts from 0).
+ */
+export function videoHandle(messageId: string, index: number): string {
+  return index === 0 ? `msg:${messageId}` : `msg:${messageId}#${index + 1}`;
+}
+
+/**
  * The transcript cache key for an audio attachment. A voice message (and the common single-file case)
  * is keyed by the message id alone, which is what getCachedTranscript(messageId) reads; further audio
  * files on the same message get their own keys.

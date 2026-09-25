@@ -4,7 +4,7 @@
 //   [video msg:<message id>: <description>]
 //
 // The message id on a video line is the handle the chat model passes to watch_video to ask a follow-up
-// question about that clip.
+// question about that clip (a message's second clip is msg:<message id>#2).
 //
 // The triggering message and the one it replies to ('current' / 'reference') may be transcribed or
 // watched on the spot; seeded history only reads what is already cached, so a 25-message backfill never
@@ -15,7 +15,15 @@ import type { ContentEnricher, EnrichmentRole } from '../enrichers';
 import type { NormalizedContentPart } from '../types';
 import { getAudioTranscriber, getVideoDescriber, videoOutcomeNote } from './index';
 import type { AudioInput, TranscriptionOutcome, VideoInput, VideoOutcome } from './types';
-import { audioAttachments, formatClock, isVoiceMessage, speakerName, transcriptKey, videoAttachments } from './voice';
+import {
+  audioAttachments,
+  formatClock,
+  isVoiceMessage,
+  speakerName,
+  transcriptKey,
+  videoAttachments,
+  videoHandle,
+} from './voice';
 
 // Bounds on paid work per message: nobody posts ten voice notes at once on purpose.
 const MAX_AUDIO_PER_MESSAGE = 3;
@@ -90,10 +98,11 @@ async function renderVideo(
   deps: MediaEnricherDeps,
   message: Message,
   attachment: Attachment,
+  index: number,
   role: EnrichmentRole,
   speaker: string,
 ): Promise<string> {
-  const head = `video msg:${message.id}`;
+  const head = `video ${videoHandle(message.id, index)}`;
   let outcome: VideoOutcome;
   if (role === 'history') {
     const cached = deps.cachedDescription(attachment.url);
@@ -123,7 +132,7 @@ export function createMediaEnricher(deps: MediaEnricherDeps = defaultDeps): Cont
       const speaker = speakerName(message);
       const lines = await Promise.all([
         ...audio.map((attachment, index) => renderAudio(deps, message, attachment, index, role, speaker)),
-        ...video.map((attachment) => renderVideo(deps, message, attachment, role, speaker)),
+        ...video.map((attachment, index) => renderVideo(deps, message, attachment, index, role, speaker)),
       ]);
       return lines.map((text) => ({ type: 'text', text }));
     },
