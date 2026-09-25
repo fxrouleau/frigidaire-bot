@@ -4,7 +4,16 @@ import { config } from '../config';
 import { logger } from '../logger';
 import { type ArchivedMessage, getArchiveStore } from './archiveStore';
 
-export type { ArchivedMessage, ArchiveSource } from './archiveStore';
+export type {
+  ArchivedMessage,
+  ArchivedReaction,
+  ArchiveSource,
+  ReactionProfile,
+  ReactionProfileEntry,
+  ReactionProfileOptions,
+  ReactionSample,
+} from './archiveStore';
+export { getReactionProfile } from './reactions';
 export { computeWrappedStats, messageCountsByAuthor } from './stats';
 export type { AuthorCount, StatsScope, WrappedStats } from './stats';
 

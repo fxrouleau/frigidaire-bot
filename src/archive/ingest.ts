@@ -19,6 +19,7 @@ import {
   VOICE_MESSAGE_FLAG,
   getArchiveStore,
 } from './archiveStore';
+import { reactionsOf } from './reactions';
 
 const ARCHIVABLE_CHANNEL_TYPES: ReadonlySet<ChannelType> = new Set([
   ChannelType.GuildText,
@@ -196,6 +197,7 @@ export function toArchiveInput(message: Message): ArchiveMessageInput | undefine
     hasAudio,
     attachments,
     embeds,
+    reactions: reactionsOf(message),
   };
 }
 
@@ -220,8 +222,8 @@ export function archiveNewMessage(message: Message, store: ArchiveStore = getArc
 }
 
 /**
- * Applies an edit (MessageUpdate): new content, a newer edited timestamp (counted as one edit), or late
- * link previews (Discord adds embeds after the fact). Only messages already in the archive are updated:
+ * Applies an edit (MessageUpdate): new content, a newer edited timestamp (counted as one edit), late
+ * link previews (Discord adds embeds after the fact), and the current reactions. Only messages already in the archive are updated:
  * inserting an old message here would break the "archive is contiguous from its oldest message"
  * assumption the backfill and gap fill rely on — the backfill picks those messages up anyway.
  */

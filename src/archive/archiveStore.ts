@@ -27,6 +27,32 @@ export type ArchiveSource = 'human' | 'relay' | 'bot';
 export type ArchivedAttachment = { name: string; type: string | null; size: number; url: string };
 export type ArchivedEmbed = { title?: string; url?: string; description?: string };
 
+/** One reaction on a message, as Discord counts it. */
+export type ArchivedReaction = {
+  /** Custom emoji id; null for a unicode emoji. */
+  id: string | null;
+  /** The custom emoji's name, or the unicode emoji itself. */
+  name: string;
+  /** Animated custom emoji (absent for static and unicode ones). */
+  animated?: boolean;
+  /** Everyone who reacted with it, the bot included. */
+  count: number;
+  /** The bot itself is one of the `count` reactors. */
+  me?: boolean;
+};
+
+/** The key Discord's reaction cache uses: the custom emoji id, or the unicode emoji itself. */
+export function reactionKey(reaction: Pick<ArchivedReaction, 'id' | 'name'>): string {
+  return reaction.id ?? reaction.name;
+}
+
+/** Canonical order (by key), so an unchanged reaction set serializes to the same JSON and upserts are no-ops. */
+export function normalizeReactions(reactions: ArchivedReaction[]): ArchivedReaction[] {
+  return reactions
+    .filter((r) => r.count > 0)
+    .sort((a, b) => (reactionKey(a) < reactionKey(b) ? -1 : reactionKey(a) > reactionKey(b) ? 1 : 0));
+}
+
 /** One message as ingest hands it to the store. */
 export type ArchiveMessageInput = {
   id: string;
@@ -51,6 +77,7 @@ export type ArchiveMessageInput = {
   hasAudio: boolean;
   attachments: ArchivedAttachment[];
   embeds: ArchivedEmbed[];
+  reactions: ArchivedReaction[];
 };
 
 export type ArchivedMessage = Omit<ArchiveMessageInput, 'hasAudio'> & {
@@ -106,6 +133,55 @@ export type SearchResult = {
   truncated: boolean;
 };
 
+export type ReactionProfileOptions = {
+  /** Only this channel and its threads. Undefined ⇒ every archived channel. */
+  channelId?: string;
+  /** Only messages posted at or after this instant. */
+  sinceMs?: number;
+  /** Emojis returned, most used first (default 25). */
+  limit?: number;
+  /** Example messages per emoji (default 3). */
+  samplesPerEmoji?: number;
+};
+
+export type ReactionSample = {
+  messageId: string;
+  channelId: string;
+  guildId: string | null;
+  authorId: string | null;
+  authorName: string;
+  createdAt: number;
+  /** Members who reacted with this emoji on this message (the bot excluded). */
+  count: number;
+  /** One-line preview of the message (≤140 chars). */
+  snippet: string;
+};
+
+export type ReactionProfileEntry = {
+  /** The custom emoji id, or the unicode emoji itself. */
+  key: string;
+  /** Custom emoji id; null for a unicode emoji. */
+  id: string | null;
+  name: string;
+  animated: boolean;
+  /** Total reactions with it by members (the bot's own excluded). */
+  uses: number;
+  /** Messages it was used on. */
+  messages: number;
+  lastUsedAt: number;
+  samples: ReactionSample[];
+};
+
+export type ReactionProfile = {
+  /** Member messages in scope. */
+  messages: number;
+  /** Of those, messages with at least one member reaction. */
+  reactedMessages: number;
+  /** reactedMessages / messages (0 when there are no messages): how often anything gets a reaction. */
+  baseRate: number;
+  emojis: ReactionProfileEntry[];
+};
+
 type MessageRow = {
   seq: number;
   id: string;
@@ -128,6 +204,7 @@ type MessageRow = {
   has_audio: number;
   attachments_json: string | null;
   embeds_json: string | null;
+  reactions_json: string | null;
 };
 
 type BackfillRow = {
@@ -179,7 +256,8 @@ const SCHEMA = `
     flags             INTEGER NOT NULL DEFAULT 0,
     has_audio         INTEGER NOT NULL DEFAULT 0,
     attachments_json  TEXT,
-    embeds_json       TEXT
+    embeds_json       TEXT,
+    reactions_json    TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_messages_channel_created ON messages(channel_id, created_at);
@@ -189,6 +267,9 @@ const SCHEMA = `
     ON messages(parent_channel_id, created_at) WHERE parent_channel_id IS NOT NULL;
   CREATE INDEX IF NOT EXISTS idx_messages_pending_audio
     ON messages(created_at) WHERE has_audio = 1 AND transcript IS NULL AND deleted_at IS NULL;
+  -- The reaction profile only reads reacted messages (a minority), so it scans this instead of the table.
+  CREATE INDEX IF NOT EXISTS idx_messages_reacted
+    ON messages(created_at) WHERE reactions_json IS NOT NULL AND deleted_at IS NULL;
 
   -- porter: "running" finds "ran"/"runs"; remove_diacritics 2: "deja" finds "déjà" (the group writes both).
   CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -207,8 +288,13 @@ const SCHEMA = `
     VALUES ('delete', old.seq, old.content, old.author_name, old.transcript, old.extra_text);
   END;
 
+  -- WHEN: an upsert that only refreshes reactions or flags rewrites the text columns with equal values;
+  -- the index already holds exactly those, so there is nothing to re-index.
   CREATE TRIGGER IF NOT EXISTS messages_fts_update
-  AFTER UPDATE OF content, author_name, transcript, extra_text ON messages BEGIN
+  AFTER UPDATE OF content, author_name, transcript, extra_text ON messages
+  WHEN old.content IS NOT new.content OR old.author_name IS NOT new.author_name
+    OR old.transcript IS NOT new.transcript OR old.extra_text IS NOT new.extra_text
+  BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content, author_name, transcript, extra_text)
     VALUES ('delete', old.seq, old.content, old.author_name, old.transcript, old.extra_text);
     INSERT INTO messages_fts(rowid, content, author_name, transcript, extra_text)
@@ -239,16 +325,17 @@ const SCHEMA = `
 
 // Upsert. On conflict only the mutable parts change, and only when something actually differs: an
 // unchanged re-ingest (gap-fill overlap, embed-less update) touches nothing, so the FTS trigger doesn't
-// churn. A newer edited_at counts one edit. Deleted rows are never resurrected.
+// churn. A newer edited_at counts one edit. Deleted rows are never resurrected. Reactions are replaced
+// wholesale: every source of a full message (API fetch, the discord.js cache) carries Discord's counts.
 const UPSERT_SQL = `
   INSERT INTO messages (
     id, guild_id, channel_id, parent_channel_id, author_id, author_name, source, relay_kind,
     content, extra_text, transcript, created_at, edited_at, edit_count, reply_to_id, flags, has_audio,
-    attachments_json, embeds_json
+    attachments_json, embeds_json, reactions_json
   ) VALUES (
     @id, @guildId, @channelId, @parentChannelId, @authorId, @authorName, @source, @relayKind,
     @content, @extraText, @transcript, @createdAt, @editedAt, @editCount, @replyToId, @flags, @hasAudio,
-    @attachmentsJson, @embedsJson
+    @attachmentsJson, @embedsJson, @reactionsJson
   )
   ON CONFLICT(id) DO UPDATE SET
     content = excluded.content,
@@ -266,7 +353,8 @@ const UPSERT_SQL = `
     flags = excluded.flags,
     has_audio = excluded.has_audio,
     attachments_json = excluded.attachments_json,
-    embeds_json = excluded.embeds_json
+    embeds_json = excluded.embeds_json,
+    reactions_json = excluded.reactions_json
   WHERE messages.deleted_at IS NULL AND (
     messages.content IS NOT excluded.content
     OR messages.extra_text IS NOT excluded.extra_text
@@ -277,6 +365,7 @@ const UPSERT_SQL = `
     OR messages.flags IS NOT excluded.flags
     OR messages.attachments_json IS NOT excluded.attachments_json
     OR messages.embeds_json IS NOT excluded.embeds_json
+    OR messages.reactions_json IS NOT excluded.reactions_json
   )
 `;
 
@@ -288,6 +377,24 @@ function parseJsonArray<T>(raw: string | null): T[] {
   } catch {
     return [];
   }
+}
+
+const SAMPLE_SNIPPET_CHARS = 140;
+
+/** A short one-line preview of a sample message: its text, else what it carried (file, link preview). */
+function sampleSnippet(content: string, attachmentsJson: string | null, embedsJson: string | null): string {
+  const flat = content.replace(/\s+/g, ' ').trim();
+  if (flat) return flat.length > SAMPLE_SNIPPET_CHARS ? `${flat.slice(0, SAMPLE_SNIPPET_CHARS - 1)}…` : flat;
+  const attachment = parseJsonArray<ArchivedAttachment>(attachmentsJson)[0];
+  if (attachment) return `[attached: ${attachment.name}]`;
+  const embed = parseJsonArray<ArchivedEmbed>(embedsJson).find((e) => e.title || e.url);
+  if (embed) return `[link: ${embed.title ?? embed.url}]`;
+  return '(no text)';
+}
+
+function reactionsJson(reactions: ArchivedReaction[]): string | null {
+  const normalized = normalizeReactions(reactions);
+  return normalized.length > 0 ? JSON.stringify(normalized) : null;
 }
 
 function toMessage(row: MessageRow): ArchivedMessage {
@@ -312,6 +419,7 @@ function toMessage(row: MessageRow): ArchivedMessage {
     hasAudio: row.has_audio === 1,
     attachments: parseJsonArray<ArchivedAttachment>(row.attachments_json),
     embeds: parseJsonArray<ArchivedEmbed>(row.embeds_json),
+    reactions: parseJsonArray<ArchivedReaction>(row.reactions_json),
   };
 }
 
@@ -431,6 +539,7 @@ export class ArchiveStore {
       hasAudio: input.hasAudio ? 1 : 0,
       attachmentsJson: input.attachments.length > 0 ? JSON.stringify(input.attachments) : null,
       embedsJson: input.embeds.length > 0 ? JSON.stringify(input.embeds) : null,
+      reactionsJson: reactionsJson(input.reactions),
     };
   }
 
@@ -450,7 +559,8 @@ export class ArchiveStore {
     if (ids.length === 0) return 0;
     return this.stmt(
       `UPDATE messages
-       SET deleted_at = ?, content = '', extra_text = '', transcript = NULL, attachments_json = NULL, embeds_json = NULL
+       SET deleted_at = ?, content = '', extra_text = '', transcript = NULL, attachments_json = NULL, embeds_json = NULL,
+         reactions_json = NULL
        WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL`,
     ).run(at, JSON.stringify(ids)).changes;
   }
@@ -459,7 +569,8 @@ export class ArchiveStore {
   markChannelDeleted(channelId: string, at: number): number {
     return this.stmt(
       `UPDATE messages
-       SET deleted_at = ?, content = '', extra_text = '', transcript = NULL, attachments_json = NULL, embeds_json = NULL
+       SET deleted_at = ?, content = '', extra_text = '', transcript = NULL, attachments_json = NULL, embeds_json = NULL,
+         reactions_json = NULL
        WHERE (channel_id = ? OR parent_channel_id = ?) AND deleted_at IS NULL`,
     ).run(at, channelId, channelId).changes;
   }
@@ -503,6 +614,148 @@ export class ArchiveStore {
       ).run(info.authorId, info.authorName, info.relayKind, id, info.authorId, info.authorName, info.relayKind)
         .changes > 0
     );
+  }
+
+  /** A live archived message's reactions; undefined when the message is not archived or was deleted. */
+  getReactions(id: string): ArchivedReaction[] | undefined {
+    const row = this.stmt('SELECT reactions_json FROM messages WHERE id = ? AND deleted_at IS NULL').get(id) as
+      | { reactions_json: string | null }
+      | undefined;
+    return row ? parseJsonArray<ArchivedReaction>(row.reactions_json) : undefined;
+  }
+
+  /**
+   * Replaces a message's reactions (read-modify-write when `next` is a function, in one transaction).
+   * Only live archived messages change; the FTS index is untouched. Returns true when something changed.
+   */
+  updateReactions(
+    id: string,
+    next: ArchivedReaction[] | ((current: ArchivedReaction[]) => ArchivedReaction[]),
+  ): boolean {
+    return this.db.transaction(() => {
+      const current = this.getReactions(id);
+      if (current === undefined) return false;
+      const json = reactionsJson(typeof next === 'function' ? next(current) : next);
+      return (
+        this.stmt('UPDATE messages SET reactions_json = ? WHERE id = ? AND reactions_json IS NOT ?').run(json, id, json)
+          .changes > 0
+      );
+    })();
+  }
+
+  /**
+   * How members react (see ReactionProfile): member messages (human + relay, not deleted) in scope, each
+   * emoji's uses without the bot's own reaction, and the most-reacted examples per emoji.
+   */
+  reactionProfile(opts: ReactionProfileOptions = {}): ReactionProfile {
+    const params: Record<string, string | number> = {};
+    const scope = ["m.source IN ('human', 'relay')", 'm.deleted_at IS NULL'];
+    if (opts.channelId) {
+      params.channelId = opts.channelId;
+      scope.push('(m.channel_id = @channelId OR m.parent_channel_id = @channelId)');
+    }
+    if (opts.sinceMs !== undefined) {
+      params.sinceMs = opts.sinceMs;
+      scope.push('m.created_at >= @sinceMs');
+    }
+    const where = scope.join(' AND ');
+    // One row per (message, emoji) with the members' count: the bot's own reaction is taken out, so a
+    // message only the bot reacted to does not count as reacted.
+    const reacted = `
+      WITH r AS (
+        SELECT m.id, m.channel_id, m.guild_id, m.author_id, m.author_name, m.content, m.created_at,
+               m.attachments_json, m.embeds_json,
+               COALESCE(j.value ->> '$.id', j.value ->> '$.name') AS emoji_key,
+               j.value ->> '$.id' AS emoji_id,
+               j.value ->> '$.name' AS emoji_name,
+               COALESCE(j.value ->> '$.animated', 0) AS animated,
+               (j.value ->> '$.count') - COALESCE(j.value ->> '$.me', 0) AS n
+        FROM messages m, json_each(m.reactions_json) j
+        WHERE m.reactions_json IS NOT NULL AND ${where}
+      )`;
+
+    const base = this.stmt(`SELECT COUNT(*) AS n FROM messages m WHERE ${where}`).get(params) as { n: number };
+    const reactedCount = this.stmt(`${reacted} SELECT COUNT(DISTINCT id) AS n FROM r WHERE n > 0`).get(params) as {
+      n: number;
+    };
+
+    // Bare columns next to a single MAX() come from the row holding the max (documented SQLite
+    // behavior), so a renamed custom emoji is reported under its latest name.
+    const emojiRows = this.stmt(
+      `${reacted}
+       SELECT emoji_key, emoji_id, emoji_name, animated, MAX(created_at) AS last_at, SUM(n) AS uses,
+              COUNT(*) AS messages
+       FROM r WHERE n > 0
+       GROUP BY emoji_key
+       ORDER BY uses DESC, messages DESC, emoji_key ASC
+       LIMIT @limit`,
+    ).all({ ...params, limit: opts.limit ?? 25 }) as {
+      emoji_key: string;
+      emoji_id: string | null;
+      emoji_name: string;
+      animated: number;
+      last_at: number;
+      uses: number;
+      messages: number;
+    }[];
+
+    const samplesPerEmoji = opts.samplesPerEmoji ?? 3;
+    const samples = new Map<string, ReactionSample[]>();
+    if (emojiRows.length > 0 && samplesPerEmoji > 0) {
+      // Examples with text first (they say what the emoji is used FOR), then the most-reacted, then the newest.
+      const rows = this.stmt(
+        `${reacted}
+         SELECT * FROM (
+           SELECT r.*, ROW_NUMBER() OVER (
+             PARTITION BY emoji_key ORDER BY (content != '') DESC, n DESC, created_at DESC
+           ) AS rank
+           FROM r WHERE n > 0 AND emoji_key IN (SELECT value FROM json_each(@keys))
+         ) WHERE rank <= @samples
+         ORDER BY emoji_key, rank`,
+      ).all({ ...params, keys: JSON.stringify(emojiRows.map((e) => e.emoji_key)), samples: samplesPerEmoji }) as {
+        emoji_key: string;
+        id: string;
+        channel_id: string;
+        guild_id: string | null;
+        author_id: string | null;
+        author_name: string;
+        content: string;
+        created_at: number;
+        attachments_json: string | null;
+        embeds_json: string | null;
+        n: number;
+      }[];
+      for (const row of rows) {
+        const list = samples.get(row.emoji_key) ?? [];
+        list.push({
+          messageId: row.id,
+          channelId: row.channel_id,
+          guildId: row.guild_id,
+          authorId: row.author_id,
+          authorName: row.author_name,
+          createdAt: row.created_at,
+          count: row.n,
+          snippet: sampleSnippet(row.content, row.attachments_json, row.embeds_json),
+        });
+        samples.set(row.emoji_key, list);
+      }
+    }
+
+    return {
+      messages: base.n,
+      reactedMessages: reactedCount.n,
+      baseRate: base.n > 0 ? reactedCount.n / base.n : 0,
+      emojis: emojiRows.map((row) => ({
+        key: row.emoji_key,
+        id: row.emoji_id,
+        name: row.emoji_name,
+        animated: row.animated === 1,
+        uses: row.uses,
+        messages: row.messages,
+        lastUsedAt: row.last_at,
+        samples: samples.get(row.emoji_key) ?? [],
+      })),
+    };
   }
 
   upsertChannel(channel: ArchiveChannelInput, now = Date.now()): void {
