@@ -19,6 +19,12 @@ rather than to PID 1 and can be found). Files the run wrote to <workspace>/out/ 
 encoded; that directory is emptied before every run. Runs are serialized behind one lock with a short
 waiting queue; the container is sized for one run at a time.
 
+A run can't start runs of its own: /run refuses clients on this machine (loopback or the container's own
+addresses; the bot always connects from its own container), and a queued request whose client has hung up
+is dropped when its turn comes. Otherwise a run could POST its own code back before it is killed and keep
+itself going forever. The bearer token alone would not stop that: tini (PID 1) holds SANDBOX_TOKEN in its
+environment, which runs can read.
+
 Everything else in the workspace persists between runs on purpose (saved files, `pip install --user`,
 `npm install`), so one run can leave things behind for the next. What a run leaves behind must not change
 how the *tools* behave in later runs: Python runs with -P and without the workspace on sys.path (a planted
@@ -29,7 +35,8 @@ until a run asks for "reset_workspace": true, which starts it on an empty worksp
 
 Environment (all optional):
     SANDBOX_TOKEN            bearer token required on /run (unset => no auth; keep the port private)
-    SANDBOX_HOST / _PORT     bind address (default 0.0.0.0:8080; port 0 picks a free port)
+    SANDBOX_HOST / _PORT     bind address (default 0.0.0.0:8080; port 0 picks a free port). Bound to a
+                             loopback address (local development, tests), local clients are allowed.
     SANDBOX_WORKSPACE        working directory and HOME for runs (default /workspace)
     SANDBOX_MEMORY_MB        per-process RLIMIT_DATA (default 768)
     SANDBOX_FILE_SIZE_MB     per-file RLIMIT_FSIZE (default 100)
@@ -44,12 +51,14 @@ import base64
 import contextlib
 import ctypes
 import hmac
+import ipaddress
 import json
 import logging
 import math
 import os
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -90,8 +99,10 @@ LANGUAGES: dict[str, tuple[list[str], str]] = {
     'node': (['node', *NODE_FLAGS], 'main.js'),
 }
 
-# Environment variables a run may inherit from the server. Everything else (notably SANDBOX_TOKEN, and
-# anything an operator mistakenly passes in) never reaches user code.
+# Environment variables a run may inherit from the server. Everything else (SANDBOX_TOKEN, and anything an
+# operator mistakenly passes in) stays out of the run's own environment. That is hygiene, not a seal: tini
+# (PID 1) runs as the same uid and a run can read its /proc/1/environ, so nothing here relies on the token
+# being unknown to runs (see is_local_client).
 PASSTHROUGH_ENV = (
     'PATH',
     'LANG',
@@ -161,10 +172,83 @@ class Settings:
         self.max_processes = env_int('SANDBOX_MAX_PROCESSES', 128, 8, 1_000_000)
         self.queue_size = env_int('SANDBOX_QUEUE_SIZE', 3, 0, 100)
         self.queue_wait_seconds = env_int('SANDBOX_QUEUE_WAIT_SECONDS', 30, 1, 600)
+        # A server bound to loopback can only ever be reached from this machine (local development, the
+        # bot's test suite): there, local clients are the legitimate ones.
+        self.allow_local_clients = _is_loopback_host(self.host)
 
     @property
     def out_dir(self) -> str:
         return os.path.join(self.workspace, 'out')
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+# ---- who is calling ---------------------------------------------------------------------------------
+
+
+def is_local_client(client_address: tuple[Any, ...]) -> bool:
+    """True when the peer address belongs to this machine: loopback, or any address this host can bind.
+
+    Runs share the server's network namespace, so every connection a run makes to this server comes from
+    one of these (127.0.0.1, or the container's own address when it dials that); the bot's never does.
+    The bind probe covers every local interface without having to list them.
+    """
+    host = str(client_address[0]).split('%', 1)[0]
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if address.is_loopback or address.is_unspecified:
+        return True
+    try:
+        if isinstance(address, ipaddress.IPv6Address):
+            scope = client_address[3] if len(client_address) > 3 else 0
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+                probe.bind((str(address), 0, 0, scope))
+        else:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind((str(address), 0))
+    except OSError:
+        return False
+    return True
+
+
+# The most a client may have sent past its request body; a real client sends nothing more.
+_MAX_TRAILING_BYTES = 64 * 1024
+
+
+def client_disconnected(connection: socket.socket) -> bool:
+    """True when the client has closed or reset the connection (checked without blocking).
+
+    Anything still unread (bytes past the request body) is drained first, since a client that sent extra
+    bytes and then died would otherwise look alive. HTTP/1.0: nothing more is read from the connection.
+    """
+    previous = connection.gettimeout()
+    drained = 0
+    try:
+        connection.setblocking(False)
+        while drained <= _MAX_TRAILING_BYTES:
+            chunk = connection.recv(8192)
+            if not chunk:
+                return True
+            drained += len(chunk)
+        return True
+    except (BlockingIOError, InterruptedError):
+        return False
+    except OSError:
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            connection.settimeout(previous)
 
 
 # ---- process hygiene --------------------------------------------------------------------------------
@@ -186,8 +270,9 @@ def harden_self() -> None:
     """Linux-only protections for the server process itself (no-ops elsewhere).
 
     Runs execute as the same uid as this server (the container drops every capability, so there is no
-    second user to switch to). Non-dumpable keeps user code from reading this process's memory or
-    /proc/<pid>/environ (where SANDBOX_TOKEN lives) and from ptrace-attaching to it. Subreaper makes
+    second user to switch to). Non-dumpable keeps user code from reading this process's memory and from
+    ptrace-attaching to it (which would let a run tamper with the server itself). It does not keep
+    SANDBOX_TOKEN secret: tini, PID 1, has it too; see is_local_client for why that is fine. Subreaper makes
     orphaned descendants of a run reparent here instead of to PID 1, which is what lets the post-run
     sweep find processes that escaped the run's process group.
     """
@@ -749,6 +834,12 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
             if self.path.split('?', 1)[0] != '/run':
                 self.send_json(HTTPStatus.NOT_FOUND, {'error': 'not found'})
                 return
+            if not settings.allow_local_clients and is_local_client(self.client_address):
+                log.warning(
+                    'refused /run from %s: a local client (a run trying to start another run)', self.client_address[0]
+                )
+                self.send_json(HTTPStatus.FORBIDDEN, {'error': 'runs cannot start other runs'})
+                return
             if not self.authorized():
                 log.warning('rejected /run from %s: bad or missing bearer token', self.address_string())
                 self.send_json(HTTPStatus.UNAUTHORIZED, {'error': 'unauthorized'})
@@ -768,6 +859,13 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
                 return
             try:
                 waited_ms = int((time.monotonic() - queued_at) * 1000)
+                # Nobody is waiting for this result any more. Besides wasted work, this is what stops a run
+                # from POSTing a follow-up run before it ends: by now every process of that run is dead.
+                if client_disconnected(self.connection):
+                    log.warning(
+                        'dropped a queued run: its client disconnected while it waited (waited_ms=%d)', waited_ms
+                    )
+                    return
                 # The workspace directory is this server's, not the run's: undo a `chmod a-w /workspace` a
                 # previous run may have done to break every later run.
                 _make_owner_writable(settings.workspace)

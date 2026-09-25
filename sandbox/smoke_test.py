@@ -118,6 +118,21 @@ def main() -> int:
         expect(lines[2] == '0', 'SANDBOX_* variables leaked into the run environment', result)
         expect(lines[3] == 'sealed', "the server's environment is readable from a run", result)
 
+    def run_cannot_start_runs() -> None:
+        # A run can read the token from tini's environment (PID 1), so the refusal must not depend on it:
+        # /run turns away every client on the container's own addresses.
+        code = (
+            "token=$(tr '\\0' '\\n' < /proc/1/environ 2>/dev/null | sed -n 's/^SANDBOX_TOKEN=//p'); "
+            'for host in 127.0.0.1 $(hostname -i); do '
+            'curl -s -o /dev/null -w "%{http_code}\\n" -X POST -H "Authorization: Bearer $token" '
+            '-H "Content-Type: application/json" --data \'{"language":"bash","code":"touch chained"}\' '
+            '"http://$host:8080/run"; done; ls chained 2>/dev/null || echo no-chained-run'
+        )
+        result = sandbox.run('bash', code)
+        lines = result['stdout'].split()
+        expect(len(lines) >= 3 and set(lines[:-1]) == {'403'}, 'a run could call /run on its own sandbox', result)
+        expect(lines[-1] == 'no-chained-run', 'a run started another run', result)
+
     def workspace_persists() -> None:
         sandbox.run('bash', 'echo kept > note.txt')
         result = sandbox.run('python', "print(open('note.txt').read().strip())")
@@ -181,6 +196,7 @@ def main() -> int:
         ('bash tools', bash_tools),
         ('node', node_runs),
         ('identity and environment', identity_and_env),
+        ('a run cannot start runs', run_cannot_start_runs),
         ('workspace persists', workspace_persists),
         ('planted files do not shadow stdlib or tools', planted_files_do_not_shadow),
         ('reset_workspace wipes the workspace', reset_workspace_wipes),

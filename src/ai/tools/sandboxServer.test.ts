@@ -21,11 +21,14 @@ const canRunServer =
   spawnSync('python3', ['-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)']).status === 0;
 
 /** Starts the server on a free port and resolves with its base URL once it logs that it's listening. */
-function startServer(workspace: string): Promise<{ child: ChildProcess; baseUrl: string; logs: () => string }> {
+function startServer(
+  workspace: string,
+  host = '127.0.0.1',
+): Promise<{ child: ChildProcess; baseUrl: string; logs: () => string }> {
   const child = spawn('python3', [SERVER_SCRIPT], {
     env: {
       PATH: process.env.PATH,
-      SANDBOX_HOST: '127.0.0.1',
+      SANDBOX_HOST: host,
       SANDBOX_PORT: '0',
       SANDBOX_WORKSPACE: workspace,
       SANDBOX_TOKEN: TOKEN,
@@ -44,7 +47,7 @@ function startServer(workspace: string): Promise<{ child: ChildProcess; baseUrl:
     }, 8000);
     const onData = (chunk: Buffer) => {
       output += chunk.toString();
-      const match = /sandbox listening on 127\.0\.0\.1:(\d+)/.exec(output);
+      const match = /sandbox listening on [\d.]+:(\d+)/.exec(output);
       if (match) {
         clearTimeout(timer);
         resolve({ child, baseUrl: `http://127.0.0.1:${match[1]}`, logs });
@@ -233,6 +236,35 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     expect(next).toMatchObject({ ok: true, result: { exit_code: 0, stdout: 'ok\n' } });
   });
 
+  it('drops a run a previous run queued behind itself once that run is over (its client is gone)', async () => {
+    // A run can't keep code going after it is killed by POSTing its own follow-up run to the sidecar: the
+    // request is queued behind the run, and by the time it gets the lock its client died with the run.
+    const marker = path.join(workspace, 'chained-marker');
+    const body = JSON.stringify({ language: 'bash', code: `echo chained > ${marker}` });
+    const request = [
+      'import urllib.request',
+      `req = urllib.request.Request(${JSON.stringify(`${server.baseUrl}/run`)}, data=${JSON.stringify(body)}.encode(),`,
+      `    headers={'Authorization': 'Bearer ${TOKEN}', 'Content-Type': 'application/json'})`,
+      'urllib.request.urlopen(req, timeout=60)',
+    ].join('\n');
+    const code = [
+      'import subprocess, sys, time',
+      `subprocess.Popen([sys.executable, '-c', ${JSON.stringify(request)}], start_new_session=True)`,
+      'time.sleep(1)',
+      "print('queued')",
+    ].join('\n');
+
+    const outcome = await runInSandbox({ language: 'python', code, timeoutSeconds: 10 }, client());
+    expect(outcome).toMatchObject({ ok: true, result: { exit_code: 0, stdout: 'queued\n' } });
+    // Give the queued request every chance to run.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    expect(existsSync(marker)).toBe(false);
+    expect(server.logs()).toMatch(/dropped a queued run: its client disconnected/);
+    const after = await runInSandbox({ language: 'bash', code: 'echo still-fine', timeoutSeconds: 10 }, client());
+    expect(after).toMatchObject({ ok: true, result: { stdout: 'still-fine\n' } });
+  });
+
   it('wipes the whole workspace on reset_workspace, without following symlinks out of it', async () => {
     const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'sandbox-outside-')));
     writeFileSync(path.join(outside, 'keep.txt'), 'not the sandbox');
@@ -266,5 +298,41 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe.skipIf(!canRunServer)('sandbox/server.py on a non-loopback address (as in its container)', () => {
+  let workspace: string;
+  let server: Awaited<ReturnType<typeof startServer>>;
+
+  beforeAll(async () => {
+    workspace = realpathSync(mkdtempSync(path.join(tmpdir(), 'sandbox-server-test-')));
+    server = await startServer(workspace, '0.0.0.0');
+  });
+
+  afterAll(async () => {
+    if (server?.child.exitCode === null) {
+      const exited = new Promise((resolve) => server.child.once('exit', resolve));
+      server.child.kill('SIGTERM');
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
+      server.child.kill('SIGKILL');
+    }
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it('refuses /run from its own machine: only the bot, on another host, may start runs', async () => {
+    // The bot reaches the sidecar over the compose network; a request from loopback or the container's own
+    // address can only come from a run (which can read the token from /proc/1/environ, so auth is no help).
+    const port = new URL(server.baseUrl).port;
+    const outcome = await runInSandbox(
+      { language: 'bash', code: 'touch should-not-exist', timeoutSeconds: 5 },
+      { url: `http://127.0.0.1:${port}`, token: TOKEN },
+    );
+
+    expect(outcome).toMatchObject({ ok: false, kind: 'unauthorized', detail: 'runs cannot start other runs' });
+    expect(existsSync(path.join(workspace, 'should-not-exist'))).toBe(false);
+    expect(server.logs()).toMatch(/refused \/run from 127\.0\.0\.1: a local client/);
+    // /health stays open to the container's own healthcheck.
+    expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(200);
   });
 });
