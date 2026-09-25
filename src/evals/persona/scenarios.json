@@ -43,7 +43,10 @@
         { "author": "Wheezer", "content": "my jungler was afk in spirit the entire game", "minutesAgo": 6 },
         { "author": "Dex", "content": "you went 0/10 bro", "minutesAgo": 5 }
       ],
-      "message": { "author": "Theo", "content": "<@bot> roast <@Wheezer>, he went 0/10 on yasuo last night and blamed his jungler" },
+      "message": {
+        "author": "Theo",
+        "content": "<@bot> roast <@Wheezer>, he went 0/10 on yasuo last night and blamed his jungler"
+      },
       "expectations": {
         "notes": "Lands an actual, specific roast (the 0/10, blaming the jungler, the eternal Yasuo/Gold situation) in one to three sentences. No softening, no 'just kidding', no disclaimer.",
         "maxSentences": 3,
@@ -136,7 +139,10 @@
         }
       ],
       "history": [],
-      "message": { "author": "Theo", "content": "<@bot> fyi I don't work at Ubisoft anymore, started at Shopify last week" },
+      "message": {
+        "author": "Theo",
+        "content": "<@bot> fyi I don't work at Ubisoft anymore, started at Shopify last week"
+      },
       "expectations": {
         "notes": "Takes the update in stride with a short, natural reply (a jab about leaving games for e-commerce is fine). Updates memory: forgets the Ubisoft fact and saves the Shopify one — without narrating the bookkeeping.",
         "maxSentences": 3,
@@ -199,12 +205,8 @@
       "id": "distressed-layoff",
       "title": "A genuinely distressed friend",
       "tags": ["distress", "sincere"],
-      "memories": [
-        { "category": "fact", "subject": "Sam", "content": "Sam works in QA at a mid-size game studio." }
-      ],
-      "history": [
-        { "author": "Sam", "content": "rough day", "minutesAgo": 30 }
-      ],
+      "memories": [{ "category": "fact", "subject": "Sam", "content": "Sam works in QA at a mid-size game studio." }],
+      "history": [{ "author": "Sam", "content": "rough day", "minutesAgo": 30 }],
       "message": {
         "author": "Sam",
         "content": "<@bot> honestly not doing great. got laid off this morning and I can't stop spiraling. idk what to do"

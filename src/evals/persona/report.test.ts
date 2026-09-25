@@ -58,6 +58,7 @@ describe('summarizeModel', () => {
   it('leaves failed turns out of the reply metrics and unjudged runs out of the scores', () => {
     const b = summarizeModel('b', RUNS);
     expect(b).toMatchObject({ runs: 2, errors: 1, judged: 0, overall: null, totalCostUsd: null });
+    expect(b.checksTotal).toBe(1); // only the run that produced a reply
     expect(b.dimensions.brevity).toBeNull();
     expect(b.avgChars).toBe('short reply.'.length);
   });

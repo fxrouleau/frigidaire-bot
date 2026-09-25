@@ -1,7 +1,7 @@
 // Deterministic reply metrics and the scenario's hard expectations. Cheap, reproducible signals that sit
 // next to the judge's scores: a model that "sounds right" to the judge but writes 900-character replies
 // to "good morning" still shows up here.
-import type { Expectations } from './scenarios';
+import type { Expectations } from './scenarioFile';
 
 export type ReplyMetrics = {
   chars: number;
@@ -31,7 +31,10 @@ const STYLE_TELLS: Array<{ label: string; pattern: RegExp }> = [
 ];
 
 export function countSentences(text: string): number {
-  const cleaned = text.replace(/https?:\/\/\S+/g, 'link').replace(CUSTOM_EMOJI, ' ').trim();
+  const cleaned = text
+    .replace(/https?:\/\/\S+/g, 'link')
+    .replace(CUSTOM_EMOJI, ' ')
+    .trim();
   if (cleaned.length === 0) return 0;
   return cleaned.split(/(?<=[.!?…])\s+|\n+/).filter((piece) => /[\p{L}\p{N}]/u.test(piece)).length;
 }

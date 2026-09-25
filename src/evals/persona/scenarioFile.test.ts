@@ -9,7 +9,7 @@ import {
   loadScenarioFile,
   parseScenarioFile,
   selectScenarios,
-} from './scenarios';
+} from './scenarioFile';
 
 // A minimal valid file; each negative test breaks exactly one thing in a copy of it.
 function validFile() {

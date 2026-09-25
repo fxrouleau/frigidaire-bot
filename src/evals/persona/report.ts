@@ -67,7 +67,8 @@ export function summarizeModel(model: string, runs: ScenarioRun[]): ModelSummary
   for (const d of RUBRIC_DIMENSIONS) {
     dimensions[d] = mean(judged.map((r) => r.judge.scores[d].score));
   }
-  const checks = mine.flatMap((r) => r.checks);
+  // A failed turn's "reply" is the bot's error message; its checks say nothing about the model.
+  const checks = answered.flatMap((r) => r.checks);
 
   return {
     model,

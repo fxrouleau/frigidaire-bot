@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { checkExpectations, countSentences, measureReply } from './metrics';
-import type { Expectations } from './scenarios';
+import type { Expectations } from './scenarioFile';
 
 function expectations(overrides: Partial<Expectations> = {}): Expectations {
   return { notes: 'n/a', maxCustomEmojis: 1, mustMatch: [], mustNotMatch: [], ...overrides };

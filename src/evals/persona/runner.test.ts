@@ -5,7 +5,7 @@ import { FakeEmbeddingProvider } from '../../test-support/fakeEmbeddings';
 import { FakeProvider, textResponse, toolCallResponse } from '../../test-support/fakeProvider';
 import { type Judge, type JudgeInput, RUBRIC_DIMENSIONS } from './judge';
 import { type RunnerDeps, renderTranscript, runPersonaEval, runScenario } from './runner';
-import { type ScenarioFile, parseScenarioFile } from './scenarios';
+import { type ScenarioFile, parseScenarioFile } from './scenarioFile';
 
 const FILE: ScenarioFile = parseScenarioFile({
   version: 1,

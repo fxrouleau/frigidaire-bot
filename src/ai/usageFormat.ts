@@ -59,7 +59,9 @@ export function describeSpend(
 
   const notes: string[] = [];
   if (total.unpricedRequests > 0) {
-    notes.push(`${plural(total.unpricedRequests, 'call')} reported no cost and ${total.unpricedRequests === 1 ? 'is' : 'are'} not in the total.`);
+    notes.push(
+      `${plural(total.unpricedRequests, 'call')} reported no cost and ${total.unpricedRequests === 1 ? 'is' : 'are'} not in the total.`,
+    );
   }
   if (summary.trackedSince && summary.trackedSince > summary.fromDay) {
     notes.push(`Cost tracking started ${summary.trackedSince}; earlier days are not covered.`);

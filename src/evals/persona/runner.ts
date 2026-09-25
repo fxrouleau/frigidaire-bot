@@ -24,7 +24,7 @@ import {
   type ScenarioMessage,
   type SeedEmbed,
   castMember,
-} from './scenarios';
+} from './scenarioFile';
 
 // What the agent posts when a turn fails (src/ai/agent.ts); a reply equal to it is a failed turn.
 const AGENT_ERROR_REPLY = 'Sorry, I encountered an error while processing your request.';

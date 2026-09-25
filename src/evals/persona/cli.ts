@@ -22,7 +22,7 @@ import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import { createLlmJudge } from './judge';
 import { type EvalReport, renderComparisonTable, renderScenarioTable } from './report';
 import { runPersonaEval } from './runner';
-import { DEFAULT_SCENARIOS_PATH, loadScenarioFile, selectScenarios } from './scenarios';
+import { DEFAULT_SCENARIOS_PATH, loadScenarioFile, selectScenarios } from './scenarioFile';
 
 dotenv.config({ quiet: true });
 

@@ -7,6 +7,8 @@
 // must use an id from the emoji list, so a typo fails loading instead of silently testing nothing.
 //
 // Everything here is invented: the repository is public, so no real chat content or member details.
+//
+// (Not named scenarios.ts: under ts-node, `require('./scenarios')` would resolve to scenarios.json first.)
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -180,7 +182,9 @@ function parseEmbeds(value: unknown, at: string): SeedEmbed[] {
       url: optionalString(entry.url, `${here}.url`),
       imageUrl: optionalString(entry.imageUrl, `${here}.imageUrl`),
     };
-    if (!embed.title && !embed.description && !embed.imageUrl) fail(here, 'an embed needs a title, description or image');
+    if (!embed.title && !embed.description && !embed.imageUrl) {
+      fail(here, 'an embed needs a title, description or image');
+    }
     return embed;
   });
 }
@@ -201,7 +205,9 @@ function checkReferences(content: string, at: string, refs: RefCheck): void {
 function parseMessage(raw: unknown, at: string, refs: RefCheck, withAge: boolean): ScenarioMessage {
   const entry = object(raw, at);
   const author = string(entry.author, `${at}.author`);
-  if (author !== BOT_AUTHOR && !refs.castNames.has(author.toLowerCase())) fail(`${at}.author`, `unknown author "${author}"`);
+  if (author !== BOT_AUTHOR && !refs.castNames.has(author.toLowerCase())) {
+    fail(`${at}.author`, `unknown author "${author}"`);
+  }
   const content = typeof entry.content === 'string' ? entry.content : fail(`${at}.content`, 'expected a string');
   checkReferences(content, `${at}.content`, refs);
   const embeds = parseEmbeds(entry.embeds, `${at}.embeds`);
@@ -209,7 +215,9 @@ function parseMessage(raw: unknown, at: string, refs: RefCheck, withAge: boolean
   let minutesAgo = 0;
   if (withAge) {
     const age = entry.minutesAgo;
-    if (typeof age !== 'number' || !Number.isFinite(age) || age <= 0) fail(`${at}.minutesAgo`, 'expected a positive number');
+    if (typeof age !== 'number' || !Number.isFinite(age) || age <= 0) {
+      fail(`${at}.minutesAgo`, 'expected a positive number');
+    }
     minutesAgo = age;
   }
   return { author, content, minutesAgo, embeds };
@@ -302,7 +310,9 @@ export function selectScenarios(file: ScenarioFile, ids: string[]): Scenario[] {
   const byId = new Map(file.scenarios.map((s) => [s.id, s]));
   const unknown = ids.filter((id) => !byId.has(id));
   if (unknown.length > 0) {
-    throw new ScenarioFileError(`unknown scenario id(s): ${unknown.join(', ')} (known: ${[...byId.keys()].join(', ')})`);
+    throw new ScenarioFileError(
+      `unknown scenario id(s): ${unknown.join(', ')} (known: ${[...byId.keys()].join(', ')})`,
+    );
   }
   return ids.map((id) => byId.get(id) as Scenario);
 }
