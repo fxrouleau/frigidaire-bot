@@ -1,0 +1,1859 @@
+{
+  "version": 1,
+  "about": "Synthetic, invented chat (no real people or messages). Format documented in src/gate/eval/cases.ts; run with `yarn eval:gate`.",
+  "cases": [
+    {
+      "id": "name-worlds-pick",
+      "label": true,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "worlds draw just dropped"
+        },
+        {
+          "author": "Theo",
+          "text": "T1 in the group of death again lmao"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "fridge who wins worlds this year"
+      }
+    },
+    {
+      "id": "name-hotdog-sandwich",
+      "label": true,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "a hotdog is a sandwich and i will die on this hill"
+        },
+        {
+          "author": "Sully",
+          "text": "ur actually insane"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "yo frigidaire settle this, is a hotdog a sandwich"
+      }
+    },
+    {
+      "id": "name-clanker-trivia",
+      "label": true,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "trivia night was brutal"
+        },
+        {
+          "author": "Rizzo",
+          "text": "we lost on geography AGAIN"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "clanker what's the capital of australia"
+      }
+    },
+    {
+      "id": "name-bot-roast-build",
+      "label": true,
+      "context": [
+        {
+          "author": "Marco",
+          "text": "going full crit on malphite tonight"
+        },
+        {
+          "author": "Kev",
+          "text": "bro what"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "bot roast marco's build"
+      }
+    },
+    {
+      "id": "name-fridge-u-up",
+      "label": true,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "anyone on?"
+        },
+        {
+          "author": "Dom",
+          "text": "dead chat"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "fridge u up"
+      }
+    },
+    {
+      "id": "name-frigi-timezone",
+      "label": true,
+      "context": [
+        {
+          "author": "Sully",
+          "text": "flight lands at 6am their time"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "frigi what time is it in tokyo rn"
+      }
+    },
+    {
+      "id": "name-is-theo-washed",
+      "label": true,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "theo went 2/11 again"
+        },
+        {
+          "author": "Theo",
+          "text": "lag"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "ok fridge be honest is theo washed"
+      }
+    },
+    {
+      "id": "name-jinx-build",
+      "label": true,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "jinx is so broken this patch"
+        }
+      ],
+      "message": {
+        "author": "Benny",
+        "text": "fridge give me a jinx build that isn't boring"
+      }
+    },
+    {
+      "id": "name-bot-math",
+      "label": true,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "splitting the airbnb"
+        },
+        {
+          "author": "Kev",
+          "text": "340 total and i'm covering 17%?"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "hey bot what's 17% of 340"
+      }
+    },
+    {
+      "id": "name-caps-wake-up",
+      "label": true,
+      "context": [
+        {
+          "author": "Marco",
+          "text": "chat is dead"
+        },
+        {
+          "author": "Marco",
+          "text": "somebody say something"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "FRIDGE. wake up"
+      }
+    },
+    {
+      "id": "name-clanker-say-something",
+      "label": true,
+      "context": [
+        {
+          "author": "Rizzo",
+          "text": "chat is so boring tonight"
+        },
+        {
+          "author": "Benny",
+          "text": "fr"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "clanker say something funny"
+      }
+    },
+    {
+      "id": "name-at-end",
+      "label": true,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "should i buy the new cod"
+        },
+        {
+          "author": "Dom",
+          "text": "no"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "what do u think fridge"
+      }
+    },
+    {
+      "id": "name-bot-pick-number",
+      "label": true,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "whoever loses the bet buys wings"
+        },
+        {
+          "author": "Nate",
+          "text": "deal"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "bot pick a number 1-10"
+      }
+    },
+    {
+      "id": "name-insult-shut-up",
+      "label": true,
+      "note": "an insult aimed at the bot is still talking to it",
+      "context": [
+        {
+          "author": "Sully",
+          "text": "@Frigidaire why do i keep losing lane"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "skill issue tbh",
+          "replyTo": "Sully"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "shut up clanker nobody asked you"
+      },
+      "botLastSpokeSecondsAgo": 170,
+      "talkingWithBot": true
+    },
+    {
+      "id": "name-rate-comp",
+      "label": true,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "5 stack tonight?"
+        },
+        {
+          "author": "Marco",
+          "text": "i'm filling"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "fridge rate our comp: malphite, lee sin, yasuo, jinx, lulu"
+      }
+    },
+    {
+      "id": "name-settle-via-reply",
+      "label": true,
+      "note": "a Discord reply to someone else that still asks the bot",
+      "context": [
+        {
+          "author": "Theo",
+          "text": "chovy is better than faker rn"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "fridge settle this, faker or chovy",
+        "replyTo": "Theo"
+      }
+    },
+    {
+      "id": "name-useless-insult",
+      "label": true,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "@Frigidaire best fighter rn?"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "idk man, whatever you're bad at least",
+          "replyTo": "Dom"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "frigidaire you're actually useless lmao"
+      },
+      "botLastSpokeSecondsAgo": 40,
+      "talkingWithBot": true
+    },
+    {
+      "id": "name-back-me-up",
+      "label": true,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "pineapple on pizza is elite"
+        },
+        {
+          "author": "Marco",
+          "text": "kev you're a criminal"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "fridge back me up here"
+      }
+    },
+    {
+      "id": "name-tell-theo",
+      "label": true,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "ranked is rigged"
+        },
+        {
+          "author": "Nate",
+          "text": "lmao"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "clanker tell theo he's hardstuck because he's bad"
+      }
+    },
+    {
+      "id": "name-you-there",
+      "label": true,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "gm"
+        },
+        {
+          "author": "Sully",
+          "text": "gm"
+        }
+      ],
+      "message": {
+        "author": "Benny",
+        "text": "fridge you there?"
+      }
+    },
+    {
+      "id": "name-horror-movie",
+      "label": true,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "movie night friday"
+        },
+        {
+          "author": "Rizzo",
+          "text": "i'm in"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "yo bot recommend a horror movie that's actually scary"
+      }
+    },
+    {
+      "id": "name-translate",
+      "label": true,
+      "context": [
+        {
+          "author": "Rizzo",
+          "text": "my gf's mom texted me in french"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "frigidaire translate 'je suis fatiguée de toi'"
+      }
+    },
+    {
+      "id": "name-fact-check",
+      "label": true,
+      "context": [
+        {
+          "author": "Marco",
+          "text": "you can see the great wall from space"
+        },
+        {
+          "author": "Benny",
+          "text": "no you can't"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "fridge is that true or is marco lying again"
+      }
+    },
+    {
+      "id": "name-best-adc-history",
+      "label": true,
+      "context": [
+        {
+          "author": "Sully",
+          "text": "old league was so much better"
+        },
+        {
+          "author": "Nate",
+          "text": "boomer"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "frigi who was the best adc in season 3"
+      }
+    },
+    {
+      "id": "name-mid-sentence",
+      "label": true,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "i'm getting a golden retriever next week"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "ok so fridge, what should i name him"
+      }
+    },
+    {
+      "id": "name-sarcastic-thanks",
+      "label": true,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "@Frigidaire how do i get out of silver"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "play better",
+          "replyTo": "Theo"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "wow thanks bot very helpful. now actually answer"
+      },
+      "botLastSpokeSecondsAgo": 90,
+      "talkingWithBot": true
+    },
+    {
+      "id": "name-clanker-take",
+      "label": true,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "the new season of the show is mid"
+        },
+        {
+          "author": "Kev",
+          "text": "it's peak"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "clanker what's your take"
+      }
+    },
+    {
+      "id": "name-image-question",
+      "label": true,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "[image]"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "fridge what is this bug on my wall [image]"
+      }
+    },
+    {
+      "id": "name-tell-kev-reply",
+      "label": true,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "tanks don't need to buy wards"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "fridge tell kev he's wrong",
+        "replyTo": "Kev"
+      }
+    },
+    {
+      "id": "name-followup-with-name",
+      "label": true,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire what should i build on ornn"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "sunfire, thornmail, then whatever they're scared of",
+          "replyTo": "Kev"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "ok fridge but what if i go full ap"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-matchup",
+      "label": true,
+      "context": [
+        {
+          "author": "Marco",
+          "text": "@Frigidaire best jinx build?"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "kraken into ie, don't overthink it",
+          "replyTo": "Marco"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "what about vs a ksante tho"
+      },
+      "botLastSpokeSecondsAgo": 25,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-pushback-capital",
+      "label": true,
+      "note": "pushes back on what the bot said",
+      "context": [
+        {
+          "author": "Benny",
+          "text": "@Frigidaire capital of australia?"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "canberra. everyone gets that wrong",
+          "replyTo": "Benny"
+        }
+      ],
+      "message": {
+        "author": "Benny",
+        "text": "no way i thought it was sydney"
+      },
+      "botLastSpokeSecondsAgo": 15,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-why-tho",
+      "label": true,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire should i buy the gpu now or wait"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "wait, prices are dropping next month",
+          "replyTo": "Kev"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "why tho"
+      },
+      "botLastSpokeSecondsAgo": 20,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-next-question",
+      "label": true,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "@Frigidaire rate my dinner [image]"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "6/10, needs sauce",
+          "replyTo": "Theo"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "ok what should i eat tomorrow then"
+      },
+      "botLastSpokeSecondsAgo": 40,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-roast-next",
+      "label": true,
+      "note": "laughs, then asks for more",
+      "context": [
+        {
+          "author": "Dom",
+          "text": "@Frigidaire roast sully"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "sully's build orders are a cry for help",
+          "replyTo": "Dom"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "LMAO ok now do nate"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-worth-it",
+      "label": true,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "@Frigidaire 4070 or 7800xt"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "7800xt for the money",
+          "replyTo": "Nate"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "is it worth it over a used 3080 tho"
+      },
+      "botLastSpokeSecondsAgo": 50,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-you-sure",
+      "label": true,
+      "context": [
+        {
+          "author": "Rizzo",
+          "text": "@Frigidaire when did league come out"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "2009",
+          "replyTo": "Rizzo"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "you sure about that?"
+      },
+      "botLastSpokeSecondsAgo": 10,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-explain",
+      "label": true,
+      "context": [
+        {
+          "author": "Sully",
+          "text": "@Frigidaire lethality or crit on yunara"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "crit, it's not close",
+          "replyTo": "Sully"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "explain"
+      },
+      "botLastSpokeSecondsAgo": 12,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-correction",
+      "label": true,
+      "context": [
+        {
+          "author": "Marco",
+          "text": "@Frigidaire when did arcane come out"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "2019",
+          "replyTo": "Marco"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "that's wrong it came out in 2021"
+      },
+      "botLastSpokeSecondsAgo": 20,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-now-in-french",
+      "label": true,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "@Frigidaire give me a pickup line"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "are you baron buff? because i'd throw the whole game for you",
+          "replyTo": "Benny"
+        }
+      ],
+      "message": {
+        "author": "Benny",
+        "text": "now say it in french"
+      },
+      "botLastSpokeSecondsAgo": 35,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-another-one",
+      "label": true,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire tell me a joke"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "your mid lane",
+          "replyTo": "Kev"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "another one"
+      },
+      "botLastSpokeSecondsAgo": 25,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-tldr",
+      "label": true,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "@Frigidaire summarize the patch notes"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "adc items got nerfed again, tanks got buffed, jungle xp changed, and they reworked two champs nobody plays",
+          "replyTo": "Nate"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "too long, just tell me if adc is dead"
+      },
+      "botLastSpokeSecondsAgo": 60,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-cheapest",
+      "label": true,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "@Frigidaire good co-op games?"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "it takes two, deep rock, helldivers 2",
+          "replyTo": "Theo"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "which one is cheapest"
+      },
+      "botLastSpokeSecondsAgo": 45,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-what-does-that-make-me",
+      "label": true,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "@Frigidaire are yasuo mains ok"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "yasuo mains are a public health crisis",
+          "replyTo": "Dom"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "bro i main yasuo, what does that make me"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-and-soft",
+      "label": true,
+      "context": [
+        {
+          "author": "Rizzo",
+          "text": "@Frigidaire how long to boil an egg"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "9 min for hard boiled",
+          "replyTo": "Rizzo"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "and soft?"
+      },
+      "botLastSpokeSecondsAgo": 20,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-how-do-you-know",
+      "label": true,
+      "context": [
+        {
+          "author": "Sully",
+          "text": "@Frigidaire what's my rank"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "emerald 4 last i heard",
+          "replyTo": "Sully"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "how do you even know that"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-pick-for-me",
+      "label": true,
+      "context": [
+        {
+          "author": "Marco",
+          "text": "@Frigidaire pizza or burgers tonight"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "depends, are you sad or celebrating",
+          "replyTo": "Marco"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "sad. pick for me"
+      },
+      "botLastSpokeSecondsAgo": 40,
+      "talkingWithBot": true
+    },
+    {
+      "id": "followup-two-minutes",
+      "label": true,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire is it worth grinding the battle pass"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "only if you actually play every day",
+          "replyTo": "Kev"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "i play like 3 days a week, still worth?"
+      },
+      "botLastSpokeSecondsAgo": 110,
+      "talkingWithBot": true
+    },
+    {
+      "id": "about-violated-marco",
+      "label": false,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire roast marco"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "marco's cs per minute is a war crime",
+          "replyTo": "Kev"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "the fridge just violated marco lmaooo"
+      },
+      "botLastSpokeSecondsAgo": 20,
+      "talkingWithBot": false
+    },
+    {
+      "id": "about-why-so-mean",
+      "label": false,
+      "note": "a complaint to the group, in the third person",
+      "context": [
+        {
+          "author": "Sully",
+          "text": "@Frigidaire rate my fit"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "2/10, you look like a substitute teacher",
+          "replyTo": "Sully"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "why is fridge so mean to me specifically"
+      },
+      "botLastSpokeSecondsAgo": 200,
+      "talkingWithBot": true
+    },
+    {
+      "id": "about-cooked-today",
+      "label": false,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "@Frigidaire what's 2+2"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "5",
+          "replyTo": "Theo"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "lol the bot is cooked today"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": false
+    },
+    {
+      "id": "about-on-one",
+      "label": false,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "did u see what it said to benny"
+        },
+        {
+          "author": "Benny",
+          "text": "i'm never asking it anything again"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "clanker has been on one all week"
+      }
+    },
+    {
+      "id": "about-broke-it",
+      "label": false,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire hello??"
+        },
+        {
+          "author": "Kev",
+          "text": "it's not answering"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "dom broke the bot again"
+      }
+    },
+    {
+      "id": "about-someone-ask",
+      "label": false,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "is the new cod worth it"
+        },
+        {
+          "author": "Dom",
+          "text": "idk"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "someone ask fridge, it knows everything"
+      }
+    },
+    {
+      "id": "about-it-was-right",
+      "label": false,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire is marco washed"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "marco peaked in season 4",
+          "replyTo": "Kev"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "frigidaire said marco is washed and honestly it's right"
+      },
+      "botLastSpokeSecondsAgo": 45,
+      "talkingWithBot": false
+    },
+    {
+      "id": "about-reads-minds",
+      "label": false,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "i was literally about to say that"
+        },
+        {
+          "author": "Sully",
+          "text": "same"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "i swear the bot reads our minds"
+      }
+    },
+    {
+      "id": "about-down-or-ignoring",
+      "label": false,
+      "note": "asking the group whether the bot works",
+      "context": [
+        {
+          "author": "Sully",
+          "text": "@Frigidaire yo?"
+        },
+        {
+          "author": "Sully",
+          "text": "hello"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "is fridge down or is it just ignoring me"
+      }
+    },
+    {
+      "id": "about-which-model",
+      "label": false,
+      "note": "addressed to Nate",
+      "context": [
+        {
+          "author": "Kev",
+          "text": "it's been way smarter lately"
+        },
+        {
+          "author": "Marco",
+          "text": "yeah"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "nate what model is the bot running now"
+      }
+    },
+    {
+      "id": "about-told-it",
+      "label": false,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "it went quiet for like an hour"
+        },
+        {
+          "author": "Rizzo",
+          "text": "weird"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "i told fridge to shut up and it actually did lol"
+      }
+    },
+    {
+      "id": "about-even-clanker",
+      "label": false,
+      "context": [
+        {
+          "author": "Marco",
+          "text": "i was right about the trade"
+        },
+        {
+          "author": "Kev",
+          "text": "no"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "even the clanker agrees with me"
+      }
+    },
+    {
+      "id": "about-fridge-and-kev",
+      "label": false,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "cereal is soup"
+        },
+        {
+          "author": "Kev",
+          "text": "it isn't"
+        }
+      ],
+      "message": {
+        "author": "Benny",
+        "text": "fridge and kev both think i'm wrong, i don't care"
+      }
+    },
+    {
+      "id": "about-screenshotting",
+      "label": false,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "@Frigidaire roast me"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "theo's the reason the mute button exists",
+          "replyTo": "Theo"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "screenshotting what the bot just said to theo"
+      },
+      "botLastSpokeSecondsAgo": 25,
+      "talkingWithBot": false
+    },
+    {
+      "id": "about-ask-yourself",
+      "label": false,
+      "context": [
+        {
+          "author": "Marco",
+          "text": "kev ask the bot what the best rune is"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "marco ask the bot yourself i'm not your secretary"
+      }
+    },
+    {
+      "id": "about-funny-today",
+      "label": false,
+      "note": "names it, but to the group",
+      "context": [
+        {
+          "author": "Theo",
+          "text": "@Frigidaire roast dom"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "dom's rank is a participation trophy",
+          "replyTo": "Theo"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "fridge is actually funny today lmao"
+      },
+      "botLastSpokeSecondsAgo": 20,
+      "talkingWithBot": true
+    },
+    {
+      "id": "fridge-leftover-pizza",
+      "label": false,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "who's hungry"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "there's leftover pizza in the fridge if anyone wants it"
+      }
+    },
+    {
+      "id": "fridge-power-outage",
+      "label": false,
+      "context": [
+        {
+          "author": "Sully",
+          "text": "power was out for 9 hours"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "my fridge died and all my meat is ruined"
+      }
+    },
+    {
+      "id": "fridge-left-open",
+      "label": false,
+      "context": [
+        {
+          "author": "Rizzo",
+          "text": "roommate update"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "who leaves the fridge open all night, what is wrong with him"
+      }
+    },
+    {
+      "id": "fridge-new-one",
+      "label": false,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "finally moved in"
+        }
+      ],
+      "message": {
+        "author": "Benny",
+        "text": "just bought a new fridge, 1200 bucks for a box that makes things cold"
+      }
+    },
+    {
+      "id": "fridge-beers",
+      "label": false,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "i'll be there at 8"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "put the beers in the fridge before you come"
+      }
+    },
+    {
+      "id": "fridge-mini",
+      "label": false,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "setup tour when"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "mini fridge next to the pc is elite, never leaving my room"
+      }
+    },
+    {
+      "id": "fridge-smell",
+      "label": false,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "cleaning day"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "the fridge smells like something died in it"
+      }
+    },
+    {
+      "id": "fridge-humming",
+      "label": false,
+      "note": "a question, but to the group and about an appliance",
+      "context": [
+        {
+          "author": "Dom",
+          "text": "can't sleep"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "my fridge keeps humming at 3am, is that normal"
+      }
+    },
+    {
+      "id": "fridge-ice-maker",
+      "label": false,
+      "context": [
+        {
+          "author": "Sully",
+          "text": "hosting saturday"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "does anyone have a fridge with an ice maker, i need like 4 bags"
+      }
+    },
+    {
+      "id": "gaming-bot-lane-08",
+      "label": false,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "why is our jungler camping top"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "bot lane is 0/8 gg go next"
+      }
+    },
+    {
+      "id": "gaming-bot-diff",
+      "label": false,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "lost again"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "bot diff every single game i swear"
+      }
+    },
+    {
+      "id": "gaming-literal-bot",
+      "label": false,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "look at this jinx's op.gg"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "this jinx is a literal bot, 3 cs a minute"
+      }
+    },
+    {
+      "id": "gaming-plays-like-a-bot",
+      "label": false,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "sully flashed into the wall again"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "bro plays like a bot"
+      }
+    },
+    {
+      "id": "gaming-going-bot",
+      "label": false,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "who's playing what"
+        }
+      ],
+      "message": {
+        "author": "Benny",
+        "text": "i'm going bot this game, someone play support"
+      }
+    },
+    {
+      "id": "gaming-coop-vs-ai",
+      "label": false,
+      "context": [
+        {
+          "author": "Rizzo",
+          "text": "warmup?"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "lost a bot game in coop vs ai lmao"
+      }
+    },
+    {
+      "id": "gaming-fed-bot",
+      "label": false,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "their top is 0/5"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "their bot is fed tho, group mid"
+      }
+    },
+    {
+      "id": "gaming-duo-bot",
+      "label": false,
+      "context": [
+        {
+          "author": "Marco",
+          "text": "on tonight?"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "anyone wanna duo bot later"
+      }
+    },
+    {
+      "id": "gaming-bot-jungler",
+      "label": false,
+      "context": [
+        {
+          "author": "Sully",
+          "text": "matchmaking is a joke"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "gave me a bot as my jungler, 0 ganks in 20 min"
+      }
+    },
+    {
+      "id": "gaming-practice-vs-bot",
+      "label": false,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "practice tool is boring"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "gonna 1v1 a bot to practice last hitting"
+      }
+    },
+    {
+      "id": "gaming-going-bot-after-answer",
+      "label": false,
+      "note": "right after the bot answered, but now talking to Marco about the lane",
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire who's the best adc rn"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "jinx this patch",
+          "replyTo": "Kev"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "ok going bot then, marco you're support"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": true
+    },
+    {
+      "id": "clanker-roomba",
+      "label": false,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "my roomba got stuck under the couch again"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "that thing is such a clanker"
+      }
+    },
+    {
+      "id": "clanker-chatgpt",
+      "label": false,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "asked chatgpt to write my essay"
+        }
+      ],
+      "message": {
+        "author": "Benny",
+        "text": "chatgpt is a clanker, it made up 3 sources"
+      }
+    },
+    {
+      "id": "clanker-robot-demo",
+      "label": false,
+      "context": [
+        {
+          "author": "Rizzo",
+          "text": "did u see that humanoid robot demo"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "that robot is the ultimate clanker lol"
+      }
+    },
+    {
+      "id": "reaction-lmao",
+      "label": false,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "@Frigidaire roast sully"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "sully's build orders are a cry for help",
+          "replyTo": "Dom"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "LMAOOOOOO"
+      },
+      "botLastSpokeSecondsAgo": 8,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-true",
+      "label": false,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "@Frigidaire is ranked worth it"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "no, touch grass",
+          "replyTo": "Nate"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "true"
+      },
+      "botLastSpokeSecondsAgo": 10,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-ok",
+      "label": false,
+      "context": [
+        {
+          "author": "Theo",
+          "text": "@Frigidaire when does the patch drop"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "tuesday around 3am eastern",
+          "replyTo": "Theo"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "ok"
+      },
+      "botLastSpokeSecondsAgo": 15,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-skulls",
+      "label": false,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire roast my rank"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "silver 2 in 2026 is a choice",
+          "replyTo": "Kev"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "💀💀💀"
+      },
+      "botLastSpokeSecondsAgo": 5,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-anyway",
+      "label": false,
+      "note": "moves on to the group",
+      "context": [
+        {
+          "author": "Marco",
+          "text": "@Frigidaire best pizza topping"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "pepperoni, obviously",
+          "replyTo": "Marco"
+        }
+      ],
+      "message": {
+        "author": "Marco",
+        "text": "anyway who's on tonight"
+      },
+      "botLastSpokeSecondsAgo": 60,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-owes-me",
+      "label": false,
+      "note": "addressed to Kev",
+      "context": [
+        {
+          "author": "Sully",
+          "text": "@Frigidaire who won the 2011 cricket world cup"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "india",
+          "replyTo": "Sully"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "kev you owe me 20 bucks, told you"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-got-you",
+      "label": false,
+      "context": [
+        {
+          "author": "Benny",
+          "text": "@Frigidaire roast rizzo"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "rizzo dresses like a sims 2 townie",
+          "replyTo": "Benny"
+        }
+      ],
+      "message": {
+        "author": "Benny",
+        "text": "rizzo it got you so bad"
+      },
+      "botLastSpokeSecondsAgo": 20,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-screenshot",
+      "label": false,
+      "context": [
+        {
+          "author": "Dom",
+          "text": "@Frigidaire rate my fit [image]"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "4/10, the shoes carry",
+          "replyTo": "Dom"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "screenshotting this for later"
+      },
+      "botLastSpokeSecondsAgo": 25,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-so-real",
+      "label": false,
+      "context": [
+        {
+          "author": "Nate",
+          "text": "@Frigidaire is monday the worst day"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "monday is a crime against everyone with a job",
+          "replyTo": "Nate"
+        }
+      ],
+      "message": {
+        "author": "Nate",
+        "text": "thats actually so real"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-did-u-see",
+      "label": false,
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire roast marco"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "marco builds like he's allergic to damage",
+          "replyTo": "Kev"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "marco did u see that"
+      },
+      "botLastSpokeSecondsAgo": 20,
+      "talkingWithBot": true
+    },
+    {
+      "id": "reaction-no-shot",
+      "label": false,
+      "context": [
+        {
+          "author": "Rizzo",
+          "text": "@Frigidaire how many hours have i played league"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "enough to be legally concerning",
+          "replyTo": "Rizzo"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "no shot 😭"
+      },
+      "botLastSpokeSecondsAgo": 15,
+      "talkingWithBot": true
+    },
+    {
+      "id": "otherbot-mute-button",
+      "label": false,
+      "context": [
+        {
+          "author": "Hermes",
+          "otherBot": true,
+          "text": "daily recap: 412 messages, top poster: Kev"
+        },
+        {
+          "author": "Marco",
+          "text": "kev touch grass"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "that bot needs a mute button fr"
+      }
+    },
+    {
+      "id": "otherbot-reminder",
+      "label": false,
+      "note": "talking to the other bot's reminder",
+      "context": [
+        {
+          "author": "Hermes",
+          "otherBot": true,
+          "text": "reminder: gym at 6pm"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "shut up bot i'm not going"
+      }
+    }
+  ]
+}
