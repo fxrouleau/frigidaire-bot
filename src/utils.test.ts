@@ -10,7 +10,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getRelay } from './relay';
 import { BotDb, setBotDbForTesting } from './storage/botDb';
 import { createFakeMessage } from './test-support/fakeDiscord';
-import { type RepostOutcome, repostBlocker, repostMessage, splitMessage, webhookTargetOf } from './utils';
+import {
+  type RepostOutcome,
+  type WebhookParentChannel,
+  repostBlocker,
+  repostMessage,
+  sendViaWebhook,
+  splitMessage,
+  webhookTargetOf,
+} from './utils';
 
 describe('splitMessage', () => {
   it('returns a single unchanged chunk for short text', () => {
@@ -470,6 +478,27 @@ describe('repostMessage', () => {
 
       expect(sentPayload(fake).content).toBe(body);
     });
+  });
+});
+
+describe('sendViaWebhook', () => {
+  it('posts every payload through one webhook, never pinging unless told to, then deletes the webhook', async () => {
+    const fake = createFakeMessage();
+    const channel = fake.message.channel as unknown as WebhookParentChannel;
+
+    const sent = await sendViaWebhook(channel, { name: 'Jasper' }, [
+      { content: '@everyone part one' },
+      { content: 'part two', allowedMentions: { users: ['7'] } },
+    ]);
+
+    expect(sent).toHaveLength(2);
+    expect(fake.recorders.createWebhook.calls).toHaveLength(1);
+    const hook = fake.webhooks[0];
+    expect(hook.send.calls.map((call) => call[0])).toEqual([
+      { content: '@everyone part one', allowedMentions: { parse: [] } },
+      { content: 'part two', allowedMentions: { users: ['7'] } },
+    ]);
+    expect(hook.delete.calls).toHaveLength(1);
   });
 });
 

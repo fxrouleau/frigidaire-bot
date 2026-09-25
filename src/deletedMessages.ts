@@ -8,13 +8,19 @@
 // every deletion qualifies (always), and the message is reposted through a webhook wearing the
 // author's name and avatar. A watched member's side account (LINKED_ACCOUNTS) is watched too, and its
 // messages are reposted as that account.
-import type { Message, PartialMessage } from 'discord.js';
+import type { Message, PartialMessage, WebhookMessageCreateOptions } from 'discord.js';
 import { type MessageJudge, createEdgyJudge } from './ai/messageJudge';
 import { type DeleteRepostMode, config } from './config';
 import { isSamePerson } from './linkedAccounts';
 import { logger } from './logger';
 import { recordRelay } from './relay';
-import { type WebhookIdentity, isWebhookCapableChannel, sendViaWebhook } from './utils';
+import {
+  MAX_WEBHOOK_CONTENT,
+  type WebhookIdentity,
+  isWebhookCapableChannel,
+  sendViaWebhook,
+  splitMessage,
+} from './utils';
 
 const MAX_SNAPSHOTS = 100;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
@@ -59,6 +65,25 @@ async function downloadAttachment(url: string): Promise<Buffer | undefined> {
     logger.warn(`deletedMessages: attachment download failed for ${url}:`, error);
     return undefined;
   }
+}
+
+/**
+ * The repost as webhook posts: the text in chunks a webhook can carry (a Nitro member's message can be
+ * twice Discord's webhook limit), the attachments on the last one. Mentions never ping again: the
+ * original already pinged, and a webhook would fire @everyone/role mentions the author may not even
+ * be allowed to use.
+ */
+function regretPayloads(content: string, attachments: SnapshotAttachment[]): WebhookMessageCreateOptions[] {
+  const payloads: WebhookMessageCreateOptions[] = (
+    content.length > 0 ? splitMessage(content, MAX_WEBHOOK_CONTENT) : []
+  ).map((chunk) => ({ content: chunk, allowedMentions: { parse: [] } }));
+  if (attachments.length > 0) {
+    const files = attachments.map((a) => ({ attachment: a.data, name: a.name }));
+    const last = payloads.at(-1);
+    if (last) last.files = files;
+    else payloads.push({ files, allowedMentions: { parse: [] } });
+  }
+  return payloads;
 }
 
 export class DeletedMessageReposter {
@@ -157,11 +182,9 @@ export class DeletedMessageReposter {
     if (snapshot.content.length === 0 && attachments.length === 0) return 'empty';
 
     logger.info(`deletedMessages: reposting ${snapshot.id} by ${snapshot.identity.name} (deleted after ${age}ms)`);
-    const repost = await this.send(channel, snapshot.identity, {
-      content: snapshot.content.length > 0 ? snapshot.content : undefined,
-      files: attachments.map((a) => ({ attachment: a.data, name: a.name })),
-    });
-    if (repost?.id) {
+    const reposts = await this.send(channel, snapshot.identity, regretPayloads(snapshot.content, attachments));
+    for (const repost of reposts) {
+      if (!repost?.id) continue;
       recordRelay({
         messageId: repost.id,
         channelId: channel.id,

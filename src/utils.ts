@@ -29,7 +29,7 @@ export type WebhookParentChannel = TextChannel | NewsChannel | VoiceChannel | Fo
 export type WebhookTarget = { channel: WebhookParentChannel; threadId?: string };
 
 // Discord's limit for a webhook message's content (Nitro members can send up to 4000 themselves).
-const MAX_WEBHOOK_CONTENT = 2000;
+export const MAX_WEBHOOK_CONTENT = 2000;
 
 // Creating the one-time webhook, and deleting the original once the repost is up.
 const REPOST_PERMISSIONS = [PermissionFlagsBits.ManageWebhooks, PermissionFlagsBits.ManageMessages];
@@ -145,15 +145,24 @@ export async function withTemporaryWebhook<T>(
 }
 
 /**
- * Posts as `identity` through a one-time webhook (deleted afterwards, also on failure). To post into a
- * thread, pass its parent as `channel` and the thread's id as `payload.threadId`.
+ * Posts `payloads` in order as `identity` through one one-time webhook (deleted afterwards, also on
+ * failure), so a long text split into chunks shares a single webhook. Resolves to the posted messages.
+ * Nothing pings unless a payload sets its own `allowedMentions`: a webhook post never fires @everyone,
+ * role or user mentions by default. To post into a thread, pass its parent as `channel` and the thread's
+ * id as each payload's `threadId`.
  */
 export async function sendViaWebhook(
   channel: WebhookParentChannel,
   identity: WebhookIdentity,
-  payload: string | WebhookMessageCreateOptions,
-): Promise<Message> {
-  return withTemporaryWebhook(channel, identity, (webhook) => webhook.send(payload));
+  payloads: WebhookMessageCreateOptions[],
+): Promise<Message[]> {
+  return withTemporaryWebhook(channel, identity, async (webhook) => {
+    const sent: Message[] = [];
+    for (const payload of payloads) {
+      sent.push(await webhook.send({ allowedMentions: { parse: [] }, ...payload }));
+    }
+    return sent;
+  });
 }
 
 /**
