@@ -243,6 +243,26 @@ describe('repostMessage', () => {
     expect(fake.recorders.delete.calls).toHaveLength(0);
   });
 
+  it('posts nothing when the message was edited while the webhook was being created', async () => {
+    const fake = createFakeMessage({ content: 'https://x.com/u/status/1' });
+    const channel = fake.message.channel as unknown as { createWebhook: (options: unknown) => Promise<unknown> };
+    const create = channel.createWebhook;
+    channel.createWebhook = async (options) => {
+      (fake.message as unknown as { content: string }).content = 'edited https://x.com/u/status/1';
+      return create(options);
+    };
+
+    const outcome = await repostMessage(fake.message, 'https://fixvx.com/u/status/1', {
+      fetch: noFetch,
+      stillCurrent: () => fake.message.content === 'https://x.com/u/status/1',
+    });
+
+    expect(outcome).toEqual({ status: 'skipped', reason: 'it was edited while the repost was being prepared' });
+    expect(fake.webhooks[0].send.calls).toHaveLength(0);
+    expect(fake.webhooks[0].delete.calls).toHaveLength(1);
+    expect(fake.recorders.delete.calls).toHaveLength(0);
+  });
+
   it('keeps @silent messages silent', async () => {
     const fake = createFakeMessage({ flags: MessageFlags.SuppressNotifications });
 

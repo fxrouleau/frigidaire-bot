@@ -221,6 +221,12 @@ export type RepostOptions = {
   maxAttachmentBytes?: number;
   /** Runs right before the original is deleted (the deleted-message reposter must not see a "regret"). */
   onBeforeDelete?: () => void;
+  /**
+   * Whether `newContent` still matches the message (it was not edited). Checked again after the slow
+   * part (attachment downloads, reply lookup, webhook creation) and right before the post goes out: a
+   * message edited meanwhile is left alone rather than reposted as its pre-edit text and deleted.
+   */
+  stillCurrent?: () => boolean;
 };
 
 export type RepostOutcome =
@@ -283,6 +289,9 @@ export async function repostMessage(
   if (content === undefined) {
     return { status: 'skipped', reason: `the rewritten text is over the ${MAX_WEBHOOK_CONTENT} a webhook can post` };
   }
+  const stillCurrent = options.stillCurrent ?? (() => true);
+  const edited: RepostOutcome = { status: 'skipped', reason: 'it was edited while the repost was being prepared' };
+  if (!stillCurrent()) return edited;
 
   const identity = identityOf(message);
   const payload: WebhookMessageCreateOptions = {
@@ -294,6 +303,7 @@ export async function repostMessage(
   };
 
   return withTemporaryWebhook(target.channel, identity, async (webhook): Promise<RepostOutcome> => {
+    if (!stillCurrent()) return edited;
     const repost = await webhook.send(payload);
     recordRelay({
       messageId: repost.id,
