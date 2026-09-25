@@ -6,8 +6,10 @@ import type { Message } from 'discord.js';
 import { formatLinkPreview } from '../ai/linkReader/format';
 import { getLinkReader } from '../ai/linkReader/reader';
 import { findLinks } from '../ai/linkReader/targets';
+import { repliesToTranscript } from '../ai/media/autoTranscribe';
 import { config } from '../config';
 import { attributeMessage } from '../relay';
+import { mentionsInText } from '../utils';
 import type { Candidate, CandidateSnapshot } from './autoReactor';
 import { readableEmojiText } from './guide';
 import type { ContextLine } from './judge';
@@ -69,6 +71,8 @@ function tooSlight(message: Message): string | undefined {
 }
 
 function isReplyToBot(message: Message, botId: string): boolean {
+  // A reply to the bot's transcript of a voice message answers the voice message, not the bot.
+  if (repliesToTranscript(message)) return false;
   if (message.mentions.repliedUser) return message.mentions.repliedUser.id === botId;
   const referenced = message.reference?.messageId;
   if (!referenced) return false;
@@ -94,7 +98,7 @@ export function intakeSkipReason(message: Message, settings: IntakeSettings): st
   } else if (message.author.bot) {
     return message.author.id === botId ? 'own message' : 'bot';
   }
-  if (botId && message.mentions.users.has(botId)) return 'mentions the bot';
+  if (botId && mentionsInText(message, botId)) return 'mentions the bot';
   if (botId && isReplyToBot(message, botId)) return 'replies to the bot';
   if (namesBot(message.content, settings.botNames)) return 'names the bot';
   return tooSlight(message);

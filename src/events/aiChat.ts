@@ -1,17 +1,18 @@
 import { Events, type Message } from 'discord.js';
 import type { HandleMentionOptions } from '../ai/agent';
 import { agent } from '../ai/agentInstance';
-import { isTranscriptReply, isTranscriptReplyId } from '../ai/media/autoTranscribe';
+import { isTranscriptReply, repliesToTranscript } from '../ai/media/autoTranscribe';
 import { defineEvent } from '../eventModule';
 import { addressedGate } from '../gate';
 import { logger } from '../logger';
+import { mentionsInText } from '../utils';
 
 async function isReplyToBot(message: Message): Promise<boolean> {
   if (!message.reference?.messageId) return false;
   // The bot's auto-transcript of a voice message isn't the bot talking: a reply to it answers the voice message.
-  if (isTranscriptReplyId(message.reference.messageId)) return false;
-  // Discord resolves the replied-to author into the mentions when the reply pings them, which
-  // answers the question without a REST fetch for every reply posted server-wide.
+  if (repliesToTranscript(message)) return false;
+  // discord.js resolves the replied-to author from the reply's payload (whether or not the reply pings),
+  // which answers the question without a REST fetch for every reply posted server-wide.
   const repliedUser = message.mentions.repliedUser;
   if (repliedUser) return repliedUser.id === message.client.user.id;
   try {
@@ -44,7 +45,9 @@ export default defineEvent(Events.MessageCreate, {
     if (message.author.bot) return;
 
     const author = message.member?.displayName || message.author.username;
-    const explicitMention = message.mentions.users.has(message.client.user.id);
+    // Only a mention written in the text: a pinging reply also lists the replied-to author (the bot) in
+    // `mentions.users`, and a reply to a transcript reply is not a reply to the bot (isReplyToBot).
+    const explicitMention = mentionsInText(message, message.client.user.id);
     const replyToBot = await isReplyToBot(message);
 
     if (explicitMention || replyToBot) {

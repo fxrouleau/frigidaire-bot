@@ -70,8 +70,12 @@ export type FakeMessageOptions = {
   // `.members`. `member: false` puts the user in `.users` only (not a guild member). When omitted,
   // `mentionedUserIds` still populates `.users` with bare entries (no display name) for has() checks.
   mentionedUsers?: Array<{ id: string; displayName?: string; username?: string; member?: boolean }>;
-  // The author of the message this one replies to, when Discord resolved it (reply pings on).
+  // The author of the message this one replies to, as discord.js resolves it from the reply's payload
+  // (`mentions.repliedUser`, present whether or not the reply pings).
   repliedUserId?: string | null;
+  // The reply pings its target (Discord's default): like Discord, that also lists the replied-to author in
+  // `mentions.users`, although the text doesn't mention them.
+  replyPinged?: boolean;
   // Display data for `mentions.repliedUser`; a member display name also puts them in guild.members.cache.
   repliedUserDisplayName?: string;
   repliedMemberDisplayName?: string;
@@ -94,6 +98,8 @@ export type FakeMessageOptions = {
   memberIsNull?: boolean;
   historyMessages?: Message[];
   fetchedMessageById?: Record<string, Message>;
+  // The channel's message cache (discord.js caches, among others, the message a reply points to).
+  cachedMessages?: Message[];
   // A channel log with Discord's fetch semantics: fetch({ limit, before, after, around }) filters and
   // limits it by snowflake like the API (ids must be numeric), and fetch(id) finds messages in it. When
   // set, it replaces `historyMessages` for list fetches; `fetchedMessageById` still answers id fetches.
@@ -246,6 +252,9 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
       mentionMembers.set(m.id, { id: m.id, displayName: m.displayName });
     }
   }
+  if (opts.replyPinged && opts.repliedUserId && !mentionUsers.has(opts.repliedUserId)) {
+    mentionUsers.set(opts.repliedUserId, { id: opts.repliedUserId });
+  }
 
   const embeds = (opts.embeds ?? []).map((embed) => ({
     image: embed.imageUrl ? { url: embed.imageUrl, proxyURL: embed.imageProxyUrl } : null,
@@ -387,7 +396,10 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
       send,
       sendTyping,
       createWebhook,
-      messages: { fetch: messagesFetch },
+      messages: {
+        fetch: messagesFetch,
+        cache: new Collection<string, Message>((opts.cachedMessages ?? []).map((m) => [m.id, m])),
+      },
       ...threadFields,
     },
     reply,

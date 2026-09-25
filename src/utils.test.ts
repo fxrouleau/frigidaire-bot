@@ -10,7 +10,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getRelay } from './relay';
 import { BotDb, setBotDbForTesting } from './storage/botDb';
 import { createFakeMessage } from './test-support/fakeDiscord';
-import { type RepostOutcome, repostBlocker, repostMessage, splitMessage, webhookTargetOf } from './utils';
+import {
+  type RepostOutcome,
+  mentionsInText,
+  repostBlocker,
+  repostMessage,
+  splitMessage,
+  webhookTargetOf,
+} from './utils';
 
 describe('splitMessage', () => {
   it('returns a single unchanged chunk for short text', () => {
@@ -489,6 +496,27 @@ describe('webhookTargetOf', () => {
 
   it('has nothing for DMs', () => {
     expect(webhookTargetOf(createFakeMessage({ channelType: ChannelType.DM }).message.channel)).toBeUndefined();
+  });
+});
+
+describe('mentionsInText', () => {
+  it('counts a mention written in the text, not the ping of a reply to that user', () => {
+    const pingedReply = createFakeMessage({
+      content: 'lmao',
+      referencedMessageId: 'm-1',
+      repliedUserId: 'bot-1',
+      replyPinged: true,
+    }).message;
+    expect(pingedReply.mentions.users.has('bot-1')).toBe(true);
+    expect(mentionsInText(pingedReply, 'bot-1')).toBe(false);
+
+    for (const content of ['<@bot-1> lmao', 'lmao <@!bot-1>']) {
+      const both = createFakeMessage({ content, referencedMessageId: 'm-1', repliedUserId: 'bot-1', replyPinged: true });
+      expect(mentionsInText(both.message, 'bot-1')).toBe(true);
+    }
+    const plain = createFakeMessage({ content: 'hey', mentionedUserIds: ['bot-1'] });
+    expect(mentionsInText(plain.message, 'bot-1')).toBe(true);
+    expect(mentionsInText(createFakeMessage({ content: 'hey' }).message, 'bot-1')).toBe(false);
   });
 });
 
