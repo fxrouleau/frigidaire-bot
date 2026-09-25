@@ -416,10 +416,16 @@ export type FakeChannel = {
   recorders: { send: Recorder<[unknown], Promise<unknown>> };
 };
 
-/** A minimal sendable GuildText channel: isTextBased() true + a recording send(). */
-export function createFakeChannel(opts: { id?: string } = {}): FakeChannel {
+/**
+ * A minimal sendable GuildText channel: isTextBased() true + a recording send(). `sendError` makes
+ * every send reject with it (missing permission, a Discord 5xx), after recording the call.
+ */
+export function createFakeChannel(opts: { id?: string; sendError?: Error } = {}): FakeChannel {
   const id = opts.id ?? 'report-channel-1';
-  const send = createRecorder<[unknown], Promise<unknown>>(async (_content: unknown) => ({}) as unknown);
+  const send = createRecorder<[unknown], Promise<unknown>>(async (_content: unknown) => {
+    if (opts.sendError) throw opts.sendError;
+    return {} as unknown;
+  });
   const built = {
     id,
     type: ChannelType.GuildText,
@@ -427,6 +433,13 @@ export function createFakeChannel(opts: { id?: string } = {}): FakeChannel {
     send,
   };
   return { channel: built as unknown as Channel, recorders: { send } };
+}
+
+/** The text of one recorded send() argument, whether it was sent as a string or as `{ content }`. */
+export function sentContent(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
+  if (payload && typeof payload === 'object' && 'content' in payload) return String(payload.content ?? '');
+  return String(payload);
 }
 
 export type FakeClient = {

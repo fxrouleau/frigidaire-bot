@@ -51,7 +51,10 @@ export function getAutoReactor(client: Client): AutoReactor {
       ledger: new AutoReactLedger(),
       emojis: usableEmojis,
       loadImages: (urls, max) => loadImages(urls, max),
-      report: (text) => sendToReportChannel(client, text),
+      // Shadow-mode lines are best-effort: nothing is recorded as "reported", so there is nothing to retry.
+      report: async (text) => {
+        await sendToReportChannel(client, text);
+      },
       // A post the agent is answering (a gate-routed follow-up included) never also gets a reaction.
       wasRouted: (messageId) => addressedGate.wasRouted(messageId),
       // Nor does one by a partner in the gate's active exchange: its follow-ups are the gate's to answer.

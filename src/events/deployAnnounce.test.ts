@@ -2,7 +2,7 @@ import type { Channel } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
-import { createFakeChannel, createFakeClient } from '../test-support/fakeDiscord';
+import { createFakeChannel, createFakeClient, sentContent } from '../test-support/fakeDiscord';
 import { config } from '../config';
 import deployAnnounceEvent, { formatAnnouncement, shouldAnnounce } from './deployAnnounce';
 
@@ -75,12 +75,29 @@ describe('deployAnnounce execute', () => {
     await execute(fakeClient.client);
 
     expect(fakeChannel.recorders.send.calls).toHaveLength(1);
-    expect(String(fakeChannel.recorders.send.calls[0][0])).toContain('🚀 Deployed `abcdef1`');
+    expect(sentContent(fakeChannel.recorders.send.calls[0][0])).toContain('🚀 Deployed `abcdef1`');
     expect(store.getState('deploy:last_announced_sha')).toBe('abcdef1234567890');
 
     // A second boot on the same sha stays silent.
     await execute(fakeClient.client);
     expect(fakeChannel.recorders.send.calls).toHaveLength(1);
+  });
+
+  it('leaves the sha unannounced when the post fails, so the next boot on it tries again', async () => {
+    const failing = createFakeChannel({ id: CHANNEL_ID, sendError: new Error('Missing Access') });
+    const fakeClient = createFakeClient({ channelsById: { [CHANNEL_ID]: failing.channel } });
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    process.env.GIT_SHA = 'abcdef1234567890';
+
+    await execute(fakeClient.client);
+
+    expect(failing.recorders.send.calls).toHaveLength(1);
+    expect(store.getState('deploy:last_announced_sha')).toBeUndefined();
+
+    const { fakeChannel, fakeClient: nextBoot } = setup();
+    await execute(nextBoot.client);
+    expect(fakeChannel.recorders.send.calls).toHaveLength(1);
+    expect(store.getState('deploy:last_announced_sha')).toBe('abcdef1234567890');
   });
 
   it('does not announce when the stored sha already matches', async () => {
@@ -138,7 +155,7 @@ describe('deploy announcement channel block', () => {
 
     await execute(fakeClient.client);
 
-    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
     const [headline, ...rest] = sent.split('\n');
     expect(headline).toMatch(/^🚀 Deployed `abcdef1` · .* ET$/);
     expect(rest).toEqual([

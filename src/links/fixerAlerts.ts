@@ -25,8 +25,11 @@ export type AlertStore = {
 };
 
 export type FixerAlerterOptions = {
-  /** Posts to the report channel. Expected not to throw (sendToReportChannel logs its own failures). */
-  send: (text: string) => Promise<void>;
+  /**
+   * Posts to the report channel; resolves true once the post landed (sendToReportChannel). On false (or a
+   * throw) nothing is recorded, since the channel wasn't told, and the platform is re-checked later.
+   */
+  send: (text: string) => Promise<boolean>;
   /** The platform's current verdict (fixerHealth.platformHealth); re-read when a deferred alert fires. */
   currentState: (platform: Platform) => PlatformState | 'unknown';
   minIntervalMs: number;
@@ -35,6 +38,9 @@ export type FixerAlerterOptions = {
   /** Schedules a deferred re-check; returns its canceller. Defaults to an unref'd setTimeout. */
   schedule?: (callback: () => void, delayMs: number) => () => void;
 };
+
+// How long after a failed post the platform is re-checked (and the alert re-sent if still true).
+const SEND_RETRY_MS = 10 * 60 * 1000;
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS link_fix_alerts (
@@ -126,7 +132,7 @@ export function recoveryAlertText(platform: Platform, detail: string, outageMs: 
  * race each other into the channel out of order.
  */
 export class FixerAlerter {
-  private readonly send: (text: string) => Promise<void>;
+  private readonly send: (text: string) => Promise<boolean>;
   private readonly currentState: (platform: Platform) => PlatformState | 'unknown';
   private readonly minIntervalMs: number;
   private readonly store: AlertStore;
@@ -192,8 +198,9 @@ export class FixerAlerter {
 
     if (current === 'up') {
       this.cancelDeferred(platform);
-      await this.send(recoveryAlertText(platform, detail, announced ? now - announced.at : undefined));
-      this.store.set(platform, { state: 'up', at: now });
+      if (await this.post(platform, recoveryAlertText(platform, detail, announced ? now - announced.at : undefined))) {
+        this.store.set(platform, { state: 'up', at: now });
+      }
       return;
     }
 
@@ -202,17 +209,43 @@ export class FixerAlerter {
     if (wait > 0) {
       if (!this.deferred.has(platform)) {
         logger.info(`linkfix: ${platform} down alert deferred ${formatOutageDuration(wait)} (rate limit)`);
-        const cancel = this.schedule(() => {
-          this.deferred.delete(platform);
-          void this.enqueue(() => this.evaluate(platform));
-        }, wait);
-        this.deferred.set(platform, cancel);
+        this.defer(platform, wait);
       }
       return;
     }
 
     this.cancelDeferred(platform);
-    await this.send(downAlertText(platform, detail));
-    this.store.set(platform, { state: 'down', at: now });
+    if (await this.post(platform, downAlertText(platform, detail))) {
+      this.store.set(platform, { state: 'down', at: now });
+    }
+  }
+
+  /** Re-evaluates the platform after `delayMs` (one pending re-check per platform). */
+  private defer(platform: Platform, delayMs: number): void {
+    if (this.deferred.has(platform)) return;
+    const cancel = this.schedule(() => {
+      this.deferred.delete(platform);
+      void this.enqueue(() => this.evaluate(platform));
+    }, delayMs);
+    this.deferred.set(platform, cancel);
+  }
+
+  /**
+   * Sends one alert. A post that didn't land (the report channel unreachable, a Discord blip) records
+   * nothing and schedules a re-check, which posts whatever is still true then: health changes only fire
+   * on transitions, so without it an outage whose alert failed would never be announced.
+   */
+  private async post(platform: Platform, text: string): Promise<boolean> {
+    let posted = false;
+    try {
+      posted = await this.send(text);
+    } catch (error) {
+      logger.warn(`linkfix: posting the ${platform} alert failed:`, error);
+    }
+    if (!posted) {
+      logger.warn(`linkfix: ${platform} alert not posted; re-checking in ${formatOutageDuration(SEND_RETRY_MS)}`);
+      this.defer(platform, SEND_RETRY_MS);
+    }
+    return posted;
   }
 }

@@ -6,7 +6,7 @@ import { setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
 import { recordUsage } from '../ai/usage';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
-import { createFakeChannel, createFakeClient } from '../test-support/fakeDiscord';
+import { createFakeChannel, createFakeClient, sentContent } from '../test-support/fakeDiscord';
 import reportDigestEvent, { runDigestCheck } from './reportDigest';
 
 const ENV_KEYS = [
@@ -64,7 +64,7 @@ describe('runDigestCheck watermark gating', () => {
     await runDigestCheck(fakeClient.client);
 
     expect(fakeChannel.recorders.send.calls).toHaveLength(1);
-    expect(String(fakeChannel.recorders.send.calls[0][0])).toContain('Cannot read receipts');
+    expect(sentContent(fakeChannel.recorders.send.calls[0][0])).toContain('Cannot read receipts');
     expect(store.getState(WATERMARK_KEY)).toBeDefined();
   });
 
@@ -76,7 +76,7 @@ describe('runDigestCheck watermark gating', () => {
 
     await runDigestCheck(fakeClient.client);
 
-    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
     const today = new Date().toISOString().slice(0, 10);
     expect(sent).toContain(`${eightDaysAgo.toISOString().slice(0, 10)} → ${today}`);
   });
@@ -88,10 +88,31 @@ describe('runDigestCheck watermark gating', () => {
 
     await runDigestCheck(fakeClient.client);
 
-    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
     expect(sent).toContain('🩺 Self-diagnosis digest (5 weeks)');
     expect(sent).toContain('(1 new since the last digest)');
     expect(sent).not.toContain('this week');
+  });
+
+  it('keeps the watermark when the post fails, so the next check posts the same period', async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    store.setState(WATERMARK_KEY, eightDaysAgo);
+    await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot read receipts' });
+    const failing = createFakeChannel({ id: CHANNEL_ID, sendError: new Error('503 Service Unavailable') });
+
+    await runDigestCheck(createFakeClient({ channelsById: { [CHANNEL_ID]: failing.channel } }).client);
+
+    expect(failing.recorders.send.calls).toHaveLength(1);
+    expect(store.getState(WATERMARK_KEY)).toBe(eightDaysAgo);
+
+    await runDigestCheck(fakeClient.client);
+
+    expect(fakeChannel.recorders.send.calls).toHaveLength(1);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
+    expect(sent).toContain('Cannot read receipts');
+    expect(sent).toContain(eightDaysAgo.slice(0, 10));
+    expect(store.getState(WATERMARK_KEY)).not.toBe(eightDaysAgo);
   });
 
   it('does not post when the last run is within the period', async () => {
@@ -121,7 +142,7 @@ describe('runDigestCheck watermark gating', () => {
 
     await runDigestCheck(fakeClient.client);
 
-    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
     expect(sent).toContain('bot gap visible');
     expect(sent).not.toContain('user gap hidden');
   });
@@ -152,7 +173,7 @@ describe('runDigestCheck privacy', () => {
 
     await runDigestCheck(fakeClient.client);
 
-    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
     // The capture is counted and its privacy-safe network-error code surfaces as a label...
     expect(sent).toContain('AI errors captured (data/debug) — 1');
     expect(sent).toContain('ECONNRESET');
@@ -194,7 +215,7 @@ describe('runDigestCheck spend', () => {
 
     await runDigestCheck(fakeClient.client);
 
-    const sent = fakeChannel.recorders.send.calls.map((c) => String(c[0])).join('\n');
+    const sent = fakeChannel.recorders.send.calls.map((c) => sentContent(c[0])).join('\n');
     expect(sent).toContain('— $0.35 over 2 calls');
     expect(sent).toContain('by feature: chat $0.25 (1 call) · learner $0.10 (1 call)');
     expect(sent).not.toContain('gemini-image');
@@ -206,6 +227,6 @@ describe('runDigestCheck spend', () => {
 
     await runDigestCheck(fakeClient.client);
 
-    expect(String(fakeChannel.recorders.send.calls[0][0])).not.toContain('Spend');
+    expect(sentContent(fakeChannel.recorders.send.calls[0][0])).not.toContain('Spend');
   });
 });
