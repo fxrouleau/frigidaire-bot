@@ -5,14 +5,24 @@
 //
 // One summary call on a tiny synthetic transcript: a fraction of a cent.
 import { Collection, type FetchMessagesOptions, type Message, SnowflakeUtil } from 'discord.js';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { createFakeMessage } from '../../test-support/fakeDiscord';
+import { setMemoryStoreForTesting } from '../memory';
+import { MemoryStore } from '../memory/memoryStore';
 import { summarizeChannel } from './summary';
 
 const RUN_LIVE = process.env.RUN_LIVE === '1' && !!process.env.OPENROUTER_API_KEY;
 
 describe.skipIf(!RUN_LIVE)('summarizeChannel live (paid, opt-in)', () => {
-  it('summarizes a short synthetic chat through the ZDR-routed chat model', async () => {
+  afterEach(() => setMemoryStoreForTesting(undefined));
+
+  it('summarizes a short synthetic chat through the ZDR-routed chat model, without leaking background', async () => {
+    // Background memories are context only: a fact nobody said in the chat must not show up in the summary.
+    const store = new MemoryStore(':memory:');
+    setMemoryStoreForTesting(store);
+    store.upsertIdentity('u1', 'Jason', 'cigalefourmi');
+    await store.save({ category: 'fact', subject: 'Jason', subject_user_id: 'u1', content: 'Keeps eleven pet iguanas' });
+
     const now = new Date();
     const lines: [string, string, string][] = [
       ['u1', 'Jason', 'who is down for wings friday at 8'],
@@ -42,5 +52,7 @@ describe.skipIf(!RUN_LIVE)('summarizeChannel live (paid, opt-in)', () => {
     expect(result).toMatch(/^Summary of this channel from /);
     expect(result).not.toMatch(/model call failed|returned nothing/);
     expect(result.toLowerCase()).toContain('wings');
+    expect(result.toLowerCase()).not.toContain('iguana');
+    expect(result).toContain('People in this stretch: Jason, Simon, Felix.');
   }, 60_000);
 });

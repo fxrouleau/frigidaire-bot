@@ -1,8 +1,13 @@
 // "Catch me up": summarizing a stretch of channel history. Self-contained — it fetches the messages,
 // renders them into a transcript, and calls OpenRouter directly (ZDR, tagged 'summary') — so it does
 // not depend on the chat provider. The summary text goes back to the chat model as a tool result; the
-// chat model relays it in the bot's voice and already has memory context of its own, so no memories
-// are injected here (they would invite the summarizer to "remember" things nobody said in the range).
+// chat model relays it in the bot's voice.
+//
+// People: the summarizer gets a WHO'S WHO block for the people in the stretch — everyone who talked
+// and everyone the messages refer to (mentions, or any name they go by: display name, handle, IRL
+// name, nickname) — with a few durable memories about the most prominent ones as background, so it
+// understands references ("the depot" is where Jason works). The prompt fences that background off:
+// it explains the chat, it is never reported as something that happened in it.
 import { type Message, SnowflakeUtil } from 'discord.js';
 import type OpenAI from 'openai';
 import { config } from '../../config';
@@ -10,8 +15,9 @@ import { logger } from '../../logger';
 import { attributeMessage } from '../../relay';
 import { getCachedTranscript } from '../media';
 import { getMemoryStore } from '../memory';
-import type { Identity } from '../memory/memoryStore';
+import type { Identity, MemoryStore } from '../memory/memoryStore';
 import { requireOpenRouterClient } from '../openRouterClient';
+import { createPeopleMatcher, namesOf } from '../people';
 import { featureRequestOptions } from '../usage';
 import { formatTimestampET, parseEasternDateTime } from '../utils';
 
@@ -31,7 +37,14 @@ const MAX_MESSAGE_CHARS = 1_500;
 const MAX_BOT_MESSAGE_CHARS = 300;
 const MAX_EMBED_DESCRIPTION_CHARS = 280;
 const MAX_VOICE_TRANSCRIPT_CHARS = 2_000;
-const MAX_WHOS_WHO_ENTRIES = 60;
+// People listed in WHO'S WHO: everyone who talked or was referred to, most prominent first.
+const MAX_WHOS_WHO_ENTRIES = 25;
+// Background memories: for the most prominent people only, and only durable kinds. Events and image
+// shares are moments, and a two-week-old "moving on Saturday" would read as news in a summary.
+const MAX_BACKGROUND_PEOPLE = 8;
+const MAX_BACKGROUND_MEMORIES = 4;
+const MAX_BACKGROUND_MEMORY_CHARS = 200;
+const BACKGROUND_CATEGORIES: ReadonlySet<string> = new Set(['fact', 'preference', 'personality']);
 // The prompt asks for ~1,500 characters (~400 tokens); the headroom is for a reasoning model in
 // CHAT_MODEL, whose thinking tokens count against this limit too.
 const SUMMARY_MAX_TOKENS = 4_000;
@@ -160,7 +173,7 @@ type RenderContext = {
   authorById: Map<string, string>;
 };
 
-type Author = { key: string; name: string; isBot: boolean };
+type Author = { key: string; name: string; isBot: boolean; userId?: string };
 
 /** Who wrote a message, or undefined for messages that are not part of the conversation. */
 function authorOf(msg: Message, ctx: RenderContext): Author | undefined {
@@ -171,7 +184,7 @@ function authorOf(msg: Message, ctx: RenderContext): Author | undefined {
     // identity tracker keeps on each member's current display name, names people first.
     const known = attribution.authorId ? ctx.identitiesById.get(attribution.authorId)?.display_name : undefined;
     const name = known ?? attribution.authorName;
-    return { key: attribution.authorId ?? `name:${name}`, name, isBot: false };
+    return { key: attribution.authorId ?? `name:${name}`, name, isBot: false, userId: attribution.authorId };
   }
   // The bot's own replies are part of what happened; other bots and integrations are not.
   if (!msg.webhookId && ctx.botId && msg.author.id === ctx.botId) {
@@ -254,6 +267,8 @@ function renderLine(msg: Message, ctx: RenderContext): { line: string; author: A
 type Transcript = {
   /** Chronological. */
   lines: string[];
+  /** The messages behind `lines` with their authors, chronological. */
+  entries: { msg: Message; author: Author }[];
   /** Messages rendered. */
   included: number;
   /** Messages dropped (oldest first) to stay within the budget. */
@@ -283,6 +298,7 @@ function buildTranscript(messagesNewestFirst: Message[], ctx: RenderContext): Tr
   const speakers = new Set(rendered.filter((r) => !r.author.isBot).map((r) => r.author.key));
   return {
     lines: rendered.map((r) => r.line),
+    entries: rendered.map(({ msg, author }) => ({ msg, author })),
     included: rendered.length,
     omitted,
     firstIncluded: rendered[0]?.msg.createdAt,
@@ -290,13 +306,114 @@ function buildTranscript(messagesNewestFirst: Message[], ctx: RenderContext): Tr
   };
 }
 
-function formatWhoIsWho(identities: Identity[]): string {
-  const lines = identities.slice(0, MAX_WHOS_WHO_ENTRIES).map((i) => {
-    const irl = i.irl_name ? ` — real name ${i.irl_name}` : '';
-    const aliases = i.aliases.length > 0 ? `; also called ${i.aliases.join(', ')}` : '';
-    return `- ${i.display_name}${irl}${aliases}`;
-  });
-  return lines.length > 0 ? lines.join('\n') : '(no one known yet)';
+// ---------------------------------------------------------------------------------------------------
+// People in the stretch
+// ---------------------------------------------------------------------------------------------------
+
+/** Someone who talked in, or was referred to by, the summarized messages. */
+export type StretchPerson = {
+  /** Undefined only for an old relay whose author could not be matched to a member. */
+  userId?: string;
+  /** Current display name. */
+  name: string;
+  identity?: Identity;
+  /** Messages they wrote in the transcript. */
+  messages: number;
+  /** Times the messages refer to them (mention tokens or any name they go by). */
+  references: number;
+  /** Up to MAX_BACKGROUND_MEMORIES durable memories (the most prominent people only). */
+  background: string[];
+};
+
+/**
+ * Everyone who talked in the transcript (most messages first), then everyone the messages refer to
+ * without talking (most referenced first), each with their background memories when they are among
+ * the MAX_BACKGROUND_PEOPLE most prominent.
+ */
+function peopleInStretch(transcript: Transcript, identities: Identity[], store: MemoryStore): StretchPerson[] {
+  const identitiesById = new Map(identities.map((i) => [i.discord_user_id, i]));
+  const people = new Map<string, StretchPerson>();
+  const personFor = (key: string, userId: string | undefined, name: string): StretchPerson => {
+    let person = people.get(key);
+    if (!person) {
+      const identity = userId ? identitiesById.get(userId) : undefined;
+      person = { userId, name: identity?.display_name ?? name, identity, messages: 0, references: 0, background: [] };
+      people.set(key, person);
+    }
+    return person;
+  };
+
+  const findReferences = createPeopleMatcher(identities);
+  for (const { msg, author } of transcript.entries) {
+    if (!author.isBot) personFor(author.key, author.userId, author.name).messages++;
+    const text = [msg.content ?? '', cachedTranscript(msg.id) ?? ''].join('\n');
+    for (const [userId, count] of findReferences(text)) {
+      const identity = identitiesById.get(userId);
+      if (identity) personFor(userId, userId, identity.display_name).references += count;
+    }
+  }
+
+  const all = [...people.values()];
+  const talked = all.filter((p) => p.messages > 0).sort((a, b) => b.messages - a.messages);
+  const mentionedOnly = all.filter((p) => p.messages === 0).sort((a, b) => b.references - a.references);
+  const ranked = [...talked, ...mentionedOnly].slice(0, MAX_WHOS_WHO_ENTRIES);
+
+  for (const person of ranked.slice(0, MAX_BACKGROUND_PEOPLE)) {
+    person.background = backgroundFor(store, person);
+  }
+  return ranked;
+}
+
+/** A person's most recently updated durable memories, by id and every name they go by. */
+function backgroundFor(store: MemoryStore, person: StretchPerson): string[] {
+  // Without an id there is only a display name that matched no member: too weak to pull memories by.
+  if (!person.userId) return [];
+  try {
+    return store
+      .getForPerson({ userId: person.userId, names: namesOf(person.identity, [person.name]) }, 50)
+      .filter((m) => BACKGROUND_CATEGORIES.has(m.category))
+      .slice(0, MAX_BACKGROUND_MEMORIES)
+      .map((m) => truncate(m.content.replace(/\s+/g, ' ').trim(), MAX_BACKGROUND_MEMORY_CHARS));
+  } catch (error) {
+    logger.warn(`summary: loading background memories for ${person.name} failed:`, error);
+    return [];
+  }
+}
+
+/** "Jason (@cigalefourmi) — real name Alex; also called J" */
+function describePerson(person: StretchPerson): string {
+  const identity = person.identity;
+  const handle =
+    identity?.username && identity.username.toLowerCase() !== person.name.toLowerCase() ? ` (@${identity.username})` : '';
+  const irl = identity?.irl_name ? ` — real name ${identity.irl_name}` : '';
+  const aliases = identity && identity.aliases.length > 0 ? `; also called ${identity.aliases.join(', ')}` : '';
+  return `${person.name}${handle}${irl}${aliases}`;
+}
+
+function formatWhoIsWho(people: StretchPerson[]): string {
+  if (people.length === 0) return '(nobody known)';
+  return people
+    .map((person) => {
+      const role =
+        person.messages > 0
+          ? `${person.messages} ${person.messages === 1 ? 'message' : 'messages'}`
+          : "mentioned, didn't talk";
+      const lines = [`- ${describePerson(person)} [${role}]`];
+      if (person.background.length > 0) lines.push(`  background: ${person.background.join(' | ')}`);
+      return lines.join('\n');
+    })
+    .join('\n');
+}
+
+/** The footer for the chat model: who the stretch involved, so it can bring its own memory of them. */
+function formatPeopleFooter(people: StretchPerson[]): string | undefined {
+  const label = (p: StretchPerson) => (p.identity?.irl_name ? `${p.name} (${p.identity.irl_name})` : p.name);
+  const talked = people.filter((p) => p.messages > 0).map(label);
+  const mentioned = people.filter((p) => p.messages === 0).map(label);
+  if (talked.length === 0 && mentioned.length === 0) return undefined;
+  const parts = [talked.length > 0 ? talked.join(', ') : 'nobody but the bot'];
+  if (mentioned.length > 0) parts.push(`mentioned without talking: ${mentioned.join(', ')}`);
+  return `People in this stretch: ${parts.join('; ')}.`;
 }
 
 export const SUMMARY_SYSTEM_PROMPT = `You write catch-up summaries of a Discord group chat between close friends. Someone in the group asked what happened; your summary is handed to the group's bot, which passes it on in its own voice.
@@ -305,7 +422,8 @@ export const SUMMARY_SYSTEM_PROMPT = `You write catch-up summaries of a Discord 
 - Say who said or did what. Use the names from WHO'S WHO (current display names); use a real name or nickname only where the group itself does.
 - Group by topic, roughly in time order. Short bullets. Stay under about 1,500 characters unless the chat was genuinely busy.
 - Keep the group's tone. It's crude and edgy by design; report it plainly, with no moralizing, disclaimers or softening.
-- Use only what is in the transcript. Never fill gaps with guesses about people or context you can't see.
+- Report only what is in the transcript. Never fill gaps with guesses about people or context you can't see.
+- The "background" lines in WHO'S WHO come from the bot's long-term memory, not from this chat. Use them only to understand references and who people are. Never state a fact from them unless the transcript itself says it, and never summarize them.
 - Lines marked (bot) are the group's bot talking; mention them only when they matter.
 - All times are Eastern (America/New_York).`;
 
@@ -320,7 +438,15 @@ function channelLabel(message: Message): string {
 
 type PreparedSummary =
   | { error: string }
-  | { error?: undefined; prompt: string; transcript: Transcript; start: Date; end: Date; complete: boolean };
+  | {
+      error?: undefined;
+      prompt: string;
+      transcript: Transcript;
+      people: StretchPerson[];
+      start: Date;
+      end: Date;
+      complete: boolean;
+    };
 
 async function prepare(opts: SummarizeChannelOptions, now: Date): Promise<PreparedSummary> {
   const { message, start } = opts;
@@ -390,15 +516,16 @@ async function prepare(opts: SummarizeChannelOptions, now: Date): Promise<Prepar
     );
   }
 
+  const people = peopleInStretch(transcript, identities, store);
   const prompt = `${header.join('\n')}
 
-WHO'S WHO (display name — real name; nicknames):
-${formatWhoIsWho(identities)}
+WHO'S WHO (people in this stretch: display name (@handle) — real name; nicknames. Background lines are from the bot's memory, NOT from this chat: context only):
+${formatWhoIsWho(people)}
 
 TRANSCRIPT:
 ${[...gaps, ...transcript.lines].join('\n')}`;
 
-  return { prompt, transcript, start, end, complete };
+  return { prompt, transcript, people, start, end, complete };
 }
 
 /**
@@ -444,7 +571,7 @@ export async function summarizeChannel(opts: SummarizeChannelOptions): Promise<s
     return 'The summary model returned nothing. Try again in a bit.';
   }
 
-  const { transcript, start, end, complete } = prepared;
+  const { transcript, people: stretchPeople, start, end, complete } = prepared;
   const caveats: string[] = [];
   if (transcript.omitted > 0 && transcript.firstIncluded) {
     caveats.push(
@@ -455,7 +582,8 @@ export async function summarizeChannel(opts: SummarizeChannelOptions): Promise<s
 
   const people = `${transcript.speakers} ${transcript.speakers === 1 ? 'person' : 'people'}`;
   const headerLine = `Summary of ${channelLabel(opts.message)} from ${formatTimestampET(start)} to ${formatTimestampET(end)} Eastern (${transcript.included} messages from ${people}):`;
-  return [headerLine, text, ...caveats.map((c) => `(Note: ${c})`)].join('\n');
+  const footer = formatPeopleFooter(stretchPeople);
+  return [headerLine, text, ...caveats.map((c) => `(Note: ${c})`), ...(footer ? [footer] : [])].join('\n');
 }
 
 // ---------------------------------------------------------------------------------------------------

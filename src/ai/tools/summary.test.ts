@@ -180,20 +180,83 @@ describe('summarizeChannel', () => {
     expect(userPrompt(requests[0])).toContain('] Jason: hi');
   });
 
-  it("includes a who's-who block from identities and never injects memories", async () => {
-    await store.save({ category: 'fact', subject: 'Jason', subject_user_id: 'u-jason', content: 'Secretly owns eleven cats' });
-    const { trigger } = channelWith([said(30, 'jason', 'anyway')]);
+  it("gives a who's-who with background memories for the people who talked and the people referenced", async () => {
+    store.upsertIdentity('u-jason', 'Jason', 'cigalefourmi');
+    store.upsertIdentity('u-bob', 'Bob');
+    store.upsertIdentity('123456789012345678', 'Wheezer');
+    await store.save({ category: 'fact', subject: 'Jason', subject_user_id: 'u-jason', content: 'Works nights at the depot' });
+    // Filed under his handle, without an id: still his (every name he goes by counts).
+    await store.save({ category: 'preference', subject: 'cigalefourmi', content: 'Hates pineapple on pizza' });
+    await store.save({ category: 'event', subject: 'Jason', subject_user_id: 'u-jason', content: 'Moving apartments on Saturday' });
+    await store.save({ category: 'image', subject: 'Jason', subject_user_id: 'u-jason', content: 'Shared a hotdog photo' });
+    await store.save({ category: 'fact', subject: 'Felix', subject_user_id: 'u-felix', content: 'Owns a husky named Loki' });
+    await store.save({ category: 'fact', subject: 'Bob', subject_user_id: 'u-bob', content: 'Lives in Ottawa' });
+    const { trigger } = channelWith([
+      said(30, 'jason', 'has anyone seen fefe today'),
+      said(25, 'simon', 'no but <@123456789012345678> owes me 20 bucks'),
+    ]);
+    const { client, requests } = okClient();
+
+    const result = await summarizeChannel({ message: trigger, start: new Date(NOW.getTime() - HOUR), client, now });
+
+    const prompt = userPrompt(requests[0]);
+    expect(prompt).toContain("WHO'S WHO");
+    expect(prompt).toContain('- Jason (@cigalefourmi) [1 message]');
+    expect(prompt).toMatch(/background: .*Works nights at the depot/);
+    expect(prompt).toMatch(/background: .*Hates pineapple on pizza/);
+    expect(prompt).toContain('- Simon [1 message]');
+    expect(prompt).toContain("- Felix — real name Félix R; also called Fefe [mentioned, didn't talk]");
+    expect(prompt).toContain('background: Owns a husky named Loki');
+    expect(prompt).toContain("- Wheezer [mentioned, didn't talk]");
+    // Moments are not background, and nobody outside the stretch is listed.
+    expect(prompt).not.toContain('Moving apartments');
+    expect(prompt).not.toContain('hotdog');
+    expect(prompt).not.toContain('Bob');
+    expect(prompt).not.toContain('Ottawa');
+
+    const system = (requests[0].body.messages as { role: string; content: string }[])[0];
+    expect(system.role).toBe('system');
+    expect(system.content).toContain('Report only what is in the transcript');
+    expect(system.content).toContain('Never state a fact from them unless the transcript itself says it');
+
+    expect(result.split('\n').at(-1)).toBe('People in this stretch: Jason, Simon; mentioned without talking: Felix (Félix R), Wheezer.');
+  });
+
+  it('caps background at the 8 most active people and 4 memories each, and never throws on a memory failure', async () => {
+    const history: Message[] = [];
+    for (let p = 0; p < 10; p++) {
+      store.upsertIdentity(`u-p${p}`, `Person${p}`);
+      for (let m = 0; m < 5; m++) {
+        await store.save({ category: 'fact', subject: `Person${p}`, subject_user_id: `u-p${p}`, content: `trait ${m} of person ${p} xyz${p}${m}` });
+      }
+      // Person0 talks the most, Person9 the least.
+      for (let n = 0; n < 10 - p; n++) {
+        history.push(msgAt(50 - p - n / 20, { authorId: `u-p${p}`, authorDisplayName: `Person${p}`, content: `hello ${n}` }));
+      }
+    }
+    const { trigger } = channelWith(history);
     const { client, requests } = okClient();
 
     await summarizeChannel({ message: trigger, start: new Date(NOW.getTime() - HOUR), client, now });
 
     const prompt = userPrompt(requests[0]);
-    expect(prompt).toContain("WHO'S WHO");
-    expect(prompt).toContain('- Felix — real name Félix R; also called Fefe');
-    expect(prompt).not.toContain('eleven cats');
-    const system = (requests[0].body.messages as { role: string; content: string }[])[0];
-    expect(system.role).toBe('system');
-    expect(system.content).toContain('Use only what is in the transcript');
+    const whoIsWho = prompt.slice(prompt.indexOf("WHO'S WHO"), prompt.indexOf('TRANSCRIPT:'));
+    const backgrounds = whoIsWho.split('\n').filter((line) => line.trim().startsWith('background:'));
+    expect(backgrounds).toHaveLength(8);
+    for (const line of backgrounds) expect(line.split(' | ')).toHaveLength(4);
+    expect(whoIsWho).toContain('- Person0 [10 messages]');
+    expect(whoIsWho).toContain('- Person9 [1 message]');
+    expect(whoIsWho.indexOf('Person0')).toBeLessThan(whoIsWho.indexOf('Person9'));
+    expect(whoIsWho).not.toMatch(/xyz9\d/);
+
+    // A memory-store failure costs the background, never the summary.
+    vi.spyOn(store, 'getForPerson').mockImplementation(() => {
+      throw new Error('database is locked');
+    });
+    const again = okClient();
+    const result = await summarizeChannel({ message: trigger, start: new Date(NOW.getTime() - HOUR), client: again.client, now });
+    expect(result).toContain('Jason and Simon argued about pizza.');
+    expect(userPrompt(again.requests[0])).not.toContain('background:');
   });
 
   it('names who asked', async () => {
