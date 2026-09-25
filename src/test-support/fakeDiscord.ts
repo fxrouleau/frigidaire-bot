@@ -7,6 +7,7 @@ import {
   type Client,
   Collection,
   type Message,
+  MessageFlagsBitField,
   type OmitPartialGroupDMChannel,
 } from 'discord.js';
 import { type Recorder, createRecorder } from './recorder';
@@ -30,13 +31,18 @@ export type FakeMessageOptions = {
   botDisplayName?: string;
   channelId?: string;
   channelType?: ChannelType;
+  // A thread's parent channel id (threads only; null elsewhere, like discord.js).
+  channelParentId?: string | null;
   messageId?: string;
   webhookId?: string | null;
   // Discord stamps the owning application's id on messages from application-owned webhooks (the bot's
   // own relays) and on interaction responses.
   applicationId?: string | null;
   createdAt?: Date;
-  attachments?: Array<{ url: string; contentType: string | null; name?: string }>;
+  // `duration` (seconds) is set by Discord on voice-message attachments; `id` defaults to `att-<index>`.
+  attachments?: Array<{ url: string; contentType: string | null; name?: string; id?: string; duration?: number | null }>;
+  // Raw MessageFlags bits, e.g. MessageFlags.IsVoiceMessage.
+  flags?: number;
   embeds?: Array<{
     imageUrl?: string;
     imageProxyUrl?: string;
@@ -108,9 +114,19 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   const historyMessages = opts.historyMessages ?? [];
   const fetchedMessageById = opts.fetchedMessageById ?? {};
 
-  const attachments = new Collection<string, { contentType: string | null; url: string; name: string }>();
+  const attachments = new Collection<
+    string,
+    { id: string; contentType: string | null; url: string; name: string; duration: number | null }
+  >();
   (opts.attachments ?? []).forEach((att, index) => {
-    attachments.set(`att-${index}`, { contentType: att.contentType, url: att.url, name: att.name ?? `file-${index}` });
+    const id = att.id ?? `att-${index}`;
+    attachments.set(id, {
+      id,
+      contentType: att.contentType,
+      url: att.url,
+      name: att.name ?? `file-${index}`,
+      duration: att.duration ?? null,
+    });
   });
 
   const stickers = new Collection<string, { id: string; name: string; format: number }>();
@@ -184,6 +200,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     partial: false,
     webhookId,
     applicationId: opts.applicationId ?? null,
+    flags: new MessageFlagsBitField(opts.flags ?? 0).freeze(),
     author: {
       id: authorId,
       username: authorUsername,
@@ -206,6 +223,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     channel: {
       id: channelId,
       type: channelType,
+      parentId: opts.channelParentId ?? null,
       isTextBased: () => true,
       send,
       sendTyping,

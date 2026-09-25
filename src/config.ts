@@ -282,7 +282,46 @@ export const config = {
   archive: {},
 
   /** Voice-message transcription and video understanding (src/ai/media/). */
-  media: {},
+  media: {
+    // Default model for both: Gemini Flash-Lite hears audio and watches video natively (32 tokens per
+    // second of audio, ~100 per second of video), is served with zero data retention on Google Vertex,
+    // and costs roughly $0.0015 per minute of voice message.
+    /** Audio-input chat model that transcribes voice messages and audio files (ZDR endpoints required). */
+    get transcriptionModel(): string {
+      return envString('TRANSCRIPTION_MODEL') ?? 'google/gemini-3.5-flash-lite';
+    },
+    /** Model that describes videos: sent the clip itself, or keyframes + transcript (see videoInputMode). */
+    get videoModel(): string {
+      return envString('VIDEO_MODEL') ?? 'google/gemini-3.5-flash-lite';
+    },
+    /** Reply to members' voice messages with a transcript. */
+    get voiceAutoTranscribe(): boolean {
+      return envBool('VOICE_AUTO_TRANSCRIBE', true);
+    },
+    /** Channel ids (a thread matches through its parent) where auto-transcripts are posted; empty ⇒ all. */
+    get voiceTranscribeChannels(): string[] {
+      return envCsv('VOICE_TRANSCRIBE_CHANNELS');
+    },
+    /** Longer recordings are not transcribed at all (cost and latency guard). */
+    get voiceMaxSeconds(): number {
+      return envInt('VOICE_MAX_SECONDS', 600, { min: 1 });
+    },
+    /** Largest clip sent to the video model as-is; bigger ones go through keyframe sampling. */
+    get videoMaxBytes(): number {
+      return envInt('VIDEO_MAX_BYTES', 20 * 1024 * 1024, { min: 1024 });
+    },
+    /** Longest clip sent to the video model as-is; longer ones go through keyframe sampling. */
+    get videoMaxSeconds(): number {
+      return envInt('VIDEO_MAX_SECONDS', 300, { min: 1 });
+    },
+    /**
+     * 'auto' sends whole clips to models known to take video input (Gemini) and keyframes to anything
+     * else; 'native' / 'frames' force one path.
+     */
+    get videoInputMode(): 'auto' | 'native' | 'frames' {
+      return envEnum('VIDEO_INPUT_MODE', ['auto', 'native', 'frames'] as const, 'auto');
+    },
+  },
 
   /** Reading shared links (src/ai/linkReader/). */
   linkReader: {},
