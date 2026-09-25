@@ -119,6 +119,20 @@ export function parseChannelNotes(raw: string | undefined): { notes: Record<stri
   return { notes, invalid: false };
 }
 
+const SNOWFLAKE = /^\d{15,21}$/;
+
+/** Parses `sideId:mainId` pairs into side → main. Malformed entries and self-links are dropped. */
+export function parseLinkedAccounts(entries: string[]): Map<string, string> {
+  const links = new Map<string, string>();
+  for (const entry of entries) {
+    const [side, main, ...rest] = entry.split(':').map((part) => part.trim());
+    if (rest.length > 0 || !side || !main || side === main) continue;
+    if (!SNOWFLAKE.test(side) || !SNOWFLAKE.test(main)) continue;
+    links.set(side, main);
+  }
+  return links;
+}
+
 export const config = {
   discord: {
     /** The bot token. Required in prod. */
@@ -403,6 +417,13 @@ export const config = {
     /** The channel the group actually talks in; proactive posts default here. Unset ⇒ proactive posts off. */
     get mainChannelId(): string | undefined {
       return envString('MAIN_CHANNEL_ID');
+    },
+    /**
+     * Side accounts that belong to the same person as a main account, as `sideId:mainId` pairs
+     * (LINKED_ACCOUNTS, csv). Malformed pairs and self-links are ignored. See src/linkedAccounts.ts.
+     */
+    get linkedAccounts(): Map<string, string> {
+      return parseLinkedAccounts(envCsv('LINKED_ACCOUNTS'));
     },
   },
 

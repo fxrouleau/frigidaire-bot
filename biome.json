@@ -15,7 +15,8 @@
       ".idea",
       ".DS_Store",
       "src/**/*.test.ts",
-      "src/test-support/fixtures"
+      "src/test-support/fixtures",
+      ".claude/worktrees"
     ]
   },
   "formatter": {
