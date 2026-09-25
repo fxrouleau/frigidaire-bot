@@ -82,7 +82,6 @@ describe('readGif', () => {
           url: 'https://media.tenor.com/FNVOSJ9lj1wAAAAe/sir-cat.png',
           alt: 'a black cat wearing a striped tie and collar is sitting on the floor.',
         },
-        { type: 'image', url: 'https://media1.tenor.com/m/FNVOSJ9lj1wAAAAC/sir-cat.gif', alt: 'animated' },
       ],
       notes: undefined,
     });
@@ -101,9 +100,18 @@ describe('readGif', () => {
       site: 'Klipy',
       media: [
         { type: 'image', url: 'https://static2.klipy.com/ii/abc/f6/76/uOgjQfnT.jpg', alt: 'Cat Reaction Michi Triste' },
-        { type: 'image', url: 'https://static2.klipy.com/ii/abc/f6/76/SOXcy67n.gif', alt: 'animated' },
       ],
     });
+  });
+
+  it('falls back to the animated GIF when the page has no still', async () => {
+    const fetch = createFakeSafeFetch({
+      'https://tenor.com/view/x-gif-123456789': {
+        body: htmlPage({ 'og:title': 'X - Discover &amp; Share GIFs', 'og:image': 'https://media1.tenor.com/m/abc/x.gif' }),
+      },
+    });
+    const content = await readGif({ source: 'tenor', url: 'https://tenor.com/view/x-gif-123456789' }, fakeExtractorContext(fetch));
+    expect(content.media).toEqual([{ type: 'image', url: 'https://media1.tenor.com/m/abc/x.gif', alt: 'X' }]);
   });
 
   it('reads a Klipy clip as a short video with its tags', async () => {

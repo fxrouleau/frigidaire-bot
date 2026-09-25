@@ -3,6 +3,7 @@
 import { config } from '../../config';
 import { formatLinkForTool } from '../linkReader/format';
 import { getLinkReader } from '../linkReader/reader';
+import { isDiscordUrl } from '../linkReader/targets';
 import type { ToolDefinition, TurnEffects } from '../types';
 
 // A turn that reads more links than this is looping (or being steered by a page that says "now open
@@ -25,6 +26,14 @@ export function normalizeUrlArgument(raw: unknown): string | undefined {
   return url;
 }
 
+function isDiscordLink(url: string): boolean {
+  try {
+    return isDiscordUrl(new URL(url));
+  } catch {
+    return false;
+  }
+}
+
 const readLinkTool: ToolDefinition = {
   name: 'read_link',
   description:
@@ -41,6 +50,9 @@ const readLinkTool: ToolDefinition = {
   handler: async (ctx, args) => {
     const url = normalizeUrlArgument(args.url);
     if (!url) return 'read_link needs a single http(s) URL.';
+    if (isDiscordLink(url)) {
+      return "That's a Discord link (a message, invite or attachment): read_link can't open Discord itself.";
+    }
     const used = readsPerTurn.get(ctx.turn) ?? 0;
     if (used >= MAX_READS_PER_TURN) {
       return `Already opened ${MAX_READS_PER_TURN} links this turn; answer with what you have.`;

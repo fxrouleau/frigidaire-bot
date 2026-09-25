@@ -75,6 +75,12 @@ describe('read_link', () => {
     expect(fetch.calls).toHaveLength(0);
   });
 
+  it("doesn't try to open Discord's own links", async () => {
+    const { fetch } = installReader();
+    expect(await readLink.handler(context(), { url: 'https://discord.com/channels/1/2/3' })).toMatch(/Discord link/);
+    expect(fetch.calls).toHaveLength(0);
+  });
+
   it('caps the number of reads per turn', async () => {
     installReader();
     const ctx = context();

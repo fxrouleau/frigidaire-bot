@@ -9,8 +9,7 @@
 //   - Klipy /gifs|stickers|clips|memes/<slug>: og:title "KLIPY: <Name> GIF – View & Share", og:image =
 //     a webp still and the GIF, og:video = mp4; JSON-LD ImageObject (GIFs) or VideoObject (clips) with
 //     the clean `name`, a still `thumbnailUrl` and, for clips, a tag list in `description`.
-// The model gets the title, the description/tags, and a still frame as the image (models read the
-// first frame of an animated GIF anyway, and a still is a fraction of the bytes).
+// The model gets the title, the description/tags, and a still frame as the image.
 import { logger } from '../../../logger';
 import { extractJsonLd, extractMetadata, findTags } from '../html';
 import { DISCORD_CRAWLER_UA } from '../safeFetch';
@@ -135,12 +134,12 @@ export async function readGif(
   const description = [alt, tags.length > 0 ? `tags: ${tags.join(', ')}` : undefined].filter(Boolean).join('\n');
 
   const media: LinkMedia[] = [];
-  // A still first (what the model is shown), then the animation itself for reference.
+  // One image: a still when the page offers one (the model only reads the first frame of an animated
+  // GIF anyway), else the GIF itself. A second copy of the same picture would only cost tokens.
   const still = object?.thumbnailUrl ?? meta.images.find((url) => !/\.gif(?:[?#]|$)/i.test(url));
   const animated = meta.images.find((url) => /\.gif(?:[?#]|$)/i.test(url)) ?? object?.contentUrl;
-  if (still) media.push({ type: 'image', url: still, alt: alt ?? title });
-  if (animated && animated !== still && kind !== 'video clip')
-    media.push({ type: 'image', url: animated, alt: 'animated' });
+  const picture = still ?? (kind !== 'video clip' ? animated : undefined);
+  if (picture) media.push({ type: 'image', url: picture, alt: alt ?? title });
   if (kind === 'video clip') {
     const file = isVideoFileUrl(object?.contentUrl)
       ? object.contentUrl
