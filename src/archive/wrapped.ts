@@ -3,9 +3,11 @@
 //
 // The post is deterministic text; the only model output is one optional roast-y intro line (chat model,
 // ZDR-routed, tagged 'wrapped'), and any failure there just drops the line. Each period posts once: a
-// watermark row in bot.db is claimed before posting and finalized after, so a restart, a second tick or
-// a redeploy never double-posts. A crash between claim and send leaves the period unposted rather than
-// risking a duplicate.
+// watermark row in bot.db is claimed ('posting') before the stats and the intro are computed, switched
+// to 'sending' right before the first message goes out, and finalized after, so a restart, a second
+// tick or a redeploy never double-posts. A claim abandoned while still 'posting' (the bot restarted
+// mid-intro: nothing was sent) is taken over once stale; one abandoned while 'sending' never is, since
+// part of the post may be out.
 //
 // Privacy: the post is public to whoever can read the Wrapped channel, so only channels at least that
 // visible count (see makeAudienceAccess); a private channel's messages never surface in the stats, the
@@ -44,6 +46,8 @@ const POST_HOUR_ET = 15;
 const LATE_WINDOW_MS = 3 * 86_400_000;
 const MAX_ATTEMPTS = 3;
 const INTRO_TIMEOUT_MS = 30_000;
+// Far longer than computing the stats and the intro ever takes: a 'posting' claim this old was abandoned.
+const STALE_CLAIM_MS = 15 * 60_000;
 
 const MONTH_NAMES = [
   'January',
@@ -109,7 +113,14 @@ const WATERMARK_SCHEMA = `
   );
 `;
 
-type WatermarkStatus = 'posting' | 'posted' | 'skipped' | 'retry' | 'failed';
+type WatermarkStatus = 'posting' | 'sending' | 'posted' | 'skipped' | 'retry' | 'failed';
+
+export type WrappedWatermark = {
+  status: WatermarkStatus;
+  attempts: number;
+  messageId: string | null;
+  updatedAt: number;
+};
 
 function watermarkDb() {
   const db = getBotDb();
@@ -117,13 +128,19 @@ function watermarkDb() {
   return db;
 }
 
-export function getWrappedStatus(key: string): { status: WatermarkStatus; attempts: number } | undefined {
-  return watermarkDb().stmt('SELECT status, attempts FROM wrapped_posts WHERE period_key = ?').get(key) as
-    | { status: WatermarkStatus; attempts: number }
+export function getWrappedStatus(key: string): WrappedWatermark | undefined {
+  const row = watermarkDb()
+    .stmt('SELECT status, attempts, message_id, updated_at FROM wrapped_posts WHERE period_key = ?')
+    .get(key) as
+    | { status: WatermarkStatus; attempts: number; message_id: string | null; updated_at: number }
     | undefined;
+  return row && { status: row.status, attempts: row.attempts, messageId: row.message_id, updatedAt: row.updated_at };
 }
 
-/** Claims a period for posting. False when it is posted, skipped, failed for good, or mid-post. */
+/**
+ * Claims a period for posting. False when it is posted, skipped, failed for good, being sent, or
+ * claimed by a run that is still within STALE_CLAIM_MS.
+ */
 export function claimWrappedPeriod(key: string, now: number): boolean {
   const db = watermarkDb();
   return db.transaction(() => {
@@ -135,7 +152,8 @@ export function claimWrappedPeriod(key: string, now: number): boolean {
       );
       return true;
     }
-    if (row.status !== 'retry') return false;
+    const abandoned = row.status === 'posting' && now - row.updatedAt >= STALE_CLAIM_MS;
+    if (row.status !== 'retry' && !abandoned) return false;
     db.stmt(
       "UPDATE wrapped_posts SET status = 'posting', attempts = attempts + 1, updated_at = ? WHERE period_key = ?",
     ).run(now, key);
@@ -143,9 +161,14 @@ export function claimWrappedPeriod(key: string, now: number): boolean {
   });
 }
 
+/** Marks the point of no return: from here on a crash must not lead to a second post. */
+export function markWrappedSending(key: string, now: number): void {
+  watermarkDb().stmt("UPDATE wrapped_posts SET status = 'sending', updated_at = ? WHERE period_key = ?").run(now, key);
+}
+
 export function finishWrappedPeriod(
   key: string,
-  status: Exclude<WatermarkStatus, 'posting'>,
+  status: Exclude<WatermarkStatus, 'posting' | 'sending'>,
   now: number,
   messageId?: string,
 ): void {
@@ -419,6 +442,7 @@ async function postPeriod(period: WrappedPeriod, deps: WrappedDeps): Promise<voi
   if (!channelId) return;
   if (!claimWrappedPeriod(period.key, deps.now().getTime())) return;
 
+  let firstId: string | undefined;
   try {
     const channel = await deps.fetchChannel(channelId);
     if (!channel) {
@@ -453,7 +477,7 @@ async function postPeriod(period: WrappedPeriod, deps: WrappedDeps): Promise<voi
       coverageNote: coverageNote(store, period),
     });
 
-    let firstId: string | undefined;
+    markWrappedSending(period.key, deps.now().getTime());
     for (const chunk of splitMessage(text)) {
       // Mentions render as names but never ping anyone (the intro could also say @everyone).
       const sent = await channel.send({ content: chunk, allowedMentions: { parse: [] } });
@@ -462,6 +486,12 @@ async function postPeriod(period: WrappedPeriod, deps: WrappedDeps): Promise<voi
     finishWrappedPeriod(period.key, 'posted', deps.now().getTime(), firstId);
     logger.info(`wrapped: posted ${period.label} to ${channelId}.`);
   } catch (error) {
+    if (firstId) {
+      // Part of the post is out: posting it again would duplicate that part.
+      logger.warn(`wrapped: ${period.label} was only partly posted; not retrying:`, error);
+      finishWrappedPeriod(period.key, 'posted', deps.now().getTime(), firstId);
+      return;
+    }
     logger.warn(`wrapped: posting ${period.label} failed; will retry:`, error);
     finishWrappedPeriod(period.key, 'retry', deps.now().getTime());
   }

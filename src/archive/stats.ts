@@ -233,7 +233,12 @@ export function computeWrappedStats(
   }
   const links = [...linkCounts.entries()]
     .map(([platform, count]) => ({ platform, count }))
-    .sort((a, b) => (a.platform === 'other' ? 1 : 0) - (b.platform === 'other' ? 1 : 0) || b.count - a.count);
+    .sort(
+      (a, b) =>
+        (a.platform === 'other' ? 1 : 0) - (b.platform === 'other' ? 1 : 0) ||
+        b.count - a.count ||
+        a.platform.localeCompare(b.platform),
+    );
 
   const voiceRows = countByAuthor(store, scope, `${live} AND (flags & ${VOICE_MESSAGE_FLAG}) != 0`, 1000);
   const regretRows = countByAuthor(
