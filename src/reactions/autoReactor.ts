@@ -7,9 +7,9 @@
 //      reply, see candidate.ts); each candidate waits AUTO_REACT_DELAY_SECONDS so link previews resolve
 //      and a quick delete or the link fixer's repost lands first.
 //   2. before spending a model call: still there, attributable to a member (relays included), not
-//      replied to or reacted to by the bot, the author isn't mid-exchange with the bot (the gate's own
-//      notion, asked through `inExchange`: a partner's follow-up is the gate's to answer), the budget has
-//      room, and the archive has taught enough (learn first).
+//      replied to or reacted to by the bot (a relay: nor its original), the author isn't mid-exchange
+//      with the bot (the gate's own notion, asked through `inExchange`: a partner's follow-up is the
+//      gate's to answer), the budget has room, and the archive has taught enough (learn first).
 //   3. the judge (judge.ts) sees the post, its images and preview text, a few messages of context and the
 //      reaction guide (guide.ts), and answers react / emoji / why.
 //   4. the emoji must exist (server emoji or unicode); the budget slot is claimed synchronously, then
@@ -51,6 +51,12 @@ export type Candidate = {
   channelId: string;
   url: string;
   createdAt: number;
+  /**
+   * For the bot's relay of a member's post (a link fix, a regret repost): the id of the message it stands
+   * in for, read at evaluation time (the relay is recorded only once its send returns). The agent answers
+   * and the bot reacts to that original by its own id, and the same post must not get both.
+   */
+  originalId?: () => string | undefined;
   /** undefined ⇒ not a member's post after all (another bot's or integration's webhook). */
   snapshot(): CandidateSnapshot | undefined;
   /** Up to `limit` messages right before the post, oldest first. */
@@ -182,9 +188,15 @@ export class AutoReactor {
     while (this.running.size > 0) await Promise.allSettled([...this.running]);
   }
 
-  private botRepliedTo(candidate: Candidate): boolean {
-    if (this.deps.wasRouted?.(candidate.id)) return true;
-    return (this.botReplies.get(candidate.channelId) ?? []).some((r) => r.repliedToId === candidate.id);
+  /** The post's id, plus the original's for a relay: an answer or a reaction to either counts for both. */
+  private postIds(candidate: Candidate): string[] {
+    const originalId = candidate.originalId?.();
+    return originalId && originalId !== candidate.id ? [candidate.id, originalId] : [candidate.id];
+  }
+
+  private botRepliedTo(candidate: Candidate, ids: string[]): boolean {
+    const replies = this.botReplies.get(candidate.channelId) ?? [];
+    return ids.some((id) => this.deps.wasRouted?.(id) || replies.some((r) => r.repliedToId === id));
   }
 
   private inExchange(candidate: Candidate, authorId: string | undefined): boolean {
@@ -223,8 +235,10 @@ export class AutoReactor {
     const settings = this.deps.settings();
     if (settings.mode === 'off') return { status: 'skipped', reason: 'off' };
     if (this.cancelled.has(candidate.id)) return { status: 'skipped', reason: 'deleted' };
-    if (this.botRepliedTo(candidate)) return { status: 'skipped', reason: 'bot replied' };
-    if (this.deps.ledger.has(candidate.id)) return { status: 'skipped', reason: 'already reacted' };
+    // Only the post's own deletion counts: a relay's original is always gone (that's what a relay is).
+    const ids = this.postIds(candidate);
+    if (this.botRepliedTo(candidate, ids)) return { status: 'skipped', reason: 'bot replied' };
+    if (ids.some((id) => this.deps.ledger.has(id))) return { status: 'skipped', reason: 'already reacted' };
 
     const snapshot = candidate.snapshot();
     if (!snapshot) return { status: 'skipped', reason: 'not a member post' };
@@ -272,7 +286,7 @@ export class AutoReactor {
     // The model call took a while: re-check what may have changed meanwhile, then claim the budget slot
     // synchronously, so two decisions finishing together can't both spend the last one.
     if (this.cancelled.has(candidate.id)) return { status: 'skipped', reason: 'deleted' };
-    if (this.botRepliedTo(candidate)) return { status: 'skipped', reason: 'bot replied' };
+    if (this.botRepliedTo(candidate, ids)) return { status: 'skipped', reason: 'bot replied' };
     const again = this.deps.ledger.check(this.now(), this.budgetLimits(settings));
     if (!again.allowed) return { status: 'skipped', reason: `budget (${again.reason})` };
     const mode = settings.mode;

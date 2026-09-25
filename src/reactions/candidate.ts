@@ -8,7 +8,7 @@ import { getLinkReader } from '../ai/linkReader/reader';
 import { findLinks } from '../ai/linkReader/targets';
 import { repliesToTranscript } from '../ai/media/autoTranscribe';
 import { config } from '../config';
-import { attributeMessage } from '../relay';
+import { attributeMessage, getRelay } from '../relay';
 import { mentionsInText } from '../utils';
 import type { Candidate, CandidateSnapshot } from './autoReactor';
 import { readableEmojiText } from './guide';
@@ -207,6 +207,8 @@ export function discordCandidate(message: Message): Candidate {
     channelId: message.channel.id,
     url: message.url,
     createdAt: message.createdTimestamp,
+    // Only a webhook post can be one of the bot's relays; a member's own message needs no lookup.
+    ...(message.webhookId ? { originalId: () => getRelay(message.id)?.originalId } : {}),
     snapshot: () => snapshotOf(message),
     context: (limit) => contextOf(message, limit),
     react: async (emoji) => {

@@ -32,7 +32,9 @@ import { createNameMatcher, readableMarkup, truncate } from './text';
 const CAP_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_CONTEXT_SIZE = 6;
 // A routed turn keeps its channel's exchange open while it runs, but a turn that never reports back
-// (aiChat always does; this is the backstop) stops counting after this long.
+// (aiChat always does; this is the backstop) stops counting after this long. The clock starts when the
+// turn is queued, so a slow turn (a video, a long tool loop, a wait behind other turns) can outlast it:
+// its answer still counts once it reports back (noteTurnDone).
 const PENDING_TURN_TTL_MS = 5 * 60 * 1000;
 const LOG_EXCERPT_CHARS = 80;
 // Who a reply to the bot's transcript of a voice message is aimed at: the voice message, not the bot.
@@ -170,13 +172,17 @@ export class AddressedGate {
 
   /** The routed turn for `message` finished: the bot answered its author, which extends the exchange. */
   noteTurnDone(message: Message): void {
-    const state = this.channels.get(message.channel.id);
-    const turn = state?.pending.get(message.id);
-    if (!state || !turn) return;
-    state.pending.delete(message.id);
+    const settings = this.settings();
+    const channelId = message.channel.id;
+    if (!settings.channelIds.includes(channelId)) return;
     const now = this.now();
+    // Read while the turn is still pending: it is what kept the exchange (and its partners) open. A turn
+    // that outlasted PENDING_TURN_TTL_MS was dropped from `pending` meanwhile; the bot answered all the
+    // same, so its author becomes a partner (of a fresh exchange when the old one lapsed).
+    const state = this.current(channelId, settings, now);
+    state.pending.delete(message.id);
     state.lastAnsweredAt = now;
-    state.partners.set(canonicalUserId(turn.userId), now);
+    state.partners.set(canonicalUserId(message.author.id), now);
   }
 
   /** Decides whether a message that neither mentions nor replies to the bot should still get an answer. */

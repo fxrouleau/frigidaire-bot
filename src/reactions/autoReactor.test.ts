@@ -313,6 +313,40 @@ describe('AutoReactor: gates', () => {
     expect(h.ledger.has('m2')).toBe(false);
   });
 
+  it("treats a relay as its original: the original's answer or reaction counts, its deletion doesn't", async () => {
+    const relay = (id: string, originalId: string) => ({ ...candidate(id), originalId: () => originalId });
+    const h = harness({ minGapMs: 0 });
+    // The link fixer deletes the original (autoReactDelete cancels it); the relay is the candidate now.
+    h.reactor.cancel('orig-1');
+    h.reactor.cancel('orig-2');
+    h.reactor.cancel('orig-3');
+
+    // The agent was handed the original (a pinging reply or a mention holding a link), by its own id.
+    h.routed.add('orig-1');
+    expect(await h.reactor.evaluate(relay('relay-1', 'orig-1'))).toEqual({ status: 'skipped', reason: 'bot replied' });
+    // The bot's reply went to the original.
+    h.reactor.noteBotMessage('main', { repliedToId: 'orig-2' });
+    expect(await h.reactor.evaluate(relay('relay-2', 'orig-2'))).toEqual({ status: 'skipped', reason: 'bot replied' });
+    expect(h.judge).not.toHaveBeenCalled();
+    // The gate routed the original while the judge was deciding on the relay.
+    h.judge.mockImplementationOnce(async () => {
+      h.routed.add('orig-3');
+      return { react: true, emoji: 'KEKW', why: 'lol' };
+    });
+    expect(await h.reactor.evaluate(relay('relay-3', 'orig-3'))).toEqual({ status: 'skipped', reason: 'bot replied' });
+    expect(h.ledger.has('relay-3')).toBe(false);
+
+    // A regret repost of a post the bot already reacted to is still the same post.
+    expect(await h.reactor.evaluate(candidate('orig-4'))).toMatchObject({ status: 'reacted' });
+    expect(await h.reactor.evaluate(relay('relay-4', 'orig-4'))).toEqual({
+      status: 'skipped',
+      reason: 'already reacted',
+    });
+
+    // A relay whose original nobody answered is judged like any post.
+    expect(await h.reactor.evaluate(relay('relay-5', 'orig-5'))).toMatchObject({ status: 'reacted' });
+  });
+
   it('skips a post whose author the gate counts as mid-exchange (its follow-ups are the gate\'s)', async () => {
     const h = harness();
     h.partners.add(`main:${REMI}`);
