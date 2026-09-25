@@ -103,7 +103,7 @@ export async function readGif(
 
   const meta = extractMetadata(html, result.url);
   const object = findMediaObject(extractJsonLd(html));
-  const title = object?.name ?? cleanGifTitle(meta.title);
+  const title = cleanGifTitle(object?.name) ?? cleanGifTitle(meta.title);
   // Tenor serves its 404 page with a 200 on some paths ("404 Error" everywhere).
   if (!title || /^404\b/.test(title)) throw new ExtractError(`that ${target.source === 'tenor' ? 'Tenor' : 'Klipy'} GIF does not exist`);
 
