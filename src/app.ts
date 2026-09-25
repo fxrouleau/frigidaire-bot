@@ -6,6 +6,7 @@ import * as dotenv from 'dotenv';
 import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
 import { getMemoryStore } from './ai/memory';
+import { closeArchiveStore } from './archive/archiveStore';
 import { config, describeEffectiveConfig } from './config';
 import { resolveEventModule } from './eventModule';
 import { logger } from './logger';
@@ -147,6 +148,11 @@ const shutdown = (signal: string) => {
     getBotDb().close();
   } catch (error) {
     logger.warn('Closing bot database on shutdown failed:', error);
+  }
+  try {
+    closeArchiveStore();
+  } catch (error) {
+    logger.warn('Closing the message archive on shutdown failed:', error);
   }
   void client.destroy();
   process.exit(0);
