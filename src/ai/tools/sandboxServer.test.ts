@@ -6,11 +6,16 @@ import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createFakeMessage } from '../../test-support/fakeDiscord';
 import { FakeProvider } from '../../test-support/fakeProvider';
 import { createTurnEffects } from '../types';
 import { createRunCodeTool, runInSandbox } from './sandbox';
+
+/** Log lines travel through the sidecar's stderr pipe and can arrive just after its HTTP answer: poll briefly. */
+async function expectLog(target: { logs: () => string }, pattern: RegExp): Promise<void> {
+  await vi.waitFor(() => expect(target.logs()).toMatch(pattern), { timeout: 2000, interval: 25 });
+}
 
 const SERVER_SCRIPT = path.resolve(__dirname, '../../../sandbox/server.py');
 const TOKEN = 'server-test-token';
@@ -124,7 +129,7 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     expect(outcome.result.exit_code).toBe(0);
     expect(outcome.result.stdout.split('\n').slice(0, 2)).toEqual(['42', workspace]);
     expect(outcome.result.timed_out).toBe(false);
-    expect(server.logs()).toMatch(/run language=python exit=0 timed_out=False duration_ms=\d+/);
+    await expectLog(server, /run language=python exit=0 timed_out=False duration_ms=\d+/);
   });
 
   it("returns what a bash run wrote to out/, attaches it through run_code, and clears out/ before the next run", async () => {
@@ -283,7 +288,7 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     await new Promise((resolve) => setTimeout(resolve, 1500));
 
     expect(existsSync(marker)).toBe(false);
-    expect(server.logs()).toMatch(/dropped a queued run: its client disconnected/);
+    await expectLog(server, /dropped a queued run: its client disconnected/);
     const after = await runInSandbox({ language: 'bash', code: 'echo still-fine', timeoutSeconds: 10 }, client());
     expect(after).toMatchObject({ ok: true, result: { stdout: 'still-fine\n' } });
   });
@@ -320,7 +325,7 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     // What the run put in out/ still comes back.
     expect(outcome.result.files.map((f) => f.name)).toEqual(['result.txt']);
     expect(existsSync(path.join(workspace, 'big1'))).toBe(false);
-    expect(server.logs()).toMatch(/workspace over its limit \(\d+ MB in \d+ entries; max 64 MB \/ 2000 entries\): wiping it/);
+    await expectLog(server, /workspace over its limit \(\d+ MB in \d+ entries; max 64 MB \/ 2000 entries\): wiping it/);
 
     const next = await runInSandbox({ language: 'bash', code: 'ls -A', timeoutSeconds: 10 }, client());
     expect(next).toMatchObject({ ok: true, result: { stdout: 'out\n', disk_limit_exceeded: false, workspace_over_limit: false } });
@@ -373,8 +378,8 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
       expect(output).toMatch(/stdout:\n\s*1\nout$/);
       expect(readFileSync(path.join(outside, 'keep.txt'), 'utf8')).toBe('not the sandbox');
       expect(existsSync(path.join(workspace, 'locked'))).toBe(false);
-      expect(server.logs()).toMatch(/workspace reset: removed \d+ entries/);
-      expect(server.logs()).toMatch(/run language=bash exit=0 .* reset=True/);
+      await expectLog(server, /workspace reset: removed \d+ entries/);
+      await expectLog(server, /run language=bash exit=0 .* reset=True/);
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
@@ -411,7 +416,7 @@ describe.skipIf(!canRunServer)('sandbox/server.py on a non-loopback address (as 
 
     expect(outcome).toMatchObject({ ok: false, kind: 'unauthorized', detail: 'runs cannot start other runs' });
     expect(existsSync(path.join(workspace, 'should-not-exist'))).toBe(false);
-    expect(server.logs()).toMatch(/refused \/run from 127\.0\.0\.1: a local client/);
+    await expectLog(server, /refused \/run from 127\.0\.0\.1: a local client/);
     // /health stays open to the container's own healthcheck.
     expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(200);
   });
