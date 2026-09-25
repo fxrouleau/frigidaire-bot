@@ -10,10 +10,16 @@
 // nothing: an emoji is only re-grounded when it has never been, when its caption was replaced since (a
 // rename re-captions it from the image, EMOJI_FORCE_RECAPTION clears everything), or when its uses grew
 // by half since. That keeps the Opus-priced caption model to a handful of calls a week.
+//
+// Not while the archive is still importing history (a fresh archive's backfill runs for hours or days):
+// the uses would be counted from the first few pages and the week-long watermark would then hold most
+// emojis to that. Scheduled checks wait for the import to finish; a forced pass runs anyway but leaves
+// the watermark alone, so the first check after the import does a real pass.
 import { composeCaption, describeEmojiUsage, splitCaption, type UsagePhraseInput } from '../ai/emojiCaptioner';
 import { getMemoryStore } from '../ai/memory';
 import type { EmojiRow, MemoryStore } from '../ai/memory/memoryStore';
 import { type ArchiveStore, getArchiveStore } from '../archive/archiveStore';
+import { isArchiveImportInProgress } from '../archive/backfill';
 import { config } from '../config';
 import { logger } from '../logger';
 import { type BotDb, getBotDb } from '../storage/botDb';
@@ -54,6 +60,8 @@ export type UsageCaptionDeps = {
   botDb?: () => BotDb;
   describe?: (input: UsagePhraseInput) => Promise<string | undefined>;
   now?: () => number;
+  /** True while the archive is still importing history (default: the running archive sync says so). */
+  importing?: () => boolean;
 };
 
 export type RecaptionResult = {
@@ -65,6 +73,8 @@ export type RecaptionResult = {
   failed: number;
   /** The run gave up after repeated failures (the watermark was not advanced). */
   aborted: boolean;
+  /** The archive was still importing history: uses were counted from part of it (the watermark was not advanced). */
+  partial: boolean;
 };
 
 type GroundedRow = { emoji_id: string; uses: number; caption: string; updated_at: number };
@@ -117,10 +127,11 @@ export async function runUsageRecaption(
   opts: { force?: boolean } = {},
   deps: UsageCaptionDeps = {},
 ): Promise<RecaptionResult> {
-  const result: RecaptionResult = { eligible: 0, due: 0, updated: 0, failed: 0, aborted: false };
+  const result: RecaptionResult = { eligible: 0, due: 0, updated: 0, failed: 0, aborted: false, partial: false };
   const now = deps.now ?? Date.now;
   const describe = deps.describe ?? describeEmojiUsage;
   try {
+    result.partial = (deps.importing ?? isArchiveImportInProgress)();
     const memory = (deps.memory ?? getMemoryStore)();
     // Only captioned emojis: the visual half comes from the first-pass caption.
     const emojis = memory.getUsableEmojis().filter((e) => e.caption);
@@ -167,19 +178,22 @@ export async function runUsageRecaption(
       saveGrounded(deps, emoji.id, emojiUsage.total, next, now());
       result.updated++;
     }
-    if (!result.aborted) recordRun(deps, now());
+    if (!result.aborted && !result.partial) recordRun(deps, now());
   } catch (error) {
     logger.warn('emojiUsageCaptions: run failed:', error);
     result.aborted = true;
   }
   const verb = result.aborted ? 'gave up' : 'done';
   logger.info(
-    `emojiUsageCaptions: ${verb}: eligible=${result.eligible} due=${result.due} updated=${result.updated} failed=${result.failed}${opts.force ? ' (forced)' : ''}`,
+    `emojiUsageCaptions: ${verb}: eligible=${result.eligible} due=${result.due} updated=${result.updated} failed=${result.failed}${opts.force ? ' (forced)' : ''}${result.partial ? ' (archive still importing: watermark not advanced)' : ''}`,
   );
   return result;
 }
 
-/** Runs a pass when forced or when the last one is a week old. Undefined when nothing ran. */
+/**
+ * Runs a pass when forced, or when the last one is a week old and the archive isn't importing history.
+ * Undefined when nothing ran.
+ */
 export async function runUsageRecaptionIfDue(
   opts: { force?: boolean } = {},
   deps: UsageCaptionDeps = {},
@@ -187,6 +201,10 @@ export async function runUsageRecaptionIfDue(
   const now = (deps.now ?? Date.now)();
   const last = lastRunAt(deps);
   if (!opts.force && last !== undefined && now - last < WEEK_MS) return undefined;
+  if (!opts.force && (deps.importing ?? isArchiveImportInProgress)()) {
+    logger.info('emojiUsageCaptions: the archive is still importing history; grounding waits for it to finish.');
+    return undefined;
+  }
   return runUsageRecaption(opts, deps);
 }
 

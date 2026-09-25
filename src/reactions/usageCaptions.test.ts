@@ -82,7 +82,7 @@ afterEach(() => {
 describe('runUsageRecaption', () => {
   it('rewrites the meaning half of captioned emojis with enough uses, keeping the visual half', async () => {
     const result = await runUsageRecaption({}, deps);
-    expect(result).toEqual({ eligible: 2, due: 2, updated: 2, failed: 0, aborted: false });
+    expect(result).toEqual({ eligible: 2, due: 2, updated: 2, failed: 0, aborted: false, partial: false });
     expect(memory.getEmojiById(SAJ)?.caption).toBe('crying cat; for how the group uses SAJ');
     expect(memory.getEmojiById(SMODGE)?.caption).toBe('squinting face; for how the group uses smodge');
     // Too few uses, or no first-pass caption to keep the visual half of: untouched.
@@ -163,6 +163,38 @@ describe('runUsageRecaptionIfDue', () => {
     expect(await runUsageRecaptionIfDue({ force: true }, deps)).toMatchObject({ updated: 2 });
     clock.now = T0 + 2 * WEEK_MS;
     expect(await runUsageRecaptionIfDue({}, deps)).toMatchObject({ due: 0 });
+  });
+});
+
+describe('while the archive is still importing history', () => {
+  it('scheduled checks wait for the import (no calls, no watermark), then the first check after it runs', async () => {
+    let importing = true;
+    const withImport: UsageCaptionDeps = { ...deps, importing: () => importing };
+
+    expect(await runUsageRecaptionIfDue({}, withImport)).toBeUndefined();
+    expect(describe_).not.toHaveBeenCalled();
+    expect(lastRunAt(withImport)).toBeUndefined();
+
+    // The import finishes (more uses arrived meanwhile): the next check grounds from the whole archive.
+    typedUses(SAJ, 'SAJ', 20);
+    importing = false;
+    clock.now = T0 + 6 * 60 * 60 * 1000;
+    expect(await runUsageRecaptionIfDue({}, withImport)).toMatchObject({ updated: 2, partial: false });
+    expect(describe_.mock.calls.find((c) => c[0].name === 'SAJ')?.[0].uses).toHaveLength(20);
+    expect(lastRunAt(withImport)).toBe(clock.now);
+  });
+
+  it('a forced pass runs anyway but leaves the watermark alone, so the week is not spent on partial counts', async () => {
+    let importing = true;
+    const withImport: UsageCaptionDeps = { ...deps, importing: () => importing };
+
+    expect(await runUsageRecaptionIfDue({ force: true }, withImport)).toMatchObject({ updated: 2, partial: true });
+    expect(lastRunAt(withImport)).toBeUndefined();
+    expect(await runUsageRecaptionIfDue({}, withImport)).toBeUndefined();
+
+    importing = false;
+    expect(await runUsageRecaptionIfDue({}, withImport)).toMatchObject({ partial: false });
+    expect(lastRunAt(withImport)).toBe(T0);
   });
 });
 

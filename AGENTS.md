@@ -329,6 +329,7 @@ First-pass captions (`emojiCaptioner.ts`, `EMOJI_CAPTION_MODEL`) can only guess 
   - At most 40 per run; a run stops after 3 failures in a row.
   - State lives in bot.db (`emoji_usage_captions`, `reaction_jobs`).
   - First check 10 min after startup, then every 6 h against a 7-day watermark. `EMOJI_RECAPTION_FROM_USAGE=1` forces a full pass (one-shot).
+  - **Not during a history import**: while the archive sync runs or a backfill channel is unfinished (`isArchiveImportInProgress()`), checks skip without touching the watermark, so a fresh archive's first pages don't set the counts for a week. A forced pass still runs but leaves the watermark alone.
 - `EMOJI_FORCE_RECAPTION` wipes the meaning halves too: they come back on the next weekly run, or immediately with `EMOJI_RECAPTION_FROM_USAGE` set on the same restart.
 
 ### Media: voice and video (`src/ai/media/`)
@@ -434,6 +435,7 @@ Every member message the bot can see (guild text and announcement channels and t
   - Gap fill pages every channel with history forward from its newest archived message. The cursor is persisted in `gap_fill_state`, so a stopped run resumes without leaving a hole.
   - Once per process, each channel active in the last 7 days re-reads its newest page, which heals reactions and edits made while offline and marks messages deleted while offline.
   - Each `ARCHIVE_BACKFILL_CHANNELS` channel is then imported backwards, 100 per request every `ARCHIVE_BACKFILL_DELAY_MS` (~90 msg/s), with the cursor committed in the same transaction as each page (resumes exactly). Missing access is recorded and retried hourly, and progress with a storage projection is logged every 25 pages. Threads' older history is not imported.
+  - `importInProgress()` / `isArchiveImportInProgress()`: a run is under way, or a backfill channel is unfinished and not waiting out an error. The usage-caption job waits on it; Wrapped only waits for the gap fill (`status().phase`).
 - **Tools**: `search_messages({query?, author?, channel?, after?, before?, limit≤20})` and `get_message_context({message, before?, after?})`.
   - Search is FTS in two tiers (all terms, then any non-stop-word term), BM25 blended with recency. `author` resolves through the people resolver across every account; times are Eastern wall-clock. Result lines: `[YYYY-MM-DD HH:MM ET] #channel Author: content (jump link)` plus the top reactions.
   - **Visibility** (`replyAccessFor`): a channel is searchable only if the asker can read it AND it is at least as visible as the channel the answer is posted in, so a mod's question in the main channel never quotes a private channel. This also closes Ask Fridge, where the "asker" is the target's author. `watch_video` jump links follow the same rule.

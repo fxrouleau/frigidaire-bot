@@ -4,7 +4,15 @@ import { logger } from '../logger';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { GUILD_ID, archivableMessage, archiveInput, snowflake } from '../test-support/fakeArchive';
 import { ArchiveStore, compareSnowflakes } from './archiveStore';
-import { ArchiveSync, type ArchiveSyncDeps, type HistorySource, discordSyncDeps, historySourceOf } from './backfill';
+import {
+  ArchiveSync,
+  type ArchiveSyncDeps,
+  type HistorySource,
+  discordSyncDeps,
+  historySourceOf,
+  isArchiveImportInProgress,
+  setActiveArchiveSync,
+} from './backfill';
 import { toArchiveInput } from './ingest';
 
 const CHANNEL = '100000000000000001';
@@ -426,6 +434,50 @@ describe('maintenance', () => {
     channels.set(CHANNEL, history);
     new ArchiveSync(makeDeps()).maintenance();
     expect(history.calls).toHaveLength(0);
+  });
+});
+
+describe('importInProgress', () => {
+  afterEach(() => setActiveArchiveSync(undefined));
+
+  it('is true from startup until every configured channel is imported, including during the run', async () => {
+    channels.set(CHANNEL, fakeHistory(150));
+    const during: boolean[] = [];
+    const sync = new ArchiveSync(
+      makeDeps({
+        sleep: async () => {
+          during.push(sync.importInProgress());
+        },
+      }),
+    );
+    expect(sync.importInProgress()).toBe(true); // nothing imported yet
+    await sync.run();
+    expect(during).toEqual([true]);
+    expect(store.getBackfillState(CHANNEL)?.done).toBe(true);
+    expect(sync.importInProgress()).toBe(false);
+  });
+
+  it('is false for a channel waiting out an error, and again true once it is due for a retry', async () => {
+    const sync = new ArchiveSync(makeDeps()); // CHANNEL is configured but missing
+    await sync.run();
+    expect(store.getBackfillState(CHANNEL)?.errorAt).toBe(now);
+    expect(sync.importInProgress()).toBe(false);
+    now += 2 * HOUR;
+    expect(sync.importInProgress()).toBe(true);
+  });
+
+  it('is false with nothing to import or with backfill disabled', () => {
+    backfillIds = [];
+    expect(new ArchiveSync(makeDeps()).importInProgress()).toBe(false);
+    backfillIds = [CHANNEL];
+    vi.stubEnv('ARCHIVE_BACKFILL_ENABLED', 'false');
+    expect(new ArchiveSync(makeDeps()).importInProgress()).toBe(false);
+  });
+
+  it('is reported for the active sync, and false without one', () => {
+    expect(isArchiveImportInProgress()).toBe(false);
+    setActiveArchiveSync(new ArchiveSync(makeDeps()));
+    expect(isArchiveImportInProgress()).toBe(true);
   });
 });
 

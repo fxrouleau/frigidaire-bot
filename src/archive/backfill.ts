@@ -122,6 +122,16 @@ export class ArchiveSync {
     return { running: this.running, phase: this.phase };
   }
 
+  /**
+   * True while history is still coming in: a run is under way (gap fill or backfill), or a configured
+   * backfill channel isn't finished and isn't waiting out an error (the next maintenance tick resumes it).
+   * Jobs that read the whole archive and then wait a long time (usage-grounded emoji captions) hold off
+   * until it clears, so a fresh archive isn't judged from its first few pages.
+   */
+  importInProgress(): boolean {
+    return this.running || (config.archive.backfillEnabled && this.hasPendingBackfill());
+  }
+
   stop(): void {
     this.stopped = true;
   }
@@ -496,11 +506,16 @@ export function discordSyncDeps(client: Client): ArchiveSyncDeps {
 
 let activeSync: ArchiveSync | undefined;
 
-/** The running sync (set by the ClientReady handler), for status checks elsewhere (Wrapped). */
+/** The running sync (set by the ClientReady handler), for status checks elsewhere (Wrapped, emoji captions). */
 export function getActiveArchiveSync(): ArchiveSync | undefined {
   return activeSync;
 }
 
 export function setActiveArchiveSync(sync: ArchiveSync | undefined): void {
   activeSync = sync;
+}
+
+/** Whether the running sync is still importing history (see ArchiveSync.importInProgress); false without one. */
+export function isArchiveImportInProgress(): boolean {
+  return activeSync?.importInProgress() ?? false;
 }
