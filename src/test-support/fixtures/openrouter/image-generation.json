@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "description": "Image generation via chat completions (modalities: [\"image\"]): the image arrives in message.images[] as { type: image_url, image_url: { url: <base64 data URL> } }, per OpenRouter's ChatAssistantImages schema.",
+  "status": 200,
+  "request": {
+    "model": "google/gemini-2.5-flash-image",
+    "modalities": [
+      "image"
+    ],
+    "provider": {
+      "zdr": true
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "a fridge wearing sunglasses"
+      }
+    ]
+  },
+  "response": {
+    "id": "gen-test-image-001",
+    "object": "chat.completion",
+    "created": 1735689600,
+    "model": "google/gemini-2.5-flash-image",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "Here you go.",
+          "refusal": null,
+          "images": [
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVR4nGPgEpHjEpFjgFAABk4A8Z5vd+AAAAAASUVORK5CYII="
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 9,
+      "completion_tokens": 1290,
+      "total_tokens": 1299
+    }
+  }
+}

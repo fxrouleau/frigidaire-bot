@@ -18,6 +18,7 @@ import type {
   ProviderToolCall,
   ProviderToolDefinition,
 } from '../types';
+import { featureRequestOptions } from '../usage';
 
 type ChatContentPart =
   | { type: 'text'; text: string }
@@ -27,6 +28,8 @@ export type OpenRouterProviderOptions = {
   client?: OpenAI;
   model?: string;
   routing?: Record<string, unknown>;
+  /** Models OpenRouter tries, in order, when the primary errors. Default: CHAT_FALLBACK_MODELS. */
+  fallbackModels?: string[];
 };
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -45,12 +48,14 @@ export class OpenRouterProvider implements AiProvider {
 
   private readonly client: OpenAI;
   private readonly routing: Record<string, unknown>;
+  private readonly fallbackModels: string[];
   private readonly imageCache = new Map<string, CachedImage>();
 
   constructor(opts: OpenRouterProviderOptions = {}) {
     this.client = opts.client ?? requireOpenRouterClient('chat');
     this.defaultModel = opts.model ?? config.models.chat;
     this.routing = opts.routing ?? { zdr: true, sort: 'throughput' };
+    this.fallbackModels = (opts.fallbackModels ?? config.models.chatFallbacks).filter((m) => m !== this.defaultModel);
 
     this.supportedTools = toolDefinitions
       .filter((tool) => tool.isEnabled?.() ?? true)
@@ -95,16 +100,28 @@ export class OpenRouterProvider implements AiProvider {
       allTools.push({ type: 'openrouter:web_search' });
     }
 
-    const response = await this.client.chat.completions.create({
-      model: this.defaultModel,
-      messages,
-      tools: allTools.length > 0 ? (allTools as OpenAI.ChatCompletionTool[]) : undefined,
-      tool_choice: input.toolChoice === 'none' ? 'none' : 'auto',
-      // @ts-expect-error OpenRouter-specific field
-      provider: this.routing,
-    });
+    const response = await this.client.chat.completions.create(
+      {
+        model: this.defaultModel,
+        // OpenRouter model fallbacks: `models` lists the chain in priority order, primary first; when a
+        // model errors (down, rate-limited, context too long, moderation) the next one answers, and the
+        // response's `model` names whichever did. Provider preferences (zdr) apply to every hop.
+        ...(this.fallbackModels.length > 0 ? { models: [this.defaultModel, ...this.fallbackModels] } : {}),
+        messages,
+        tools: allTools.length > 0 ? (allTools as OpenAI.ChatCompletionTool[]) : undefined,
+        tool_choice: input.toolChoice === 'none' ? 'none' : 'auto',
+        // @ts-expect-error OpenRouter-specific field
+        provider: this.routing,
+      },
+      featureRequestOptions('chat'),
+    );
 
     return parseOpenRouterResponse(response);
+  }
+
+  /** Every model a chat request may be served by: the primary, then the fallbacks in order. */
+  get chatModels(): string[] {
+    return [this.defaultModel, ...this.fallbackModels];
   }
 
   async summarizeMessages(message: Message, startTime: string, endTime: string): Promise<string> {
@@ -356,5 +373,6 @@ export function parseOpenRouterResponse(response: OpenAI.ChatCompletion): Provid
     });
   }
 
-  return { text, toolCalls, outputEntries, raw: response };
+  const servedBy = typeof response.model === 'string' && response.model.length > 0 ? response.model : undefined;
+  return { text, toolCalls, outputEntries, raw: response, servedBy };
 }

@@ -1,9 +1,10 @@
-import type OpenAI from 'openai';
+import OpenAI from 'openai';
 import sharp from 'sharp';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { serializeError } from '../debugCapture';
 import { createReplayClient, loadFixture } from '../../test-support/openRouterFetch';
 import type { ConversationEntry, ProviderToolDefinition } from '../types';
+import { FEATURE_HEADER } from '../usage';
 import { OpenRouterProvider, extractToolCalls, parseOpenRouterResponse } from './openRouterProvider';
 
 // The replay client serves a recorded fixture body instead of hitting the network. parse helpers
@@ -24,6 +25,7 @@ type RequestBody = {
   tools?: Array<{ type: string; function?: { name: string } }>;
   tool_choice?: unknown;
   provider?: unknown;
+  models?: string[];
 };
 
 describe('parseOpenRouterResponse', () => {
@@ -254,6 +256,72 @@ describe('OpenRouterProvider request building', () => {
     await provider.chat({ messages: [userText('hi')], tools: [] });
     const body = requests[0] as RequestBody;
     expect(body.model).toBe('test-model');
+  });
+
+  it('sends no fallback list when no fallback models are configured', async () => {
+    const requests: unknown[] = [];
+    const provider = new OpenRouterProvider({
+      client: createReplayClient(loadFixture('text-response'), (body) => requests.push(body)),
+      model: 'test-model',
+      fallbackModels: [],
+    });
+    await provider.chat({ messages: [userText('hi')], tools: [] });
+    expect((requests[0] as RequestBody).models).toBeUndefined();
+    expect(provider.chatModels).toEqual(['test-model']);
+  });
+
+  it('routes through the fallback chain, primary first, keeping the ZDR provider preferences', async () => {
+    const requests: unknown[] = [];
+    const provider = new OpenRouterProvider({
+      client: createReplayClient(loadFixture('text-response'), (body) => requests.push(body)),
+      model: 'primary/model',
+      fallbackModels: ['backup/one', 'primary/model', 'backup/two'],
+    });
+    await provider.chat({ messages: [userText('hi')], tools: [] });
+    const body = requests[0] as RequestBody;
+    expect(body.model).toBe('primary/model');
+    expect(body.models).toEqual(['primary/model', 'backup/one', 'backup/two']);
+    expect(body.provider).toEqual({ zdr: true, sort: 'throughput' });
+    expect(provider.chatModels).toEqual(['primary/model', 'backup/one', 'backup/two']);
+  });
+
+  it('reads CHAT_FALLBACK_MODELS by default', async () => {
+    vi.stubEnv('CHAT_FALLBACK_MODELS', 'backup/one');
+    const requests: unknown[] = [];
+    const provider = new OpenRouterProvider({
+      client: createReplayClient(loadFixture('text-response'), (body) => requests.push(body)),
+      model: 'test-model',
+    });
+    await provider.chat({ messages: [userText('hi')], tools: [] });
+    expect((requests[0] as RequestBody).models).toEqual(['test-model', 'backup/one']);
+    vi.unstubAllEnvs();
+  });
+
+  it('reports which model actually served the request', async () => {
+    const { provider } = setup();
+    const response = await provider.chat({ messages: [userText('hi')], tools: [] });
+    // The fixture's response.model: under fallbacks this names the model that answered.
+    expect(response.servedBy).toBe('deepseek/deepseek-v3.2:nitro');
+  });
+
+  it('tags the chat request with the chat feature header', async () => {
+    const headers: Array<string | null> = [];
+    const fixture = loadFixture('text-response');
+    const client = new OpenAI({
+      apiKey: 'test-key',
+      baseURL: 'https://openrouter.ai/api/v1',
+      maxRetries: 0,
+      fetch: (async (_url: unknown, init?: { headers?: HeadersInit }) => {
+        headers.push(new Headers(init?.headers).get(FEATURE_HEADER));
+        return new Response(JSON.stringify(fixture.response), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as unknown as typeof globalThis.fetch,
+    });
+    const provider = new OpenRouterProvider({ client, model: 'test-model', fallbackModels: [] });
+    await provider.chat({ messages: [userText('hi')], tools: [] });
+    expect(headers).toEqual(['chat']);
   });
 
   it('rejects on an HTTP 500 and serializeError captures the status', async () => {

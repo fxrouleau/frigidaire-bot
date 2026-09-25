@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '../logger';
-import { ConversationPersistence } from './conversationPersistence';
+import { ConversationPersistence, MAX_STATE_BYTES } from './conversationPersistence';
 import type { ConversationState } from './conversationStore';
 import { CONVERSATION_STATE_SCHEMA_VERSION, type ConversationEntry } from './types';
 
@@ -58,6 +58,22 @@ describe('ConversationPersistence', () => {
     const [channelId, restored] = loaded[0];
     expect(channelId).toBe('chan-1');
     expect(restored).toEqual(state);
+  });
+
+  it('round-trips the v3 fields: message/memory ids on entries and the lastSeenMessageId watermark', () => {
+    const state = makeState({
+      entries: [
+        { kind: 'message', role: 'developer', content: [{ type: 'text', text: 'context' }], memoryIds: [7, 9] },
+        { kind: 'message', role: 'user', content: [{ type: 'text', text: 'hey' }], messageIds: ['1001'] },
+        { kind: 'message', role: 'assistant', content: [{ type: 'text', text: 'yo' }], messageIds: ['1002', '1003'] },
+      ],
+      injectedMemoryIds: [7, 9],
+      lastSeenMessageId: '1001',
+    });
+
+    p.save('chan-v3', state);
+
+    expect(p.loadAll(TIMEOUT)).toEqual([['chan-v3', state]]);
   });
 
   it('upserts: saving the same channel twice keeps one row with the newest state', () => {
@@ -123,7 +139,7 @@ describe('ConversationPersistence', () => {
 
   it('skips an over-cap blob on save (WARN, no row) and discards an oversized row on load', () => {
     const warn = vi.spyOn(logger, 'warn');
-    const huge = 'x'.repeat(1_100_000);
+    const huge = 'x'.repeat(MAX_STATE_BYTES + 100_000);
 
     p.save('too-big', makeState({ entries: [{ kind: 'message', role: 'user', content: [{ type: 'text', text: huge }] }] }));
 

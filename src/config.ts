@@ -86,6 +86,23 @@ export const DEFAULT_TIKTOK_FIXERS = ['tnktok.com', 'fixtiktok.com', 'tfxktok.co
 export const DELETE_REPOST_MODES = ['edgy', 'always'] as const;
 export type DeleteRepostMode = (typeof DELETE_REPOST_MODES)[number];
 
+/** Parses CHANNEL_NOTES (see config.agent.channelNotes). Exported for tests. */
+export function parseChannelNotes(raw: string | undefined): { notes: Record<string, string>; invalid: boolean } {
+  if (raw === undefined) return { notes: {}, invalid: false };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { notes: {}, invalid: true };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { notes: {}, invalid: true };
+  const notes: Record<string, string> = {};
+  for (const [channelId, note] of Object.entries(parsed)) {
+    if (typeof note === 'string' && note.trim().length > 0) notes[channelId.trim()] = note.trim();
+  }
+  return { notes, invalid: false };
+}
+
 export const config = {
   discord: {
     /** The bot token. Required in prod. */
@@ -124,17 +141,43 @@ export const config = {
     get messageJudge(): string {
       return envString('DELETE_REPOST_MODEL') ?? this.chat;
     },
+    /**
+     * Chat models OpenRouter falls back to, in order, when the primary errors (down, rate-limited,
+     * context too long, moderation). Empty ⇒ no fallback routing. The primary is never repeated here.
+     */
+    get chatFallbacks(): string[] {
+      const primary = this.chat;
+      return [...new Set(envCsv('CHAT_FALLBACK_MODELS'))].filter((model) => model !== primary);
+    },
   },
 
   agent: {
     get conversationTimeoutMs(): number {
       return envInt('CONVERSATION_TIMEOUT_MS', 15 * MINUTE_MS, { min: 1 });
     },
+    // Generous on purpose: these are runaway-loop backstops, not a budget a normal turn ever reaches.
     get maxToolRounds(): number {
-      return envInt('MAX_TOOL_ROUNDS', 10, { min: 1 });
+      return envInt('MAX_TOOL_ROUNDS', 25, { min: 1 });
     },
     get maxToolInvocations(): number {
-      return envInt('MAX_TOOL_INVOCATIONS', 50, { min: 1 });
+      return envInt('MAX_TOOL_INVOCATIONS', 200, { min: 1 });
+    },
+    /** The chat model's context window in tokens when OpenRouter's model list can't tell (offline, unknown id). */
+    get chatContextTokens(): number {
+      return envInt('CHAT_CONTEXT_TOKENS', 131_072, { min: 1024 });
+    },
+    /** Explicit in-window history budget (estimated tokens); unset ⇒ min(500k, half the chat model's context). */
+    get historyTokenBudget(): number | undefined {
+      const value = envInt('HISTORY_TOKEN_BUDGET', -1, { min: 1000 });
+      return value > 0 ? value : undefined;
+    },
+    /**
+     * CHANNEL_NOTES: a JSON object of channel id → short description shown to the chat model with the
+     * channel's name and topic. Unset ⇒ no notes; not a JSON object ⇒ no notes and `invalid` set (the
+     * agent logs it). Non-string values are ignored.
+     */
+    get channelNotes(): { notes: Record<string, string>; invalid: boolean } {
+      return parseChannelNotes(envString('CHANNEL_NOTES'));
     },
   },
 
