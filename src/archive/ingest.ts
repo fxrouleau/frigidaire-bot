@@ -4,11 +4,13 @@
 // in guild text and announcement channels and their threads. Attribution goes through
 // attributeMessage(): link-fix and regret relays count as the member they were posted for, other bots
 // and other integrations' webhooks are skipped, and the bot's own messages are kept as source 'bot'
-// (so "what did you say about X" works) but never count as a member's message in stats. author_id is
-// always the member's MAIN account: a linked side account's messages (LINKED_ACCOUNTS) are stored under
-// the main id (the raw account id is not kept), so stats, search and Wrapped count one person.
+// (so "what did you say about X" works) but never count as a member's message in stats; its transcripts
+// of voice messages are not its words and are skipped (the voice message's row carries the transcript).
+// author_id is always the member's MAIN account: a linked side account's messages (LINKED_ACCOUNTS) are
+// stored under the main id (the raw account id is not kept), so stats, search and Wrapped count one person.
 import { ChannelType, type Message, MessageType, type PartialMessage } from 'discord.js';
 import { getCachedTranscript } from '../ai/media';
+import { isTranscriptReply } from '../ai/media/autoTranscribe';
 import { config } from '../config';
 import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
@@ -160,6 +162,8 @@ export function toArchiveInput(message: Message): ArchiveMessageInput | undefine
   // The bot's own messages first: interaction responses carry a webhook id (the application's) and
   // would otherwise look like one of the bot's relays to attributeMessage().
   if (botUserId && message.author.id === botUserId) {
+    // Its transcripts of voice messages are not its words: the voice message's row gets the transcript.
+    if (isTranscriptReply(message)) return undefined;
     authorId = botUserId;
     authorName = message.member?.displayName || message.author.displayName || message.author.username;
     source = 'bot';

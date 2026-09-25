@@ -170,6 +170,28 @@ describe('summarizeChannel', () => {
     expect(prompt).toContain('Jasper: :trolle: look @Silas [image]');
   });
 
+  it("leaves out the bot's transcript replies: the voice message's line carries the transcript", async () => {
+    const voice = said(45, 'silas', '', { attachments: [{ url: 'https://cdn.example/voice.ogg', contentType: 'audio/ogg' }] });
+    transcripts.set(voice.id, 'I am not driving to Laval again');
+    const at = new Date(NOW.getTime() - 44 * MIN);
+    const transcriptReply = createFakeBotMessage({
+      messageId: snowflake(at),
+      createdAt: at,
+      content: '-# 🎙️ transcript\n> I am not driving to Laval again',
+      referencedMessageId: voice.id,
+    }).message;
+    const { trigger } = channelWith([voice, transcriptReply, said(40, 'remi', 'fair')]);
+    const { client, requests } = okClient();
+
+    const result = await summarizeChannel({ message: trigger, start: new Date(NOW.getTime() - HOUR), client, now });
+
+    const prompt = userPrompt(requests[0]);
+    expect(prompt).toContain('Silas: [audio] [voice message transcript: I am not driving to Laval again]');
+    expect(prompt).not.toContain('(bot)');
+    expect(prompt.split('I am not driving to Laval again')).toHaveLength(2);
+    expect(result).toContain('(2 messages from 2 people)');
+  });
+
   it('names people by their current display name from the identities table', async () => {
     // Fetched history often has no member data: the author's global name is all the message carries.
     const { trigger } = channelWith([said(30, 'jasper', 'hi', { memberIsNull: true, authorDisplayName: 'jay_global' })]);
