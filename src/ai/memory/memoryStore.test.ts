@@ -1882,13 +1882,33 @@ describe('stampSubjectUserIds() (startup link of name-only memories to member id
     expect(rowOf(row).subject_user_id).toBeNull();
   });
 
-  it('is idempotent and never overwrites an existing id', async () => {
+  it("is idempotent and never overwrites a known member's id", async () => {
+    store.upsertIdentity('999', 'Silas');
     const mismatched = await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: '999', content: 'Has a twin' });
     await store.save({ category: 'fact', subject: 'Jasper', content: 'Drives a red Miata' });
 
     expect(store.stampSubjectUserIds().stamped).toBe(1);
     expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, relinked: 0, names: 0, ambiguous: 0 });
     expect(rowOf(mismatched).subject_user_id).toBe('999');
+  });
+
+  it('treats an id no member has (copied from a prompt example, garbled) like no id', async () => {
+    // The old learner stored whatever id the model wrote.
+    const copied = await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: '456', content: 'Still plays on PS4' });
+    const stranger = await store.save({ category: 'fact', subject: 'Stranger', subject_user_id: '456', content: 'Lives in Laval' });
+    // An inactive identity (a member who left) is still somebody: their rows keep their id.
+    store.upsertIdentity('444', 'Wheelie');
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE identities SET active = 0 WHERE discord_user_id = '444'").run();
+    const departed = await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: '444', content: 'Moved to Calgary' });
+    expect(store.getForPerson({ userId: '222', names: ['Jasper'] }).map((m) => m.id)).toEqual([]);
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 1, relinked: 0, names: 1, ambiguous: 0 });
+    expect(rowOf(copied).subject_user_id).toBe('222');
+    expect(rowOf(stranger).subject_user_id).toBe('456');
+    expect(rowOf(departed).subject_user_id).toBe('444');
+    expect(store.getForPerson({ userId: '222', names: ['Jasper'] }).map((m) => m.id)).toEqual([copied]);
+    expect(store.stampSubjectUserIds().stamped).toBe(0);
   });
 
   it('skips names shared by two members, server-wide subjects, unknown names and inactive rows', async () => {

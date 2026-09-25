@@ -848,7 +848,11 @@ export class MemoryStore {
    * 2. Every active memory without a subject_user_id whose subject is a name exactly one member goes by
    *    — display name, Discord handle, first-seen name, IRL name or nickname, case-insensitively, on
    *    any of their accounts — gets that member's MAIN id. (Real case: the learner filed memories under
-   *    "lapinlune", which is a member's handle, not his display name.)
+   *    "lapinlune", which is a member's handle, not his display name.) A row whose id belongs to nobody
+   *    the bot knows (no identities row, not in LINKED_ACCOUNTS) counts as having none: the learner
+   *    used to store whatever id the model wrote, e.g. one copied from its prompt's examples, and such a
+   *    row is otherwise found by no lookup (getForPerson only takes id-less rows by name) and never
+   *    dedups with the member's rows. A known member's id is never overwritten.
    *
    * Step 2 is stricter than interactive lookups (src/ai/people.ts), which let a display name outrank
    * another member's nickname: these rows are old and their subject was whatever the name meant back
@@ -873,11 +877,24 @@ export class MemoryStore {
       return changed;
     });
 
-    const identities = this.getAllIdentities().filter((i) => i.active !== 0);
+    const allIdentities = this.getAllIdentities();
+    const identities = allIdentities.filter((i) => i.active !== 0);
+    // Ids of nobody the bot knows. Inactive identities and every LINKED_ACCOUNTS id still count as known.
+    const knownIds = new Set([
+      ...allIdentities.map((i) => i.discord_user_id),
+      ...config.server.linkedAccounts.keys(),
+      ...config.server.linkedAccounts.values(),
+    ]);
+    const storedIds = this.stmt(
+      'SELECT DISTINCT subject_user_id AS id FROM memories WHERE active = 1 AND subject_user_id IS NOT NULL',
+    ).all() as { id: string }[];
+    const strangerIds = JSON.stringify(storedIds.map((r) => r.id).filter((id) => !knownIds.has(id)));
+    const unlinked = '(subject_user_id IS NULL OR subject_user_id IN (SELECT value FROM json_each(?)))';
+
     const subjects = this.stmt(
       `SELECT DISTINCT subject FROM memories
-       WHERE active = 1 AND subject_user_id IS NULL AND subject IS NOT NULL`,
-    ).all() as { subject: string }[];
+       WHERE active = 1 AND ${unlinked} AND subject IS NOT NULL`,
+    ).all(strangerIds) as { subject: string }[];
 
     let ambiguous = 0;
     const assignments: { subject: string; userId: string }[] = [];
@@ -889,20 +906,29 @@ export class MemoryStore {
       if (owners.length === 1) assignments.push({ subject, userId: owners[0] });
     }
 
+    let restamped = 0;
     const stamped = this.runInTransaction(() => {
       let changed = 0;
-      const update = this.stmt(
+      const stampNameOnly = this.stmt(
         'UPDATE memories SET subject_user_id = ? WHERE subject = ? AND active = 1 AND subject_user_id IS NULL',
       );
+      const restampStrangers = this.stmt(
+        `UPDATE memories SET subject_user_id = ?
+         WHERE subject = ? AND active = 1 AND subject_user_id IN (SELECT value FROM json_each(?))`,
+      );
       for (const { subject, userId } of assignments) {
-        changed += update.run(userId, subject).changes;
+        changed += stampNameOnly.run(userId, subject).changes;
+        const moved = restampStrangers.run(userId, subject, strangerIds).changes;
+        restamped += moved;
+        changed += moved;
       }
       return changed;
     });
 
     const relinkedPart = relinked > 0 ? `, moved ${relinked} from side accounts to their main account` : '';
+    const restampedPart = restamped > 0 ? `, ${restamped} of them had an id no member has` : '';
     logger.info(
-      `Subject-id stamp: linked ${stamped} memories under ${assignments.length} names to member ids (${ambiguous} ambiguous names skipped)${relinkedPart}`,
+      `Subject-id stamp: linked ${stamped} memories under ${assignments.length} names to member ids (${ambiguous} ambiguous names skipped)${restampedPart}${relinkedPart}`,
     );
     return { stamped, relinked, names: assignments.length, ambiguous };
   }
