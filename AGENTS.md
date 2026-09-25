@@ -362,7 +362,7 @@ The chat model never receives audio or video. It reads the text this layer produ
   - The reply: `-# 🎙️ transcript` (`(i/n)` on every chunk of a long one) plus quoted, escaped lines, with `SuppressNotifications` and `allowedMentions: { parse: [], repliedUser: false }`. Its ids go into `transcript_replies` (90 days).
   - `isTranscriptReply()` (header or stored id) and `repliesToTranscript()` keep transcripts out of history, the gate, auto-react, the archive and summaries. A reply to one is not a reply to the bot.
   - Deleting (or purging) the voice message deletes the transcript and forgets the cached text.
-- **Downloads** (`download.ts`): only Discord's media hosts are fetched directly. Everything else, including a Discord URL that redirects elsewhere, goes through the link reader's `createSafeFetch()` with a content-type allowlist; a declared oversized body is refused before download.
+- **Downloads** (`download.ts`): only Discord's media hosts are fetched directly. Everything else, including a Discord URL that redirects elsewhere, goes through the link reader's `createSafeFetch()` with a content-type allowlist; a declared oversized body is refused before download. `generate_image` downloads a URL-only result the same way (image types, 20 MB, 30 s).
 - **Transcoder** (`transcoder.ts`): the only place the bot shells out. Arguments only (no shell), extension-less temp input, 90 s SIGKILL, 2 concurrent jobs. Without ffmpeg the features degrade instead of failing.
 
 ### Link reader (`src/ai/linkReader/`, `src/ai/tools/linkReader.ts`)

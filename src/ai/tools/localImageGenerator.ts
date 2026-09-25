@@ -2,6 +2,8 @@ import { AttachmentBuilder, type Message } from 'discord.js';
 import type OpenAI from 'openai';
 import { config } from '../../config';
 import { logger } from '../../logger';
+import type { SafeFetch } from '../linkReader/safeFetch';
+import { downloadMedia, redact } from '../media/download';
 import { requireOpenRouterClient } from '../openRouterClient';
 import type { ImageGenerationOptions } from '../types';
 import { featureRequestOptions } from '../usage';
@@ -51,8 +53,10 @@ function setSession(channelId: string, history: ImageConversationMessage[]): voi
 /** A generated image as the response carried it: inline base64, or a URL to download. */
 export type ExtractedImage = { base64?: string; url?: string; text?: string };
 
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const IMAGE_DOWNLOAD_TIMEOUT_MS = 30_000;
+// Image hosts and object stores sometimes label files generically.
+const IMAGE_ACCEPT = ['image/*', 'application/octet-stream', 'binary/octet-stream'];
 
 /** A data URL, an http(s) URL, or bare base64 → where the image bytes are. */
 function imageRef(ref: string): Pick<ExtractedImage, 'base64' | 'url'> | undefined {
@@ -118,19 +122,27 @@ export function extractImageFromResponse(response: OpenAI.ChatCompletion): Extra
   return undefined;
 }
 
-/** The image bytes, downloading a URL-only result (bounded in size and time). */
-async function imageBytes(image: ExtractedImage, fetchImpl: typeof fetch): Promise<Buffer | undefined> {
+/**
+ * The image bytes. A URL-only result is a URL out of a model response, so it is downloaded like any URL
+ * the bot didn't choose (src/ai/media/download.ts): only Discord's media hosts directly, everything else
+ * through the SSRF-guarded fetch (public addresses only, every redirect re-checked, image types only),
+ * capped at MAX_IMAGE_BYTES while streaming and at IMAGE_DOWNLOAD_TIMEOUT_MS overall.
+ */
+async function imageBytes(image: ExtractedImage, safeFetch: SafeFetch | undefined): Promise<Buffer | undefined> {
   if (image.base64) return Buffer.from(image.base64, 'base64');
   if (!image.url) return undefined;
-  const response = await fetchImpl(image.url, { signal: AbortSignal.timeout(IMAGE_DOWNLOAD_TIMEOUT_MS) });
-  if (!response.ok) throw new Error(`image download failed: HTTP ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.byteLength > MAX_IMAGE_BYTES) throw new Error(`generated image too large (${buffer.byteLength} bytes)`);
-  return buffer;
+  const download = await downloadMedia(image.url, {
+    maxBytes: MAX_IMAGE_BYTES,
+    timeoutMs: IMAGE_DOWNLOAD_TIMEOUT_MS,
+    accept: IMAGE_ACCEPT,
+    safeFetch,
+  });
+  if (!download.ok) throw new Error(`generated image download failed (${download.reason}): ${redact(image.url)}`);
+  return download.data;
 }
 
-/** Test seams: the OpenRouter client (defaults to the shared one) and the fetch for URL-only results. */
-export type ImageGeneratorDeps = { client?: OpenAI; fetch?: typeof fetch };
+/** Test seams: the OpenRouter client (defaults to the shared one) and the guarded fetch for URL-only results. */
+export type ImageGeneratorDeps = { client?: OpenAI; safeFetch?: SafeFetch };
 
 export async function generateLocalImage(
   message: Message,
@@ -197,7 +209,7 @@ export async function generateLocalImage(
       return 'Image generation returned no data.';
     }
 
-    const imageBuffer = await imageBytes(imageResult, deps.fetch ?? globalThis.fetch);
+    const imageBuffer = await imageBytes(imageResult, deps.safeFetch);
     if (!imageBuffer || imageBuffer.byteLength === 0) return 'Image generation returned no data.';
 
     // Store session for iteration

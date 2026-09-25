@@ -2,10 +2,11 @@ import OpenAI from 'openai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '../../logger';
 import { createFakeMessage } from '../../test-support/fakeDiscord';
+import { createFileSafeFetch } from '../../test-support/fakeMedia';
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import { createTurnEffects } from '../types';
 import { FEATURE_HEADER } from '../usage';
-import { GENERATED_IMAGE_NAME, extractImageFromResponse, generateLocalImage } from './localImageGenerator';
+import { GENERATED_IMAGE_NAME, MAX_IMAGE_BYTES, extractImageFromResponse, generateLocalImage } from './localImageGenerator';
 
 function makeResponse(overrides: Partial<OpenAI.ChatCompletion['choices'][0]['message']>): OpenAI.ChatCompletion {
   return {
@@ -209,37 +210,61 @@ describe('generateLocalImage', () => {
     expect(messages[2].content).toBe('make it blue');
   });
 
-  it('downloads a URL-only image result', async () => {
+  const GEN_URL = 'https://cdn.example/gen.png';
+  const urlOnly = () => captureClient(fixtureWithImage({ type: 'image_url', image_url: { url: GEN_URL } }), []);
+
+  it('downloads a URL-only image result through the SSRF-guarded fetch', async () => {
     const fake = freshMessage();
     const turn = createTurnEffects();
     const bytes = Buffer.from(FIXTURE_PNG_BASE64, 'base64');
-    const fetched: string[] = [];
-    const fetchImpl = (async (url: string) => {
-      fetched.push(url);
-      return new Response(bytes, { status: 200 });
-    }) as unknown as typeof fetch;
+    const safeFetch = createFileSafeFetch({ [GEN_URL]: { body: bytes, contentType: 'image/png' } });
 
-    await generateLocalImage(fake.message, 'a fridge', { turn }, {
-      client: captureClient(fixtureWithImage({ type: 'image_url', image_url: { url: 'https://cdn.example/gen.png' } }), []),
-      fetch: fetchImpl,
-    });
+    await generateLocalImage(fake.message, 'a fridge', { turn }, { client: urlOnly(), safeFetch });
 
-    expect(fetched).toEqual(['https://cdn.example/gen.png']);
+    expect(safeFetch.urls).toEqual([GEN_URL]);
     expect((turn.files[0].attachment as Buffer).equals(bytes)).toBe(true);
   });
 
   it('fails cleanly when the image download fails', async () => {
     const fake = freshMessage();
     const turn = createTurnEffects();
-    const fetchImpl = (async () => new Response('nope', { status: 403 })) as unknown as typeof fetch;
+    const safeFetch = createFileSafeFetch({ [GEN_URL]: { body: Buffer.from('nope'), status: 403 } });
 
-    const result = await generateLocalImage(fake.message, 'a fridge', { turn }, {
-      client: captureClient(fixtureWithImage({ type: 'image_url', image_url: { url: 'https://cdn.example/gen.png' } }), []),
-      fetch: fetchImpl,
-    });
+    const result = await generateLocalImage(fake.message, 'a fridge', { turn }, { client: urlOnly(), safeFetch });
 
     expect(result).toBe('Image generation failed.');
     expect(turn.files).toHaveLength(0);
+  });
+
+  it('never fetches a URL-only result that resolves to a private address', async () => {
+    const fake = freshMessage();
+    const turn = createTurnEffects();
+    const bytes = Buffer.from(FIXTURE_PNG_BASE64, 'base64');
+    const safeFetch = createFileSafeFetch(
+      { [GEN_URL]: { body: bytes, contentType: 'image/png' } },
+      { privateHosts: ['cdn.example'] },
+    );
+
+    const result = await generateLocalImage(fake.message, 'a fridge', { turn }, { client: urlOnly(), safeFetch });
+
+    expect(result).toBe('Image generation failed.');
+    expect(safeFetch.urls).toEqual([]);
+    expect(turn.files).toHaveLength(0);
+  });
+
+  it('refuses an oversized or non-image download without reading its body', async () => {
+    const png = Buffer.from(FIXTURE_PNG_BASE64, 'base64');
+    for (const file of [
+      { body: png, contentType: 'image/png', headers: { 'content-length': String(MAX_IMAGE_BYTES + 1) } },
+      { body: Buffer.from('<html>login</html>'), contentType: 'text/html' },
+    ]) {
+      const turn = createTurnEffects();
+      const safeFetch = createFileSafeFetch({ [GEN_URL]: file });
+      const result = await generateLocalImage(freshMessage().message, 'a fridge', { turn }, { client: urlOnly(), safeFetch });
+      expect(result).toBe('Image generation failed.');
+      expect(safeFetch.bodies).toEqual([]);
+      expect(turn.files).toHaveLength(0);
+    }
   });
 
   it("relays the model's text when no image came back", async () => {
