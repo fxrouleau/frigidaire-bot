@@ -1,4 +1,5 @@
 import { ChannelType } from 'discord.js';
+import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { JudgeInput } from './ai/messageJudge';
 import { DeletedMessageReposter } from './deletedMessages';
@@ -176,8 +177,10 @@ describe('DeletedMessageReposter', () => {
     expect(reposter.size).toBe(0);
   });
 
-  it('re-uploads attachments captured at post time and tells the judge about images', async () => {
-    const bytes = Buffer.from('png-bytes');
+  it('re-uploads attachments captured at post time and shows the judge the saved image, not the dead CDN url', async () => {
+    const bytes = await sharp({ create: { width: 1200, height: 600, channels: 4, background: '#ff000080' } })
+      .png()
+      .toBuffer();
     const { reposter, judgeCalls, sendCalls } = makeReposter({ attachmentBytes: bytes });
     const fake = jasperMessage({
       content: '',
@@ -187,12 +190,13 @@ describe('DeletedMessageReposter', () => {
     reposter.observe(fake.message);
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
 
-    expect(judgeCalls[0]).toEqual({
-      author: 'Jasper',
-      text: '',
-      imageUrls: ['https://cdn.discordapp.com/attachments/1/2/spicy.png'],
-      attachmentNames: ['spicy.png'],
-    });
+    expect(judgeCalls[0]).toMatchObject({ author: 'Jasper', text: '', attachmentNames: ['spicy.png'] });
+    const [image] = judgeCalls[0].imageUrls;
+    expect(judgeCalls[0].imageUrls).toHaveLength(1);
+    expect(image.startsWith('data:image/jpeg;base64,')).toBe(true);
+    // Downscaled for the judge.
+    const shown = await sharp(Buffer.from(image.slice('data:image/jpeg;base64,'.length), 'base64')).metadata();
+    expect([shown.width, shown.height]).toEqual([768, 384]);
     const [, , payload] = sendCalls[0];
     expect(payload).toEqual([{ files: [{ attachment: bytes, name: 'spicy.png' }], allowedMentions: { parse: [] } }]);
   });
@@ -238,6 +242,30 @@ describe('DeletedMessageReposter', () => {
     ]);
     expect(getRelay('repost-1-0')).toMatchObject({ authorId: JASPER, kind: 'regret' });
     expect(getRelay('repost-1-1')).toMatchObject({ authorId: JASPER, kind: 'regret' });
+  });
+
+  it('judges an image whose bytes could not be decoded (or saved) by its name alone', async () => {
+    const { reposter, judgeCalls } = makeReposter({ attachmentBytes: Buffer.from('not an image') });
+    const fake = jasperMessage({
+      attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/odd.png', contentType: 'image/png', name: 'odd.png' }],
+    });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+    expect(judgeCalls[0]).toEqual({ author: 'Jasper', text: 'something edgy', imageUrls: [], attachmentNames: ['odd.png'] });
+  });
+
+  it('does not pay the judge when nothing could be reposted anyway', async () => {
+    const { reposter, judgeCalls, sendCalls } = makeReposter({ attachmentBytes: undefined });
+    const fake = jasperMessage({
+      content: '',
+      attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/huge.png', contentType: 'image/png', name: 'huge.png' }],
+    });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('empty');
+    expect(judgeCalls).toHaveLength(0);
+    expect(sendCalls).toHaveLength(0);
   });
 
   it('reports "empty" when there is nothing left to repost', async () => {

@@ -9,6 +9,7 @@
 // author's name and avatar. A watched member's side account (LINKED_ACCOUNTS) is watched too, and its
 // messages are reposted as that account.
 import type { Message, PartialMessage, WebhookMessageCreateOptions } from 'discord.js';
+import sharp from 'sharp';
 import { type MessageJudge, createEdgyJudge } from './ai/messageJudge';
 import { type DeleteRepostMode, config } from './config';
 import { isSamePerson } from './linkedAccounts';
@@ -26,6 +27,9 @@ const MAX_SNAPSHOTS = 100;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 // Snapshots outlive the repost window by this much so a delete racing the window edge still resolves.
 const SNAPSHOT_GRACE_MS = 5000;
+// What the judge sees of a regret's images: the first few, downscaled (it only needs to get the gist).
+const MAX_JUDGE_IMAGES = 4;
+const JUDGE_IMAGE_DIMENSION = 768;
 
 export type SnapshotAttachment = { name: string; contentType: string | null; data: Buffer };
 
@@ -36,7 +40,6 @@ export type MessageSnapshot = {
   identity: WebhookIdentity;
   content: string;
   createdAt: number;
-  imageUrls: string[];
   attachmentNames: string[];
   attachments: Promise<SnapshotAttachment[]>;
 };
@@ -65,6 +68,33 @@ async function downloadAttachment(url: string): Promise<Buffer | undefined> {
     logger.warn(`deletedMessages: attachment download failed for ${url}:`, error);
     return undefined;
   }
+}
+
+/** The saved image attachments as downscaled JPEG data URIs for the judge; undecodable ones are left out. */
+async function judgeImages(attachments: SnapshotAttachment[]): Promise<string[]> {
+  const images = attachments.filter((a) => a.contentType?.startsWith('image/')).slice(0, MAX_JUDGE_IMAGES);
+  const uris = await Promise.all(
+    images.map(async (image) => {
+      try {
+        // First frame of an animation; flattened so transparency doesn't turn black.
+        const jpeg = await sharp(image.data)
+          .resize({
+            width: JUDGE_IMAGE_DIMENSION,
+            height: JUDGE_IMAGE_DIMENSION,
+            fit: 'inside',
+            withoutEnlargement: true,
+          })
+          .flatten({ background: '#ffffff' })
+          .jpeg({ quality: 80 })
+          .toBuffer();
+        return `data:image/jpeg;base64,${jpeg.toString('base64')}`;
+      } catch (error) {
+        logger.debug(`deletedMessages: could not decode ${image.name} for the judge:`, error);
+        return undefined;
+      }
+    }),
+  );
+  return uris.filter((uri): uri is string => uri !== undefined);
 }
 
 /**
@@ -122,7 +152,6 @@ export class DeletedMessageReposter {
     this.prune(now);
 
     const attachments = [...message.attachments.values()];
-    const imageUrls = attachments.filter((a) => a.contentType?.startsWith('image/')).map((a) => a.url);
     const downloads = Promise.all(
       attachments.map(async (a) => {
         const data = await this.fetchAttachment(a.url);
@@ -140,7 +169,6 @@ export class DeletedMessageReposter {
       },
       content: message.content ?? '',
       createdAt: message.createdTimestamp ?? now,
-      imageUrls,
       attachmentNames: attachments.map((a) => a.name),
       attachments: downloads,
     });
@@ -164,11 +192,16 @@ export class DeletedMessageReposter {
     const channel = message.channel;
     if (!isWebhookCapableChannel(channel)) return 'ignored';
 
+    // Awaited before judging: the judge sees the bytes saved at post time, because the deleted
+    // message's CDN URLs stop serving its files. And nothing left to repost means nothing to pay a judge for.
+    const attachments = await snapshot.attachments;
+    if (snapshot.content.length === 0 && attachments.length === 0) return 'empty';
+
     if (this.mode() === 'edgy') {
       const verdict = await this.judge({
         author: snapshot.identity.name,
         text: snapshot.content,
-        imageUrls: snapshot.imageUrls,
+        imageUrls: await judgeImages(attachments),
         attachmentNames: snapshot.attachmentNames,
       });
       if (verdict === undefined) {
@@ -177,9 +210,6 @@ export class DeletedMessageReposter {
       }
       if (!verdict) return 'not-edgy';
     }
-
-    const attachments = await snapshot.attachments;
-    if (snapshot.content.length === 0 && attachments.length === 0) return 'empty';
 
     logger.info(`deletedMessages: reposting ${snapshot.id} by ${snapshot.identity.name} (deleted after ${age}ms)`);
     const reposts = await this.send(channel, snapshot.identity, regretPayloads(snapshot.content, attachments));
