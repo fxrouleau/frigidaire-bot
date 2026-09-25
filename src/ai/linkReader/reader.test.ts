@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type FakeRoute, createFakeSafeFetch } from '../../test-support/fakeSafeFetch';
-import type { VideoInput } from '../media';
+import type { VideoInput, VideoOutcome } from '../media';
 import { BlockedUrlError } from './netGuard';
 import { LinkReader, getLinkReader, setLinkReaderForTesting } from './reader';
 import type { LinkVideo } from './types';
@@ -32,12 +32,18 @@ const videoTweet = (duration: number) =>
     },
   });
 
-// `null` = video understanding answers nothing (disabled or failed upstream).
-function setup(routes: Record<string, FakeRoute>, describeResult: string | null = 'a cat knocks a glass off a table') {
+// A string = what video understanding says; an outcome = why it said nothing; `null` = it failed upstream.
+function setup(
+  routes: Record<string, FakeRoute>,
+  describeResult: string | VideoOutcome | null = 'a cat knocks a glass off a table',
+) {
   let now = 1_000_000;
   const fetch = createFakeSafeFetch(routes);
-  const describeVideo = vi.fn(async (_input: VideoInput) => describeResult ?? undefined);
-  const reader = new LinkReader({ fetch, now: () => now, describeVideo });
+  const describeVideo = vi.fn(async (_input: VideoInput): Promise<VideoOutcome> => {
+    if (describeResult === null) return { status: 'failed' };
+    return typeof describeResult === 'string' ? { status: 'ok', text: describeResult, cached: false } : describeResult;
+  });
+  const reader = new LinkReader({ fetch, now: () => now, watchVideo: describeVideo });
   return {
     reader,
     fetch,
@@ -199,6 +205,73 @@ describe('LinkReader video understanding', () => {
     const { reader } = setup({ [`${API}222`]: { body: videoTweet(12) }, 'https://video.twimg.com/v.mp4': mp4 }, null);
     const result = await reader.read('https://x.com/a/status/222', { watchVideos: true });
     expect(result.ok && (result.content.media[0] as LinkVideo).note).toBe('video understanding is unavailable right now');
+  });
+
+  it("says so, in character, when today's video budget is spent", async () => {
+    const { reader } = setup(
+      { [`${API}222`]: { body: videoTweet(12) }, 'https://video.twimg.com/v.mp4': mp4 },
+      { status: 'over_budget' },
+    );
+    const result = await reader.read('https://x.com/a/status/222', { watchVideos: true });
+    expect(result.ok && (result.content.media[0] as LinkVideo).note).toBe(
+      'not watched: out of popcorn money for today, the daily video budget is spent',
+    );
+  });
+});
+
+describe('LinkReader: a question about the video', () => {
+  const mp4 = { contentType: 'video/mp4', headers: { 'content-length': '3000000' }, body: Buffer.alloc(4) };
+
+  it('watches the first video to answer it, without caching the answer with the content', async () => {
+    const { reader, describeVideo } = setup(
+      { [`${API}222`]: { body: videoTweet(12) }, 'https://video.twimg.com/v.mp4': mp4 },
+      'he says "run it back"',
+    );
+    const result = await reader.read('https://x.com/a/status/222', { question: 'what does he say at the end?' });
+
+    expect(describeVideo.mock.calls[0][0]).toMatchObject({
+      url: 'https://video.twimg.com/v.mp4',
+      question: 'what does he say at the end?',
+    });
+    expect(result.ok && (result.content.media[0] as LinkVideo).answer).toEqual({
+      question: 'what does he say at the end?',
+      text: 'he says "run it back"',
+    });
+    const cached = reader.peek('https://x.com/a/status/222');
+    expect(cached?.ok && (cached.content.media[0] as LinkVideo).answer).toBeUndefined();
+  });
+
+  it("can't watch a video without a file (YouTube), and says so", async () => {
+    const { reader, describeVideo } = setup({});
+    const content = {
+      url: 'https://www.youtube.com/watch?v=x',
+      source: 'youtube' as const,
+      kind: 'youtube video' as const,
+      media: [
+        {
+          type: 'video' as const,
+          pageUrl: 'https://www.youtube.com/watch?v=x',
+          note: "YouTube doesn't expose the video file; going by title and description",
+        },
+      ],
+    };
+    // What the YouTube extractor returns, without scripting its HTTP exchange.
+    vi.spyOn(reader as unknown as { extract: () => Promise<unknown> }, 'extract').mockResolvedValue({
+      result: { ok: true, content },
+      videosDescribed: false,
+    });
+    const result = await reader.read('https://www.youtube.com/watch?v=x', { question: 'who wins?' });
+    expect(describeVideo).not.toHaveBeenCalled();
+    expect(result.ok && (result.content.media[0] as LinkVideo).note).toBe(
+      "YouTube doesn't expose the video file; going by title and description; can't watch this one",
+    );
+  });
+
+  it('notes a link without any video', async () => {
+    const { reader, describeVideo } = setup({ [`${API}111`]: { body: tweet('111') } });
+    const result = await reader.read('https://x.com/a/status/111', { question: 'who wins?' });
+    expect(describeVideo).not.toHaveBeenCalled();
+    expect(result.ok && result.content.notes).toEqual(['no video in this link to watch']);
   });
 });
 
