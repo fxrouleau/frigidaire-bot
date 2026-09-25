@@ -18,7 +18,6 @@ import { summarizeFromMessage } from './summary';
 vi.mock('../ai/media', () => ({
   getCachedTranscript: () => undefined,
   transcribeAudio: async () => undefined,
-  describeVideo: async () => undefined,
 }));
 
 const message = { id: 'm-1' } as unknown as Message;

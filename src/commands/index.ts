@@ -18,7 +18,7 @@ import {
   type ContextMenuCommandInteraction,
 } from 'discord.js';
 import { agent } from '../ai/agentInstance';
-import { describeVideo, getCachedTranscript, transcribeAudio } from '../ai/media';
+import { getCachedTranscript, transcribeAudio, watchVideo } from '../ai/media';
 import { getMemoryStore } from '../ai/memory';
 import { config } from '../config';
 import { logger } from '../logger';
@@ -118,7 +118,7 @@ export function defaultCommandDeps(): CommandDeps {
     summarize: (request) => summarizeFromMessage(request),
     transcribeAudio,
     getCachedTranscript,
-    describeVideo,
+    watchVideo,
     complete: createCompletion(),
     memoryStore: getMemoryStore,
     now: () => new Date(),

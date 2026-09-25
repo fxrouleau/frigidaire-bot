@@ -77,14 +77,17 @@ describe('Transcribe', () => {
       mediaAttachments: [{ url: 'https://cdn/clip.mp4', contentType: 'video/mp4', name: 'clip.mp4', duration: 75 }],
     });
     const { interaction } = createFakeMessageCommandInteraction(target.message, { commandName: 'Transcribe' });
-    const { deps, recorders } = createFakeCommandDeps({ describeVideo: async () => 'A cat knocks a glass off a table.' });
+    const { deps, recorders } = createFakeCommandDeps({
+      watchVideo: async () => ({ status: 'ok', text: 'A cat knocks a glass off a table.', cached: false }),
+    });
 
     await handleContextMenuCommand(interaction, deps);
 
-    expect(recorders.describeVideo.calls[0][0]).toEqual({
+    expect(recorders.watchVideo.calls[0][0]).toEqual({
       url: 'https://cdn/clip.mp4',
       contentType: 'video/mp4',
       context: 'Shared in a Discord chat by Jason with the message: look at this @Simon',
+      durationSecs: 75,
     });
     expect(postedContent(target)).toBe(
       "-# what's in it · asked by Invoker\n**clip.mp4 (1:15)**\n> A cat knocks a glass off a table.",
@@ -132,6 +135,68 @@ describe('Transcribe', () => {
 
     expect(target.recorders.reply.calls).toHaveLength(0);
     expect(responses.at(-1)).toMatchObject({ method: 'editReply', content: TRANSCRIBE_LINES.couldNot, ephemeral: true });
+  });
+
+  it("shows the in-character note, privately, when today's video budget is spent", async () => {
+    const target = createFakeTargetMessage({
+      mediaAttachments: [{ url: 'https://cdn/clip.mp4', contentType: 'video/mp4', name: 'clip.mp4', duration: 75 }],
+    });
+    const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Transcribe' });
+    const { deps } = createFakeCommandDeps({ watchVideo: async () => ({ status: 'over_budget' }) });
+
+    await handleContextMenuCommand(interaction, deps);
+
+    expect(target.recorders.reply.calls).toHaveLength(0);
+    expect(responses.at(-1)).toMatchObject({
+      method: 'editReply',
+      content: 'not watched: out of popcorn money for today, the daily video budget is spent',
+      ephemeral: true,
+    });
+  });
+
+  it('says a voice message is too long without trying to transcribe it', async () => {
+    const target = createFakeTargetMessage({
+      voiceMessage: true,
+      mediaAttachments: [{ url: 'https://cdn/voice-message.ogg', contentType: 'audio/ogg', duration: 725 }],
+    });
+    const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Transcribe' });
+    const { deps, recorders } = createFakeCommandDeps({ transcribeAudio: async () => 'never asked' });
+
+    await handleContextMenuCommand(interaction, deps);
+
+    expect(recorders.transcribeAudio.calls).toHaveLength(0);
+    expect(responses.at(-1)).toMatchObject({ method: 'editReply', content: 'too long to transcribe (12:05)', ephemeral: true });
+  });
+
+  it('posts what it could read and tells the invoker, labelled, why the rest is missing', async () => {
+    const target = createFakeTargetMessage({
+      mediaAttachments: [
+        { url: 'https://cdn/memo.mp3', contentType: 'audio/mpeg', name: 'memo.mp3', duration: 30 },
+        { url: 'https://cdn/huge.mp4', contentType: 'video/mp4', name: 'huge.mp4', duration: 90 },
+      ],
+    });
+    const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Transcribe' });
+    const { deps } = createFakeCommandDeps({
+      transcribeAudio: async () => 'memo words',
+      watchVideo: async () => ({ status: 'too_large' }),
+    });
+
+    await handleContextMenuCommand(interaction, deps);
+
+    expect(postedContent(target)).toBe('-# transcript · asked by Invoker\n> memo words');
+    expect(String(responses.at(-1)?.content)).toMatch(/^posted it: .+\nhuge\.mp4 \(1:30\): too large to watch$/);
+  });
+
+  it('shows the generic line when watching simply failed', async () => {
+    const target = createFakeTargetMessage({
+      mediaAttachments: [{ url: 'https://cdn/clip.mp4', contentType: 'video/mp4', name: 'clip.mp4' }],
+    });
+    const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Transcribe' });
+    const { deps } = createFakeCommandDeps({ watchVideo: async () => ({ status: 'failed' }) });
+
+    await handleContextMenuCommand(interaction, deps);
+
+    expect(responses.at(-1)).toMatchObject({ method: 'editReply', content: TRANSCRIBE_LINES.couldNot });
   });
 
   it('splits a very long transcript across messages, each within the limit', async () => {

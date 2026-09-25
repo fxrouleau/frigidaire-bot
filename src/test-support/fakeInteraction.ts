@@ -14,7 +14,7 @@ import {
   MessageFlagsBitField,
   type UserContextMenuCommandInteraction,
 } from 'discord.js';
-import type { AudioInput, VideoInput } from '../ai/media';
+import type { AudioInput, VideoInput, VideoOutcome } from '../ai/media';
 import type { MemoryStore } from '../ai/memory/memoryStore';
 import type { ChannelSummary, CommandDeps, CompletionRequest, SummarizeRequest } from '../commands/types';
 import { type FakeMessageOptions, createFakeMessage } from './fakeDiscord';
@@ -330,7 +330,7 @@ export type FakeCommandDeps = {
     summarize: Recorder<[SummarizeRequest], Promise<ChannelSummary>>;
     transcribeAudio: Recorder<[AudioInput], Promise<string | undefined>>;
     getCachedTranscript: Recorder<[string], string | undefined>;
-    describeVideo: Recorder<[VideoInput], Promise<string | undefined>>;
+    watchVideo: Recorder<[VideoInput], Promise<VideoOutcome>>;
     complete: Recorder<[CompletionRequest], Promise<string | undefined>>;
   };
 };
@@ -349,7 +349,7 @@ export function createFakeCommandDeps(
     summarize?: CommandDeps['summarize'];
     transcribeAudio?: CommandDeps['transcribeAudio'];
     getCachedTranscript?: CommandDeps['getCachedTranscript'];
-    describeVideo?: CommandDeps['describeVideo'];
+    watchVideo?: CommandDeps['watchVideo'];
     complete?: CommandDeps['complete'];
     now?: Date;
   } = {},
@@ -363,8 +363,8 @@ export function createFakeCommandDeps(
       opts.transcribeAudio ?? (async () => undefined),
     ),
     getCachedTranscript: createRecorder<[string], string | undefined>(opts.getCachedTranscript ?? (() => undefined)),
-    describeVideo: createRecorder<[VideoInput], Promise<string | undefined>>(
-      opts.describeVideo ?? (async () => undefined),
+    watchVideo: createRecorder<[VideoInput], Promise<VideoOutcome>>(
+      opts.watchVideo ?? (async () => ({ status: 'unavailable' })),
     ),
     complete: createRecorder<[CompletionRequest], Promise<string | undefined>>(
       opts.complete ?? (async () => undefined),

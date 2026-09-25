@@ -108,18 +108,10 @@ export function getCachedTranscript(messageId: string): string | undefined {
 }
 
 /**
- * Describes a video (what happens, on-screen text, what's said) in a few compact lines. Undefined when
- * video understanding is unavailable, the file is over the download cap, or the call failed.
- */
-export async function describeVideo(input: VideoInput): Promise<string | undefined> {
-  const outcome = await getVideoDescriber().describe(input);
-  return outcome.status === 'ok' ? outcome.text : undefined;
-}
-
-/**
- * describeVideo() with the full outcome, for callers that tell the chat model why nothing came back
- * (over today's VIDEO_DAILY_BUDGET_USD, too large, unavailable). With `input.question`, the clip is
- * watched to answer that question instead (cached per URL and question).
+ * Describes a video (what happens, on-screen text, what's said) in a few compact lines, with the full
+ * outcome so callers can say why nothing came back (over today's VIDEO_DAILY_BUDGET_USD, too large,
+ * unavailable; see videoOutcomeNote). With `input.question`, the clip is watched to answer that question
+ * instead (cached per URL and question).
  */
 export function watchVideo(input: VideoInput): Promise<VideoOutcome> {
   return getVideoDescriber().describe(input);

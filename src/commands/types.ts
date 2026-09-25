@@ -8,7 +8,7 @@ import type {
   MessageContextMenuCommandInteraction,
   UserContextMenuCommandInteraction,
 } from 'discord.js';
-import type { AudioInput, VideoInput } from '../ai/media';
+import type { AudioInput, VideoInput, VideoOutcome } from '../ai/media';
 import type { MemoryStore } from '../ai/memory/memoryStore';
 
 /** Result of the channel summary pipeline: the summary text, or why there is none (shown privately). */
@@ -29,7 +29,8 @@ export type CommandDeps = {
   summarize: (request: SummarizeRequest) => Promise<ChannelSummary>;
   transcribeAudio: (input: AudioInput) => Promise<string | undefined>;
   getCachedTranscript: (messageId: string) => string | undefined;
-  describeVideo: (input: VideoInput) => Promise<string | undefined>;
+  /** Video understanding with its full outcome (over budget and too large are told apart from failures). */
+  watchVideo: (input: VideoInput) => Promise<VideoOutcome>;
   /** One chat-model call (ZDR, tagged 'command'). Resolves to the trimmed answer, undefined when empty; throws on API errors. */
   complete: (request: CompletionRequest) => Promise<string | undefined>;
   memoryStore: () => MemoryStore;

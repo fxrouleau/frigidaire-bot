@@ -13,12 +13,12 @@ import {
 } from '../../test-support/fakeMedia';
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import {
-  describeVideo,
   getCachedTranscript,
   getCachedVideoDescription,
   setMediaForTesting,
   startTranscriptionRouteChecks,
   transcribeAudio,
+  watchVideo,
 } from './index';
 import { AudioTranscriber } from './transcriber';
 import { VideoDescriber } from './video';
@@ -72,16 +72,16 @@ describe('media entry points', () => {
     expect(await transcribeAudio({ url: VOICE_URL, messageId: 'voice-2', durationSecs: 3600 })).toBeUndefined();
   });
 
-  it('describeVideo returns the description and caches it per URL', async () => {
+  it('watchVideo returns the description and caches it per URL', async () => {
     install([loadFixture('video-description')]);
-    const text = await describeVideo({ url: CLIP_URL, contentType: 'video/mp4', context: 'shared by Jason' });
-    expect(text).toMatch(/^League of Legends clip/);
-    expect(getCachedVideoDescription(CLIP_URL)).toBe(text);
+    const outcome = await watchVideo({ url: CLIP_URL, contentType: 'video/mp4', context: 'shared by Jason' });
+    expect(outcome).toMatchObject({ status: 'ok', text: expect.stringMatching(/^League of Legends clip/) });
+    expect(getCachedVideoDescription(CLIP_URL)).toBe(outcome.status === 'ok' ? outcome.text : 'no description');
   });
 
   it('reports nothing without an API key (the defaults under test)', async () => {
     expect(await transcribeAudio({ url: VOICE_URL, messageId: 'voice-3' })).toBeUndefined();
-    expect(await describeVideo({ url: CLIP_URL })).toBeUndefined();
+    expect(await watchVideo({ url: CLIP_URL })).toEqual({ status: 'unavailable' });
     expect(getCachedTranscript('voice-3')).toBeUndefined();
   });
 });

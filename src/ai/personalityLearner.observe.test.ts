@@ -20,7 +20,6 @@ const transcripts = vi.hoisted(() => new Map<string, string>());
 vi.mock('./media', () => ({
   getCachedTranscript: (messageId: string) => transcripts.get(messageId),
   transcribeAudio: async () => undefined,
-  describeVideo: async () => undefined,
 }));
 
 const CHANNEL_ID = 'chan-general';

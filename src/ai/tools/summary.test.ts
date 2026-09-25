@@ -15,7 +15,6 @@ const transcripts = vi.hoisted(() => new Map<string, string>());
 vi.mock('../media', () => ({
   getCachedTranscript: (messageId: string) => transcripts.get(messageId),
   transcribeAudio: async () => undefined,
-  describeVideo: async () => undefined,
 }));
 
 // "Now" for every test: 2026-01-15 12:00 Eastern (EST, UTC-5).
