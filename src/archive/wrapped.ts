@@ -8,7 +8,9 @@
 // to 'sending' right before the first message goes out, and finalized after, so a restart, a second
 // tick or a redeploy never double-posts. A claim abandoned while still 'posting' (the bot restarted
 // mid-intro: nothing was sent) is taken over once stale; one abandoned while 'sending' never is, since
-// part of the post may be out.
+// part of the post may be out. An attempt that failed before anything went out (the channel could not
+// be fetched, the first send was rejected) is retried with a growing backoff for as long as the year is
+// due, so an outage or a permission fix on Jan 1 doesn't cost the year.
 //
 // Preview: `!wrapped` (this year so far) or `!wrapped 2025` (a whole past year) typed in the report
 // channel posts the same text there on demand, so the owner can check it long before January. A
@@ -58,7 +60,10 @@ const POST_HOUR_ET = 15;
 // A year is still posted when the bot comes back within this long after the due time (it was down on
 // Jan 1); later than that, the moment has passed and the year is skipped.
 const LATE_WINDOW_MS = 3 * 86_400_000;
-const MAX_ATTEMPTS = 3;
+// A failed attempt is retried after 5 min, then 10, 20, … capped at 6 h: ~18 attempts at most over the
+// late window, which bounds what a persistent failure spends on intro lines.
+const RETRY_BASE_MS = 5 * 60_000;
+const RETRY_MAX_MS = 6 * 60 * 60_000;
 const INTRO_TIMEOUT_MS = 30_000;
 // Far longer than computing the stats and the intro ever takes: a 'posting' claim this old was abandoned.
 const STALE_CLAIM_MS = 15 * 60_000;
@@ -130,9 +135,14 @@ export function getWrappedStatus(key: string): WrappedWatermark | undefined {
   return row && { status: row.status, attempts: row.attempts, messageId: row.message_id, updatedAt: row.updated_at };
 }
 
+/** How long after its `attempts`-th failed attempt a period may be tried again. */
+function retryDelayMs(attempts: number): number {
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
+}
+
 /**
- * Claims a period for posting. False when it is posted, skipped, failed for good, being sent, or
- * claimed by a run that is still within STALE_CLAIM_MS.
+ * Claims a period for posting. False when it is posted, skipped, failed for good, being sent, claimed
+ * by a run that is still within STALE_CLAIM_MS, or waiting out the backoff of a failed attempt.
  */
 export function claimWrappedPeriod(key: string, now: number): boolean {
   const db = watermarkDb();
@@ -146,7 +156,8 @@ export function claimWrappedPeriod(key: string, now: number): boolean {
       return true;
     }
     const abandoned = row.status === 'posting' && now - row.updatedAt >= STALE_CLAIM_MS;
-    if (row.status !== 'retry' && !abandoned) return false;
+    const retryDue = row.status === 'retry' && now - row.updatedAt >= retryDelayMs(row.attempts);
+    if (!retryDue && !abandoned) return false;
     db.stmt(
       "UPDATE wrapped_posts SET status = 'posting', attempts = attempts + 1, updated_at = ? WHERE period_key = ?",
     ).run(now, key);
@@ -165,15 +176,25 @@ export function finishWrappedPeriod(
   now: number,
   messageId?: string,
 ): void {
-  const db = watermarkDb();
-  const row = getWrappedStatus(key);
-  const finalStatus = status === 'retry' && (row?.attempts ?? 0) >= MAX_ATTEMPTS ? 'failed' : status;
-  db.stmt('UPDATE wrapped_posts SET status = ?, message_id = ?, updated_at = ? WHERE period_key = ?').run(
-    finalStatus,
-    messageId ?? null,
-    now,
-    key,
+  watermarkDb()
+    .stmt('UPDATE wrapped_posts SET status = ?, message_id = ?, updated_at = ? WHERE period_key = ?')
+    .run(status, messageId ?? null, now, key);
+}
+
+/**
+ * After an attempt that sent nothing: 'retry' while another attempt still fits in the late window,
+ * else 'failed' (the year is not posted; worth a WARN, since that takes days of failures).
+ */
+function retryOrGiveUp(period: WrappedPeriod, now: number): void {
+  const attempts = getWrappedStatus(period.key)?.attempts ?? 1;
+  if (now + retryDelayMs(attempts) < period.dueAtMs + LATE_WINDOW_MS) {
+    finishWrappedPeriod(period.key, 'retry', now);
+    return;
+  }
+  logger.warn(
+    `wrapped: ${period.label} could not be posted in ${attempts} attempt(s) over the ${LATE_WINDOW_MS / 86_400_000}-day window; giving up.`,
   );
+  finishWrappedPeriod(period.key, 'failed', now);
 }
 
 // ---------------------------------------------------------------- rendering
@@ -508,7 +529,7 @@ async function postPeriod(period: WrappedPeriod, deps: WrappedDeps): Promise<voi
     const channel = await deps.fetchChannel(channelId);
     if (!channel) {
       logger.warn(`wrapped: channel ${channelId} is missing or not a server text channel; will retry.`);
-      finishWrappedPeriod(period.key, 'retry', deps.now().getTime());
+      retryOrGiveUp(period, deps.now().getTime());
       return;
     }
     const channelIds = allowedChannelIds(deps.store(), makeAudienceAccess(channel.guild, channel));
@@ -537,7 +558,7 @@ async function postPeriod(period: WrappedPeriod, deps: WrappedDeps): Promise<voi
       return;
     }
     logger.warn(`wrapped: posting ${period.label} failed; will retry:`, error);
-    finishWrappedPeriod(period.key, 'retry', deps.now().getTime());
+    retryOrGiveUp(period, deps.now().getTime());
   }
 }
 

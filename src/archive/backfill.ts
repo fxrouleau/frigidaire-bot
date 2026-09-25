@@ -1,4 +1,4 @@
-// Importing history into the archive, two ways:
+// Importing history into the archive and keeping recent rows current, three ways:
 //
 // - Backfill: for each ARCHIVE_BACKFILL_CHANNELS channel, page backwards 100 messages at a time from
 //   the oldest archived message to the start of the channel. Resumable: the cursor and a done flag live
@@ -6,11 +6,16 @@
 //   redeploys on every merge) picks up exactly where it stopped.
 // - Gap fill: after downtime, every channel with history is paged forward from its newest archived
 //   message, so messages posted while the bot was offline are not missing. Channels whose last message
-//   (as Discord reports it in the channel cache) is already archived cost no request at all. The id a
+//   (as Discord reports it in the channel cache) is already archived cost no gap-fill request. The id a
 //   channel's gap fill has reached is saved with each page: live ingest archives newer messages in the
 //   meantime, so a run that stops early resumes from there instead of skipping the rest of the gap.
+// - Refresh: reactions added or removed, edits and deletions made while the bot was offline never
+//   arrive as events, and the reaction events that follow are deltas on the stored counts. So once per
+//   process, each channel active within REFRESH_LOOKBACK_MS has its newest archived page re-read (one
+//   request): Discord's data replaces the archived rows, archived messages missing from the page's span
+//   are marked deleted, and messages the archive doesn't hold are not imported.
 //
-// Both are polite (ARCHIVE_BACKFILL_DELAY_MS between requests; discord.js additionally honors 429s),
+// All three are polite (ARCHIVE_BACKFILL_DELAY_MS between requests; discord.js additionally honors 429s),
 // fetch with cache:false (hundreds of thousands of messages must not pile up in discord.js' cache), and
 // treat missing access as "skip this channel, retry later" rather than an error loop.
 import type { Client, Message } from 'discord.js';
@@ -32,6 +37,9 @@ const PROGRESS_EVERY_PAGES = 25;
 const MAX_ATTEMPTS = 4;
 // A channel whose backfill failed (no access, deleted, persistent errors) is retried after this long.
 const ERROR_RETRY_MS = 60 * 60 * 1000;
+// Channels whose newest archived message is older than this are not refreshed after a restart: a
+// reaction during the downtime on a message that old is unlikely enough not to be worth a request.
+const REFRESH_LOOKBACK_MS = 7 * 86_400_000;
 // Discord API error codes that mean "this channel is not readable", not "try again".
 const PERMANENT_DISCORD_CODES = new Set([10003, 50001, 50013]);
 
@@ -105,6 +113,8 @@ export class ArchiveSync {
   private phase: SyncStatus['phase'] = 'idle';
   private stopped = false;
   private requestsMade = 0;
+  /** Channels whose newest archived page this process has re-read (see refreshNewest). */
+  private readonly refreshed = new Set<string>();
 
   constructor(private readonly deps: ArchiveSyncDeps) {}
 
@@ -137,30 +147,84 @@ export class ArchiveSync {
 
   /**
    * Pages forward from each channel's newest archived message to catch what was posted while offline,
-   * and finishes gap fills an earlier run left unfinished from where they stopped.
+   * and finishes gap fills an earlier run left unfinished from where they stopped. Recently active
+   * channels also get their newest archived page refreshed, once per process (see refreshNewest).
    */
   async gapFill(): Promise<number> {
     const store = this.deps.store();
     // Read before the first await: live ingest is already archiving newer messages.
-    const starts = new Map(store.channelsWithHistory().map((c) => [c.channelId, c.newestId]));
+    const history = store.channelsWithHistory();
+    const starts = new Map(history.map((c) => [c.channelId, c.newestId]));
+    const now = this.deps.now();
+    const toRefresh = new Map(
+      history
+        .filter((c) => now - c.newestAt < REFRESH_LOOKBACK_MS && !this.refreshed.has(c.channelId))
+        .map((c) => [c.channelId, c.newestId]),
+    );
     const pending = store.pendingGapFills();
     for (const { channelId, cursorId } of pending) starts.set(channelId, cursorId);
     const pendingIds = new Set(pending.map((p) => p.channelId));
     let total = 0;
+    const refreshed = { changed: 0, deleted: 0 };
     for (const [channelId, from] of starts) {
       if (this.stopped) break;
       const cached = this.deps.peekChannel(channelId);
       // Not in the channel cache: deleted, no longer visible, or an archived thread (a new message
       // would have unarchived it, putting it back in the cache). Nothing to catch up on.
       if (!cached || !isArchivableChannel(cached)) continue;
+      const newestId = toRefresh.get(channelId);
+      if (newestId) {
+        const result = await this.refreshNewest(cached, newestId);
+        refreshed.changed += result.changed;
+        refreshed.deleted += result.deleted;
+      }
+      if (this.stopped) break;
       if (!cached.lastMessageId || compareSnowflakes(cached.lastMessageId, from) <= 0) {
         if (pendingIds.has(channelId)) store.finishGapFill(channelId);
         continue;
       }
       total += await this.gapFillChannel(cached, from);
     }
+    if (refreshed.changed + refreshed.deleted > 0) {
+      logger.info(
+        `archive: while the bot was offline, ${refreshed.changed} archived message(s) changed (reactions, edits) and ${refreshed.deleted} were deleted; updated.`,
+      );
+    }
     if (total > 0) logger.info(`archive: gap fill archived ${total} message(s) posted while the bot was offline.`);
     return total;
+  }
+
+  /**
+   * Re-reads the page of messages ending at `newestId` (the channel's newest archived message when the
+   * process started) and brings the archived ones up to date with Discord: reactions, edits and
+   * deletions made while the bot was offline never arrive as events. One request.
+   */
+  private async refreshNewest(channel: HistorySource, newestId: string): Promise<{ changed: number; deleted: number }> {
+    this.refreshed.add(channel.id);
+    // `before` is exclusive: start right after the newest archived id so the page includes it.
+    const before = (BigInt(newestId) + 1n).toString();
+    const messages = await this.fetchWithRetry(channel, { before, limit: PAGE_SIZE });
+    const bounds = messages && pageBounds(messages);
+    // Nothing returned (or no access): nothing to compare against, so nothing is concluded.
+    if (!messages || !bounds) return { changed: 0, deleted: 0 };
+    const store = this.deps.store();
+    const inputs = messages.map((m) => toArchiveInput(m)).filter((i) => i !== undefined);
+    const changed = store.refreshMessages(inputs);
+
+    // The page holds every message of its span, back to the channel's start when it is short: an
+    // archived message inside that span that Discord no longer returns was deleted while offline.
+    const reachedStart = messages.length < PAGE_SIZE;
+    const present = new Set(messages.map((m) => m.id));
+    const gone = store
+      .liveMessageIdsSince(channel.id, reachedStart ? 0 : bounds.oldest.createdTimestamp)
+      .filter(
+        (id) =>
+          !present.has(id) &&
+          compareSnowflakes(id, newestId) <= 0 &&
+          (reachedStart || compareSnowflakes(id, bounds.oldest.id) >= 0),
+      );
+    const deleted = store.markDeleted(gone, this.deps.now());
+    return { changed, deleted };
   }
 
   private async gapFillChannel(channel: HistorySource, from: string): Promise<number> {

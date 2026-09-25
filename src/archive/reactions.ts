@@ -10,7 +10,8 @@
 // edited or pinned since the last restart) is cached as a FULL message with an EMPTY reaction cache,
 // because gateway message payloads carry no reactions; copying it would wipe the archived counts.
 // Messages the archive doesn't hold (ignored channels, not imported yet) are left alone: the backfill
-// brings their reactions along when it reaches them.
+// brings their reactions along when it reaches them. Reactions made while the bot was offline arrive as
+// no event at all; the post-restart refresh (backfill.ts) re-reads each active channel's newest page.
 import { config } from '../config';
 import { logger } from '../logger';
 import {

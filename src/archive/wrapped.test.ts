@@ -5,6 +5,7 @@ import { setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
 import { FEATURE_HEADER } from '../ai/usage';
 import { config } from '../config';
+import { logger } from '../logger';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { BOT_USER_ID, GUILD_ID, archiveInput, snowflake } from '../test-support/fakeArchive';
 import { type OpenRouterFixture, loadFixture } from '../test-support/openRouterFetch';
@@ -37,6 +38,8 @@ const JASPER = '200000000000000002';
 const EVERYONE_ROLE = GUILD_ID;
 const MOD_ROLE = '400000000000000001';
 const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 
 let botDb: BotDb;
 
@@ -105,16 +108,24 @@ describe('periods and scheduling', () => {
 describe('watermark', () => {
   const T = Date.UTC(2027, 0, 1, 20, 0);
 
-  it('claims a period once; a retry can be reclaimed until it fails for good', () => {
+  it('claims a period once; a retry is reclaimed after a growing backoff; failed is final', () => {
     expect(claimWrappedPeriod('year:2026', T)).toBe(true);
     expect(claimWrappedPeriod('year:2026', T + 1)).toBe(false);
-    finishWrappedPeriod('year:2026', 'retry', T + 2);
-    expect(claimWrappedPeriod('year:2026', T + 3)).toBe(true);
-    finishWrappedPeriod('year:2026', 'retry', T + 4);
-    expect(claimWrappedPeriod('year:2026', T + 5)).toBe(true);
-    finishWrappedPeriod('year:2026', 'retry', T + 6);
-    expect(getWrappedStatus('year:2026')).toMatchObject({ status: 'failed', attempts: 3 });
-    expect(claimWrappedPeriod('year:2026', T + 7)).toBe(false);
+    finishWrappedPeriod('year:2026', 'retry', T);
+    expect(claimWrappedPeriod('year:2026', T + 5 * MINUTE - 1)).toBe(false);
+    expect(claimWrappedPeriod('year:2026', T + 5 * MINUTE)).toBe(true);
+    finishWrappedPeriod('year:2026', 'retry', T + 5 * MINUTE);
+    expect(claimWrappedPeriod('year:2026', T + 14 * MINUTE)).toBe(false);
+    expect(claimWrappedPeriod('year:2026', T + 15 * MINUTE)).toBe(true);
+    // No attempt cap: a retry stays a retry (the late window, not a count, ends it).
+    for (let i = 0; i < 5; i++) {
+      finishWrappedPeriod('year:2026', 'retry', T + (i + 1) * DAY);
+      expect(getWrappedStatus('year:2026')?.status).toBe('retry');
+      expect(claimWrappedPeriod('year:2026', T + (i + 1) * DAY + 6 * 60 * MINUTE)).toBe(true);
+    }
+    expect(getWrappedStatus('year:2026')).toMatchObject({ status: 'posting', attempts: 8 });
+    finishWrappedPeriod('year:2026', 'failed', T + 7 * DAY);
+    expect(claimWrappedPeriod('year:2026', T + 30 * DAY)).toBe(false);
   });
 
   it('takes over an abandoned claim that sent nothing, never one that was sending', () => {
@@ -464,23 +475,74 @@ describe('runWrappedCheck', () => {
     expect(getWrappedStatus('year:2026')?.status).toBe('skipped');
   });
 
-  it('retries after a failed send or a missing channel', async () => {
+  it('retries after a failed send or a missing channel, once its backoff has passed', async () => {
     seedStore(store, IN_2026);
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
     await runWrappedCheck(deps({ fetchChannel: async () => undefined }));
     expect(getWrappedStatus('year:2026')?.status).toBe('retry');
 
-    await runWrappedCheck(
+    const failingSend = (at: number) =>
       deps({
+        now: () => new Date(at),
         fetchChannel: async (id) =>
           channel(id, async () => {
             throw new Error('Missing Permissions');
           }),
-      }),
-    );
+      });
+    // The next tick is too soon: not even an attempt.
+    await runWrappedCheck(failingSend(NOW + MINUTE));
+    expect(getWrappedStatus('year:2026')).toMatchObject({ status: 'retry', attempts: 1 });
+    await runWrappedCheck(failingSend(NOW + 10 * MINUTE));
     expect(getWrappedStatus('year:2026')).toMatchObject({ status: 'retry', attempts: 2 });
 
-    await runWrappedCheck(deps());
+    await runWrappedCheck(deps({ now: () => new Date(NOW + 30 * MINUTE) }));
     expect(getWrappedStatus('year:2026')).toMatchObject({ status: 'posted', attempts: 3 });
+  });
+
+  it('keeps retrying through a long outage while the year is due, backing off, and posts once it can', async () => {
+    seedStore(store, IN_2026);
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    let t = NOW;
+    let attempts = 0;
+    const down = deps({
+      now: () => new Date(t),
+      fetchChannel: async () => {
+        attempts++;
+        return undefined;
+      },
+    });
+    // Twelve hours of 10-minute ticks with the Wrapped channel unreachable.
+    for (; t < NOW + 12 * HOUR; t += 10 * MINUTE) await runWrappedCheck(down);
+    expect(getWrappedStatus('year:2026')?.status).toBe('retry');
+    expect(attempts).toBeGreaterThan(3);
+    expect(attempts).toBeLessThan(12); // backed off, not every tick
+
+    const up = deps({ now: () => new Date(t) });
+    for (const end = t + 7 * HOUR; t < end && sent.length === 0; t += 10 * MINUTE) await runWrappedCheck(up);
+    expect(sent).toHaveLength(1);
+    expect(getWrappedStatus('year:2026')?.status).toBe('posted');
+  });
+
+  it('gives up for good, with a WARN, once no retry fits in the late window', async () => {
+    seedStore(store, IN_2026);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    let t = NOW;
+    const intro = vi.fn(async () => 'what a year');
+    const down = deps({
+      now: () => new Date(t),
+      intro,
+      fetchChannel: async (id) =>
+        channel(id, async () => {
+          throw new Error('Missing Permissions');
+        }),
+    });
+    for (; t < NOW + 4 * DAY; t += 10 * MINUTE) await runWrappedCheck(down);
+    expect(getWrappedStatus('year:2026')?.status).toBe('failed');
+    // Every attempt paid for an intro line: the backoff keeps that to a handful over three days.
+    expect(intro.mock.calls.length).toBeGreaterThan(3);
+    expect(intro.mock.calls.length).toBeLessThanOrEqual(20);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('giving up'))).toBe(true);
+    expect(sent).toHaveLength(intro.mock.calls.length); // each attempt's first chunk was rejected
   });
 
   it('does not repost a partly sent (multi-message) post', async () => {

@@ -81,6 +81,43 @@ describe('collectEmojiUsage', () => {
     expect(collectEmojiUsage(['" OR hello'], { store }).size).toBe(0);
   });
 
+  it('leaves out ARCHIVE_IGNORE_CHANNELS (a parent covers its threads), rows archived before the ignore included', () => {
+    const IGNORED = '100000000000000009';
+    const IGNORED_THREAD = '100000000000000010';
+    store.upsertMessages([
+      archiveInput({
+        id: snowflake(at(0)),
+        createdAt: at(0),
+        channelId: IGNORED,
+        content: `private channel talk about the ban appeal <:SAJ:${SAJ}>`,
+      }),
+      archiveInput({
+        id: snowflake(at(1)),
+        createdAt: at(1),
+        channelId: IGNORED_THREAD,
+        parentChannelId: IGNORED,
+        content: `private thread talk that goes on for a while <:SAJ:${SAJ}>`,
+      }),
+      archiveInput({
+        id: snowflake(at(2)),
+        createdAt: at(2),
+        channelId: IGNORED,
+        content: 'private post people reacted to',
+        reactions: [{ id: SAJ, name: 'SAJ', count: 3 }],
+      }),
+      archiveInput({
+        id: snowflake(at(3)),
+        createdAt: at(3),
+        content: `public use in the main channel, long enough <:SAJ:${SAJ}>`,
+      }),
+    ]);
+    vi.stubEnv('ARCHIVE_IGNORE_CHANNELS', IGNORED);
+
+    const saj = collectEmojiUsage([SAJ], { store }).get(SAJ);
+    expect(saj).toMatchObject({ reactionUses: 0, messageUses: 1, total: 1 });
+    expect(JSON.stringify(saj?.samples)).not.toContain('private');
+  });
+
   it('caps the samples', () => {
     store.upsertMessages(
       Array.from({ length: 30 }, (_, i) =>

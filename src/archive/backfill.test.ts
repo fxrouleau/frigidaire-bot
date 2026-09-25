@@ -5,6 +5,7 @@ import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { GUILD_ID, archivableMessage, archiveInput, snowflake } from '../test-support/fakeArchive';
 import { ArchiveStore, compareSnowflakes } from './archiveStore';
 import { ArchiveSync, type ArchiveSyncDeps, type HistorySource, discordSyncDeps, historySourceOf } from './backfill';
+import { toArchiveInput } from './ingest';
 
 const CHANNEL = '100000000000000001';
 const OTHER = '100000000000000002';
@@ -315,6 +316,84 @@ describe('gap fill', () => {
     expect(await new ArchiveSync(makeDeps()).gapFill()).toBe(0);
     expect(history.calls).toEqual([]);
     expect(store.pendingGapFills()).toEqual([]);
+  });
+
+  it('re-reads the newest archived page once per process, so reactions and edits made while offline count', async () => {
+    backfillIds = [];
+    // An active channel: its newest message is from half an hour before the restart.
+    const history = fakeHistory(150, { start: now - 3 * HOUR + 31 * MINUTE });
+    channels.set(CHANNEL, history);
+    // Live ingest archived messages 80..149 (the channel is not backfilled), none of them reacted to yet.
+    const live = history.messages.slice(80).map((m) => toArchiveInput(m));
+    store.upsertMessages(live.filter((i) => i !== undefined));
+    // While the bot was down: five members reacted to one message, and another was edited.
+    const redo = (i: number, extra: Partial<Parameters<typeof archivableMessage>[0]>) => {
+      const m = history.messages[i];
+      history.messages[i] = archivableMessage({
+        id: m.id,
+        createdAt: m.createdTimestamp,
+        channelId: CHANNEL,
+        content: `message ${i}`,
+        ...extra,
+      });
+    };
+    redo(140, { reactions: [{ name: '😂', count: 5 }] });
+    redo(149, { content: 'message 149 (edited)', editedAt: now - 10 * MINUTE });
+    expect(history.lastMessageId).toBe(history.messages[149].id); // up to date: no gap to fill
+
+    const sync = new ArchiveSync(makeDeps());
+    expect(await sync.gapFill()).toBe(0);
+    expect(history.calls).toEqual([{ before: (BigInt(history.messages[149].id) + 1n).toString(), limit: 100 }]);
+    expect(store.getReactions(history.messages[140].id)).toEqual([{ id: null, name: '😂', count: 5 }]);
+    expect(store.getMessage(history.messages[149].id)).toMatchObject({ content: 'message 149 (edited)', editCount: 1 });
+    // The page reached back to message 50, but only what was archived is refreshed: nothing is imported.
+    expect(store.countMessages(CHANNEL)).toBe(70);
+
+    // Once per process: a later run (maintenance resuming a backfill) does not re-read it.
+    await sync.gapFill();
+    expect(history.calls).toHaveLength(1);
+  });
+
+  it("marks archived messages deleted while offline, but only within the refreshed page's span", async () => {
+    backfillIds = [];
+    const start = now - 3 * HOUR + 31 * MINUTE;
+    const busy = fakeHistory(150, { start });
+    const quiet = fakeHistory(30, { id: OTHER, start: start + 1000 }); // distinct snowflakes
+    channels.set(CHANNEL, busy);
+    channels.set(OTHER, quiet);
+    for (const h of [busy, quiet]) {
+      store.upsertMessages(h.messages.map((m) => toArchiveInput(m)).filter((i) => i !== undefined));
+    }
+    // While the bot was down, messages were deleted: two in the busy channel (one inside the newest
+    // page, one older than it) and one in the quiet channel, whose whole history fits in one page.
+    const [inPage, older] = [busy.messages[120].id, busy.messages[20].id];
+    const quietGone = quiet.messages[3].id;
+    busy.messages = busy.messages.filter((m) => m.id !== inPage && m.id !== older);
+    quiet.messages = quiet.messages.filter((m) => m.id !== quietGone);
+
+    await new ArchiveSync(makeDeps()).gapFill();
+    expect(store.getMessage(inPage)).toMatchObject({ deletedAt: now, content: '' });
+    expect(store.getMessage(quietGone)).toMatchObject({ deletedAt: now, content: '' });
+    // Older than the page: not seen, so not concluded (it stays as archived).
+    expect(store.getMessage(older)?.deletedAt).toBeNull();
+    // Every message still on Discord, inside the page or not, stays live.
+    const live = (h: FakeHistory) => h.messages.filter((m) => store.getMessage(m.id)?.deletedAt === null).length;
+    expect(live(busy)).toBe(148);
+    expect(live(quiet)).toBe(29);
+  });
+
+  it('concludes nothing about deletions from an empty or failed refresh', async () => {
+    backfillIds = [];
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const history = fakeHistory(20, { start: now - HOUR });
+    channels.set(CHANNEL, history);
+    store.upsertMessages(history.messages.map((m) => toArchiveInput(m)).filter((i) => i !== undefined));
+    history.failures.push(Object.assign(new Error('Missing Access'), { code: 50001, status: 403 }));
+    await new ArchiveSync(makeDeps()).gapFill();
+    history.messages = [];
+    await new ArchiveSync(makeDeps()).gapFill();
+    expect(history.calls).toHaveLength(2);
+    expect(store.liveMessageIdsSince(CHANNEL, 0)).toHaveLength(20);
   });
 
   it('costs no request for an up-to-date channel, or one that is gone from the cache', async () => {
