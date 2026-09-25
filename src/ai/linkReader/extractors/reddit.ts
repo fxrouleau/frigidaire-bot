@@ -11,8 +11,8 @@ import { extractMetadata } from '../html';
 import { DISCORD_CRAWLER_UA } from '../safeFetch';
 import type { LinkComment, LinkContent, LinkMedia } from '../types';
 import {
-  type ExtractorContext,
   ExtractError,
+  type ExtractorContext,
   type Json,
   asArray,
   asRecord,
@@ -86,7 +86,7 @@ export function parseRedditJson(json: unknown, fallbackUrl: string): LinkContent
   }
 
   const selftext = str(post.selftext);
-  const linked = post.is_self === true ? undefined : str(post.url_overridden_by_dest) ?? str(post.url);
+  const linked = post.is_self === true ? undefined : (str(post.url_overridden_by_dest) ?? str(post.url));
   const body = [selftext, linked && !/reddit\.com|redd\.it/.test(linked) ? `(links to ${linked})` : undefined]
     .filter(Boolean)
     .join('\n\n');
@@ -162,7 +162,10 @@ async function readFromPage(url: string, ctx: ExtractorContext): Promise<LinkCon
   };
 }
 
-export async function readReddit(target: { postId?: string; url: string }, ctx: ExtractorContext): Promise<LinkContent> {
+export async function readReddit(
+  target: { postId?: string; url: string },
+  ctx: ExtractorContext,
+): Promise<LinkContent> {
   let postId = target.postId;
   let url = target.url;
   if (!postId) {

@@ -15,7 +15,11 @@ const readsPerTurn = new WeakMap<TurnEffects, number>();
 /** Accepts what a model tends to pass: `<url>` wrapping, surrounding quotes, a missing scheme. */
 export function normalizeUrlArgument(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
-  let url = raw.trim().replace(/^<(.*)>$/, '$1').replace(/^["'`](.*)["'`]$/, '$1').trim();
+  let url = raw
+    .trim()
+    .replace(/^<(.*)>$/, '$1')
+    .replace(/^["'`](.*)["'`]$/, '$1')
+    .trim();
   if (!url || url.length > MAX_URL_LENGTH || /\s/.test(url)) return undefined;
   if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = `https://${url.replace(/^\/\//, '')}`;
   return url;

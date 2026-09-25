@@ -219,11 +219,11 @@ function rawTextAfter(html: string, lower: string, tag: Tag): string {
   return html.slice(tag.end, close === -1 ? html.length : close);
 }
 
+// Zero-width space/non-joiner/joiner and the BOM: invisible, but they split words for the model.
+const ZERO_WIDTH = /\u200B|\u200C|\u200D|\uFEFF/g;
+
 export function collapseWhitespace(text: string): string {
-  return text
-    .replace(/[​-‍﻿]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return text.replace(ZERO_WIDTH, '').replace(/\s+/g, ' ').trim();
 }
 
 // ---- Charset ----
@@ -460,7 +460,21 @@ export function findJsonLdArticle(blocks: unknown[]): JsonLdArticle | undefined 
 // Raw-text elements: their content is never prose, and an unclosed one swallows the rest of the page.
 const RAW_ELEMENTS = new Set(['script', 'style', 'noscript', 'template', 'textarea', 'title', 'xmp']);
 // Page chrome: navigation, banners, sidebars, embedded widgets. (Not <form>: ASP.NET wraps whole pages in one.)
-const CHROME_ELEMENTS = ['head', 'nav', 'header', 'footer', 'aside', 'svg', 'iframe', 'object', 'canvas', 'button', 'select', 'dialog', 'menu'];
+const CHROME_ELEMENTS = [
+  'head',
+  'nav',
+  'header',
+  'footer',
+  'aside',
+  'svg',
+  'iframe',
+  'object',
+  'canvas',
+  'button',
+  'select',
+  'dialog',
+  'menu',
+];
 
 function stripComments(html: string): string {
   if (!html.includes('<!--')) return html;
@@ -544,7 +558,7 @@ function htmlFragmentToText(fragment: string): string {
       .replace(/<[^>]*>/g, ''),
   );
   return text
-    .replace(/[​-‍﻿]/g, '')
+    .replace(ZERO_WIDTH, '')
     .replace(/\r\n?/g, '\n')
     .replace(/[^\S\n]+/g, ' ')
     .split('\n')

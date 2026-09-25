@@ -13,8 +13,8 @@
 //     accounts) — a direct mp4 that video understanding can use
 import type { LinkContent, LinkMedia, LinkQuote } from '../types';
 import {
-  type ExtractorContext,
   ExtractError,
+  type ExtractorContext,
   type Json,
   asArray,
   asRecord,
@@ -136,7 +136,11 @@ export function parseBlueskyThread(thread: Json, fallbackUrl: string): LinkConte
   const parent = asRecord(thread.parent);
   const parentAuthor = asRecord(asRecord(parent?.post)?.author);
   const notes: string[] = [];
-  if (asArray(post.labels).some((label) => ['porn', 'sexual', 'nudity', 'graphic-media'].includes(String(asRecord(label)?.val)))) {
+  if (
+    asArray(post.labels).some((label) =>
+      ['porn', 'sexual', 'nudity', 'graphic-media'].includes(String(asRecord(label)?.val)),
+    )
+  ) {
     notes.push('labeled as adult/graphic content');
   }
 

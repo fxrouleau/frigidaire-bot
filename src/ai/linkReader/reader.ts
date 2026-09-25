@@ -16,7 +16,7 @@ import { logger } from '../../logger';
 import { type VideoInput, describeVideo as defaultDescribeVideo } from '../media';
 import { TtlCache } from './cache';
 import { readBluesky } from './extractors/bluesky';
-import { type ExtractorContext, ExtractError, capText } from './extractors/common';
+import { ExtractError, type ExtractorContext, capText } from './extractors/common';
 import { readGif } from './extractors/gif';
 import { readReddit } from './extractors/reddit';
 import { readInstagram, readTikTok } from './extractors/shortVideo';
@@ -24,9 +24,9 @@ import { readTweet } from './extractors/twitter';
 import { readWebPage } from './extractors/web';
 import { readYouTube } from './extractors/youtube';
 import { formatDuration } from './format';
+import { checkUrlShape } from './netGuard';
 import { BlockedUrlError, FetchFailedError, type SafeFetch, createSafeFetch } from './safeFetch';
 import { type LinkTarget, identifyLink } from './targets';
-import { checkUrlShape } from './netGuard';
 import type { LinkContent, LinkReadResult, LinkVideo } from './types';
 
 const CACHE_ENTRIES = 200;
@@ -97,7 +97,8 @@ function mediaTypeAcceptable(prefix: 'image/' | 'video/', contentType: string, u
   if (contentType === 'image/svg+xml') return false;
   if (contentType.startsWith(prefix)) return true;
   // Object stores often label media generically; trust the file extension then.
-  const generic = contentType === 'application/octet-stream' || contentType === 'binary/octet-stream' || contentType === '';
+  const generic =
+    contentType === 'application/octet-stream' || contentType === 'binary/octet-stream' || contentType === '';
   return generic && (prefix === 'image/' ? IMAGE_FILE : VIDEO_FILE).test(url);
 }
 
@@ -253,7 +254,11 @@ export class LinkReader {
       let checked: CheckedMedia | null = null;
       try {
         // An empty accept list means the body is never downloaded; the header still says what we want.
-        const result = await this.fetch(url, { accept: [], headers: { accept: `${prefix}*` }, timeoutMs: MEDIA_CHECK_TIMEOUT_MS });
+        const result = await this.fetch(url, {
+          accept: [],
+          headers: { accept: `${prefix}*` },
+          timeoutMs: MEDIA_CHECK_TIMEOUT_MS,
+        });
         if (result.ok && mediaTypeAcceptable(prefix, result.contentType, result.url)) {
           const size = Number(result.headers['content-length']);
           checked = {
@@ -262,10 +267,15 @@ export class LinkReader {
             sizeBytes: Number.isFinite(size) && size > 0 ? size : undefined,
           };
         } else {
-          logger.info(`linkreader: ${prefix.slice(0, -1)} ${url} unusable (HTTP ${result.status}, ${result.contentType || 'no type'})`);
+          logger.info(
+            `linkreader: ${prefix.slice(0, -1)} ${url} unusable (HTTP ${result.status}, ${result.contentType || 'no type'})`,
+          );
         }
       } catch (error) {
-        logger.info(`linkreader: ${prefix.slice(0, -1)} ${url} unreachable:`, error instanceof Error ? error.message : error);
+        logger.info(
+          `linkreader: ${prefix.slice(0, -1)} ${url} unreachable:`,
+          error instanceof Error ? error.message : error,
+        );
       }
       this.mediaChecks.set(key, checked, MEDIA_CHECK_TTL_MS);
       return checked;
@@ -293,7 +303,9 @@ export class LinkReader {
     if (maxSecs === 0) return { note: joinNotes(video.note, 'video understanding is turned off') };
     if (!video.url) return {};
     if (video.durationSecs !== undefined && video.durationSecs > maxSecs) {
-      return { note: joinNotes(video.note, `too long to watch (${formatDuration(video.durationSecs)}); going by the text`) };
+      return {
+        note: joinNotes(video.note, `too long to watch (${formatDuration(video.durationSecs)}); going by the text`),
+      };
     }
     const file = await this.checkMedia(video.url, 'video/');
     if (!file) return { note: joinNotes(video.note, "the video file couldn't be opened") };
@@ -304,7 +316,11 @@ export class LinkReader {
 
     let description: string | undefined;
     try {
-      description = await this.describeVideo({ url: file.url, contentType: file.contentType, context: videoContext(content) });
+      description = await this.describeVideo({
+        url: file.url,
+        contentType: file.contentType,
+        context: videoContext(content),
+      });
     } catch (error) {
       logger.warn(`linkreader: describing the video of ${content.url} failed:`, error);
     }

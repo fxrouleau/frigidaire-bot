@@ -16,13 +16,31 @@ import { extractJsonLd, extractMetadata, findTags } from '../html';
 import { DISCORD_CRAWLER_UA } from '../safeFetch';
 import type { KlipySection } from '../targets';
 import type { LinkContent, LinkKind, LinkMedia } from '../types';
-import { type ExtractorContext, ExtractError, type Json, asRecord, capText, fetchHtml, parseDate, str } from './common';
+import { ExtractError, type ExtractorContext, type Json, asRecord, capText, fetchHtml, parseDate, str } from './common';
 
 const PAGE_MAX_BYTES = 1024 * 1024;
 // Keywords every GIF page carries; they say nothing about this one.
-const GENERIC_TAGS = new Set(['gif', 'gifs', 'animated gif', 'animated gifs', 'meme', 'memes', 'sticker', 'stickers', 'clip', 'clips']);
+const GENERIC_TAGS = new Set([
+  'gif',
+  'gifs',
+  'animated gif',
+  'animated gifs',
+  'meme',
+  'memes',
+  'sticker',
+  'stickers',
+  'clip',
+  'clips',
+]);
 
-type MediaObject = { name?: string; description?: string; contentUrl?: string; thumbnailUrl?: string; creator?: string; date?: number };
+type MediaObject = {
+  name?: string;
+  description?: string;
+  contentUrl?: string;
+  thumbnailUrl?: string;
+  creator?: string;
+  date?: number;
+};
 
 /** The first JSON-LD ImageObject/VideoObject, looking inside `image`/`video` of a wrapping Article too. */
 function findMediaObject(blocks: unknown[]): MediaObject | undefined {
@@ -95,7 +113,10 @@ export async function readGif(
   target: { source: 'tenor' | 'klipy'; url: string; section?: KlipySection },
   ctx: ExtractorContext,
 ): Promise<LinkContent> {
-  const { result, html } = await fetchHtml(ctx, target.url, { userAgent: DISCORD_CRAWLER_UA, maxBytes: PAGE_MAX_BYTES });
+  const { result, html } = await fetchHtml(ctx, target.url, {
+    userAgent: DISCORD_CRAWLER_UA,
+    maxBytes: PAGE_MAX_BYTES,
+  });
   if (result.status === 404 || result.status === 410) {
     throw new ExtractError(`that ${target.source === 'tenor' ? 'Tenor' : 'Klipy'} page does not exist`);
   }
@@ -105,7 +126,8 @@ export async function readGif(
   const object = findMediaObject(extractJsonLd(html));
   const title = cleanGifTitle(object?.name) ?? cleanGifTitle(meta.title);
   // Tenor serves its 404 page with a 200 on some paths ("404 Error" everywhere).
-  if (!title || /^404\b/.test(title)) throw new ExtractError(`that ${target.source === 'tenor' ? 'Tenor' : 'Klipy'} GIF does not exist`);
+  if (!title || /^404\b/.test(title))
+    throw new ExtractError(`that ${target.source === 'tenor' ? 'Tenor' : 'Klipy'} GIF does not exist`);
 
   const kind = kindFor(target.source, target.section);
   const alt = target.source === 'tenor' ? tenorAltText(html) : undefined;
@@ -117,14 +139,18 @@ export async function readGif(
   const still = object?.thumbnailUrl ?? meta.images.find((url) => !/\.gif(?:[?#]|$)/i.test(url));
   const animated = meta.images.find((url) => /\.gif(?:[?#]|$)/i.test(url)) ?? object?.contentUrl;
   if (still) media.push({ type: 'image', url: still, alt: alt ?? title });
-  if (animated && animated !== still && kind !== 'video clip') media.push({ type: 'image', url: animated, alt: 'animated' });
+  if (animated && animated !== still && kind !== 'video clip')
+    media.push({ type: 'image', url: animated, alt: 'animated' });
   if (kind === 'video clip') {
-    const file = isVideoFileUrl(object?.contentUrl) ? object.contentUrl : meta.videos.map((v) => v.url).find(isVideoFileUrl);
+    const file = isVideoFileUrl(object?.contentUrl)
+      ? object.contentUrl
+      : meta.videos.map((v) => v.url).find(isVideoFileUrl);
     if (file) media.push({ type: 'video', url: file, thumbnailUrl: still, contentType: 'video/mp4' });
   }
   if (media.length === 0) logger.info(`linkreader: ${target.source} page ${target.url} had no media tags`);
 
-  const canonical = meta.canonicalUrl && !/\.(?:gif|mp4|webp)(?:[?#]|$)/i.test(meta.canonicalUrl) ? meta.canonicalUrl : result.url;
+  const canonical =
+    meta.canonicalUrl && !/\.(?:gif|mp4|webp)(?:[?#]|$)/i.test(meta.canonicalUrl) ? meta.canonicalUrl : result.url;
   return {
     url: canonical,
     source: target.source,

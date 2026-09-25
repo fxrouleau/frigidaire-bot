@@ -13,8 +13,8 @@ import { extractMetadata } from '../html';
 import { DISCORD_CRAWLER_UA } from '../safeFetch';
 import type { LinkContent, LinkMedia, LinkQuote, LinkVideo } from '../types';
 import {
-  type ExtractorContext,
   ExtractError,
+  type ExtractorContext,
   type Json,
   asArray,
   asRecord,
@@ -80,7 +80,10 @@ function parseMedia(mediaField: unknown): LinkMedia[] {
 function describeMediaBriefly(media: LinkMedia[]): string | undefined {
   const photos = media.filter((m) => m.type === 'image').length;
   const videos = media.filter((m) => m.type === 'video').length;
-  const parts = [photos ? `${photos} photo${photos > 1 ? 's' : ''}` : '', videos ? `${videos} video${videos > 1 ? 's' : ''}` : ''];
+  const parts = [
+    photos ? `${photos} photo${photos > 1 ? 's' : ''}` : '',
+    videos ? `${videos} video${videos > 1 ? 's' : ''}` : '',
+  ];
   const joined = parts.filter(Boolean).join(', ');
   return joined || undefined;
 }
@@ -179,7 +182,11 @@ async function readFromApi(statusId: string, url: string, ctx: ExtractorContext)
 }
 
 /** Fallback: a fixer's embed page (OpenGraph tags) when the API is unreachable. */
-async function readFromFixerPage(statusId: string, url: string, ctx: ExtractorContext): Promise<LinkContent | undefined> {
+async function readFromFixerPage(
+  statusId: string,
+  url: string,
+  ctx: ExtractorContext,
+): Promise<LinkContent | undefined> {
   for (const domain of config.links.twitterFixers.slice(0, 2)) {
     try {
       const { result, html } = await fetchHtml(ctx, `https://${domain}/i/status/${statusId}`, {

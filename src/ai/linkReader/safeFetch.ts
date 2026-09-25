@@ -15,7 +15,14 @@ import type { LookupFunction } from 'node:net';
 import type { Readable } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { config } from '../../config';
-import { BlockedUrlError, type ResolvedAddress, type Resolver, checkUrlShape, resolvePublicAddresses, systemResolver } from './netGuard';
+import {
+  BlockedUrlError,
+  type ResolvedAddress,
+  type Resolver,
+  checkUrlShape,
+  resolvePublicAddresses,
+  systemResolver,
+} from './netGuard';
 
 export { BlockedUrlError };
 

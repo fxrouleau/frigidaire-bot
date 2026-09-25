@@ -1,6 +1,6 @@
+import { sniffCharset } from '../html';
 // Shared plumbing for the per-platform extractors.
 import { type FetchOptions, type FetchResult, type SafeFetch, decodeText, parseJsonBody } from '../safeFetch';
-import { sniffCharset } from '../html';
 
 export type ExtractorContext = {
   fetch: SafeFetch;
@@ -97,6 +97,11 @@ export async function resolveRedirect(
   userAgent?: string,
 ): Promise<string | undefined> {
   // An empty accept list means no body is ever downloaded; the header still asks for a page.
-  const result = await ctx.fetch(url, { accept: [], headers: { accept: 'text/html,*/*' }, redirect: 'manual', userAgent });
+  const result = await ctx.fetch(url, {
+    accept: [],
+    headers: { accept: 'text/html,*/*' },
+    redirect: 'manual',
+    userAgent,
+  });
   return result.location;
 }

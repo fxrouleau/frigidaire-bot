@@ -50,7 +50,10 @@ export function createFakeSafeFetch(routes: Record<string, FakeRoute>): FakeSafe
           ? route.body
           : Buffer.from(isObject ? JSON.stringify(route.body) : String(route.body));
     const wantsBody = route.location === undefined && mimeMatches(mime, options.accept);
-    const headers: Record<string, string> = { ...(contentTypeHeader ? { 'content-type': contentTypeHeader } : {}), ...route.headers };
+    const headers: Record<string, string> = {
+      ...(contentTypeHeader ? { 'content-type': contentTypeHeader } : {}),
+      ...route.headers,
+    };
     if (route.location) headers.location = route.location;
 
     return {

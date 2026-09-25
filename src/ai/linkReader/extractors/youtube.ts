@@ -16,7 +16,18 @@ import { logger } from '../../../logger';
 import { extractMetadata } from '../html';
 import { DISCORD_CRAWLER_UA } from '../safeFetch';
 import type { LinkContent, LinkVideo } from '../types';
-import { type ExtractorContext, ExtractError, type Json, asRecord, capText, fetchHtml, fetchJson, num, parseDate, str } from './common';
+import {
+  ExtractError,
+  type ExtractorContext,
+  type Json,
+  asRecord,
+  capText,
+  fetchHtml,
+  fetchJson,
+  num,
+  parseDate,
+  str,
+} from './common';
 
 const WATCH_PAGE_MAX_BYTES = 4 * 1024 * 1024;
 
@@ -105,8 +116,14 @@ function isWatchPageHost(url: string): boolean {
   }
 }
 
-async function readOEmbed(watchUrl: string, ctx: ExtractorContext): Promise<{ title?: string; channel?: string; status: number }> {
-  const { result, json } = await fetchJson(ctx, `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(watchUrl)}`);
+async function readOEmbed(
+  watchUrl: string,
+  ctx: ExtractorContext,
+): Promise<{ title?: string; channel?: string; status: number }> {
+  const { result, json } = await fetchJson(
+    ctx,
+    `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(watchUrl)}`,
+  );
   const body = asRecord(json);
   return { title: str(body?.title), channel: str(body?.author_name), status: result.status };
 }
@@ -122,12 +139,18 @@ export async function readYouTube(
   ]);
 
   const embed = oembed.status === 'fulfilled' ? oembed.value : undefined;
-  if (oembed.status === 'rejected') logger.info(`linkreader: youtube oEmbed failed for ${target.videoId}:`, oembed.reason);
+  if (oembed.status === 'rejected')
+    logger.info(`linkreader: youtube oEmbed failed for ${target.videoId}:`, oembed.reason);
 
   let info: WatchPageInfo = {};
   // Only trust a page that is still the watch page: EU consent walls (consent.youtube.com) and Google's
   // "unusual traffic" bounce are also 200s full of their own metadata.
-  if (page.status === 'fulfilled' && page.value.html && page.value.result.ok && isWatchPageHost(page.value.result.url)) {
+  if (
+    page.status === 'fulfilled' &&
+    page.value.html &&
+    page.value.result.ok &&
+    isWatchPageHost(page.value.result.url)
+  ) {
     info = parseWatchPage(page.value.html, page.value.result.url);
   } else if (page.status === 'rejected') {
     logger.info(`linkreader: youtube watch page failed for ${target.videoId}:`, page.reason);
@@ -136,7 +159,8 @@ export async function readYouTube(
   const title = info.title ?? embed?.title;
   if (!title) {
     // oEmbed answers 400/404 for ids that don't exist and 401 for private ones; nothing else knew the video either.
-    if (embed && embed.status >= 400) throw new ExtractError('that YouTube video is private, removed, or does not exist');
+    if (embed && embed.status >= 400)
+      throw new ExtractError('that YouTube video is private, removed, or does not exist');
     throw new Error('YouTube returned neither oEmbed data nor a readable watch page');
   }
 

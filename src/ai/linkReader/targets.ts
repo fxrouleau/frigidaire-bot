@@ -22,9 +22,35 @@ export type KlipySection = 'gifs' | 'stickers' | 'clips' | 'memes';
 
 // Embed-fixer and mirror domains that serve the same path shapes as the platform they mirror, on top
 // of whatever the link fixer is configured to rewrite to (config.links.*Fixers).
-const TWITTER_DOMAINS = ['twitter.com', 'x.com', 'fxtwitter.com', 'fixupx.com', 'fixvx.com', 'vxtwitter.com', 'twittpr.com', 'xcancel.com', 'nitter.net'];
-const INSTAGRAM_DOMAINS = ['instagram.com', 'ddinstagram.com', 'kkinstagram.com', 'uuinstagram.com', 'instagramez.com', 'vxinstagram.com', 'eeinstagram.com'];
-const TIKTOK_DOMAINS = ['tiktok.com', 'tnktok.com', 'tiktxk.com', 'vxtiktok.com', 'fixtiktok.com', 'tfxktok.com', 'tiktokez.com'];
+const TWITTER_DOMAINS = [
+  'twitter.com',
+  'x.com',
+  'fxtwitter.com',
+  'fixupx.com',
+  'fixvx.com',
+  'vxtwitter.com',
+  'twittpr.com',
+  'xcancel.com',
+  'nitter.net',
+];
+const INSTAGRAM_DOMAINS = [
+  'instagram.com',
+  'ddinstagram.com',
+  'kkinstagram.com',
+  'uuinstagram.com',
+  'instagramez.com',
+  'vxinstagram.com',
+  'eeinstagram.com',
+];
+const TIKTOK_DOMAINS = [
+  'tiktok.com',
+  'tnktok.com',
+  'tiktxk.com',
+  'vxtiktok.com',
+  'fixtiktok.com',
+  'tfxktok.com',
+  'tiktokez.com',
+];
 const BLUESKY_DOMAINS = ['bsky.app', 'fxbsky.app', 'bskx.app', 'bsyy.app', 'vxbsky.app'];
 const REDDIT_DOMAINS = ['reddit.com', 'rxddit.com', 'vxreddit.com'];
 const YOUTUBE_DOMAINS = ['youtube.com', 'youtube-nocookie.com'];
@@ -68,7 +94,12 @@ function twitterTarget(url: URL): LinkTarget | undefined {
   const match = url.pathname.match(/^\/(?:i\/web|i|(\w{1,20}))\/status(?:es)?\/(\d{2,20})/);
   if (!match) return undefined;
   const statusId = match[2];
-  return { source: 'twitter', key: `twitter:${statusId}`, url: `https://x.com/${match[1] ?? 'i'}/status/${statusId}`, statusId };
+  return {
+    source: 'twitter',
+    key: `twitter:${statusId}`,
+    url: `https://x.com/${match[1] ?? 'i'}/status/${statusId}`,
+    statusId,
+  };
 }
 
 function tiktokTarget(url: URL, host: string): LinkTarget | undefined {
@@ -104,7 +135,12 @@ function redditTarget(url: URL, host: string): LinkTarget | undefined {
   if (post) {
     const id = post[1].toLowerCase();
     const canonicalPathPart = path.match(/^\/r\/[\w-]+\/comments\//i) ? post[0] : `/comments/${id}`;
-    return { source: 'reddit', key: `reddit:${id}`, url: `https://www.reddit.com${canonicalPathPart.replace(/\/?$/, '/')}`, postId: id };
+    return {
+      source: 'reddit',
+      key: `reddit:${id}`,
+      url: `https://www.reddit.com${canonicalPathPart.replace(/\/?$/, '/')}`,
+      postId: id,
+    };
   }
   // Share links (/r/<sub>/s/<code>) only resolve to a post through Reddit's redirect.
   const share = path.match(/^\/r\/[\w-]+\/s\/([A-Za-z0-9]+)/);
@@ -122,7 +158,8 @@ function tenorTarget(url: URL): LinkTarget | undefined {
   if (view) return { source: 'tenor', key: `tenor:${view[2]}`, url: `https://tenor.com/view/${view[1]}${view[2]}` };
   // Share short links (tenor.com/bEfN4.gif) redirect to the view page.
   const short = url.pathname.match(/^\/([A-Za-z0-9]{3,16})\.gif$/);
-  if (short) return { source: 'tenor', key: `tenor:short:${short[1].toLowerCase()}`, url: `https://tenor.com/${short[1]}.gif` };
+  if (short)
+    return { source: 'tenor', key: `tenor:short:${short[1].toLowerCase()}`, url: `https://tenor.com/${short[1]}.gif` };
   return undefined;
 }
 
@@ -157,7 +194,8 @@ export function identifyLink(url: URL): LinkTarget {
   const host = normalizedHost(url);
   let target: LinkTarget | undefined;
   if (hostIn(host, [...TWITTER_DOMAINS, ...config.links.twitterFixers])) target = twitterTarget(url);
-  else if (host === 'youtu.be' || host.endsWith('.youtu.be') || hostIn(host, YOUTUBE_DOMAINS)) target = youtubeTarget(url, host);
+  else if (host === 'youtu.be' || host.endsWith('.youtu.be') || hostIn(host, YOUTUBE_DOMAINS))
+    target = youtubeTarget(url, host);
   else if (hostIn(host, [...TIKTOK_DOMAINS, ...config.links.tiktokFixers])) target = tiktokTarget(url, host);
   else if (hostIn(host, [...INSTAGRAM_DOMAINS, ...config.links.instagramFixers])) target = instagramTarget(url);
   else if (host === 'redd.it' || hostIn(host, REDDIT_DOMAINS)) target = redditTarget(url, host);

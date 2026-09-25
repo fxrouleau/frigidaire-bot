@@ -13,7 +13,17 @@ import { logger } from '../../../logger';
 import { type PageMetadata, extractMetadata } from '../html';
 import { BlockedUrlError, DISCORD_CRAWLER_UA } from '../safeFetch';
 import type { LinkContent, LinkMedia } from '../types';
-import { type ExtractorContext, ExtractError, asRecord, capText, fetchHtml, fetchJson, num, resolveRedirect, str } from './common';
+import {
+  ExtractError,
+  type ExtractorContext,
+  asRecord,
+  capText,
+  fetchHtml,
+  fetchJson,
+  num,
+  resolveRedirect,
+  str,
+} from './common';
 
 const FIXER_COOLDOWN_MS = 10 * 60 * 1000;
 const FIXER_PAGE_MAX_BYTES = 512 * 1024;
@@ -87,7 +97,10 @@ async function resolveSharePath(
     const resolved = location ? canonicalPath(platform, location) : undefined;
     return resolved && !needsResolution(platform, resolved) ? resolved : undefined;
   } catch (error) {
-    logger.info(`linkreader: ${platform} short link ${lookupUrl} did not resolve:`, error instanceof Error ? error.message : error);
+    logger.info(
+      `linkreader: ${platform} short link ${lookupUrl} did not resolve:`,
+      error instanceof Error ? error.message : error,
+    );
     return undefined;
   }
 }
@@ -164,7 +177,10 @@ export async function readTikTok(target: { path: string; url: string }, ctx: Ext
 
 // ---- Instagram ----
 
-export async function readInstagram(target: { path: string; url: string }, ctx: ExtractorContext): Promise<LinkContent> {
+export async function readInstagram(
+  target: { path: string; url: string },
+  ctx: ExtractorContext,
+): Promise<LinkContent> {
   let path = target.path;
   if (needsResolution('instagram', path)) {
     const resolved = await resolveSharePath(ctx, 'instagram', `https://www.instagram.com${path}`);
@@ -179,7 +195,10 @@ export async function readInstagram(target: { path: string; url: string }, ctx: 
   if (!fixer?.meta?.description) {
     // Instagram's own page still tells crawlers whose post it is and shows a thumbnail.
     try {
-      const { result, html } = await fetchHtml(ctx, canonicalUrl, { userAgent: DISCORD_CRAWLER_UA, maxBytes: 1024 * 1024 });
+      const { result, html } = await fetchHtml(ctx, canonicalUrl, {
+        userAgent: DISCORD_CRAWLER_UA,
+        maxBytes: 1024 * 1024,
+      });
       if (result.ok && html && !/\/accounts\/login/.test(result.url)) platform = extractMetadata(html, result.url);
     } catch (error) {
       logger.info(`linkreader: instagram page failed for ${path}:`, error instanceof Error ? error.message : error);
@@ -198,10 +217,7 @@ export async function readInstagram(target: { path: string; url: string }, ctx: 
 
   const media: LinkMedia[] =
     isPost && !hasVideo
-      ? [
-          ...(fixer?.directMedia?.contentType.startsWith('image/') ? [fixer.directMedia.url] : []),
-          ...images,
-        ]
+      ? [...(fixer?.directMedia?.contentType.startsWith('image/') ? [fixer.directMedia.url] : []), ...images]
           .slice(0, 4)
           .map((url): LinkMedia => ({ type: 'image', url }))
       : [videoFrom(fixer, images[0])];

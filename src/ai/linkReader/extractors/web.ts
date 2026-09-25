@@ -13,7 +13,7 @@
 import { extractJsonLd, extractMetadata, extractReadableText, findJsonLdArticle, sniffCharset } from '../html';
 import { decodeText } from '../safeFetch';
 import type { LinkContent, LinkKind } from '../types';
-import { type ExtractorContext, ExtractError, capText, num, parseDate } from './common';
+import { ExtractError, type ExtractorContext, capText, num, parseDate } from './common';
 
 const PAGE_TYPES = ['text/html', 'application/xhtml+xml'];
 const TEXT_TYPES = ['text/plain', 'text/markdown'];
@@ -43,7 +43,9 @@ function fileNameOf(url: string): string | undefined {
 function httpFailure(status: number): Error {
   if (status === 404 || status === 410) return new ExtractError(`that page does not exist (HTTP ${status})`);
   if (status === 401 || status === 403) {
-    return new ExtractError(`the site refused to show that page to a bot (HTTP ${status}: login wall or bot protection)`);
+    return new ExtractError(
+      `the site refused to show that page to a bot (HTTP ${status}: login wall or bot protection)`,
+    );
   }
   if (status === 451) return new ExtractError('that page is blocked for legal reasons (HTTP 451)');
   return new Error(`the site answered HTTP ${status}`);
@@ -88,7 +90,8 @@ export function parseHtmlPage(html: string, url: string, truncatedBody: boolean)
   const readable = articleBody ? undefined : extractReadableText(html);
   const description = meta.description ?? article?.description;
   const mainText =
-    articleBody ?? (readable && readable.length >= MIN_USEFUL_TEXT ? readable : [description, readable].filter(Boolean).join('\n\n'));
+    articleBody ??
+    (readable && readable.length >= MIN_USEFUL_TEXT ? readable : [description, readable].filter(Boolean).join('\n\n'));
   const { text, truncated } = capText(mainText);
 
   const isArticle = Boolean(articleBody) || meta.type === 'article' || (article?.type ?? '').includes('article');
@@ -135,7 +138,10 @@ export async function readWebPage(
     throw new ExtractError(`that link is a ${mime || 'binary'} file, not a page`);
   }
 
-  const body = decodeText(result.body, result.charset ?? (TEXT_TYPES.includes(mime) ? undefined : sniffCharset(result.body)));
+  const body = decodeText(
+    result.body,
+    result.charset ?? (TEXT_TYPES.includes(mime) ? undefined : sniffCharset(result.body)),
+  );
   if (TEXT_TYPES.includes(mime)) {
     const { text, truncated } = capText(body);
     return {

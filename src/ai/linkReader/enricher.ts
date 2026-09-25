@@ -25,7 +25,9 @@ const PREVIEW_BUDGET_MS = 15_000;
 /** True when Discord already rendered an image for this link (its embed image is in the message parts). */
 function discordShowsImageFor(message: Message, key: string | undefined, reader: LinkReader): boolean {
   if (!key) return false;
-  return message.embeds.some((embed) => embed.url && (embed.image || embed.thumbnail) && reader.keyFor(embed.url) === key);
+  return message.embeds.some(
+    (embed) => embed.url && (embed.image || embed.thumbnail) && reader.keyFor(embed.url) === key,
+  );
 }
 
 function withBudget<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
