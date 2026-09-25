@@ -82,6 +82,13 @@ export const DEFAULT_EMBEDDING_QUERY_INSTRUCTION =
 export const DEFAULT_TWITTER_FIXERS = ['fixvx.com', 'fxtwitter.com', 'vxtwitter.com'];
 export const DEFAULT_INSTAGRAM_FIXERS = ['instagram7.com', 'uuinstagram.com', 'kkinstagram.com'];
 export const DEFAULT_TIKTOK_FIXERS = ['tnktok.com', 'fixtiktok.com', 'tfxktok.com'];
+// Probed 2026-09 with Discord's crawler UA: vxreddit.com served embeds; rxddit.com answered 502
+// "Forbidden." (Reddit blocking its worker) but is the most popular instance and kept as the fallback.
+export const DEFAULT_REDDIT_FIXERS = ['vxreddit.com', 'rxddit.com'];
+// fxbsky.app (FxEmbed) first: it answers a missing post with a clean "doesn't exist" page instead of a
+// 5xx, so a deleted post never counts against its health. bskx.app (VixBluesky) and xbsky.app follow.
+export const DEFAULT_BLUESKY_FIXERS = ['fxbsky.app', 'bskx.app', 'xbsky.app'];
+export const DEFAULT_TWITTER_TRANSLATE_TO = 'en';
 
 export const DELETE_REPOST_MODES = ['edgy', 'always'] as const;
 export type DeleteRepostMode = (typeof DELETE_REPOST_MODES)[number];
@@ -232,12 +239,47 @@ export const config = {
       const fromEnv = envCsv('TIKTOK_FIXERS');
       return fromEnv.length > 0 ? fromEnv : DEFAULT_TIKTOK_FIXERS;
     },
+    get redditFixers(): string[] {
+      const fromEnv = envCsv('REDDIT_FIXERS');
+      return fromEnv.length > 0 ? fromEnv : DEFAULT_REDDIT_FIXERS;
+    },
+    get blueskyFixers(): string[] {
+      const fromEnv = envCsv('BLUESKY_FIXERS');
+      return fromEnv.length > 0 ? fromEnv : DEFAULT_BLUESKY_FIXERS;
+    },
     /** When false, the first configured fixer is used blindly (no health probe). */
     get verify(): boolean {
       return envBool('LINK_FIX_VERIFY', true);
     },
     get timeoutMs(): number {
       return envInt('LINK_FIX_TIMEOUT_MS', 4000, { min: 100 });
+    },
+    /**
+     * Total bytes of attachments a link-fix repost may carry over (downloaded, then re-uploaded through
+     * the webhook). A message whose attachments exceed it is left untouched. 0 ⇒ only attachment-free
+     * messages are reposted.
+     */
+    get maxRepostAttachmentBytes(): number {
+      return envInt('LINK_REPOST_MAX_ATTACHMENT_BYTES', 10 * 1024 * 1024, { min: 0 });
+    },
+    /**
+     * Language foreign tweets are translated into (a code appended to the fixer URL). Unset ⇒ English;
+     * set but blank, or off/none/false/0 ⇒ translation disabled; anything that isn't a language code ⇒
+     * the English default.
+     */
+    get twitterTranslateTo(): string | undefined {
+      if (process.env.TWITTER_TRANSLATE_TO === undefined) return DEFAULT_TWITTER_TRANSLATE_TO;
+      const value = envString('TWITTER_TRANSLATE_TO')?.toLowerCase();
+      if (value === undefined || ['off', 'none', 'false', 'no', '0'].includes(value)) return undefined;
+      return /^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/.test(value) ? value : DEFAULT_TWITTER_TRANSLATE_TO;
+    },
+    /** Report-channel alerts when every fixer of a platform is down (and when one recovers). */
+    get alertsEnabled(): boolean {
+      return envBool('LINK_FIX_ALERTS', true);
+    },
+    /** Minimum time between two alerts for the same platform, so a flapping fixer can't spam. */
+    get alertMinIntervalMs(): number {
+      return envInt('LINK_FIX_ALERT_MIN_INTERVAL_MS', 6 * HOUR_MS, { min: 1 });
     },
   },
 
