@@ -31,7 +31,7 @@ const ALICE = '100000000000000001';
 const BOB = '100000000000000002';
 const CAROL = '100000000000000003';
 const DAVE = '100000000000000004';
-const WHEEZER = '137738554762592257';
+const WHEEZER = '100000000000000042';
 const JASON = '100000000000000005';
 const OTHER_BOT = '800000000000000001';
 
@@ -586,12 +586,99 @@ describe('memories by person', () => {
     expect(dynamic).not.toContain('is a fridge');
   });
 
+  it('pulls memories for people named by Discord handle or IRL first name', async () => {
+    const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider(), relevanceThreshold: 0.99 });
+    store.upsertIdentity(JASON, 'Jason', 'cigalefourmi');
+    store.upsertIdentity(CAROL, 'xX_Car_Xx');
+    store.updateIdentityMeta(CAROL, { irl_name: 'Caroline Smith' });
+    await store.save({ category: 'fact', subject: 'Jason', content: 'owes everyone money', subject_user_id: JASON });
+    await store.save({ category: 'fact', subject: 'xX_Car_Xx', content: 'drives a forklift', subject_user_id: CAROL });
+    setMemoryStoreForTesting(store);
+    const provider = new FakeProvider([textResponse('ok')]);
+    const agent = makeAgent(provider);
+    const ping = createFakeMessage({ ...BASE, content: 'did cigalefourmi and caroline ever meet', channelMessages: [] });
+
+    await agent.handleMention(ping.message);
+
+    const dynamic = dynamicEntryText(provider.calls[0].messages);
+    expect(dynamic).toContain('- Jason: owes everyone money');
+    expect(dynamic).toContain('- xX_Car_Xx: drives a forklift');
+  });
+
   it('tells the model to look someone up when nothing about them is in context', async () => {
     const provider = new FakeProvider([textResponse('ok')]);
     const agent = makeAgent(provider);
     await agent.handleMention(createFakeMessage({ ...BASE, content: 'hi', channelMessages: [] }).message);
 
     expect(textOf(provider.calls[0].messages[0])).toContain('call recall_memories for them before answering');
+  });
+});
+
+describe('linked side accounts (LINKED_ACCOUNTS)', () => {
+  // DAVE posts from a side account that belongs to BOB.
+  beforeEach(() => {
+    vi.stubEnv('LINKED_ACCOUNTS', `${DAVE}:${BOB}`);
+  });
+
+  function linkedStore(): MemoryStore {
+    const store = new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider(), relevanceThreshold: 0.99 });
+    store.upsertIdentity(BOB, 'Bob', 'bobby_b');
+    store.upsertIdentity(DAVE, 'BobAlt', 'bob_alt');
+    setMemoryStoreForTesting(store);
+    return store;
+  }
+
+  it("gives a side account's speaker the main account's memories and id", async () => {
+    const store = linkedStore();
+    await store.save({ category: 'fact', subject: 'Bob', content: 'plays bass in a cover band', subject_user_id: BOB });
+    const provider = new FakeProvider([textResponse('ok')]);
+    const agent = makeAgent(provider);
+    const ping = createFakeMessage({ ...BASE, authorId: DAVE, authorDisplayName: 'BobAlt', content: 'yo', channelMessages: [] });
+
+    await agent.handleMention(ping.message);
+
+    const messages = provider.calls[0].messages;
+    expect(dynamicEntryText(messages)).toContain('- plays bass in a cover band');
+    // The turn itself is attributed to the person (main id, main name), not to the side account.
+    expect(indexOfText(messages, `Bob (id:${BOB}): yo`)).toBeGreaterThan(0);
+  });
+
+  it("pulls the main account's memories for a side account named or @-mentioned", async () => {
+    const store = linkedStore();
+    await store.save({ category: 'fact', subject: 'Bob', content: 'plays bass in a cover band', subject_user_id: BOB });
+    const provider = new FakeProvider([textResponse('one'), textResponse('two')]);
+    const agent = makeAgent(provider);
+
+    const named = createFakeMessage({ ...BASE, messageId: '99001', content: 'is bob_alt around', channelMessages: [] });
+    await agent.handleMention(named.message);
+    expect(dynamicEntryText(provider.calls[0].messages)).toContain('- Bob: plays bass in a cover band');
+
+    setMemoryStoreForTesting(linkedStore());
+    await getMemoryStore().save({ category: 'fact', subject: 'Bob', content: 'hates cilantro', subject_user_id: BOB });
+    const mentioned = createFakeMessage({
+      ...BASE,
+      messageId: '99002',
+      channelId: '555000000000000002',
+      content: `what about <@${DAVE}>`,
+      mentionedUsers: [{ id: DAVE, displayName: 'BobAlt' }],
+      channelMessages: [],
+    });
+    await agent.handleMention(mentioned.message);
+    expect(dynamicEntryText(provider.calls[1].messages)).toContain('- Bob: hates cilantro');
+  });
+
+  it('lists the side account on its member’s SERVER PEOPLE line, never as its own person', async () => {
+    linkedStore();
+    const provider = new FakeProvider([textResponse('ok')]);
+    const agent = makeAgent(provider);
+
+    await agent.handleMention(createFakeMessage({ ...BASE, content: 'hi', channelMessages: [] }).message);
+
+    const staticPrompt = textOf(provider.calls[0].messages[0]);
+    expect(staticPrompt).toContain(
+      `- Bob @bobby_b (id:${BOB}) — also posts as BobAlt @bob_alt (id:${DAVE})`,
+    );
+    expect(staticPrompt).not.toContain('\n- BobAlt');
   });
 });
 
