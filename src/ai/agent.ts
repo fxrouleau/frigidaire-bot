@@ -16,6 +16,7 @@ import { applyEmojiPolicy, hasCustomEmoji } from './emojiPolicy';
 import { type ContentEnricher, type EnrichmentRole, defaultEnrichers, runEnrichers } from './enrichers';
 import { logFailure } from './failureLogger';
 import { estimateTokens, historyBudgetFor, trimHistory } from './historyBudget';
+import { isTranscriptReply } from './media/autoTranscribe';
 import { getMemoryStore } from './memory';
 import type { EmojiRow, Identity, Memory, MemoryStore } from './memory/memoryStore';
 import { type ModelContextLengths, getModelContextLengths } from './modelCatalog';
@@ -617,6 +618,8 @@ export class AgentOrchestrator {
    */
   private async renderHistoryMessage(msg: Message): Promise<ConversationEntry | undefined> {
     if (msg.system) return undefined;
+    // The bot's auto-transcripts aren't its turns: the voice message already carries its transcript.
+    if (isTranscriptReply(msg)) return undefined;
     if (msg.author.id === msg.client.user.id && !msg.webhookId) {
       const attachments = [...msg.attachments.values()].map((a) => `[attachment: ${a.name}]`);
       const text = [msg.content, ...attachments].filter((s) => s && s.length > 0).join('\n');

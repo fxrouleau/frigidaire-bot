@@ -19,6 +19,11 @@ const SCHEMA = `
     model       TEXT    NOT NULL,
     created_at  INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS transcript_replies (
+    reply_id   TEXT    PRIMARY KEY,
+    message_id TEXT    NOT NULL,
+    created_at INTEGER NOT NULL
+  );
 `;
 
 function db() {
@@ -74,6 +79,32 @@ export function storeVideoDescription(key: string, description: string, model: s
       .run(key, description, model, now);
   } catch (error) {
     logger.warn('media: failed to store a video description:', error);
+  }
+}
+
+// The bot's own transcript replies, by Discord message id, so a member's reply to one can be told apart
+// from a reply to the bot without fetching the replied-to message. Rows older than this are pruned:
+// by then nobody replies to a transcript (and a fetched one is still recognized by its header).
+const TRANSCRIPT_REPLY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+export function rememberTranscriptReply(replyId: string, messageId: string, now = Date.now()): void {
+  try {
+    const botDb = db();
+    botDb
+      .stmt('INSERT OR REPLACE INTO transcript_replies (reply_id, message_id, created_at) VALUES (?, ?, ?)')
+      .run(replyId, messageId, now);
+    botDb.stmt('DELETE FROM transcript_replies WHERE created_at < ?').run(now - TRANSCRIPT_REPLY_RETENTION_MS);
+  } catch (error) {
+    logger.warn(`media: failed to record transcript reply ${replyId}:`, error);
+  }
+}
+
+export function isStoredTranscriptReply(replyId: string): boolean {
+  try {
+    return db().stmt('SELECT 1 FROM transcript_replies WHERE reply_id = ?').get(replyId) !== undefined;
+  } catch (error) {
+    logger.warn('media: transcript reply lookup failed:', error);
+    return false;
   }
 }
 

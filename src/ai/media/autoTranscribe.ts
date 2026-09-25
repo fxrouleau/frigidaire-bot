@@ -1,16 +1,22 @@
-// Auto-transcripts: when a member posts a voice message (or an audio file), the bot replies to it with
-// the transcript, quietly — no ping, no notification — so people who can't listen right now can read
-// it. The transcript lands in the cache on the way, which is what lets the chat agent, the learner and
-// summaries "hear" the message later without paying again.
+// Auto-transcripts: when a member posts a voice message (Discord's hold-to-record kind), the bot replies
+// to it with the transcript, quietly — no ping, no notification — so people who can't listen right now
+// can read it. The transcript lands in the cache on the way, which is what lets the chat agent, the
+// learner and summaries "hear" the message later without paying again.
+//
+// Only real voice messages: an uploaded audio file (a song, a podcast clip) is not something the group
+// wants lyrics posted for; the media enricher still transcribes those when the bot is asked about one.
+// A voice message over VOICE_MAX_SECONDS gets a one-line "too long" note instead of silence.
 import { ChannelType, type Message, MessageFlags, escapeMarkdown } from 'discord.js';
 import { config } from '../../config';
 import { logger } from '../../logger';
 import { splitMessage } from '../../utils';
 import { getAudioTranscriber } from './index';
+import { isStoredTranscriptReply, rememberTranscriptReply } from './store';
 import type { AudioInput, TranscriptionOutcome } from './types';
-import { audioAttachments, isVoiceMessage, transcriptKey } from './voice';
+import { audioAttachments, formatClock, isVoiceMessage, transcriptKey } from './voice';
 
 export const TRANSCRIPT_HEADER = '-# 🎙️ transcript';
+export const TOO_LONG_HEADER = '-# 🎙️ too long to transcribe';
 
 const MAX_AUDIO_PER_MESSAGE = 3;
 // A 10-minute voice message with its translation runs ~4 messages; anything beyond that is cut.
@@ -28,11 +34,28 @@ const TRANSCRIBE_CHANNEL_TYPES: ReadonlySet<ChannelType> = new Set([
 ]);
 
 /**
- * True for the bot's own transcript replies. Anything that replays channel history to a model should
- * skip these: the voice message they answer already carries the transcript through the media enricher.
+ * True for the bot's own transcript replies (and its "too long to transcribe" notes). Anything that
+ * replays channel history to a model should skip these: the voice message they answer already carries
+ * the transcript through the media enricher. And they are not the bot talking: a reply to one is a
+ * reply to the voice message, not to the bot.
  */
 export function isTranscriptReply(message: Message): boolean {
-  return message.author.id === message.client.user?.id && (message.content ?? '').startsWith(TRANSCRIPT_HEADER);
+  if (message.author.id !== message.client.user?.id) return false;
+  const content = message.content ?? '';
+  return content.startsWith(TRANSCRIPT_HEADER) || content.startsWith(TOO_LONG_HEADER);
+}
+
+/**
+ * isTranscriptReply() by id alone, for a reply whose target wasn't fetched: the ids of the transcript
+ * replies the bot posted are kept in bot.db.
+ */
+export function isTranscriptReplyId(messageId: string): boolean {
+  return isStoredTranscriptReply(messageId);
+}
+
+/** The note posted instead of a transcript for a voice message over VOICE_MAX_SECONDS. */
+export function formatTooLongNote(durationSecs: number): string {
+  return `${TOO_LONG_HEADER} (${formatClock(durationSecs)})`;
 }
 
 function wrapLine(line: string): string[] {
@@ -53,8 +76,8 @@ function wrapLine(line: string): string[] {
  * The reply text, split into Discord-sized messages: a subtext header, then every transcript line as
  * a quote. Transcripts are escaped so a spoken "*" or "# " can't turn into formatting.
  */
-export function formatTranscriptReply(text: string, label?: string): string[] {
-  const header = label ? `${TRANSCRIPT_HEADER} · ${escapeMarkdown(label)}` : TRANSCRIPT_HEADER;
+export function formatTranscriptReply(text: string): string[] {
+  const header = TRANSCRIPT_HEADER;
   const quoted = text
     .split('\n')
     .map((line) =>
@@ -95,10 +118,10 @@ export class VoiceAutoTranscriber {
     if (!TRANSCRIBE_CHANNEL_TYPES.has(message.channel.type)) return 'skipped';
     if (!this.channelAllowed(message)) return 'skipped';
 
+    if (!isVoiceMessage(message)) return 'skipped';
     const audio = audioAttachments(message).slice(0, MAX_AUDIO_PER_MESSAGE);
     if (audio.length === 0) return 'skipped';
 
-    const voice = isVoiceMessage(message);
     let posted = false;
     for (const [index, attachment] of audio.entries()) {
       const outcome = await this.transcribe({
@@ -107,13 +130,17 @@ export class VoiceAutoTranscriber {
         messageId: transcriptKey(message.id, attachment.id, index),
         durationSecs: attachment.duration,
       });
+      if (outcome.status === 'too_long') {
+        // Silence would read as "the bot ignored it"; one line says why there's no transcript.
+        if (await this.post(message, [formatTooLongNote(outcome.durationSecs)])) posted = true;
+        continue;
+      }
       if (outcome.status !== 'ok') {
         logger.info(`voiceTranscribe: no transcript for ${message.id} (${outcome.status})`);
         continue;
       }
       if (!outcome.text) continue;
-      const label = voice ? undefined : attachment.name;
-      if (await this.post(message, formatTranscriptReply(outcome.text, label))) posted = true;
+      if (await this.post(message, formatTranscriptReply(outcome.text))) posted = true;
     }
     return posted ? 'posted' : 'nothing';
   }
@@ -129,12 +156,13 @@ export class VoiceAutoTranscriber {
   private async post(message: Message, chunks: string[]): Promise<boolean> {
     try {
       for (const chunk of chunks) {
-        await message.reply({
+        const sent = await message.reply({
           content: chunk,
           // Never a ping — not for names said out loud, not for the member being replied to.
           allowedMentions: { parse: [], repliedUser: false },
           flags: MessageFlags.SuppressNotifications,
         });
+        if (typeof sent?.id === 'string') rememberTranscriptReply(sent.id, message.id);
       }
       return true;
     } catch (error) {
