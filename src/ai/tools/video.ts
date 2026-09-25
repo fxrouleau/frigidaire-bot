@@ -9,7 +9,7 @@
 // replies to, a recent one, or one named by msg:<id> / a jump link), a Discord attachment URL, or a
 // link to a post with a video (tweet, TikTok, Reddit, Bluesky, a direct .mp4) through the link reader.
 // YouTube can't be watched under zero data retention; the link reader says so and goes by the text.
-import type { Message } from 'discord.js';
+import type { Attachment, Message } from 'discord.js';
 import { channelInfoOf } from '../../archive/ingest';
 import { replyAccessFor } from '../../archive/search';
 import { logger } from '../../logger';
@@ -86,22 +86,24 @@ function postedContext(message: Message): string {
   return `${by} with the message: ${text.length > MAX_CONTEXT_CHARS ? `${text.slice(0, MAX_CONTEXT_CHARS)}…` : text}`;
 }
 
+function fileTarget(message: Message, attachment: Attachment): FileTarget {
+  return {
+    kind: 'file',
+    url: attachment.url,
+    name: `${attachment.name} from ${speakerName(message)}`,
+    contentType: attachment.contentType,
+    durationSecs: attachment.duration,
+    context: postedContext(message),
+  };
+}
+
 /**
  * The video in a message: its first video attachment, else its first link with a video. With `strict`,
  * only links known to carry a video count (scanning history); otherwise any link is worth a read.
  */
 function videoIn(message: Message, deps: WatchVideoDeps, strict: boolean): Target | undefined {
   const attachment = videoAttachments(message)[0];
-  if (attachment) {
-    return {
-      kind: 'file',
-      url: attachment.url,
-      name: `${attachment.name} from ${speakerName(message)}`,
-      contentType: attachment.contentType,
-      durationSecs: attachment.duration,
-      context: postedContext(message),
-    };
-  }
+  if (attachment) return fileTarget(message, attachment);
   const urls = urlsIn(message.content).filter((url) => !JUMP_LINK.test(url));
   const url = strict ? urls.find((u) => hasVideoLink(u, deps)) : urls[0];
   return url ? { kind: 'link', url } : undefined;
@@ -173,11 +175,19 @@ async function resolveTarget(ctx: ToolHandlerContext, raw: string, deps: WatchVi
   if (!ref) return findRecentVideo(ctx, deps);
 
   const link = ref.match(JUMP_LINK);
-  const id = /^\d{15,21}$/.test(ref) ? ref : undefined;
-  if (link || id) {
-    const message = link ? await fetchLinked(ctx, link[1], link[2], link[3]) : await fetchIn(ctx.message, ref);
+  // msg:<id>, or msg:<id>#<n> for a message's n-th clip (see videoHandle()).
+  const handle = ref.match(/^(\d{15,21})(?:#(\d{1,2}))?$/);
+  if (link || handle) {
+    const message = link
+      ? await fetchLinked(ctx, link[1], link[2], link[3])
+      : await fetchIn(ctx.message, handle?.[1] ?? '');
     if (typeof message === 'string') return message;
     if (!message) return "Couldn't find that message (deleted, or not in this channel).";
+    const clip = handle?.[2] ? Number(handle[2]) : 1;
+    if (clip > 1) {
+      const attachment = videoAttachments(message)[clip - 1];
+      return attachment ? fileTarget(message, attachment) : `That message has no video #${clip}.`;
+    }
     return videoIn(message, deps, false) ?? 'That message has no video or link to watch.';
   }
   if (/^https?:\/\//i.test(ref)) {
@@ -214,7 +224,7 @@ export function createWatchVideoTool(deps: WatchVideoDeps = defaultDeps): ToolDe
         message_or_url: {
           type: 'string',
           description:
-            "Which video: the msg:<id> from its [video …] line, a Discord message link, or the video's/post's URL. Leave empty for the video in the current message, the one it replies to, or the most recent one here.",
+            "Which video: the msg:<id> from its [video …] line (msg:<id>#2 for a message's second clip), a Discord message link, or the video's/post's URL. Leave empty for the video in the current message, the one it replies to, or the most recent one here.",
         },
       },
       required: ['question'],

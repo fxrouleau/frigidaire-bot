@@ -8,7 +8,13 @@
 // bot buffer a 2 GB file — and one timeout covering the whole transfer.
 import { config } from '../../config';
 import { logger } from '../../logger';
-import { BlockedUrlError, createSafeFetch, FetchFailedError, type SafeFetch } from '../linkReader/safeFetch';
+import {
+  BlockedUrlError,
+  createSafeFetch,
+  FetchFailedError,
+  mimeMatches,
+  type SafeFetch,
+} from '../linkReader/safeFetch';
 
 export type DownloadResult =
   | { ok: true; data: Buffer; contentType?: string }
@@ -179,22 +185,25 @@ export async function downloadMedia(url: string, opts: DownloadOptions): Promise
 async function downloadGuarded(url: string, opts: DownloadOptions): Promise<DownloadResult> {
   const safeFetch = opts.safeFetch ?? defaultSafeFetch();
   try {
+    const accept = opts.accept ?? MEDIA_ACCEPT;
     const result = await safeFetch(url, {
-      accept: opts.accept ?? MEDIA_ACCEPT,
+      accept,
       maxBytes: opts.maxBytes,
+      // A declared length over the cap is refused from the headers, like the Discord path does.
+      skipOversizedBody: true,
       timeoutMs: opts.timeoutMs,
     });
     if (!result.ok) {
       logger.warn(`media: download of ${redact(result.url)} failed with HTTP ${result.status}`);
       return { ok: false, reason: 'http' };
     }
-    if (!result.body) {
+    if (!mimeMatches(result.contentType, accept)) {
       // The content-type allowlist said no (an HTML error page, a login wall): nothing was downloaded.
       logger.warn(`media: ${redact(result.url)} is ${result.contentType || 'untyped'}, not media; skipping`);
       return { ok: false, reason: 'http' };
     }
     const declared = Number(result.headers['content-length']);
-    if (result.truncated || (Number.isFinite(declared) && declared > opts.maxBytes)) {
+    if (!result.body || result.truncated || (Number.isFinite(declared) && declared > opts.maxBytes)) {
       return { ok: false, reason: 'too_large' };
     }
     return { ok: true, data: result.body, contentType: result.contentType || undefined };

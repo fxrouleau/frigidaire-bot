@@ -39,7 +39,7 @@ function scriptedTransport(table: Record<string, Scripted>): HttpTransport & { r
     const scripted = table[request.url.toString()];
     if (!scripted) return { status: 404, headers: {}, truncated: false };
     const headers = scripted.headers ?? {};
-    const wanted = request.wantBody(scripted.status, headers['content-type'] ?? '');
+    const wanted = request.wantBody(scripted.status, headers['content-type'] ?? '', headers);
     return { status: scripted.status, headers, body: wanted ? scripted.body : undefined, truncated: scripted.truncated ?? false };
   }) as HttpTransport & { requests: TransportRequest[] };
   transport.requests = requests;
@@ -124,6 +124,19 @@ describe('createSafeFetch', () => {
     expect(result.body).toBeUndefined();
   });
 
+  it('skips a body declared over the cap only when asked to (a truncated page is still useful)', async () => {
+    const transport = scriptedTransport({
+      'https://cdn.example/big': { status: 200, headers: { 'content-type': 'video/mp4', 'content-length': '5000' }, body: Buffer.from('x') },
+    });
+    const fetch = createSafeFetch({ resolver, transport });
+    const options = { accept: ['video/*'], maxBytes: 100 };
+    expect((await fetch('https://cdn.example/big', options)).body?.toString()).toBe('x');
+    const skipped = await fetch('https://cdn.example/big', { ...options, skipOversizedBody: true });
+    expect(skipped).toMatchObject({ ok: true, contentType: 'video/mp4', truncated: false });
+    expect(skipped.body).toBeUndefined();
+    expect((await fetch('https://cdn.example/big', { ...options, maxBytes: 5000, skipOversizedBody: true })).body).toBeDefined();
+  });
+
   it('turns a hung request into a timeout error', async () => {
     const hanging: HttpTransport = (request) =>
       new Promise((_resolve, reject) => {
@@ -193,7 +206,7 @@ describe('nodeTransport', () => {
         res.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' });
         res.end(zlib.gzipSync(Buffer.from(big)));
       } else if (req.url === '/video') {
-        res.writeHead(200, { 'content-type': 'video/mp4' });
+        res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': '1024' });
         res.end(Buffer.alloc(1024));
       } else {
         res.writeHead(200, { 'content-type': 'text/plain', 'x-host-seen': req.headers.host ?? '' });
@@ -237,6 +250,14 @@ describe('nodeTransport', () => {
   it('skips bodies the caller does not want', async () => {
     const response = await nodeTransport(request('/video', { wantBody: (_status, type) => type.startsWith('text/') }));
     expect(response.headers['content-type']).toBe('video/mp4');
+    expect(response.body).toBeUndefined();
+  });
+
+  it('lets the caller judge a body by its headers (the declared length)', async () => {
+    const response = await nodeTransport(
+      request('/video', { wantBody: (_status, _type, headers) => Number(headers['content-length']) <= 512 }),
+    );
+    expect(response.headers['content-length']).toBe('1024');
     expect(response.body).toBeUndefined();
   });
 

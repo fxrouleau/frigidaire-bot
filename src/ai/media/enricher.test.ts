@@ -14,6 +14,7 @@ function fakeDeps(
     transcript?: TranscriptionOutcome;
     video?: VideoOutcome;
     cachedTranscripts?: Record<string, string>;
+    pendingTranscripts?: Record<string, Promise<TranscriptionOutcome>>;
     cachedDescriptions?: Record<string, string>;
   } = {},
 ) {
@@ -25,6 +26,7 @@ function fakeDeps(
       return opts.transcript ?? { status: 'ok', text: 'yo who is on tonight', cached: false };
     },
     cachedTranscript: (key) => opts.cachedTranscripts?.[key],
+    pendingTranscript: (key) => opts.pendingTranscripts?.[key],
     describe: async (input) => {
       described.push(input);
       return opts.video ?? { status: 'ok', text: 'A cat knocks a glass off a table.', cached: false };
@@ -128,6 +130,22 @@ describe('media enricher', () => {
     expect(transcribed).toHaveLength(3);
   });
 
+  it('joins a transcription already running for a history message instead of calling it untranscribed', async () => {
+    // The auto-transcript reply is still being computed when someone asks "what did he say".
+    const running = Promise.resolve<TranscriptionOutcome>({ status: 'ok', text: 'on joue ce soir', cached: false });
+    const { deps, transcribed } = fakeDeps({ pendingTranscripts: { 'voice-1': running } });
+
+    expect(await createMediaEnricher(deps).enrich(voiceMessage(), 'history')).toEqual([
+      { type: 'text', text: '[voice message from Remi, 0:42: on joue ce soir]' },
+    ]);
+    expect(transcribed).toEqual([]);
+
+    const nothingRunning = fakeDeps();
+    expect(await createMediaEnricher(nothingRunning.deps).enrich(voiceMessage(), 'history')).toEqual([
+      { type: 'text', text: '[voice message from Remi, 0:42 — not transcribed]' },
+    ]);
+  });
+
   it('describes a posted video, passing who posted it and what they said', async () => {
     const { deps, described } = fakeDeps();
     const { message } = createFakeMessage({
@@ -180,6 +198,24 @@ describe('media enricher', () => {
       { type: 'text', text: '[video msg:clip-msg: other.mp4 (not watched)]' },
     ]);
     expect(history.described).toEqual([]);
+  });
+
+  it('gives each video on a message its own handle (msg:<id>, then msg:<id>#2)', async () => {
+    const { deps } = fakeDeps();
+    const { message } = createFakeMessage({
+      messageId: 'two-clips',
+      attachments: [
+        { url: CLIP_URL, contentType: 'video/mp4', name: 'clip.mp4' },
+        { url: 'https://cdn.discordapp.com/a/b/other.mp4', contentType: 'video/mp4', name: 'other.mp4' },
+      ],
+    });
+    const texts = (await createMediaEnricher(deps).enrich(message, 'current')).map((p) =>
+      p.type === 'text' ? p.text : '',
+    );
+    expect(texts).toEqual([
+      '[video msg:two-clips: A cat knocks a glass off a table.]',
+      '[video msg:two-clips#2: A cat knocks a glass off a table.]',
+    ]);
   });
 
   it('renders audio before video when a message has both', async () => {

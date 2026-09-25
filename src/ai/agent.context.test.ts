@@ -480,6 +480,98 @@ describe('reply context', () => {
     expect(indexOfText(cached.calls[0].messages, 'REPLY CONTEXT — more on')).toBe(-1);
   });
 
+  describe('a reply to its own auto-transcript', () => {
+    const VOICE_ID = '1000';
+    const TRANSCRIPT_ID = '1001';
+    const SAID = 'I never lost a single game';
+    const voice = () =>
+      chat(VOICE_ID, '', {
+        authorId: BOB,
+        authorDisplayName: 'Bob',
+        attachments: [
+          {
+            url: 'https://cdn.discordapp.com/attachments/1/2/voice-message.ogg',
+            contentType: 'audio/ogg',
+            name: 'voice-message.ogg',
+          },
+        ],
+      });
+    // discord.js caches the messages it fetched (here: the voice message, for the transcript's label).
+    const transcriptReply = (cachedMessages: Message[] = []) =>
+      createFakeBotMessage({
+        messageId: TRANSCRIPT_ID,
+        content: `${TRANSCRIPT_HEADER}\n> ${SAID}`,
+        channelId: CH,
+        botUserId: BOT_ID,
+        referencedMessageId: VOICE_ID,
+        cachedMessages,
+      }).message;
+    const spy = (roles: string[]): ContentEnricher => ({
+      name: 'voice',
+      enrich: async (msg, role) => {
+        roles.push(`${msg.id}:${role}`);
+        return msg.id === VOICE_ID ? [{ type: 'text', text: `[voice message from Bob: ${SAID}]` }] : [];
+      },
+    });
+    const ping = (log: Message[]) =>
+      createFakeMessage({
+        ...BASE,
+        messageId: '5000',
+        authorId: DAVE,
+        authorDisplayName: 'Dave',
+        content: 'is that true?',
+        referencedMessageId: TRANSCRIPT_ID,
+        channelMessages: log,
+      });
+    const fillers = () =>
+      Array.from({ length: 30 }, (_, i) => chat(String(4000 + i), `filler ${i}`, { authorId: CAROL, authorDisplayName: 'Carol' }));
+
+    it('is about the voice message: its author, its transcript, never "(you)"', async () => {
+      const roles: string[] = [];
+      const provider = new FakeProvider([textResponse('ok')]);
+      const agent = makeAgent(provider, { enrichers: [spy(roles)] });
+
+      await agent.handleMention(ping([voice(), transcriptReply([voice()]), ...fillers()]).message);
+
+      const messages = provider.calls[0].messages;
+      expect(textOf(messages.at(-1))).toContain(`(replying to Bob's voice message — ${jumpLink(VOICE_ID)}): is that true?`);
+      const context = textOf(messages.at(-2));
+      expect(context).toContain(REPLY_CONTEXT);
+      expect(context).toContain(`Bob: [attachment: voice-message.ogg] (${jumpLink(VOICE_ID)})  ← the message being replied to`);
+      expect(context).toContain(`transcript of Bob's voice message: ${TRANSCRIPT_HEADER}`);
+      expect(context).toContain(`[voice message from Bob: ${SAID}]`);
+      expect(roles).toContain(`${VOICE_ID}:reference`);
+      for (const entry of messages) expect(textOf(entry)).not.toContain('Frigidaire (you)');
+    });
+
+    it('names the voice message when it is already in the window, and adds its transcript only once', async () => {
+      const roles: string[] = [];
+      const provider = new FakeProvider([textResponse('ok')]);
+      const agent = makeAgent(provider, { enrichers: [spy(roles)] });
+
+      await agent.handleMention(ping([voice(), transcriptReply()]).message);
+
+      const messages = provider.calls[0].messages;
+      expect(textOf(messages.at(-1))).toContain(`(replying to Bob's voice message — ${jumpLink(VOICE_ID)}): is that true?`);
+      expect(countText(messages, SAID)).toBe(1);
+      for (const entry of messages) expect(textOf(entry)).not.toContain('Frigidaire (you)');
+    });
+
+    it('labels a transcript that has to stand on its own as the voice message\'s transcript', async () => {
+      // The voice message is gone (deleted, or unreadable): the transcript is still not the bot talking.
+      vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      const provider = new FakeProvider([textResponse('ok')]);
+      const agent = makeAgent(provider);
+
+      await agent.handleMention(ping([transcriptReply(), ...fillers()]).message);
+
+      const messages = provider.calls[0].messages;
+      expect(textOf(messages.at(-1))).toContain(`(replying to a voice message's transcript — ${jumpLink(TRANSCRIPT_ID)})`);
+      expect(textOf(messages.at(-2))).toContain(`transcript of a voice message: ${TRANSCRIPT_HEADER}`);
+      for (const entry of messages) expect(textOf(entry)).not.toContain('Frigidaire (you)');
+    });
+  });
+
   it('degrades to a note when the replied-to message cannot be fetched', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
     const provider = new FakeProvider([textResponse('ok')]);

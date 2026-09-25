@@ -4,18 +4,27 @@
 //   [video msg:<message id>: <description>]
 //
 // The message id on a video line is the handle the chat model passes to watch_video to ask a follow-up
-// question about that clip.
+// question about that clip (a message's second clip is msg:<message id>#2).
 //
 // The triggering message and the one it replies to ('current' / 'reference') may be transcribed or
-// watched on the spot; seeded history only reads what is already cached, so a 25-message backfill never
-// turns into 25 paid calls. A recording the bot couldn't (or didn't) process still leaves a marker, so the
-// model knows something was said rather than seeing an empty message.
+// watched on the spot; seeded history only reads what is already cached (or joins a transcription that
+// is already running), so a 25-message backfill never turns into 25 paid calls. A recording the bot
+// couldn't (or didn't) process still leaves a marker, so the model knows something was said rather than
+// seeing an empty message.
 import type { Attachment, Message } from 'discord.js';
 import type { ContentEnricher, EnrichmentRole } from '../enrichers';
 import type { NormalizedContentPart } from '../types';
 import { getAudioTranscriber, getVideoDescriber, videoOutcomeNote } from './index';
 import type { AudioInput, TranscriptionOutcome, VideoInput, VideoOutcome } from './types';
-import { audioAttachments, formatClock, isVoiceMessage, speakerName, transcriptKey, videoAttachments } from './voice';
+import {
+  audioAttachments,
+  formatClock,
+  isVoiceMessage,
+  speakerName,
+  transcriptKey,
+  videoAttachments,
+  videoHandle,
+} from './voice';
 
 // Bounds on paid work per message: nobody posts ten voice notes at once on purpose.
 const MAX_AUDIO_PER_MESSAGE = 3;
@@ -25,6 +34,8 @@ const MAX_CONTEXT_CHARS = 200;
 export type MediaEnricherDeps = {
   transcribe: (input: AudioInput) => Promise<TranscriptionOutcome>;
   cachedTranscript: (key: string) => string | undefined;
+  /** A transcription already running for this key (no new paid work), else undefined. */
+  pendingTranscript: (key: string) => Promise<TranscriptionOutcome> | undefined;
   describe: (input: VideoInput) => Promise<VideoOutcome>;
   cachedDescription: (url: string) => string | undefined;
 };
@@ -32,6 +43,7 @@ export type MediaEnricherDeps = {
 const defaultDeps: MediaEnricherDeps = {
   transcribe: (input) => getAudioTranscriber().transcribe(input),
   cachedTranscript: (key) => getAudioTranscriber().cached(key),
+  pendingTranscript: (key) => getAudioTranscriber().pending(key),
   describe: (input) => getVideoDescriber().describe(input),
   cachedDescription: (url) => getVideoDescriber().cached(url),
 };
@@ -56,8 +68,15 @@ async function renderAudio(
   let outcome: TranscriptionOutcome;
   if (role === 'history') {
     const cached = deps.cachedTranscript(key);
-    if (cached === undefined) return `[${label} — not transcribed]`;
-    outcome = { status: 'ok', text: cached, cached: true };
+    if (cached !== undefined) {
+      outcome = { status: 'ok', text: cached, cached: true };
+    } else {
+      // A voice message posted seconds ago is usually still being transcribed for its auto-transcript
+      // reply: that run is paid for either way, so it's joined rather than reported as untranscribed.
+      const running = deps.pendingTranscript(key);
+      if (!running) return `[${label} — not transcribed]`;
+      outcome = await running.catch((): TranscriptionOutcome => ({ status: 'failed' }));
+    }
   } else {
     outcome = await deps.transcribe({
       url: attachment.url,
@@ -90,10 +109,11 @@ async function renderVideo(
   deps: MediaEnricherDeps,
   message: Message,
   attachment: Attachment,
+  index: number,
   role: EnrichmentRole,
   speaker: string,
 ): Promise<string> {
-  const head = `video msg:${message.id}`;
+  const head = `video ${videoHandle(message.id, index)}`;
   let outcome: VideoOutcome;
   if (role === 'history') {
     const cached = deps.cachedDescription(attachment.url);
@@ -123,7 +143,7 @@ export function createMediaEnricher(deps: MediaEnricherDeps = defaultDeps): Cont
       const speaker = speakerName(message);
       const lines = await Promise.all([
         ...audio.map((attachment, index) => renderAudio(deps, message, attachment, index, role, speaker)),
-        ...video.map((attachment) => renderVideo(deps, message, attachment, role, speaker)),
+        ...video.map((attachment, index) => renderVideo(deps, message, attachment, index, role, speaker)),
       ]);
       return lines.map((text) => ({ type: 'text', text }));
     },

@@ -136,6 +136,20 @@ describe('AudioTranscriber', () => {
     expect(getStoredTranscript('msg-1')).toBe(TRANSCRIPT);
   });
 
+  it('exposes a run in flight, so a history reader can join it for free', async () => {
+    const { transcriber, requests } = setup([success]);
+    expect(transcriber.pending('msg-9')).toBeUndefined();
+
+    const run = transcriber.transcribe({ url: VOICE_URL, messageId: 'msg-9', durationSecs: 4 });
+    const joined = transcriber.pending('msg-9');
+
+    expect(joined).toBeDefined();
+    expect(await joined).toEqual({ status: 'ok', text: TRANSCRIPT, cached: false });
+    expect(await run).toEqual({ status: 'ok', text: TRANSCRIPT, cached: false });
+    expect(requests).toHaveLength(1);
+    expect(transcriber.pending('msg-9')).toBeUndefined();
+  });
+
   it('does not persist transcripts that have no message id', async () => {
     const { transcriber } = setup([success]);
     await transcriber.transcribe({ url: VOICE_URL });
@@ -182,6 +196,33 @@ describe('AudioTranscriber', () => {
       durationSecs: 1200,
     });
     expect(requests).toHaveLength(0);
+  });
+
+  it('gives a probed length the MP3 padding slack: a track cut at the cap is not too long', async () => {
+    // ffmpeg's `-t 600` MP3 cut probes as 600.084 s.
+    const transcoder = createFakeTranscoder({ probe: { durationSecs: 600.084, hasAudio: true, hasVideo: false } });
+    const { transcriber, requests } = setup([success], { transcoder });
+    expect((await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip')).status).toBe('ok');
+    expect(requests).toHaveLength(1);
+  });
+
+  it('takes a caller-known buffer length instead of probing it', async () => {
+    const transcoder = createFakeTranscoder({ probe: { durationSecs: 1200, hasAudio: true, hasVideo: false } });
+    const { transcriber, requests } = setup([success], { transcoder });
+    expect((await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip', { durationSecs: 600 })).status).toBe('ok');
+    expect(transcoder.calls.probe).toEqual([]);
+    expect(requests).toHaveLength(1);
+    // ...and applies the length guards to it, as it would to a probed one.
+    expect(await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip', { durationSecs: 0.4 })).toEqual({
+      status: 'ok',
+      text: '',
+      cached: false,
+    });
+    expect(await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip', { durationSecs: 900 })).toEqual({
+      status: 'too_long',
+      durationSecs: 900,
+    });
+    expect(requests).toHaveLength(1);
   });
 
   it('uses the source length the transcoder reports for transcoded files', async () => {
