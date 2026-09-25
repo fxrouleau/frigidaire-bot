@@ -117,7 +117,7 @@ function sample<T>(items: T[], count: number, random: () => number): T[] {
   if (items.length <= count) return items;
   const indexes = items.map((_, i) => i);
   for (let i = indexes.length - 1; i > 0; i--) {
-    const j = Math.floor(random() * (i + 1));
+    const j = Math.min(i, Math.floor(random() * (i + 1)));
     [indexes[i], indexes[j]] = [indexes[j], indexes[i]];
   }
   return indexes
