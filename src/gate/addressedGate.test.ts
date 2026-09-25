@@ -1,5 +1,7 @@
 import type { Message } from 'discord.js';
 import { type Mock, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TRANSCRIPT_HEADER } from '../ai/media/autoTranscribe';
+import { rememberTranscriptReply } from '../ai/media/store';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { type FakeMessageOptions, createFakeBotMessage, createFakeMessage } from '../test-support/fakeDiscord';
 import type { AddressedInput } from './addressed';
@@ -230,6 +232,44 @@ describe('AddressedGate decision', () => {
       }).message,
     );
     expect(classify.mock.calls[0][0].message.replyTo).toBe('Theo');
+  });
+
+  it("doesn't pass the bot's voice-message transcripts off as the bot talking", async () => {
+    const { gate, classify } = harness();
+    const voice = human('', {
+      at: T0 - 60_000,
+      ...KEV,
+      attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/voice-message.ogg', contentType: 'audio/ogg' }],
+    }).message;
+    const transcript = botPost(T0 - 55_000, { content: `${TRANSCRIPT_HEADER}\n> fridge is washed`, repliedUserId: KEV.authorId });
+    const stored = botPost(T0 - 50_000, { content: '> and so is everyone else', repliedUserId: KEV.authorId });
+    rememberTranscriptReply(stored.id, voice.id);
+    // Kev's voice message, its transcript in two parts, then Marco replies to the transcript (ping on).
+    const fake = human('fridge lmaooo he really said that', {
+      historyMessages: [stored, transcript, voice],
+      referencedMessageId: transcript.id,
+      repliedUserId: BOT_ID,
+      repliedUserPinged: true,
+      cachedMessages: [transcript],
+    });
+
+    await gate.evaluate(fake.message);
+
+    const input = classify.mock.calls[0][0];
+    expect(input.message.replyTo).toBe('a voice message');
+    expect(input.context).toEqual([{ author: 'Kev', text: '[voice message]' }]);
+    // Nothing the bot said is in the history: the transcripts don't count as it speaking.
+    expect(input.secondsSinceBotSpoke).toBeUndefined();
+    expect(input.authorIsBotsPartner).toBe(false);
+  });
+
+  it("doesn't make the voice message's author the bot's partner after a restart", async () => {
+    const { gate, classify } = harness();
+    const transcript = botPost(T0 - 20_000, { content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?`, repliedUserId: 'user-1' });
+
+    await gate.evaluate(human('fridge you in?', { historyMessages: [transcript] }).message);
+
+    expect(classify.mock.calls[0][0]).toMatchObject({ secondsSinceBotSpoke: undefined, authorIsBotsPartner: false });
   });
 });
 
