@@ -7,7 +7,9 @@ import { recordRelay } from '../relay';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { type FakeMessageOptions, createFakeMessage } from '../test-support/fakeDiscord';
 import { createFakeSafeFetch } from '../test-support/fakeSafeFetch';
+import { AutoReactor } from './autoReactor';
 import { contextOf, discordCandidate, intakeSkipReason, namesBot, snapshotOf } from './candidate';
+import { AutoReactLedger } from './ledger';
 
 const SETTINGS = { channelIds: ['main'], botNames: ['fridge', 'bot'] };
 
@@ -281,5 +283,66 @@ describe('discordCandidate', () => {
     });
     await candidate.react('KEKW:300000000000000001');
     expect(fake.recorders.react.calls).toEqual([['KEKW:300000000000000001']]);
+    // A member's own post has no original to look up.
+    expect(candidate.originalId).toBeUndefined();
+  });
+
+  it("gives a relay its original's id, read when asked (the relay is recorded after it is sent)", () => {
+    const relay = message({
+      messageId: 'relay-1',
+      webhookId: 'hook',
+      applicationId: 'bot-1',
+      authorUsername: 'Dale',
+      content: 'https://fixvx.com/a/status/1',
+    });
+    const candidate = discordCandidate(relay);
+    expect(candidate.originalId?.()).toBeUndefined();
+    recordRelay({
+      messageId: 'relay-1',
+      channelId: 'main',
+      authorId: 'dale',
+      authorName: 'Dale',
+      kind: 'link_fix',
+      originalId: 'orig-1',
+    });
+    expect(candidate.originalId?.()).toBe('orig-1');
+  });
+
+  it('keeps a link-fix relay of a message the agent is answering from also getting a reaction', async () => {
+    // A bare link in a pinging reply to the bot: aiChat routed the original, the link fixer relayed it.
+    // The relay replies to nothing and doesn't name the bot, so intake can't tell; its original id can.
+    recordRelay({
+      messageId: 'relay-2',
+      channelId: 'main',
+      authorId: 'dale',
+      authorName: 'Dale',
+      kind: 'link_fix',
+      originalId: 'orig-2',
+    });
+    const relay = message({
+      messageId: 'relay-2',
+      webhookId: 'hook',
+      applicationId: 'bot-1',
+      authorUsername: 'Dale',
+      content: 'https://fixvx.com/a/status/2',
+    });
+    expect(intakeSkipReason(relay, SETTINGS)).toBeUndefined();
+
+    const db = new BotDb(':memory:');
+    const judge = vi.fn(async () => ({ react: true, emoji: '😂', why: 'lol' }));
+    const reactor = new AutoReactor({
+      settings: () => ({ mode: 'on', maxPerDay: 3, minGapMs: 0, minProfileMessages: 0, delayMs: 10 }),
+      judge,
+      guide: () => ({ messages: 10, reactedMessages: 10, baseRate: 1, emojis: [], text: '', builtAt: 0 }),
+      ledger: new AutoReactLedger(() => db),
+      emojis: () => [],
+      loadImages: async () => [],
+      report: async () => {},
+      wasRouted: (id) => id === 'orig-2',
+      // The gate's exchange doesn't cover it (GATE_ENABLED=false, or a channel outside GATE_CHANNELS).
+      inExchange: () => false,
+    });
+    expect(await reactor.evaluate(discordCandidate(relay))).toEqual({ status: 'skipped', reason: 'bot replied' });
+    expect(judge).not.toHaveBeenCalled();
   });
 });
