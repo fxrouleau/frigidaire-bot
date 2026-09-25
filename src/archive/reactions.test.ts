@@ -5,7 +5,7 @@ import reactionRemoveEvent from '../events/archiveReactionRemove';
 import reactionRemoveAllEvent from '../events/archiveReactionRemoveAll';
 import reactionRemoveEmojiEvent from '../events/archiveReactionRemoveEmoji';
 import { BOT_USER_ID, archivableMessage, archiveInput, snowflake } from '../test-support/fakeArchive';
-import { ArchiveStore, setArchiveStoreForTesting } from './archiveStore';
+import { ArchiveStore, type ArchivedReaction, setArchiveStoreForTesting } from './archiveStore';
 import { toArchiveInput } from './ingest';
 import {
   type ReactionEventLike,
@@ -116,7 +116,7 @@ describe('applyReactionDelta', () => {
 });
 
 describe('reaction events', () => {
-  function seed(reactions = [{ id: null, name: '😂', count: 2 }]) {
+  function seed(reactions: ArchivedReaction[] = [{ id: null, name: '😂', count: 2 }]) {
     const input = archiveInput({ content: 'joke', reactions });
     store.upsertMessage(input);
     return input.id;
