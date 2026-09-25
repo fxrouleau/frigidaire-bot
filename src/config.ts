@@ -739,20 +739,126 @@ export const config = {
   },
 };
 
-/** One-line, secret-free summary of the effective configuration for the startup log. */
+// ---- Startup summary ----
+
+const onOff = (value: boolean): string => (value ? 'on' : 'off');
+
+/** 604800000 → "7d", 1800000 → "30m", 4000 → "4s": the unit the value was most likely written in. */
+function formatDuration(ms: number): string {
+  if (ms >= DAY_MS && ms % DAY_MS === 0) return `${ms / DAY_MS}d`;
+  if (ms >= HOUR_MS && ms % HOUR_MS === 0) return `${ms / HOUR_MS}h`;
+  if (ms >= MINUTE_MS && ms % MINUTE_MS === 0) return `${ms / MINUTE_MS}m`;
+  if (ms >= 1000 && ms % 1000 === 0) return `${ms / 1000}s`;
+  return `${ms}ms`;
+}
+
+/**
+ * `name=on(detail,…)` / `name=off` / `name=off(reason)`. Details never contain spaces, so the summary
+ * stays one `key=value` token per feature and greps cleanly.
+ */
+function feature(name: string, enabled: boolean, details: string[] = [], offReason?: string): string {
+  if (!enabled) return offReason ? `${name}=off(${offReason})` : `${name}=off`;
+  return details.length > 0 ? `${name}=on(${details.join(',')})` : `${name}=on`;
+}
+
+/**
+ * One-line summary of the effective configuration for the startup log: every config section, so a
+ * deploy's log shows at a glance which features are live and on which models. Secret-free by
+ * construction: tokens, keys, URLs and repo names only ever appear as set/missing, and Discord ids only
+ * as counts or "set" (channel names are resolved separately, see src/channelEnv.ts). The persona eval
+ * section is left out: the bot never reads it.
+ */
 export function describeEffectiveConfig(): string {
+  const { models, agent, learner, memory, report, links, deleteRepost, server } = config;
+  const { birthdays, archive, media, linkReader, gate, ramble, sandbox, featureRequests } = config;
+
+  const fallbacks = models.chatFallbacks;
+  const notes = agent.channelNotes;
+  const deployAnnounce = !report.deployAnnounceEnabled ? 'off' : report.gitSha ? 'on' : 'no-sha';
+  // Birthdays post to BIRTHDAY_CHANNEL_ID, else the main channel: say which, without the id.
+  let birthdayAnnounce = `${birthdays.announceHour}h,channel:${birthdays.channelId === server.mainChannelId ? 'main' : 'own'}`;
+  if (!birthdays.channelId) birthdayAnnounce = 'no-channel';
+  if (!birthdays.announceEnabled) birthdayAnnounce = 'off';
+  // Half-configured feature requests are the likely mistake: name the missing half.
+  let featureRequestsOff: string | undefined;
+  if (featureRequests.githubToken && !featureRequests.githubRepo) featureRequestsOff = 'no-repo';
+  if (!featureRequests.githubToken && featureRequests.githubRepo) featureRequestsOff = 'no-token';
+  const voiceChannels = media.voiceTranscribeChannels.length;
+  const translate = links.twitterTranslateTo ?? 'off';
+  const fixers = [
+    `x${links.twitterFixers.length}`,
+    `ig${links.instagramFixers.length}`,
+    `tt${links.tiktokFixers.length}`,
+    `rd${links.redditFixers.length}`,
+    `bsky${links.blueskyFixers.length}`,
+  ].join('/');
+
   const parts = [
-    `chat=${config.models.chat}`,
-    `learner=${config.models.learner}`,
-    `image=${config.models.image}`,
-    `embedding=${config.models.embedding}`,
-    `semantic=${config.memory.semanticEnabled}`,
-    `debugCapture=${config.debugCapture.enabled}`,
-    `reportChannel=${config.report.channelId ? 'set' : 'off'}`,
-    `linkVerify=${config.links.verify}`,
-    `deleteRepost=${config.deleteRepost.userIds.length > 0 ? `${config.deleteRepost.userIds.length} user(s), ${config.deleteRepost.mode}` : 'off'}`,
-    `forceRecaption=${config.emoji.forceRecaption}`,
-    `openRouterKey=${config.openRouter.apiKey ? 'set' : 'MISSING'}`,
+    // Models
+    `chat=${models.chat}`,
+    `chatFallbacks=${fallbacks.length > 0 ? fallbacks.join(',') : 'none'}`,
+    `learner=${models.learner}`,
+    ...(models.selfImprovement !== models.learner ? [`selfImprovement=${models.selfImprovement}`] : []),
+    `image=${models.image}`,
+    `embedding=${models.embedding}`,
+    `emojiCaption=${models.emojiCaption}`,
+    // Plumbing
+    `discordToken=${config.discord.token ? 'set' : 'MISSING'}`,
+    `openRouter=key:${config.openRouter.apiKey ? 'set' : 'MISSING'},timeout:${formatDuration(config.openRouter.timeoutMs)},retries:${config.openRouter.maxRetries}`,
+    `usageLedger=${onOff(config.costs.ledgerEnabled)}`,
+    `debugCapture=${onOff(config.debugCapture.enabled)}`,
+    `logFile=${onOff(config.logging.file !== undefined)}`,
+    `logDebug=${onOff(config.logging.debug)}`,
+    // Server layout
+    `mainChannel=${server.mainChannelId ? 'set' : 'off'}`,
+    `linkedAccounts=${server.linkedAccounts.size}`,
+    report.channelId
+      ? `reportChannel=set(digest:${onOff(report.digestEnabled)}@${formatDuration(report.digestPeriodMs)},deploy:${deployAnnounce})`
+      : 'reportChannel=off',
+    // Chat, memory, learning
+    `agent=rounds:${agent.maxToolRounds},history:${agent.historyTokenBudget ?? 'auto'},notes:${notes.invalid ? 'INVALID' : Object.keys(notes.notes).length}`,
+    `semanticMemory=${onOff(memory.semanticEnabled)}`,
+    `learning=every:${formatDuration(learner.intervalMs)},ignore:${learner.ignoredChannels.length},selfImprovement:${onOff(learner.selfImprovementEnabled)}`,
+    `forceRecaption=${onOff(config.emoji.forceRecaption)}`,
+    // Features
+    `links=verify:${onOff(links.verify)},fixers:${fixers},translate:${translate},alerts:${onOff(links.alertsEnabled)}`,
+    feature('deleteRepost', deleteRepost.userIds.length > 0, [
+      `users:${deleteRepost.userIds.length}`,
+      `mode:${deleteRepost.mode}`,
+      ...(deleteRepost.mode === 'edgy' ? [`judge:${models.messageJudge}`] : []),
+    ]),
+    `reminders=max:${config.reminders.maxPerUser}/user`,
+    `birthdays=announce:${birthdayAnnounce},seed:${birthdays.seed.length}`,
+    feature('archive', archive.enabled, [
+      `backfill:${archive.backfillEnabled ? archive.backfillChannels.length : 'off'}`,
+      `ignore:${archive.ignoredChannels.length}`,
+      `wrapped:${onOff(archive.wrappedEnabled && archive.wrappedChannelId !== undefined)}`,
+    ]),
+    `media=transcribe:${media.transcriptionModel},video:${media.videoModel},voiceAuto:${media.voiceAutoTranscribe ? (voiceChannels > 0 ? voiceChannels : 'all') : 'off'}`,
+    feature('linkReader', linkReader.enabled, [`previews:${onOff(linkReader.previewsEnabled)}`]),
+    feature(
+      'gate',
+      gate.enabled && gate.channelIds.length > 0,
+      [`channels:${gate.channelIds.length}`],
+      gate.enabled ? 'no-channel' : undefined,
+    ),
+    feature(
+      'ramble',
+      ramble.userIds.length > 0 && ramble.channelId !== undefined,
+      [`users:${ramble.userIds.length}`, `channels:${ramble.watchChannelIds.length}`],
+      ramble.userIds.length > 0 ? 'no-channel' : undefined,
+    ),
+    feature('sandbox', sandbox.url !== undefined, [
+      `token:${sandbox.token ? 'set' : 'none'}`,
+      `timeout:${sandbox.timeoutSeconds}s`,
+    ]),
+    feature(
+      'featureRequests',
+      featureRequests.enabled,
+      [`max:${featureRequests.maxPerDay}/day`, `users:${featureRequests.userIds.length || 'all'}`],
+      featureRequestsOff,
+    ),
+    `commands=${onOff(config.commands.enabled)}`,
   ];
   return parts.join(' ');
 }

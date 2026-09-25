@@ -171,7 +171,182 @@ describe('config', () => {
   it('never prints the API key in the startup summary', () => {
     vi.stubEnv('OPENROUTER_API_KEY', 'sk-or-super-secret');
     const summary = describeEffectiveConfig();
-    expect(summary).toContain('openRouterKey=set');
+    expect(summary).toContain('openRouter=key:set');
     expect(summary).not.toContain('super-secret');
+  });
+});
+
+describe('describeEffectiveConfig', () => {
+  // Every variable the summary reads that could hold a secret or an identifier, set to a recognizable value.
+  const SENSITIVE: Record<string, string> = {
+    CLIENT_SECRET: 'discord-token-SENTINEL',
+    OPENROUTER_API_KEY: 'sk-or-SENTINEL',
+    GITHUB_TOKEN: 'github_pat_SENTINEL',
+    GITHUB_REPO: 'sentinel-owner/sentinel-repo',
+    SANDBOX_URL: 'http://sandboxuser:sandboxpass@sandbox-host-sentinel:8080',
+    SANDBOX_TOKEN: 'sandbox-token-SENTINEL',
+    MAIN_CHANNEL_ID: '111111111111111111',
+    REPORT_CHANNEL_ID: '222222222222222222',
+    BIRTHDAY_CHANNEL_ID: '333333333333333333',
+    WRAPPED_CHANNEL_ID: '444444444444444444',
+    RAMBLE_CHANNEL_ID: '555555555555555555',
+    RAMBLE_USER_IDS: '666666666666666666',
+    RAMBLE_WATCH_CHANNELS: '777777777777777777',
+    GATE_CHANNELS: '888888888888888888,999999999999999999',
+    LEARNER_IGNORE_CHANNELS: '121212121212121212',
+    ARCHIVE_IGNORE_CHANNELS: '131313131313131313',
+    ARCHIVE_BACKFILL_CHANNELS: '141414141414141414',
+    VOICE_TRANSCRIBE_CHANNELS: '151515151515151515',
+    DELETE_REPOST_USER_IDS: '161616161616161616',
+    FEATURE_REQUEST_USER_IDS: '171717171717171717',
+    LINKED_ACCOUNTS: '181818181818181818:191919191919191919',
+    BIRTHDAYS_SEED: '202020202020202020:03-29',
+    CHANNEL_NOTES: '{"212121212121212121":"note-SENTINEL"}',
+    GIT_SHA: 'deadbeefSENTINEL',
+  };
+
+  function stubAll(values: Record<string, string>): void {
+    for (const [name, value] of Object.entries(values)) vi.stubEnv(name, value);
+  }
+
+  // Maps each config section to the summary token that covers it. A section added to `config` without a
+  // line in the summary fails the first test below: add it to describeEffectiveConfig() and here.
+  const SECTION_TOKENS: Record<string, RegExp> = {
+    discord: /(^| )discordToken=/,
+    openRouter: /(^| )openRouter=key:/,
+    models: /(^| )chat=.* learner=.* image=.* embedding=/,
+    agent: /(^| )agent=/,
+    learner: /(^| )learning=/,
+    emoji: /(^| )forceRecaption=/,
+    memory: /(^| )semanticMemory=/,
+    debugCapture: /(^| )debugCapture=/,
+    report: /(^| )reportChannel=/,
+    links: /(^| )links=/,
+    deleteRepost: /(^| )deleteRepost=/,
+    logging: /(^| )logFile=/,
+    server: /(^| )mainChannel=.* linkedAccounts=/,
+    reminders: /(^| )reminders=/,
+    birthdays: /(^| )birthdays=/,
+    archive: /(^| )archive=/,
+    media: /(^| )media=/,
+    linkReader: /(^| )linkReader=/,
+    gate: /(^| )gate=/,
+    ramble: /(^| )ramble=/,
+    sandbox: /(^| )sandbox=/,
+    featureRequests: /(^| )featureRequests=/,
+    costs: /(^| )usageLedger=/,
+    commands: /(^| )commands=/,
+  };
+  // Not bot configuration: the eval harness's own settings, and the Vitest guard.
+  const NOT_SUMMARIZED = ['evals', 'isTest'];
+
+  it('has a token for every config section', () => {
+    const sections = Object.keys(config).filter((name) => !NOT_SUMMARIZED.includes(name));
+    expect(sections.sort()).toEqual(Object.keys(SECTION_TOKENS).sort());
+    const summary = describeEffectiveConfig();
+    for (const [section, token] of Object.entries(SECTION_TOKENS)) {
+      expect(summary, `section ${section}`).toMatch(token);
+    }
+  });
+
+  it('is one line of key=value tokens', () => {
+    stubAll(SENSITIVE);
+    const summary = describeEffectiveConfig();
+    expect(summary).not.toMatch(/\n/);
+    for (const token of summary.split(' ')) expect(token).toMatch(/^[A-Za-z]+=\S+$/);
+  });
+
+  it('prints no secret, URL, repo or Discord id: only set/missing flags and counts', () => {
+    stubAll(SENSITIVE);
+    const summary = describeEffectiveConfig();
+    for (const [name, value] of Object.entries(SENSITIVE)) {
+      for (const piece of value.split(/[,:/@{}"]+/).filter((part) => part.length >= 6)) {
+        expect(summary, `${name} leaked "${piece}"`).not.toContain(piece);
+      }
+    }
+    expect(summary).not.toMatch(/\d{15,}/);
+    expect(summary).toContain('discordToken=set');
+    expect(summary).toContain('openRouter=key:set,');
+    expect(summary).toContain('sandbox=on(token:set,');
+    expect(summary).toContain('featureRequests=on(max:3/day,users:1)');
+  });
+
+  it('summarizes a prod-like configuration', () => {
+    stubAll({
+      CHAT_MODEL: 'z-ai/glm-5.3-flash',
+      LEARNER_MODEL: 'z-ai/glm-5.3-flash',
+      IMAGE_MODEL: 'google/gemini-3.1-flash-image',
+      OPENROUTER_API_KEY: 'sk-or-x',
+      CLIENT_SECRET: 'token',
+      MAIN_CHANNEL_ID: '111111111111111111',
+      REPORT_CHANNEL_ID: '222222222222222222',
+      GIT_SHA: 'abc1234',
+      LEARNER_IGNORE_CHANNELS: '121212121212121212,131313131313131313',
+      LINKED_ACCOUNTS: '181818181818181818:191919191919191919',
+      BIRTHDAYS_SEED: '202020202020202020:03-29,212121212121212121:12-01',
+      SANDBOX_URL: 'http://sandbox:8080',
+    });
+    for (const name of ['SANDBOX_TOKEN', 'GITHUB_TOKEN', 'GITHUB_REPO', 'BIRTHDAY_CHANNEL_ID', 'RAMBLE_USER_IDS']) {
+      vi.stubEnv(name, undefined);
+    }
+    const tokens = describeEffectiveConfig().split(' ');
+
+    expect(tokens).toEqual(
+      expect.arrayContaining([
+        'chat=z-ai/glm-5.3-flash',
+        'chatFallbacks=none',
+        'learner=z-ai/glm-5.3-flash',
+        'image=google/gemini-3.1-flash-image',
+        'discordToken=set',
+        'openRouter=key:set,timeout:2m,retries:2',
+        'mainChannel=set',
+        'linkedAccounts=1',
+        'reportChannel=set(digest:on@7d,deploy:on)',
+        'learning=every:30m,ignore:2,selfImprovement:on',
+        'links=verify:on,fixers:x3/ig3/tt3/rd2/bsky3,translate:en,alerts:on',
+        'deleteRepost=off',
+        'birthdays=announce:15h,channel:main,seed:2',
+        'archive=on(backfill:1,ignore:0,wrapped:on)',
+        'gate=on(channels:1)',
+        'ramble=off',
+        'sandbox=on(token:none,timeout:20s)',
+        'featureRequests=off',
+        'commands=on',
+        'usageLedger=on',
+      ]),
+    );
+    // SELF_IMPROVEMENT_MODEL only shows up when it differs from the learner.
+    expect(tokens.some((token) => token.startsWith('selfImprovement='))).toBe(false);
+  });
+
+  it('names what is missing when a feature is half configured', () => {
+    stubAll({
+      GITHUB_TOKEN: 'github_pat_x',
+      RAMBLE_USER_IDS: '666666666666666666',
+      REPORT_CHANNEL_ID: '222222222222222222',
+      DEPLOY_ANNOUNCE_ENABLED: 'true',
+      CHANNEL_NOTES: '{not json',
+      DELETE_REPOST_USER_IDS: '161616161616161616,171717171717171717',
+      DELETE_REPOST_MODE: 'always',
+    });
+    for (const name of ['GITHUB_REPO', 'RAMBLE_CHANNEL_ID', 'GIT_SHA', 'MAIN_CHANNEL_ID', 'GATE_CHANNELS']) {
+      vi.stubEnv(name, undefined);
+    }
+    const summary = describeEffectiveConfig();
+
+    expect(summary).toContain('featureRequests=off(no-repo)');
+    expect(summary).toContain('ramble=off(no-channel)');
+    expect(summary).toContain('gate=off(no-channel)');
+    expect(summary).toContain('birthdays=announce:no-channel,');
+    expect(summary).toContain('reportChannel=set(digest:on@7d,deploy:no-sha)');
+    expect(summary).toContain('mainChannel=off');
+    expect(summary).toContain('notes:INVALID');
+    expect(summary).toContain('deleteRepost=on(users:2,mode:always)');
+
+    vi.stubEnv('GITHUB_TOKEN', undefined);
+    vi.stubEnv('GITHUB_REPO', 'owner/repo');
+    vi.stubEnv('GATE_ENABLED', 'false');
+    expect(describeEffectiveConfig()).toContain('featureRequests=off(no-token)');
+    expect(describeEffectiveConfig()).toContain('gate=off ');
   });
 });
