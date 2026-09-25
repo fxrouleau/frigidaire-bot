@@ -439,28 +439,26 @@ export type WrappedDeps = {
   syncBusy: () => boolean;
 };
 
-type Composed = { stats: WrappedStats; text?: string };
-
-/** Stats for `period` over `channelIds`, and the post's text (undefined when nothing was said). */
+/** The post's text for `period` over `channelIds`; undefined when nothing was said there. */
 async function composeWrapped(
   period: WrappedPeriod,
   channelIds: string[],
   guild: WrappedChannel['guild'],
   deps: WrappedDeps,
   extras: { banner?: string; footnotes?: string[] } = {},
-): Promise<Composed> {
+): Promise<string | undefined> {
   const store = deps.store();
   reconcileRelays(store, { sinceMs: period.startMs });
   const stats = computeWrappedStats(
     { startMs: period.startMs, endMs: period.endMs, channelIds },
     { botUserId: deps.botUserId, store },
   );
-  if (stats.totalMessages === 0) return { stats };
+  if (stats.totalMessages === 0) return undefined;
 
   const nameOf = (a: Pick<AuthorCount, 'authorId' | 'authorName'>) => currentName(a.authorId) ?? a.authorName;
   const intro = config.archive.wrappedLlmIntro ? await deps.intro(period, stats, nameOf) : undefined;
   const coverage = coverageNote(store, period);
-  const text = renderWrapped(period, stats, {
+  return renderWrapped(period, stats, {
     botName: deps.botName,
     intro,
     person: (a) => (a.authorId ? `<@${a.authorId}>` : `**${escapeMarkdown(a.authorName)}**`),
@@ -469,7 +467,6 @@ async function composeWrapped(
     banner: extras.banner,
     footnotes: [...(coverage ? [coverage] : []), ...(extras.footnotes ?? [])],
   });
-  return { stats, text };
 }
 
 async function sendChunks(channel: WrappedChannel, text: string, onSent?: (id: string) => void): Promise<void> {
@@ -513,7 +510,7 @@ async function postPeriod(period: WrappedPeriod, deps: WrappedDeps): Promise<voi
       return;
     }
     const channelIds = allowedChannelIds(deps.store(), makeAudienceAccess(channel.guild, channel));
-    const { text } = await composeWrapped(period, channelIds, channel.guild, deps);
+    const text = await composeWrapped(period, channelIds, channel.guild, deps);
     if (!text) {
       // WARN: a whole year with nothing to show is almost always a configuration problem (the Wrapped
       // channel's audience can read no archived channel), and the year is not retried.
@@ -566,7 +563,10 @@ let previewRunning = false;
  * or written. Answers every outcome in that channel; never throws.
  */
 export async function runWrappedPreview(request: WrappedPreviewRequest, deps: WrappedDeps): Promise<void> {
-  if (previewRunning) return;
+  if (previewRunning) {
+    logger.info('wrapped: a preview is already being built; ignoring the second request.');
+    return;
+  }
   previewRunning = true;
   let channel: WrappedChannel | undefined;
   try {
@@ -620,7 +620,7 @@ async function preview(request: WrappedPreviewRequest, here: WrappedChannel, dep
   if (!config.archive.wrappedEnabled) notes.push('WRAPPED_ENABLED=false: the yearly post itself is off.');
 
   const banner = `👀 preview, not the real post: that one goes to <#${wrappedId}> on Jan 1 at 3 PM ET`;
-  const { text } = await composeWrapped(period, channelIds, here.guild, deps, { banner, footnotes: notes });
+  const text = await composeWrapped(period, channelIds, here.guild, deps, { banner, footnotes: notes });
   if (!text) {
     await say(
       [
