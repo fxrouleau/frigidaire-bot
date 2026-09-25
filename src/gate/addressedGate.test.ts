@@ -390,6 +390,31 @@ describe('AddressedGate exchanges (follow-ups without a name)', () => {
     expect(await h.gate.evaluate(human('so?').message)).toEqual({ respond: false, reason: 'no_trigger' });
   });
 
+  it("still counts a slow turn's answer when it reports back after those 5 minutes", async () => {
+    const h = harness();
+    // Queued behind other turns, then a video watch: the answer lands 6 minutes after the ping.
+    const slow = human('<@bot-1> watch this and tell me', { at: T0 - 360_000 }).message;
+    h.clock.now = T0 - 360_000;
+    h.gate.noteRouted(slow);
+    // Meanwhile the channel state is read (someone else's message), which drops the stale turn.
+    h.clock.now = T0 - 30_000;
+    expect(await h.gate.evaluate(human('lol', { at: h.clock.now, ...KEV }).message)).toEqual({
+      respond: false,
+      reason: 'no_trigger',
+    });
+    expect(h.gate.isInExchange(CHANNEL, 'user-1')).toBe(false);
+
+    h.clock.now = T0 - 10_000;
+    h.gate.noteTurnDone(slow);
+    expect(h.gate.isInExchange(CHANNEL, 'user-1')).toBe(true);
+    h.clock.now = T0;
+    expect(await h.gate.evaluate(human('ok and?').message)).toMatchObject({
+      respond: true,
+      trigger: 'followup',
+      cold: false,
+    });
+  });
+
   it('a bot post that answers nobody (a ramble nudge, a transcript, a reminder) starts no exchange', async () => {
     const h = harness();
     // The nudge is a Discord reply to Marco, but no turn was routed: it is not a conversation.
