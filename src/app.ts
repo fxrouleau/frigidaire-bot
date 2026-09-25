@@ -9,6 +9,7 @@ import { getMemoryStore } from './ai/memory';
 import { config, describeEffectiveConfig } from './config';
 import { resolveEventModule } from './eventModule';
 import { logger } from './logger';
+import { getBotDb } from './storage/botDb';
 
 dotenv.config({ quiet: true });
 
@@ -134,6 +135,11 @@ const shutdown = (signal: string) => {
     getConversationPersistence().close();
   } catch (error) {
     logger.warn('Closing conversation persistence on shutdown failed:', error);
+  }
+  try {
+    getBotDb().close();
+  } catch (error) {
+    logger.warn('Closing bot database on shutdown failed:', error);
   }
   void client.destroy();
   process.exit(0);

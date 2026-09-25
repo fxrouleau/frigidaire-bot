@@ -29,7 +29,8 @@ function makeReposter(opts: {
     fetchAttachment: async () => opts.attachmentBytes,
     send: (async (...args: SendCall) => {
       sendCalls.push(args);
-    }) as typeof sendViaWebhook,
+      return { id: `repost-${sendCalls.length}` };
+    }) as unknown as typeof sendViaWebhook,
     now: opts.now ?? (() => T0),
   });
   return { reposter, judgeCalls, sendCalls };

@@ -486,6 +486,18 @@ describe('subject_user_id (soft-FK to identities)', () => {
     const row = store.getAllActive().find((m) => m.id === id);
     expect(row?.subject_user_id).toBe('123');
   });
+
+  it('getForPerson() matches the stable id and every known name, newest first', async () => {
+    await store.save({ category: 'fact', subject: 'OldNick', content: 'Plays bass', subject_user_id: '123' });
+    await store.save({ category: 'fact', subject: 'Wheezer', content: 'Owns a husky' });
+    await store.save({ category: 'fact', subject: 'Someone Else', content: 'Hates cilantro' });
+    const rows = store.getForPerson({ userId: '123', names: ['Wheezer', ' ', 'Wheezer'] });
+    expect(rows.map((r) => r.content).sort()).toEqual(['Owns a husky', 'Plays bass']);
+  });
+
+  it('getForPerson() with neither an id nor a name returns nothing', () => {
+    expect(store.getForPerson({ names: [] })).toEqual([]);
+  });
 });
 
 describe('identities', () => {

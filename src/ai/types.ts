@@ -55,10 +55,29 @@ export type ProviderChatResponse = {
   raw?: unknown;
 };
 
+/** A file a tool wants attached to the bot's reply for this turn (a generated image, a sandbox chart, …). */
+export type TurnFile = { attachment: Buffer; name: string };
+
+/**
+ * Side effects tools produce during one chat turn, applied by the orchestrator when it sends the reply:
+ * files ride on the reply itself instead of a separate message, and a turn whose only output is a
+ * reaction may end without any text.
+ */
+export type TurnEffects = {
+  files: TurnFile[];
+  /** Emojis already added as reactions to the triggering message this turn. */
+  reactions: string[];
+};
+
+export function createTurnEffects(): TurnEffects {
+  return { files: [], reactions: [] };
+}
+
 export interface ToolHandlerContext {
   message: Message;
   provider: AiProvider;
   channelId: string;
+  turn: TurnEffects;
 }
 
 export type ToolHandler = (ctx: ToolHandlerContext, args: Record<string, unknown>) => Promise<string>;
@@ -68,6 +87,11 @@ export type ToolDefinition = {
   description: string;
   parameters: Record<string, unknown>;
   handler: ToolHandler;
+  /**
+   * Optional gate evaluated when the provider builds its tool list: a tool whose backing feature is not
+   * configured (e.g. run_code without SANDBOX_URL) is simply not offered to the model. Absent ⇒ enabled.
+   */
+  isEnabled?: () => boolean;
 };
 
 export type ChatInput = {

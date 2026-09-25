@@ -52,16 +52,18 @@ export class OpenRouterProvider implements AiProvider {
     this.defaultModel = opts.model ?? config.models.chat;
     this.routing = opts.routing ?? { zdr: true, sort: 'throughput' };
 
-    this.supportedTools = toolDefinitions.map(
-      (tool) =>
-        ({
-          name: tool.name,
-          type: 'function',
-          description: tool.description,
-          parameters: tool.parameters,
-          hostHandled: true,
-        }) satisfies ProviderToolDefinition,
-    );
+    this.supportedTools = toolDefinitions
+      .filter((tool) => tool.isEnabled?.() ?? true)
+      .map(
+        (tool) =>
+          ({
+            name: tool.name,
+            type: 'function',
+            description: tool.description,
+            parameters: tool.parameters,
+            hostHandled: true,
+          }) satisfies ProviderToolDefinition,
+      );
 
     // Add native web search — handled by the model itself, not the host
     this.supportedTools.push({

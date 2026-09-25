@@ -1,6 +1,14 @@
 import { getMemoryStore } from './memory';
 import { type Memory, SELF_DIAGNOSIS_CATEGORIES } from './memory/memoryStore';
 import { emojiSyntax } from './promptSections';
+import { birthdayTools } from './tools/birthdays';
+import { costTools } from './tools/costs';
+import { featureRequestTools } from './tools/featureRequest';
+import { linkReaderTools } from './tools/linkReader';
+import { messageSearchTools } from './tools/messageSearch';
+import { reactTools } from './tools/react';
+import { reminderTools } from './tools/reminders';
+import { sandboxTools } from './tools/sandbox';
 import type { ToolDefinition, ToolHandlerContext } from './types';
 
 // The categories the chat model may write. Everything the model sends is untrusted text: a
@@ -300,6 +308,8 @@ const getEmojiTool: ToolDefinition = {
   },
 };
 
+// Every tool the chat model can call. Feature tools live in their own modules under ./tools/ so each
+// feature owns its file; a tool with an `isEnabled` gate is only offered when its feature is configured.
 export const toolDefinitions: ToolDefinition[] = [
   summarizeTool,
   imageTool,
@@ -308,4 +318,12 @@ export const toolDefinitions: ToolDefinition[] = [
   forgetMemoryTool,
   querySelfDiagnosisTool,
   getEmojiTool,
+  ...reactTools,
+  ...reminderTools,
+  ...birthdayTools,
+  ...messageSearchTools,
+  ...linkReaderTools,
+  ...sandboxTools,
+  ...featureRequestTools,
+  ...costTools,
 ];
