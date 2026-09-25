@@ -283,6 +283,12 @@ describe('ArchiveStore — reads', () => {
     expect(store.sizeBytes()).toBeGreaterThan(0);
   });
 
+  it('knows when it is empty', () => {
+    expect(store.isEmpty()).toBe(true);
+    store.upsertMessage(archiveInput());
+    expect(store.isEmpty()).toBe(false);
+  });
+
   it('keeps channel rows and finds archived author names', () => {
     store.upsertChannel({ id: CHANNEL, guildId: 'g', name: 'banana-combo', parentId: null, type: 0 }, T0);
     store.upsertChannel({ id: CHANNEL, guildId: 'g', name: 'banana-combo', parentId: null, type: 0 }, T0 + 1);

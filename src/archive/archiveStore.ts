@@ -1016,6 +1016,11 @@ export class ArchiveStore {
     return result;
   }
 
+  /** True when nothing has been archived yet (cheaper than counting a large archive). */
+  isEmpty(): boolean {
+    return this.stmt('SELECT 1 FROM messages LIMIT 1').get() === undefined;
+  }
+
   countMessages(channelId?: string): number {
     const row = channelId
       ? (this.stmt('SELECT COUNT(*) AS n FROM messages WHERE channel_id = ?').get(channelId) as { n: number })

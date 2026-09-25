@@ -7,7 +7,7 @@ import type { Identity } from '../ai/memory/memoryStore';
 import { formatTimestampET } from '../ai/utils';
 import { config } from '../config';
 import { logger } from '../logger';
-import type { ArchiveStore, ArchivedChannel, ArchivedMessage } from './archiveStore';
+import type { ArchiveStore, ArchivedChannel, ArchivedMessage, ArchivedReaction } from './archiveStore';
 import { isIgnoredChannel, isThreadType } from './ingest';
 
 /** The permission view of a guild channel search needs; a discord.js GuildChannel/ThreadChannel fits. */
@@ -204,6 +204,7 @@ export function resolveChannels(text: string, store: ArchiveStore): ArchivedChan
 // ---------------------------------------------------------------- rendering
 
 const MAX_LINE_CONTENT = 300;
+const MAX_REACTIONS_SHOWN = 3;
 
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -255,7 +256,16 @@ function describeBody(message: ArchivedMessage, ctx: RenderContext): string {
   if (embedTitle && !text.includes(embedTitle)) parts.push(`[link: ${truncate(embedTitle, 120)}]`);
   if (parts.length === 0 && message.extraText)
     parts.push(`[${truncate(message.extraText.replace(/\s*\n\s*/g, ' · '), 200)}]`);
-  return parts.length > 0 ? parts.join(' ') : '(no text)';
+  const body = parts.length > 0 ? parts.join(' ') : '(no text)';
+  const reactions = describeReactions(message.reactions);
+  return reactions ? `${body} ${reactions}` : body;
+}
+
+/** The top reactions as `[reactions: 😂×3 :kekw:×2]`: how the group took the message. */
+function describeReactions(reactions: ArchivedReaction[]): string | undefined {
+  const top = [...reactions].sort((a, b) => b.count - a.count).slice(0, MAX_REACTIONS_SHOWN);
+  if (top.length === 0) return undefined;
+  return `[reactions: ${top.map((r) => `${r.id ? `:${r.name}:` : r.name}×${r.count}`).join(' ')}]`;
 }
 
 export function displayAuthor(message: ArchivedMessage, ctx: RenderContext): string {

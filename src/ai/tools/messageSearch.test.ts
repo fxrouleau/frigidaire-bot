@@ -151,6 +151,22 @@ describe('search_messages', () => {
     expect(result).not.toContain('tacos');
   });
 
+  it("shows a hit's top reactions", async () => {
+    seedChannels();
+    store.upsertMessage(
+      at(0, {
+        content: 'the take',
+        reactions: [
+          { id: null, name: '💀', count: 1 },
+          { id: '300000000000000001', name: 'kekw', count: 4 },
+          { id: null, name: '😂', count: 2 },
+          { id: null, name: '👍', count: 1 },
+        ],
+      }),
+    );
+    expect(await search({ query: 'take' })).toContain('Felix: the take [reactions: :kekw:×4 😂×2 ');
+  });
+
   it('flags partial matches and truncates long messages', async () => {
     seedChannels();
     store.upsertMessages([

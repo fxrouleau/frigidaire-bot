@@ -54,7 +54,7 @@ function withNotice(text: string, store: ArchiveStore): string {
 
 async function searchMessages(ctx: ToolHandlerContext, args: Record<string, unknown>): Promise<string> {
   const store = getArchiveStore();
-  if (store.countMessages() === 0) {
+  if (store.isEmpty()) {
     return withNotice(
       'The message archive is empty — nothing has been indexed yet, so there is nothing to search.',
       store,
