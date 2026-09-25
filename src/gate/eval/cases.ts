@@ -28,6 +28,7 @@
 // Discord reply points at. A case is only relevant to the live gate when it passes the prefilter (its
 // text names the bot, or it is a follow-up); the runner reports both views.
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { AddressedInput, ChatLine } from '../addressed';
 import { createNameMatcher, isFollowup } from '../text';
 
@@ -136,6 +137,24 @@ export function loadCaseFile(filePath: string): GateEvalCase[] {
   }
   const { cases, errors } = validateCaseFile(parsed, filePath);
   if (errors.length > 0) throw new Error(`${filePath} is invalid:\n  ${errors.join('\n  ')}`);
+  return cases;
+}
+
+export type SourcedCase = { source: string; case: GateEvalCase };
+
+/** Loads several case files in order; a case id must be unique across all of them. */
+export function loadCaseSources(filePaths: string[]): SourcedCase[] {
+  const cases: SourcedCase[] = [];
+  const seen = new Map<string, string>();
+  for (const filePath of filePaths) {
+    const source = path.basename(filePath);
+    for (const c of loadCaseFile(filePath)) {
+      const clash = seen.get(c.id);
+      if (clash) throw new Error(`Duplicate case id "${c.id}" in ${source} (also in ${clash})`);
+      seen.set(c.id, source);
+      cases.push({ source, case: c });
+    }
+  }
   return cases;
 }
 

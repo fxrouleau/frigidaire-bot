@@ -2,7 +2,7 @@
 // precision/recall/F1 per threshold. The live CLI (runEval.ts) wires in the real decision model; tests
 // wire in a fake, so the arithmetic here is covered without an API key.
 import type { AddressedClassifier } from '../addressed';
-import { type GateEvalCase, caseToInput, passesPrefilter } from './cases';
+import { type SourcedCase, caseToInput, passesPrefilter } from './cases';
 
 export const EVAL_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9];
 
@@ -30,7 +30,7 @@ export type Confusion = {
 export type EvalSettings = { names: string[]; followupSeconds: number; concurrency?: number };
 
 export async function runCases(
-  cases: Array<{ source: string; case: GateEvalCase }>,
+  cases: SourcedCase[],
   classify: AddressedClassifier,
   settings: EvalSettings,
   onProgress?: (done: number, total: number) => void,

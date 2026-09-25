@@ -13,7 +13,7 @@ import * as dotenv from 'dotenv';
 import { config } from '../../config';
 import { createAddressedClassifier } from '../addressed';
 import { gateSettingsFromConfig } from '../addressedGate';
-import { type GateEvalCase, loadCaseFile } from './cases';
+import { loadCaseSources } from './cases';
 import { EVAL_THRESHOLDS, formatMisclassified, formatTable, runCases } from './runner';
 
 dotenv.config({ quiet: true });
@@ -32,17 +32,7 @@ async function main(args: string[]): Promise<number> {
     ...(fs.existsSync(LOCAL_CASES) ? [LOCAL_CASES] : []),
     ...args.map((a) => path.resolve(a)),
   ];
-  const cases: Array<{ source: string; case: GateEvalCase }> = [];
-  const ids = new Map<string, string>();
-  for (const file of files) {
-    const source = path.basename(file);
-    for (const c of loadCaseFile(file)) {
-      const clash = ids.get(c.id);
-      if (clash) throw new Error(`Duplicate case id "${c.id}" in ${source} (also in ${clash})`);
-      ids.set(c.id, source);
-      cases.push({ source, case: c });
-    }
-  }
+  const cases = loadCaseSources(files);
 
   const settings = gateSettingsFromConfig();
   const model = config.gate.model;
