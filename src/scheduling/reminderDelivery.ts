@@ -2,6 +2,7 @@
 // process start time, fallback channel) comes in through the options so tests drive it directly.
 import type { Client } from 'discord.js';
 import { currentName } from '../ai/people';
+import { accountIdsFor } from '../linkedAccounts';
 import { logger } from '../logger';
 import { type PostableChannel, describeError, fetchPostableChannel, isPermanentChannelError } from './discord';
 import { type Reminder, claimDueReminders, markFailed, markRetry, markSent, releaseStaleClaims } from './reminderStore';
@@ -30,13 +31,26 @@ export type ReminderDeliveryOptions = {
 
 export type DeliveryReport = { sent: number; retried: number; failed: number };
 
-/** The reminder post: the ping line, then a subtext line with who set it and where. */
+/**
+ * Every account the reminder pings. Targets are stored as main account ids (LINKED_ACCOUNTS); a member
+ * who also posts from a side account is pinged on both, since the bot can't know which one they're on.
+ */
+export function pingedAccountIds(reminder: Reminder): string[] {
+  const targets = reminder.targetIds.length > 0 ? reminder.targetIds : [reminder.requesterId];
+  return [...new Set(targets.flatMap((id) => accountIdsFor(id)))];
+}
+
+/**
+ * The reminder post: the ping line, then a subtext line with who set it and where. Redirected away from
+ * a channel not everyone can read, it says a reminder is due without repeating its text there.
+ */
 export function renderReminder(
   reminder: Reminder,
   opts: { now: number; startedAt: number; redirectedFrom?: string },
 ): string {
-  const targets = reminder.targetIds.length > 0 ? reminder.targetIds : [reminder.requesterId];
-  const mentions = targets.map((id) => `<@${id}>`).join(' ');
+  const mentions = pingedAccountIds(reminder)
+    .map((id) => `<@${id}>`)
+    .join(' ');
 
   const lateMs = opts.now - reminder.dueAt;
   const missedOffline = reminder.dueAt < opts.startedAt && lateMs > OFFLINE_GRACE_MS;
@@ -50,15 +64,18 @@ export function renderReminder(
   }
   if (opts.redirectedFrom) footer.push(`couldn't post in <#${opts.redirectedFrom}>`);
 
-  return `⏰ ${mentions} ${reminder.text}${lateNote}\n-# ${footer.join(' · ')}`;
+  const body =
+    opts.redirectedFrom && reminder.sourcePrivate
+      ? `reminder #${reminder.id} is due, but it was set somewhere private, so its text stays there`
+      : reminder.text;
+  return `⏰ ${mentions} ${body}${lateNote}\n-# ${footer.join(' · ')}`;
 }
 
 async function post(channel: PostableChannel, reminder: Reminder, content: string): Promise<string> {
-  const targets = reminder.targetIds.length > 0 ? reminder.targetIds : [reminder.requesterId];
   const message = await channel.send({
     content,
     // Only the reminder's own people get pinged: an @everyone or a stray <@id> inside the text stays inert.
-    allowedMentions: { parse: [], users: targets },
+    allowedMentions: { parse: [], users: pingedAccountIds(reminder) },
     // Idempotency for a re-send after a crash between Discord accepting the post and the row being
     // marked sent: Discord returns the earlier message instead of posting again (a few-minute window).
     nonce: `reminder-${reminder.id}`,

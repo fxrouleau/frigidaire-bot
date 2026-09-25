@@ -27,6 +27,7 @@ function reminder(overrides: Partial<NewReminder> = {}): NewReminder {
     text: 'take the pizza out',
     dueAt: T0 + 60_000,
     sourceUrl: 'https://discord.com/channels/guild-1/channel-1/msg-1',
+    sourcePrivate: false,
     createdAt: T0,
     ...overrides,
   };
@@ -56,11 +57,37 @@ describe('reminder rows', () => {
       text: 'take the pizza out',
       dueAt: T0 + 60_000,
       sourceUrl: 'https://discord.com/channels/guild-1/channel-1/msg-1',
+      sourcePrivate: false,
       status: 'pending',
       attempts: 0,
       nextAttemptAt: null,
       createdAt: T0,
     });
+  });
+
+  it('stores whether the source channel was private', () => {
+    expect(getReminder(insertReminder(reminder({ sourcePrivate: true })))?.sourcePrivate).toBe(true);
+    expect(getReminder(insertReminder(reminder({ sourcePrivate: false })))?.sourcePrivate).toBe(false);
+  });
+
+  it('adds source_private to a table created before it existed, treating old rows as private', () => {
+    const old = new BotDb(':memory:');
+    old.db.exec(`CREATE TABLE reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT, channel_id TEXT NOT NULL, requester_id TEXT NOT NULL,
+      requester_name TEXT NOT NULL, target_ids TEXT NOT NULL, text TEXT NOT NULL, due_at INTEGER NOT NULL,
+      source_url TEXT, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER, claimed_at INTEGER, sent_at INTEGER, sent_message_id TEXT, sent_channel_id TEXT,
+      last_error TEXT, cancelled_by TEXT, created_at INTEGER NOT NULL)`);
+    old.db
+      .prepare(
+        "INSERT INTO reminders (channel_id, requester_id, requester_name, target_ids, text, due_at, created_at) VALUES ('c', 'alice', 'Alice', '[]', 'old', 1, 1)",
+      )
+      .run();
+    setBotDbForTesting(old);
+
+    expect(getReminder(1)).toMatchObject({ text: 'old', sourcePrivate: true });
+    const id = insertReminder(reminder({ sourcePrivate: false }));
+    expect(getReminder(id)?.sourcePrivate).toBe(false);
   });
 
   it('never reuses an id, even after pruning', () => {

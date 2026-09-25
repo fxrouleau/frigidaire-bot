@@ -2,7 +2,7 @@
 // the scheduler (src/scheduling/scheduler.ts); polls are posted straight into the channel.
 import { config } from '../../config';
 import { logger } from '../../logger';
-import { jumpLink } from '../../scheduling/discord';
+import { isVisibleToEveryone, jumpLink } from '../../scheduling/discord';
 import { buildPoll, postPoll } from '../../scheduling/polls';
 import {
   type Reminder,
@@ -156,6 +156,7 @@ const setReminderTool: ToolDefinition = {
       text,
       dueAt: due.dueAt.getTime(),
       sourceUrl: jumpLink(ctx.message),
+      sourcePrivate: !isVisibleToEveryone(ctx.message.channel),
       createdAt: now.getTime(),
     });
     logger.info(

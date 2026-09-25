@@ -18,6 +18,7 @@ function reminder(overrides: Partial<NewReminder> = {}): NewReminder {
     text: 'stretch',
     dueAt: NOW - 1000,
     sourceUrl: null,
+    sourcePrivate: false,
     createdAt: NOW - 3_600_000,
     ...overrides,
   };

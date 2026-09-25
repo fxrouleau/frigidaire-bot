@@ -37,6 +37,7 @@ describe('schedulerStart', () => {
       text: 'call mom',
       dueAt: Date.now() - 3_600_000,
       sourceUrl: null,
+      sourcePrivate: false,
       createdAt: Date.now() - 7_200_000,
     });
 

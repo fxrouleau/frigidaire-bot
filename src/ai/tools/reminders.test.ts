@@ -1,3 +1,4 @@
+import { ChannelType, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getReminder, insertReminder, listPendingInChannel } from '../../scheduling/reminderStore';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
@@ -167,6 +168,36 @@ describe('set_reminder', () => {
     expect(getReminder(1)).toBeUndefined();
   });
 
+  describe('remembers whether the channel is private (its text must never be reposted in the main channel)', () => {
+    function runIn(channel: { type?: ChannelType; everyoneCanView?: boolean }) {
+      const { ctx } = ctxFor({ channelType: channel.type ?? ChannelType.GuildText });
+      if (channel.everyoneCanView !== undefined) {
+        const everyone = { id: 'guild-1' };
+        Object.assign(ctx.message.channel, {
+          guild: { roles: { everyone } },
+          permissionsFor: (role: unknown) =>
+            role === everyone
+              ? new PermissionsBitField(channel.everyoneCanView ? PermissionFlagsBits.ViewChannel : 0n)
+              : null,
+        });
+      }
+      return tool('set_reminder').handler(ctx, { text: 'x', in_minutes: 5 });
+    }
+
+    it('a channel everyone can read is public', async () => {
+      await runIn({ everyoneCanView: true });
+      expect(getReminder(1)?.sourcePrivate).toBe(false);
+    });
+
+    it('a channel @everyone cannot view, a private thread, or a channel it cannot check is private', async () => {
+      await runIn({ everyoneCanView: false });
+      await runIn({ type: ChannelType.PrivateThread, everyoneCanView: true });
+      await runIn({});
+      await runIn({ type: ChannelType.DM });
+      expect([1, 2, 3, 4].map((id) => getReminder(id)?.sourcePrivate)).toEqual([true, true, true, true]);
+    });
+  });
+
   it('caps pending reminders per requester', async () => {
     vi.stubEnv('REMINDERS_MAX_PER_USER', '2');
     await run('set_reminder', { text: 'one', in_minutes: 5 });
@@ -247,6 +278,7 @@ describe('cancel_reminder', () => {
       text: 'old',
       dueAt: NOW.getTime() - 1000,
       sourceUrl: null,
+      sourcePrivate: false,
       createdAt: 0,
     });
     await run('cancel_reminder', { id });

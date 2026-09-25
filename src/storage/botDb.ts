@@ -37,6 +37,20 @@ export class BotDb {
     this.schemas.add(key);
   }
 
+  /**
+   * Adds `column` to an existing `table` unless it is already there: the additive migration for a column
+   * that a table created by an older build lacks. Run it after the table's ensureSchema().
+   */
+  ensureColumn(table: string, column: string, definition: string): void {
+    const key = `column:${table}.${column}`;
+    if (this.schemas.has(key)) return;
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!columns.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+    this.schemas.add(key);
+  }
+
   /** Returns the cached prepared statement for this SQL, compiling it on first use. */
   stmt(sql: string): Database.Statement {
     let prepared = this.statements.get(sql);
