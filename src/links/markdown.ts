@@ -64,9 +64,18 @@ export function isInsideSpan(index: number, spans: readonly Span[]): boolean {
 
 // Sentence punctuation right after a link belongs to the sentence (Discord's own autolinker drops these too).
 const SENTENCE_END = new Set(['.', ',', ':', ';', '!', '?', "'", '"']);
-// Emphasis delimiters are only trimmed when the same character opens somewhere before the link: a
-// `_` or `*` at the very end of a query string (base64-ish share tokens end in `_`) is otherwise kept.
-const EMPHASIS = new Set(['*', '_', '~']);
+// `*` and `~` are only trimmed when the same character opens somewhere before the link (social links
+// never contain them). `_` gets a closer look (closesUnderscoreSpan): it is the one that really ends
+// links — X share tokens end in `_` — and it sits inside them too (`x.com/some_user/…`).
+const EMPHASIS = new Set(['*', '~']);
+
+// Discord's parser (simple-markdown) reads `_x_` as italics and `__x__` as underline, with these
+// regexes (its own; its leading `\b` always holds where the parser tries them). Italics can't contain
+// a lone `_`, and close at the first one not followed by a letter, digit or `_`.
+const ITALIC = /_((?:__|\\[\s\S]|[^\\_])+?)_(?!\w)/y;
+const UNDERLINE = /__((?:\\[\s\S]|[^\\])+?)__(?!_)/y;
+// A link earlier in the text: its underscores are the link rule's, never an italic opener.
+const EARLIER_LINK = /https?:\/\/[^\s<]+[^<.,:;"')\]\s]/g;
 
 function count(text: string, char: string): number {
   let total = 0;
@@ -74,12 +83,60 @@ function count(text: string, char: string): number {
   return total;
 }
 
+/** Where the italics/underline span opening at `index` ends (its length wins, italics on a tie), if any. */
+function underscoreSpanEnd(text: string, index: number): number | undefined {
+  ITALIC.lastIndex = index;
+  UNDERLINE.lastIndex = index;
+  const italic = ITALIC.exec(text)?.[0].length ?? 0;
+  const underline = UNDERLINE.exec(text)?.[0].length ?? 0;
+  const length = Math.max(italic, underline);
+  return length > 0 ? index + length : undefined;
+}
+
+/**
+ * Whether the `_` run ending `head` (the link up to here) closes italics or underline opened in
+ * `textBefore`, the way Discord's parser reads the message: left to right, every `_` outside code,
+ * escapes and earlier links may open a span; one that closes before the link is spent (`_a_ link_`),
+ * and one that runs into a lone `_` inside the link (`x.com/some_user/…?t=abc_`) can't reach this run.
+ * When nothing reaches it, the run is part of the link and stays in it.
+ */
+function closesUnderscoreSpan(textBefore: string, head: string): boolean {
+  if (!textBefore.includes('_')) return false;
+  const text = textBefore + head;
+  const skipped = [
+    ...codeSpans(textBefore),
+    ...[...textBefore.matchAll(EARLIER_LINK)].map((m) => ({ start: m.index, end: m.index + m[0].length })),
+  ];
+  let index = 0;
+  while (index < textBefore.length) {
+    const skip = skipped.find((span) => index >= span.start && index < span.end);
+    if (skip) {
+      index = skip.end;
+      continue;
+    }
+    const char = text[index];
+    if (char === '\\') {
+      index += 2;
+      continue;
+    }
+    const end = char === '_' ? underscoreSpanEnd(text, index) : undefined;
+    if (end === undefined) {
+      index++;
+      continue;
+    }
+    // Closing inside the link means this run isn't the delimiter.
+    if (end > textBefore.length) return end === text.length;
+    index = end;
+  }
+  return false;
+}
+
 /**
  * Trims markdown and sentence punctuation off the end of a matched URL so the replacement leaves it
  * in the message: `)` when it doesn't balance an opener inside the URL (masked links, parenthesized
- * links), `*` `_` `~` when the same delimiter opened earlier in the message (bold/italic/strikethrough),
- * and trailing sentence punctuation. `|`, backticks and square brackets never get this far: the URL
- * patterns exclude them.
+ * links), `*` `~` when the same delimiter opened earlier in the message (bold/italic/strikethrough),
+ * `_` when it closes italics/underline the way Discord reads them, and trailing sentence punctuation.
+ * `|`, backticks and square brackets never get this far: the URL patterns exclude them.
  */
 export function trimLinkEnd(url: string, textBefore: string): string {
   let end = url.length;
@@ -90,6 +147,8 @@ export function trimLinkEnd(url: string, textBefore: string): string {
       end--;
     } else if (char === ')' && count(head, ')') > count(head, '(')) {
       end--;
+    } else if (char === '_' && closesUnderscoreSpan(textBefore, head)) {
+      end -= head.length - head.replace(/_+$/, '').length;
     } else if (EMPHASIS.has(char) && textBefore.includes(char)) {
       end--;
     } else {
