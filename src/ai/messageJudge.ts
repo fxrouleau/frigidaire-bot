@@ -106,20 +106,23 @@ async function judgeWithChat(model: string, input: JudgeInput, opts: EdgyJudgeOp
   ];
 
   try {
-    const response = await client.chat.completions.create({
-      model,
-      max_tokens: 20,
-      temperature: 0,
-      // @ts-expect-error OpenRouter-specific field
-      provider: { zdr: true },
-      messages: [
-        {
-          role: 'system',
-          content: `You judge messages from a private Discord server between close friends. Decide whether a message is "edgy": ${EDGY_CRITERIA.true} Not edgy: ${EDGY_CRITERIA.false} Answer with JSON only: {"edgy": true} or {"edgy": false}.`,
-        },
-        { role: 'user', content },
-      ],
-    }, featureRequestOptions('judge'));
+    const response = await client.chat.completions.create(
+      {
+        model,
+        max_tokens: 20,
+        temperature: 0,
+        // @ts-expect-error OpenRouter-specific field
+        provider: { zdr: true },
+        messages: [
+          {
+            role: 'system',
+            content: `You judge messages from a private Discord server between close friends. Decide whether a message is "edgy": ${EDGY_CRITERIA.true} Not edgy: ${EDGY_CRITERIA.false} Answer with JSON only: {"edgy": true} or {"edgy": false}.`,
+          },
+          { role: 'user', content },
+        ],
+      },
+      featureRequestOptions('judge'),
+    );
     const text = response.choices?.[0]?.message?.content ?? '';
     const match = text.match(/"edgy"\s*:\s*(true|false)/i);
     if (!match) {

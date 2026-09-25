@@ -105,11 +105,17 @@ export function validateCaseFile(raw: unknown, source: string): { cases: GateEva
     if (!Array.isArray(entry.context)) {
       errors.push(`${where}.context: must be an array (use [] for none)`);
     } else {
-      entry.context.forEach((line: unknown, i: number) => validateLine(line, `${where}.context[${i}]`, LINE_KEYS, errors));
+      entry.context.forEach((line: unknown, i: number) =>
+        validateLine(line, `${where}.context[${i}]`, LINE_KEYS, errors),
+      );
     }
     validateLine(entry.message, `${where}.message`, MESSAGE_KEYS, errors);
     const seconds = entry.botLastSpokeSecondsAgo;
-    if (seconds !== undefined && seconds !== null && !(typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0)) {
+    if (
+      seconds !== undefined &&
+      seconds !== null &&
+      !(typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0)
+    ) {
       errors.push(`${where}.botLastSpokeSecondsAgo: must be a number >= 0, or null`);
     }
     if (entry.talkingWithBot !== undefined && typeof entry.talkingWithBot !== 'boolean') {

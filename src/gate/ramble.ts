@@ -17,12 +17,12 @@ import { stripMarkup, truncate } from './text';
 // In character: a friend telling another friend to take it elsewhere. `{channel}` becomes the channel link.
 export const RAMBLE_LINES: readonly string[] = [
   'this is a {channel} moment',
-  "we have a whole channel for this. {channel}. go",
+  'we have a whole channel for this. {channel}. go',
   "sir this is a wendy's. {channel} is that way",
   'the committee has reviewed your essay and is forwarding it to {channel}',
   "i'm not reading all that. {channel} will though",
   '{channel} misses you. go talk to it',
-  "ramble detected. relocating you to {channel}",
+  'ramble detected. relocating you to {channel}',
   'the ted talk continues in {channel}, not here',
   'somebody get this man a blog. or just {channel}',
   "you've unlocked a new channel: {channel}. please proceed",

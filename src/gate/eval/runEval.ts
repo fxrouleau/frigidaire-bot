@@ -27,7 +27,11 @@ async function main(args: string[]): Promise<number> {
     return 2;
   }
 
-  const files = [BUNDLED_CASES, ...(fs.existsSync(LOCAL_CASES) ? [LOCAL_CASES] : []), ...args.map((a) => path.resolve(a))];
+  const files = [
+    BUNDLED_CASES,
+    ...(fs.existsSync(LOCAL_CASES) ? [LOCAL_CASES] : []),
+    ...args.map((a) => path.resolve(a)),
+  ];
   const cases: Array<{ source: string; case: GateEvalCase }> = [];
   const ids = new Map<string, string>();
   for (const file of files) {
@@ -43,17 +47,30 @@ async function main(args: string[]): Promise<number> {
   const settings = gateSettingsFromConfig();
   const model = config.gate.model;
   let cost = 0;
-  const classify = createAddressedClassifier({ model, feature: 'eval', onUsage: (u) => (cost += u.cost ?? 0) });
+  const classify = createAddressedClassifier({
+    model,
+    feature: 'eval',
+    onUsage: (usage) => {
+      cost += usage.cost ?? 0;
+    },
+  });
 
   const positives = cases.filter((c) => c.case.label).length;
   console.log(
     `Gate eval: ${cases.length} cases (${positives} addressed, ${cases.length - positives} not) from ${files.map((f) => path.basename(f)).join(', ')}`,
   );
-  console.log(`model=${model} threshold=${settings.threshold} followup=${settings.followupSeconds}s names=${settings.names.join(',')}\n`);
+  console.log(
+    `model=${model} threshold=${settings.threshold} followup=${settings.followupSeconds}s names=${settings.names.join(',')}\n`,
+  );
 
-  const results = await runCases(cases, classify, { names: settings.names, followupSeconds: settings.followupSeconds }, (done, total) => {
-    if (done % 10 === 0 || done === total) process.stdout.write(`  ${done}/${total}\r`);
-  });
+  const results = await runCases(
+    cases,
+    classify,
+    { names: settings.names, followupSeconds: settings.followupSeconds },
+    (done, total) => {
+      if (done % 10 === 0 || done === total) process.stdout.write(`  ${done}/${total}\r`);
+    },
+  );
 
   const unanswered = results.filter((r) => r.probability === undefined);
   const thresholds = [...new Set([...EVAL_THRESHOLDS, settings.threshold])].sort((a, b) => a - b);
@@ -63,7 +80,8 @@ async function main(args: string[]): Promise<number> {
   console.log(formatTable(results, true, thresholds));
   console.log(`\nMisclassified end to end at threshold ${settings.threshold}:`);
   console.log(formatMisclassified(results, settings.threshold, true));
-  if (unanswered.length > 0) console.log(`\n${unanswered.length} case(s) got no answer from the model (counted as "no").`);
+  if (unanswered.length > 0)
+    console.log(`\n${unanswered.length} case(s) got no answer from the model (counted as "no").`);
   console.log(`\nCost: $${cost.toFixed(6)} (${results.length} calls)`);
   return 0;
 }

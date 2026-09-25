@@ -112,7 +112,9 @@ export async function askNouls<K extends string>(
         signal: AbortSignal.timeout(opts.timeoutMs ?? DECISIONS_TIMEOUT_MS),
       });
       if (!response.ok) {
-        logger.warn(`${tag}: ${model} returned HTTP ${response.status} (attempt ${attempt})${await errorDetail(response)}`);
+        logger.warn(
+          `${tag}: ${model} returned HTTP ${response.status} (attempt ${attempt})${await errorDetail(response)}`,
+        );
         if (!isRetryable(response.status)) return undefined;
         continue;
       }
