@@ -1,0 +1,86 @@
+// The bot's auto-transcripts of voice messages are not the bot talking: replying to one is not replying
+// to the bot, and posting one doesn't open a conversation the gate should follow up on.
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { agent } from '../ai/agentInstance';
+import { TRANSCRIPT_HEADER } from '../ai/media/autoTranscribe';
+import { rememberTranscriptReply } from '../ai/media/store';
+import { addressedGate } from '../gate';
+import { BotDb, setBotDbForTesting } from '../storage/botDb';
+import { createFakeBotMessage, createFakeMessage } from '../test-support/fakeDiscord';
+import aiChatEvent from './aiChat';
+
+const BOT_ID = 'bot-1';
+
+beforeEach(() => {
+  setBotDbForTesting(new BotDb(':memory:'));
+  vi.spyOn(agent, 'handleMention').mockResolvedValue(undefined);
+  vi.spyOn(addressedGate, 'evaluate').mockResolvedValue({ respond: false, reason: 'below_threshold' });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  setBotDbForTesting(undefined);
+});
+
+describe('aiChat and transcript replies', () => {
+  it('a reply (with ping) to a transcript reply goes to the gate, not straight to the agent', async () => {
+    rememberTranscriptReply('transcript-1', 'voice-1');
+    const fake = createFakeMessage({
+      content: 'lmao he really said that',
+      botUserId: BOT_ID,
+      referencedMessageId: 'transcript-1',
+      repliedUserId: BOT_ID,
+    });
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).not.toHaveBeenCalled();
+    expect(addressedGate.evaluate).toHaveBeenCalledWith(fake.message);
+    expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
+  });
+
+  it('recognizes a transcript reply it has no record of by its header', async () => {
+    const transcript = createFakeBotMessage({
+      botUserId: BOT_ID,
+      messageId: 'old-transcript',
+      content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?`,
+    });
+    const fake = createFakeMessage({
+      content: 'ouais',
+      botUserId: BOT_ID,
+      referencedMessageId: 'old-transcript',
+      fetchedMessageById: { 'old-transcript': transcript.message },
+    });
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).not.toHaveBeenCalled();
+  });
+
+  it('an explicit mention in a reply to a transcript still reaches the agent', async () => {
+    rememberTranscriptReply('transcript-2', 'voice-2');
+    const fake = createFakeMessage({
+      content: 'fridge what did he mean',
+      botUserId: BOT_ID,
+      referencedMessageId: 'transcript-2',
+      mentionedUserIds: [BOT_ID],
+    });
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).toHaveBeenCalledWith(fake.message);
+  });
+
+  it("doesn't tell the gate about its own transcript replies", async () => {
+    const noteBotMessage = vi.spyOn(addressedGate, 'noteBotMessage');
+    const transcript = createFakeBotMessage({
+      botUserId: BOT_ID,
+      content: `${TRANSCRIPT_HEADER}\n> hello`,
+      repliedUserId: 'user-1',
+    });
+
+    await aiChatEvent.execute(transcript.message);
+
+    expect(noteBotMessage).not.toHaveBeenCalled();
+  });
+});

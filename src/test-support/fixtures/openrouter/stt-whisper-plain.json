@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "description": "POST /audio/transcriptions with the default response_format json (openai/whisper-large-v3): text + usage only, no segments — the shape of the transcriber's retry after a refused request. Synthetic, in the documented response shape.",
+  "status": 200,
+  "response": {
+    "text": " Salut tout le monde, on se fait une game ce soir ? Thanks for watching!",
+    "usage": { "seconds": 3.4, "total_tokens": 0, "input_tokens": 0, "output_tokens": 0, "cost": 0.0000255 }
+  }
+}

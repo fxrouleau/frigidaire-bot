@@ -1,5 +1,5 @@
 // The stable entry points other features call (link reader, learner, summaries, commands).
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import {
   CATALOG_MODELS,
@@ -9,6 +9,7 @@ import {
   createFakeCatalog,
   createFakeTranscoder,
   createFileFetch,
+  createFileSafeFetch,
 } from '../../test-support/fakeMedia';
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import {
@@ -16,6 +17,7 @@ import {
   getCachedTranscript,
   getCachedVideoDescription,
   setMediaForTesting,
+  startTranscriptionRouteChecks,
   transcribeAudio,
 } from './index';
 import { AudioTranscriber } from './transcriber';
@@ -27,13 +29,13 @@ const TRANSCRIPT = 'salut tout le monde, on se fait une game ce soir?\nEnglish: 
 
 function install(fixtures: OpenRouterFixture[] = []) {
   const { client, requests } = createCapturingClient(fixtures);
-  const fetch = createFileFetch({
-    [VOICE_URL]: { body: OGG_BYTES, contentType: 'audio/ogg' },
-    [CLIP_URL]: { body: MP4_BYTES, contentType: 'video/mp4' },
-  });
+  const fetch = createFileFetch({ [VOICE_URL]: { body: OGG_BYTES, contentType: 'audio/ogg' } });
+  // The clip is on a third-party host: it comes through the SSRF-guarded fetch.
+  const safeFetch = createFileSafeFetch({ [CLIP_URL]: { body: MP4_BYTES, contentType: 'video/mp4' } });
   const common = {
     client: () => client,
     fetch,
+    safeFetch,
     transcoder: createFakeTranscoder({ probe: { durationSecs: 20, hasAudio: true, hasVideo: true } }),
     catalog: createFakeCatalog(CATALOG_MODELS),
     model: () => 'google/gemini-3.5-flash-lite',
@@ -81,5 +83,40 @@ describe('media entry points', () => {
     expect(await transcribeAudio({ url: VOICE_URL, messageId: 'voice-3' })).toBeUndefined();
     expect(await describeVideo({ url: CLIP_URL })).toBeUndefined();
     expect(getCachedTranscript('voice-3')).toBeUndefined();
+  });
+});
+
+describe('startTranscriptionRouteChecks', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  it('checks the route at startup and then daily, once however often it is started', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    vi.stubEnv('OPENROUTER_API_KEY', 'test-key');
+    const transcriber = new AudioTranscriber({ transcoder: createFakeTranscoder(), catalog: createFakeCatalog() });
+    const route = vi.spyOn(transcriber, 'route').mockResolvedValue({ kind: 'stt', model: 'openai/whisper-large-v3' });
+    setMediaForTesting({ transcriber });
+
+    const stop = startTranscriptionRouteChecks(1000);
+    startTranscriptionRouteChecks(1000);
+    expect(route).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(1000);
+    expect(route).toHaveBeenCalledTimes(2);
+    stop();
+    vi.advanceTimersByTime(5000);
+    expect(route).toHaveBeenCalledTimes(2);
+  });
+
+  it('does nothing without an API key', () => {
+    vi.stubEnv('OPENROUTER_API_KEY', '');
+    const transcriber = new AudioTranscriber({ transcoder: createFakeTranscoder(), catalog: createFakeCatalog() });
+    const route = vi.spyOn(transcriber, 'route');
+    setMediaForTesting({ transcriber });
+    const stop = startTranscriptionRouteChecks();
+    stop();
+    expect(route).not.toHaveBeenCalled();
   });
 });

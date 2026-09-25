@@ -43,8 +43,10 @@ export type LinkVideo = {
   durationSecs?: number;
   sizeBytes?: number;
   contentType?: string;
-  /** Filled in by read_link through describeVideo(); cached with the rest of the content. */
+  /** Filled in by read_link through video understanding; cached with the rest of the content. */
   description?: string;
+  /** A question asked about this video (read_link's `question`) and what watching it answered; never cached. */
+  answer?: { question: string; text: string };
   /** Why the video wasn't / can't be described (shown to the model instead of a description). */
   note?: string;
 };

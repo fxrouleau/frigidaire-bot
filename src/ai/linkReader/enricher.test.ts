@@ -19,7 +19,7 @@ const tweet = (id: string, photos: string[] = []) => ({
 
 function setup(routes: Record<string, FakeRoute>, budgetMs?: number) {
   const fetch = createFakeSafeFetch(routes);
-  const reader = new LinkReader({ fetch, describeVideo: async () => undefined });
+  const reader = new LinkReader({ fetch, watchVideo: async () => ({ status: 'unavailable' }) });
   return { fetch, reader, enricher: createLinkEnricher({ reader: () => reader, budgetMs }) };
 }
 

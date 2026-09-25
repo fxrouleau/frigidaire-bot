@@ -1,19 +1,22 @@
 import { Events, type Message } from 'discord.js';
 import type { HandleMentionOptions } from '../ai/agent';
 import { agent } from '../ai/agentInstance';
+import { isTranscriptReply, isTranscriptReplyId } from '../ai/media/autoTranscribe';
 import { defineEvent } from '../eventModule';
 import { addressedGate } from '../gate';
 import { logger } from '../logger';
 
 async function isReplyToBot(message: Message): Promise<boolean> {
   if (!message.reference?.messageId) return false;
+  // The bot's auto-transcript of a voice message isn't the bot talking: a reply to it answers the voice message.
+  if (isTranscriptReplyId(message.reference.messageId)) return false;
   // Discord resolves the replied-to author into the mentions when the reply pings them, which
   // answers the question without a REST fetch for every reply posted server-wide.
   const repliedUser = message.mentions.repliedUser;
   if (repliedUser) return repliedUser.id === message.client.user.id;
   try {
     const repliedTo = await message.channel.messages.fetch(message.reference.messageId);
-    return repliedTo.author.id === message.client.user.id;
+    return repliedTo.author.id === message.client.user.id && !isTranscriptReply(repliedTo);
   } catch {
     return false;
   }
@@ -31,9 +34,11 @@ async function routeToAgent(message: Message, opts?: HandleMentionOptions): Prom
 
 export default defineEvent(Events.MessageCreate, {
   async execute(message) {
-    // The bot's own messages tell the gate who it is talking to (and when it last spoke) per channel.
+    // The bot's own messages tell the gate when it last spoke per channel (who it is talking to comes from
+    // routed turns, see AddressedGate.noteRouted/noteTurnDone).
     if (message.author.id === message.client.user.id && !message.webhookId) {
-      addressedGate.noteBotMessage(message);
+      // A voice-message transcript is not the bot speaking in the conversation.
+      if (!isTranscriptReply(message)) addressedGate.noteBotMessage(message);
       return;
     }
     if (message.author.bot) return;

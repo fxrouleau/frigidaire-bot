@@ -138,7 +138,7 @@ describe('media enricher', () => {
 
     const parts = await createMediaEnricher(deps).enrich(message, 'current');
 
-    expect(parts).toEqual([{ type: 'text', text: '[video: A cat knocks a glass off a table.]' }]);
+    expect(parts).toEqual([{ type: 'text', text: `[video msg:${message.id}: A cat knocks a glass off a table.]` }]);
     expect(described).toEqual([
       {
         url: CLIP_URL,
@@ -151,24 +151,33 @@ describe('media enricher', () => {
 
   it('marks videos it could not watch, and reads only the cache for history', async () => {
     const attachments = [{ url: CLIP_URL, contentType: 'video/mp4', name: 'clip.mp4' }];
+    const posted = (extra = {}) => createFakeMessage({ messageId: 'clip-msg', attachments, ...extra }).message;
     const failed = fakeDeps({ video: { status: 'failed' } });
-    expect(await createMediaEnricher(failed.deps).enrich(createFakeMessage({ attachments }).message, 'current')).toEqual([
-      { type: 'text', text: "[video: clip.mp4 (couldn't watch it)]" },
+    expect(await createMediaEnricher(failed.deps).enrich(posted(), 'current')).toEqual([
+      { type: 'text', text: "[video msg:clip-msg: clip.mp4 (couldn't watch it)]" },
     ]);
 
     const tooBig = fakeDeps({ video: { status: 'too_large' } });
-    expect(await createMediaEnricher(tooBig.deps).enrich(createFakeMessage({ attachments }).message, 'current')).toEqual([
-      { type: 'text', text: '[video: clip.mp4 (too large to watch)]' },
+    expect(await createMediaEnricher(tooBig.deps).enrich(posted(), 'current')).toEqual([
+      { type: 'text', text: '[video msg:clip-msg: clip.mp4 (too large to watch)]' },
+    ]);
+
+    const broke = fakeDeps({ video: { status: 'over_budget' } });
+    expect(await createMediaEnricher(broke.deps).enrich(posted(), 'current')).toEqual([
+      {
+        type: 'text',
+        text: '[video msg:clip-msg: clip.mp4 (not watched: out of popcorn money for today, the daily video budget is spent)]',
+      },
     ]);
 
     const history = fakeDeps({ cachedDescriptions: { [CLIP_URL]: 'A known clip.' } });
     const enricher = createMediaEnricher(history.deps);
-    expect(await enricher.enrich(createFakeMessage({ attachments }).message, 'history')).toEqual([
-      { type: 'text', text: '[video: A known clip.]' },
+    expect(await enricher.enrich(posted(), 'history')).toEqual([
+      { type: 'text', text: '[video msg:clip-msg: A known clip.]' },
     ]);
     const other = [{ url: 'https://cdn.discordapp.com/a/b/other.mp4', contentType: 'video/mp4', name: 'other.mp4' }];
-    expect(await enricher.enrich(createFakeMessage({ attachments: other }).message, 'history')).toEqual([
-      { type: 'text', text: '[video: other.mp4 (not watched)]' },
+    expect(await enricher.enrich(posted({ attachments: other }), 'history')).toEqual([
+      { type: 'text', text: '[video msg:clip-msg: other.mp4 (not watched)]' },
     ]);
     expect(history.described).toEqual([]);
   });
@@ -186,7 +195,7 @@ describe('media enricher', () => {
       p.type === 'text' ? p.text : '',
     );
     expect(texts[0]).toMatch(/^\[audio file "memo.mp3" from Felix/);
-    expect(texts[1]).toMatch(/^\[video: /);
+    expect(texts[1]).toMatch(/^\[video msg:/);
   });
 });
 

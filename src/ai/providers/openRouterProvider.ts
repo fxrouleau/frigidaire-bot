@@ -5,6 +5,8 @@ import type { ChatCompletionMessageParam } from 'openai/resources/chat/completio
 import sharp from 'sharp';
 import { config } from '../../config';
 import { logger } from '../../logger';
+import type { SafeFetch } from '../linkReader/safeFetch';
+import { downloadMedia, redact } from '../media/download';
 import { requireOpenRouterClient } from '../openRouterClient';
 import { toolDefinitions } from '../tools';
 import { prepareSummaryPrompt } from '../tools/summary';
@@ -30,9 +32,12 @@ export type OpenRouterProviderOptions = {
   routing?: Record<string, unknown>;
   /** Models OpenRouter tries, in order, when the primary errors. Default: CHAT_FALLBACK_MODELS. */
   fallbackModels?: string[];
+  /** The guarded fetch for images on non-Discord hosts (default: the shared createSafeFetch()). */
+  safeFetch?: SafeFetch;
 };
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const IMAGE_FETCH_TIMEOUT_MS = 10_000;
 const MAX_IMAGE_DIMENSION = 1568;
 // Every chat() call re-walks the whole conversation, so without a cache each image in the 25-message
 // seed history would be downloaded and decoded again on every tool round of every turn.
@@ -50,12 +55,14 @@ export class OpenRouterProvider implements AiProvider {
   private readonly routing: Record<string, unknown>;
   private readonly fallbackModels: string[];
   private readonly imageCache = new Map<string, CachedImage>();
+  private readonly safeFetch?: SafeFetch;
 
   constructor(opts: OpenRouterProviderOptions = {}) {
     this.client = opts.client ?? requireOpenRouterClient('chat');
     this.defaultModel = opts.model ?? config.models.chat;
     this.routing = opts.routing ?? { zdr: true, sort: 'throughput' };
     this.fallbackModels = (opts.fallbackModels ?? config.models.chatFallbacks).filter((m) => m !== this.defaultModel);
+    this.safeFetch = opts.safeFetch;
 
     this.supportedTools = toolDefinitions
       .filter((tool) => tool.isEnabled?.() ?? true)
@@ -266,24 +273,26 @@ export class OpenRouterProvider implements AiProvider {
 
   private async fetchImageAsBase64(url: string): Promise<string | undefined> {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-      if (!response.ok) {
-        logger.warn(`Failed to fetch image (HTTP ${response.status}): ${url}`);
+      // Discord's CDN and media proxy are fetched directly; any other host (a link preview's og:image)
+      // goes through the SSRF-guarded fetch, which also refuses anything that isn't an image.
+      const download = await downloadMedia(url, {
+        maxBytes: MAX_IMAGE_BYTES,
+        timeoutMs: IMAGE_FETCH_TIMEOUT_MS,
+        accept: ['image/*'],
+        safeFetch: this.safeFetch,
+      });
+      if (!download.ok) {
+        logger.warn(`Failed to fetch image (${download.reason}): ${redact(url)}`);
+        return undefined;
+      }
+      // SVG is markup the image pipeline would rasterize: not something to render on a stranger's behalf.
+      const declaredType = (download.contentType ?? '').split(';')[0].trim().toLowerCase();
+      if (declaredType === 'image/svg+xml') {
+        logger.warn(`Skipping an SVG image: ${redact(url)}`);
         return undefined;
       }
 
-      const contentLength = response.headers.get('content-length');
-      if (contentLength && Number.parseInt(contentLength, 10) > MAX_IMAGE_BYTES) {
-        logger.warn(`Image too large (${contentLength} bytes), skipping: ${url}`);
-        return undefined;
-      }
-
-      let buffer: Buffer = Buffer.from(await response.arrayBuffer());
-      if (buffer.byteLength > MAX_IMAGE_BYTES) {
-        logger.warn(`Image too large (${buffer.byteLength} bytes), skipping: ${url}`);
-        return undefined;
-      }
-
+      let buffer: Buffer = download.data;
       let resized = false;
       try {
         const image = sharp(buffer);
@@ -303,9 +312,7 @@ export class OpenRouterProvider implements AiProvider {
         logger.warn(`Failed to resize image, using original: ${url}`, resizeError);
       }
 
-      const mimeType = resized
-        ? 'image/png'
-        : (response.headers.get('content-type') || 'image/png').split(';')[0].trim();
+      const mimeType = resized ? 'image/png' : declaredType || 'image/png';
       return `data:${mimeType};base64,${buffer.toString('base64')}`;
     } catch (error) {
       logger.warn(`Failed to download image for base64 conversion: ${url}`, error);

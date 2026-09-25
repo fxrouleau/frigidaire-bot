@@ -110,7 +110,11 @@ export function formatLinkForTool(result: LinkReadResult): string {
     for (const item of c.media) {
       if (item.type === 'image')
         lines.push(`- image: ${item.url}${item.alt ? ` (alt: ${oneLine(item.alt, 300)})` : ''}`);
-      else lines.push(`- ${describeVideoLine(item)}`);
+      else {
+        lines.push(`- ${describeVideoLine(item)}`);
+        if (item.answer)
+          lines.push(`  asked "${oneLine(item.answer.question, 300)}" — watching it says: ${item.answer.text}`);
+      }
     }
   }
 

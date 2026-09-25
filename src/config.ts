@@ -497,13 +497,24 @@ export const config = {
 
   /** Voice-message transcription and video understanding (src/ai/media/). */
   media: {
-    // Default model for both: Gemini 3.5 Flash-Lite hears audio and watches video (soundtrack included)
-    // natively — 32 tokens per second of audio, ~100 per second of video — and every one of its Google
-    // Vertex endpoints is zero-data-retention and takes base64 video. About $0.001 per minute of voice
-    // message; see the media notes in AGENTS.md for the GLM-5.3-Flash comparison.
-    /** Audio-input chat model that transcribes voice messages and audio files (ZDR endpoints required). */
+    // Voice goes to Whisper Large V3 through OpenRouter's speech-to-text endpoint: ≈$0.00045 per minute
+    // (DeepInfra) and every host serving it is zero-data-retention — which is checked at startup and
+    // daily, because that endpoint ignores provider routing (src/ai/media/speechToText.ts). Video goes
+    // to Gemini 3.5 Flash-Lite, which watches the picture and hears the soundtrack in one call (~100
+    // tokens per second) on Google Vertex endpoints that are all ZDR and take base64 video.
+    /**
+     * Transcribes voice messages and audio files: a speech-to-text model (served by /audio/transcriptions;
+     * every endpoint must be ZDR, or TRANSCRIPTION_FALLBACK_MODEL is used) or an audio-input chat model.
+     */
     get transcriptionModel(): string {
-      return envString('TRANSCRIPTION_MODEL') ?? 'google/gemini-3.5-flash-lite';
+      return envString('TRANSCRIPTION_MODEL') ?? 'openai/whisper-large-v3';
+    },
+    /**
+     * Audio-input chat model (called with provider.zdr) used when TRANSCRIPTION_MODEL is a speech-to-text
+     * model that can't be verified as zero-data-retention on every host.
+     */
+    get transcriptionFallbackModel(): string {
+      return envString('TRANSCRIPTION_FALLBACK_MODEL') ?? 'google/gemini-3.5-flash-lite';
     },
     /** Model that describes videos: sent the clip itself, or keyframes + transcript (see videoInputMode). */
     get videoModel(): string {
@@ -538,6 +549,13 @@ export const config = {
      */
     get videoInputMode(): 'auto' | 'native' | 'frames' {
       return envEnum('VIDEO_INPUT_MODE', ['auto', 'native', 'frames'] as const, 'auto');
+    },
+    /**
+     * Most the video model may spend per Eastern calendar day (USD, from the usage ledger's 'video' rows);
+     * past it, clips aren't watched until midnight ET. 0 = unlimited. Transcription is not counted.
+     */
+    get videoDailyBudgetUsd(): number {
+      return envNumber('VIDEO_DAILY_BUDGET_USD', 0.5, { min: 0 });
     },
   },
 

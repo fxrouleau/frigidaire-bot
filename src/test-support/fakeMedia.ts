@@ -2,8 +2,10 @@
 // client that replays fixtures while capturing each request's body AND headers (the feature tag rides
 // in a header), and a fetch that serves in-memory files by URL.
 import OpenAI from 'openai';
-import type { ModelCatalog, ModelInfo } from '../ai/media/modelCatalog';
+import type { Resolver } from '../ai/linkReader/netGuard';
+import { type HttpTransport, type SafeFetch, createSafeFetch } from '../ai/linkReader/safeFetch';
 import type { MediaTranscoder, ProbeResult, VideoSample } from '../ai/media/transcoder';
+import type { EndpointCoverage, ModelCatalog, ModelInfo } from '../ai/modelCatalog';
 import type { OpenRouterFixture } from './openRouterFetch';
 
 // Minimal buffers with the right magic numbers for format sniffing.
@@ -106,6 +108,35 @@ export function createFileFetch(files: Record<string, FakeFile>): typeof globalT
   return Object.assign(fetchImpl as typeof globalThis.fetch, { urls });
 }
 
+/**
+ * The real SSRF-guarded fetch (createSafeFetch) over an in-memory transport serving `files` by exact URL
+ * (404 otherwise). Every hostname resolves to a public address except `privateHosts` (10.0.0.7), so the
+ * guard's redirect, byte-cap and content-type rules run for real without DNS or sockets.
+ */
+export function createFileSafeFetch(
+  files: Record<string, FakeFile>,
+  opts: { privateHosts?: string[] } = {},
+): SafeFetch & { urls: string[] } {
+  const urls: string[] = [];
+  const resolver: Resolver = async (hostname) => [
+    { address: opts.privateHosts?.includes(hostname) ? '10.0.0.7' : '93.184.215.14', family: 4 },
+  ];
+  const transport: HttpTransport = async (request) => {
+    const url = request.url.toString();
+    urls.push(url);
+    const file = files[url];
+    if (!file) return { status: 404, headers: {}, truncated: false };
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(file.headers ?? {})) headers[name.toLowerCase()] = value;
+    if (file.contentType) headers['content-type'] = file.contentType;
+    const status = file.status ?? 200;
+    if (!request.wantBody(status, headers['content-type'] ?? '')) return { status, headers, truncated: false };
+    const truncated = file.body.byteLength > request.maxBytes;
+    return { status, headers, body: truncated ? file.body.subarray(0, request.maxBytes) : file.body, truncated };
+  };
+  return Object.assign(createSafeFetch({ resolver, transport }), { urls });
+}
+
 /** The text parts and media parts of the user message in a captured media request. */
 export function userContent(request: CapturedRequest): Array<Record<string, unknown>> {
   const messages = request.body.messages as Array<{ role: string; content: unknown }>;
@@ -113,13 +144,20 @@ export function userContent(request: CapturedRequest): Array<Record<string, unkn
   return Array.isArray(user?.content) ? (user.content as Array<Record<string, unknown>>) : [];
 }
 
-export type FakeCatalog = Pick<ModelCatalog, 'info' | 'catalogInfo'>;
+export type FakeCatalog = Pick<ModelCatalog, 'info' | 'catalogInfo' | 'endpointCoverage'>;
+
+/** How a fake endpoints listing looks: speech-to-text or not, and each host's ZDR status. */
+export type FakeEndpoints = { transcription?: boolean; hosts: Array<{ provider: string; zdr: boolean }> };
 
 /**
- * A model catalog answering from a fixed table. Models missing from it are "unknown to the catalog":
+ * A model catalog answering from fixed tables. Models missing from `models` are "unknown to the catalog":
  * catalogInfo() says undefined and info() falls back to Gemini-style defaults for google/gemini ids.
+ * endpointCoverage() answers from `endpoints`; a model missing there can't be verified (undefined).
  */
-export function createFakeCatalog(models: Record<string, { modalities: string[]; effort?: string }> = {}): FakeCatalog {
+export function createFakeCatalog(
+  models: Record<string, { modalities: string[]; effort?: string }> = {},
+  endpoints: Record<string, FakeEndpoints | 'not_found'> = {},
+): FakeCatalog {
   const lookup = (model: string): ModelInfo | undefined => {
     const entry = models[model];
     return entry ? { inputModalities: new Set(entry.modalities), lowestEffort: entry.effort } : undefined;
@@ -135,8 +173,34 @@ export function createFakeCatalog(models: Record<string, { modalities: string[];
         ? { inputModalities: new Set(['text', 'image', 'audio', 'video']) }
         : { inputModalities: new Set(['text']) };
     },
+    async endpointCoverage(model): Promise<EndpointCoverage | undefined> {
+      const entry = endpoints[model];
+      if (entry === undefined) return undefined;
+      if (entry === 'not_found') {
+        return { model, found: false, outputModalities: new Set(), endpoints: [], allZdr: false, checkedAt: 0 };
+      }
+      const hosts = entry.hosts.map((h) => ({ provider: h.provider, tag: h.provider.toLowerCase(), zdr: h.zdr }));
+      return {
+        model,
+        found: true,
+        outputModalities: new Set([entry.transcription ? 'transcription' : 'text']),
+        endpoints: hosts,
+        allZdr: hosts.length > 0 && hosts.every((h) => h.zdr),
+        checkedAt: 0,
+      };
+    },
   };
 }
+
+/** Whisper Large V3's endpoints as OpenRouter listed them on 2026-09-25: three hosts, all ZDR. */
+export const WHISPER_ENDPOINTS: FakeEndpoints = {
+  transcription: true,
+  hosts: [
+    { provider: 'DeepInfra', zdr: true },
+    { provider: 'Together', zdr: true },
+    { provider: 'Groq', zdr: true },
+  ],
+};
 
 /** Catalog entries matching OpenRouter's metadata for the models the media tests use (2026-09-25). */
 export const CATALOG_MODELS = {

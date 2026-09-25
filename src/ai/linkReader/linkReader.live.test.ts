@@ -20,7 +20,7 @@ function content(result: LinkReadResult) {
 }
 
 describe.skipIf(!RUN_LIVE)('link reader (live)', () => {
-  const reader = new LinkReader({ describeVideo: async () => undefined });
+  const reader = new LinkReader({ watchVideo: async () => ({ status: 'unavailable' }) });
 
   it(
     'reads a tweet through FxTwitter',

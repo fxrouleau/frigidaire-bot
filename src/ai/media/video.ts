@@ -1,5 +1,7 @@
 // Video understanding: a compact description (what happens, on-screen text, what's said) of an
-// uploaded clip or a video behind a shared link.
+// uploaded clip or a video behind a shared link — or, for a follow-up, the answer to one specific
+// question about it ("what does he say at the end?"). The chat model never sees the video itself;
+// it reads what this module writes, and asks again (watch_video / read_link's question) when it needs to.
 //
 // Two paths:
 //   - native: the whole clip goes to a video-input model as a base64 data URL. Zero-data-retention
@@ -9,21 +11,34 @@
 //     transcript alongside, so "what's said" still makes it into the description.
 //   - frames: for clips over those bounds, containers the endpoint doesn't take, models without video
 //     input, or a failed native call — ffmpeg samples up to 8 keyframes plus the audio track, the track
-//     is transcribed, and a vision model describes the frames with the transcript alongside.
+//     is transcribed (Whisper), and a vision model describes the frames with the transcript alongside.
 //
-// What the model takes (video? audio?) comes from OpenRouter's model catalog (modelCatalog.ts).
+// Every video-model call first checks VIDEO_DAILY_BUDGET_USD against today's ledger spend
+// (videoBudget.ts). Descriptions are cached per URL and answers per (URL, question) in bot.db; the
+// downloaded clip itself is kept in memory for a few minutes (clipCache.ts) so a follow-up question
+// doesn't download it again. What the model takes (video? audio?) comes from the model catalog.
 import type OpenAI from 'openai';
 import { config } from '../../config';
 import { logger } from '../../logger';
+import type { SafeFetch } from '../linkReader/safeFetch';
+import { type ModelCatalog, type ModelInfo, getModelCatalog } from '../modelCatalog';
 import { getOpenRouterClient } from '../openRouterClient';
+import { ClipCache } from './clipCache';
 import { downloadMedia, redact } from './download';
 import { detectVideoMime } from './formats';
 import { type MediaContentPart, completeMedia, describeError } from './modelCall';
-import { type ModelCatalog, type ModelInfo, getModelCatalog } from './modelCatalog';
-import { getStoredVideoDescription, mediaCacheKey, storeVideoDescription } from './store';
+import {
+  getStoredVideoAnswer,
+  getStoredVideoDescription,
+  mediaCacheKey,
+  questionKey,
+  storeVideoAnswer,
+  storeVideoDescription,
+} from './store';
 import type { MediaTranscoder } from './transcoder';
 import type { AudioTranscriber } from './transcriber';
 import type { VideoInput, VideoOutcome } from './types';
+import { VideoBudget } from './videoBudget';
 import { formatClock } from './voice';
 
 /** The most the frames path will download; bigger files are skipped rather than buffered. */
@@ -36,6 +51,7 @@ const FRAME_MAX_DIMENSION = 768;
 const MAX_OUTPUT_TOKENS = 2048;
 const MAX_DESCRIPTION_CHARS = 1500;
 const MAX_CONTEXT_CHARS = 300;
+export const MAX_QUESTION_CHARS = 500;
 
 const SYSTEM_PROMPT =
   "You describe videos for a Discord bot in a private friend group's server; the bot can't watch them itself. Be factual and compact, and never comment on the task.";
@@ -47,6 +63,25 @@ Said: <what's spoken or sung, close to verbatim in the original language; add an
 No preamble, no markdown headings, under 120 words.`;
 
 const DESCRIBE_ASK = "Describe the video so someone who can't watch it knows what's in it.";
+
+const QUESTION_SHAPE = `Answer from what the video shows and what is said in it. If it doesn't show or say that, say so plainly instead of guessing. Quote speech close to verbatim in the original language (add an English translation in parentheses if it isn't English); give timestamps (m:ss) when they help.
+No preamble, no markdown headings, under 100 words.`;
+
+/** What one watch is for: the general description, or one question. */
+type Task = { ask: string; shape: string; what: string };
+
+function describeTask(): Task {
+  return { ask: DESCRIBE_ASK, shape: ANSWER_SHAPE, what: 'description' };
+}
+
+function questionTask(question: string): Task {
+  // The question is a member's (or the chat model's) words: quoted as data, capped.
+  return {
+    ask: `Answer this question about the video: "${question.slice(0, MAX_QUESTION_CHARS)}"`,
+    shape: QUESTION_SHAPE,
+    what: 'answer',
+  };
+}
 
 function contextLine(context: string | undefined): string {
   const trimmed = context?.trim();
@@ -68,6 +103,8 @@ export function cleanDescription(raw: string): string | undefined {
 export type VideoDescriberOptions = {
   client?: () => OpenAI | undefined;
   fetch?: typeof globalThis.fetch;
+  /** The guarded fetch for non-Discord URLs (default: the shared createSafeFetch()). */
+  safeFetch?: SafeFetch;
   transcoder: MediaTranscoder;
   /** Transcribes the audio track for models that can't hear it (and on the frames path). */
   transcriber: Pick<AudioTranscriber, 'transcribeBuffer'>;
@@ -78,6 +115,10 @@ export type VideoDescriberOptions = {
   maxAudioSeconds?: () => number;
   now?: () => number;
   catalog?: Pick<ModelCatalog, 'info'>;
+  /** Default: VIDEO_DAILY_BUDGET_USD against the usage ledger. */
+  budget?: Pick<VideoBudget, 'check'>;
+  /** Default: a private in-memory cache of the last few clips. */
+  clips?: ClipCache;
 };
 
 type Attempt = {
@@ -86,13 +127,18 @@ type Attempt = {
   info: ModelInfo;
   input: VideoInput;
   data: Buffer;
+  task: Task;
   /** The soundtrack line once transcribed, so a native call that fails doesn't pay for it twice. */
   heard?: string;
 };
 
+/** Thrown between calls when the day's budget ran out mid-watch (native failed, frames not tried). */
+class OverBudget extends Error {}
+
 export class VideoDescriber {
   private readonly client: () => OpenAI | undefined;
   private readonly fetchImpl?: typeof globalThis.fetch;
+  private readonly safeFetch?: SafeFetch;
   private readonly transcoder: MediaTranscoder;
   private readonly transcriber: Pick<AudioTranscriber, 'transcribeBuffer'>;
   private readonly model: () => string;
@@ -102,12 +148,15 @@ export class VideoDescriber {
   private readonly maxAudioSeconds: () => number;
   private readonly now: () => number;
   private readonly catalog: Pick<ModelCatalog, 'info'>;
+  private readonly budget: Pick<VideoBudget, 'check'>;
+  private readonly clips: ClipCache;
   private readonly inFlight = new Map<string, Promise<VideoOutcome>>();
   private readonly cooldownUntil = new Map<string, number>();
 
   constructor(opts: VideoDescriberOptions) {
     this.client = opts.client ?? getOpenRouterClient;
     this.fetchImpl = opts.fetch;
+    this.safeFetch = opts.safeFetch;
     this.transcoder = opts.transcoder;
     this.transcriber = opts.transcriber;
     this.model = opts.model ?? (() => config.media.videoModel);
@@ -117,6 +166,8 @@ export class VideoDescriber {
     this.maxAudioSeconds = opts.maxAudioSeconds ?? (() => config.media.voiceMaxSeconds);
     this.now = opts.now ?? (() => Date.now());
     this.catalog = opts.catalog ?? getModelCatalog();
+    this.budget = opts.budget ?? new VideoBudget({ now: this.now });
+    this.clips = opts.clips ?? new ClipCache({ now: this.now });
   }
 
   /** A stored description for this URL, without any paid work. */
@@ -124,18 +175,47 @@ export class VideoDescriber {
     return getStoredVideoDescription(mediaCacheKey(url));
   }
 
+  /**
+   * The clip's description — or, when `input.question` is set, the answer to that question (see ask()).
+   * Cached per URL; concurrent asks share one run; a failure cools down before it is retried.
+   */
   async describe(input: VideoInput): Promise<VideoOutcome> {
+    const question = input.question?.trim();
+    if (question) return this.ask({ ...input, question });
+
     const key = mediaCacheKey(input.url);
     const stored = getStoredVideoDescription(key);
     if (stored !== undefined) return { status: 'ok', text: stored, cached: true };
+    return this.dedup(key, () =>
+      this.watch(input, key, describeTask(), (text, model) => storeVideoDescription(key, text, model, this.now())),
+    );
+  }
 
-    const pending = this.inFlight.get(key);
+  /** Watches the clip again to answer one question about it. Answers are cached per (URL, question). */
+  async ask(input: VideoInput & { question: string }): Promise<VideoOutcome> {
+    const key = mediaCacheKey(input.url);
+    const stored = getStoredVideoAnswer(key, input.question);
+    if (stored !== undefined) return { status: 'ok', text: stored, cached: true };
+    return this.dedup(`${key}\n${questionKey(input.question)}`, () =>
+      this.watch(input, key, questionTask(input.question), (text, model) =>
+        storeVideoAnswer(key, input.question, text, model, this.now()),
+      ),
+    );
+  }
+
+  private dedup(runKey: string, run: () => Promise<VideoOutcome>): Promise<VideoOutcome> {
+    const pending = this.inFlight.get(runKey);
     if (pending) return pending;
-    if ((this.cooldownUntil.get(key) ?? 0) > this.now()) return { status: 'failed' };
+    if ((this.cooldownUntil.get(runKey) ?? 0) > this.now()) return Promise.resolve({ status: 'failed' });
 
-    const run = this.run(input, key).finally(() => this.inFlight.delete(key));
-    this.inFlight.set(key, run);
-    return run;
+    const promise = run()
+      .then((outcome) => {
+        if (outcome.status === 'failed') this.setCooldown(runKey);
+        return outcome;
+      })
+      .finally(() => this.inFlight.delete(runKey));
+    this.inFlight.set(runKey, promise);
+    return promise;
   }
 
   private setCooldown(key: string): void {
@@ -146,43 +226,76 @@ export class VideoDescriber {
     this.cooldownUntil.set(key, now + FAILURE_COOLDOWN_MS);
   }
 
-  private async run(input: VideoInput, key: string): Promise<VideoOutcome> {
+  /** False (and logged) when today's video budget is spent. */
+  private withinBudget(input: VideoInput): boolean {
+    const verdict = this.budget.check();
+    if (verdict.ok) return true;
+    logger.info(
+      `video: the daily budget is spent ($${verdict.spentUsd.toFixed(4)} of $${verdict.budgetUsd.toFixed(2)} today); not watching ${redact(input.url)}`,
+    );
+    return false;
+  }
+
+  private async watch(
+    input: VideoInput,
+    key: string,
+    task: Task,
+    store: (text: string, model: string) => void,
+  ): Promise<VideoOutcome> {
     const client = this.client();
     if (!client) {
       logger.warn('video: no OPENROUTER_API_KEY; skipping');
       return { status: 'unavailable' };
     }
+    // Checked before downloading too: an over-budget day shouldn't cost bandwidth either.
+    if (!this.withinBudget(input)) return { status: 'over_budget' };
 
-    const maxBytes = this.maxBytes();
+    const clip = await this.clip(input, key);
+    if (!clip.ok) return clip.outcome;
+
+    const model = this.model();
+    const attempt: Attempt = { client, model, info: await this.catalog.info(model), input, data: clip.data, task };
+    let text: string | undefined;
+    try {
+      text = (await this.tryNative(attempt, clip.contentType)) ?? (await this.tryFrames(attempt));
+    } catch (error) {
+      if (error instanceof OverBudget) return { status: 'over_budget' };
+      throw error;
+    }
+
+    if (text === undefined) return { status: 'failed' };
+    store(text, model);
+    return { status: 'ok', text, cached: false };
+  }
+
+  /** The clip's bytes: from the short-lived clip cache, or downloaded (and then cached). */
+  private async clip(
+    input: VideoInput,
+    key: string,
+  ): Promise<{ ok: true; data: Buffer; contentType?: string } | { ok: false; outcome: VideoOutcome }> {
+    const cached = this.clips.get(key);
+    if (cached) return { ok: true, ...cached };
+
     const download = await downloadMedia(input.url, {
-      maxBytes: Math.max(maxBytes, VIDEO_DOWNLOAD_MAX_BYTES),
+      maxBytes: Math.max(this.maxBytes(), VIDEO_DOWNLOAD_MAX_BYTES),
       timeoutMs: DOWNLOAD_TIMEOUT_MS,
       fetch: this.fetchImpl,
+      safeFetch: this.safeFetch,
     });
     if (!download.ok) {
       if (download.reason === 'too_large') {
         logger.info(`video: ${redact(input.url)} is too large to download; skipping`);
-        return { status: 'too_large' };
+        return { ok: false, outcome: { status: 'too_large' } };
       }
-      this.setCooldown(key);
-      return { status: 'failed' };
+      return { ok: false, outcome: { status: 'failed' } };
     }
-
-    const model = this.model();
-    const attempt: Attempt = { client, model, info: await this.catalog.info(model), input, data: download.data };
-    const text = (await this.tryNative(attempt, download.contentType)) ?? (await this.tryFrames(attempt));
-
-    if (text === undefined) {
-      this.setCooldown(key);
-      return { status: 'failed' };
-    }
-    storeVideoDescription(key, text, model, this.now());
-    return { status: 'ok', text, cached: false };
+    this.clips.set(key, { data: download.data, contentType: download.contentType });
+    return { ok: true, data: download.data, contentType: download.contentType };
   }
 
   /** The whole clip as a data URL, when the model, container, size and length all allow it. */
   private async tryNative(attempt: Attempt, downloadedType: string | undefined): Promise<string | undefined> {
-    const { client, model, info, input, data } = attempt;
+    const { client, model, info, input, data, task } = attempt;
     const mode = this.inputMode();
     if (mode === 'frames' || (mode === 'auto' && !info.inputModalities.has('video'))) return undefined;
     const mime = detectVideoMime(data, input.contentType ?? downloadedType, input.url);
@@ -206,27 +319,27 @@ export class VideoDescriber {
         system: SYSTEM_PROMPT,
         content: [
           { type: 'video_url', video_url: { url: `data:${mime};base64,${data.toString('base64')}` } },
-          { type: 'text', text: `${DESCRIBE_ASK}${heard}${contextLine(input.context)}\n${ANSWER_SHAPE}` },
+          { type: 'text', text: `${task.ask}${heard}${contextLine(input.context)}\n${task.shape}` },
         ],
         maxTokens: MAX_OUTPUT_TOKENS,
         timeoutMs: DESCRIBE_TIMEOUT_MS,
         reasoningEffort: info.lowestEffort,
       });
       const text = cleanDescription(raw);
-      if (text === undefined) throw new Error(`${model} returned an empty description`);
+      if (text === undefined) throw new Error(`${model} returned an empty ${task.what}`);
       logger.info(
-        `video: described ${redact(input.url)} natively via ${model} (${mime}, ${data.byteLength} bytes) in ${this.now() - started}ms`,
+        `video: ${task.what} of ${redact(input.url)} natively via ${model} (${mime}, ${data.byteLength} bytes) in ${this.now() - started}ms`,
       );
       return text;
     } catch (error) {
-      logger.warn(`video: native description via ${model} failed (${describeError(error)}); trying keyframes`);
+      logger.warn(`video: native ${task.what} via ${model} failed (${describeError(error)}); trying keyframes`);
       return undefined;
     }
   }
 
   /** Keyframes + the audio track's transcript, for a vision model. */
   private async tryFrames(attempt: Attempt): Promise<string | undefined> {
-    const { client, model, info, input, data } = attempt;
+    const { client, model, info, input, data, task } = attempt;
     const started = this.now();
     let sample: Awaited<ReturnType<MediaTranscoder['sampleVideo']>>;
     try {
@@ -258,9 +371,11 @@ export class VideoDescriber {
           image_url: { url: `data:image/jpeg;base64,${frame.toString('base64')}` },
         }),
       ),
-      { type: 'text', text: `${intro}\n${heard}\n${DESCRIBE_ASK}${contextLine(input.context)}\n${ANSWER_SHAPE}` },
+      { type: 'text', text: `${intro}\n${heard}\n${task.ask}${contextLine(input.context)}\n${task.shape}` },
     ];
 
+    // A native attempt may have spent the last of today's budget.
+    if (!this.withinBudget(input)) throw new OverBudget();
     try {
       const raw = await completeMedia({
         client,
@@ -273,13 +388,13 @@ export class VideoDescriber {
         reasoningEffort: info.lowestEffort,
       });
       const text = cleanDescription(raw);
-      if (text === undefined) throw new Error(`${model} returned an empty description`);
+      if (text === undefined) throw new Error(`${model} returned an empty ${task.what}`);
       logger.info(
-        `video: described ${redact(input.url)} from ${sample.frames.length} frames via ${model} in ${this.now() - started}ms`,
+        `video: ${task.what} of ${redact(input.url)} from ${sample.frames.length} frames via ${model} in ${this.now() - started}ms`,
       );
       return text;
     } catch (error) {
-      logger.warn(`video: keyframe description via ${model} failed: ${describeError(error)}`);
+      logger.warn(`video: keyframe ${task.what} via ${model} failed: ${describeError(error)}`);
       return undefined;
     }
   }

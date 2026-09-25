@@ -20,6 +20,7 @@ import {
 } from './agent';
 import type { ContentEnricher } from './enrichers';
 import { TRIMMED_NOTE } from './historyBudget';
+import { TRANSCRIPT_HEADER } from './media/autoTranscribe';
 import { getMemoryStore, setMemoryStoreForTesting } from './memory';
 import { MemoryStore } from './memory/memoryStore';
 import type { ConversationEntry, ProviderChatResponse, ToolDefinition } from './types';
@@ -160,6 +161,26 @@ describe('catching up between pings', () => {
     expect(dynamic).toBe(second.length - 2);
     // The first-window seed was not fetched again.
     expect(ping2.recorders.messagesFetch.calls).toEqual([[{ limit: 100, before: '1020' }]]);
+  });
+
+  it("drops its own auto-transcript replies from seeded history and from the catch-up", async () => {
+    const provider = new FakeProvider([textResponse('one'), textResponse('two')]);
+    const agent = makeAgent(provider);
+    const transcript = (id: string, said: string) =>
+      createFakeBotMessage({ messageId: id, content: `${TRANSCRIPT_HEADER}\n> ${said}`, channelId: CH, botUserId: BOT_ID })
+        .message;
+
+    const seeded = [chat('7000', 'earlier chatter'), transcript('7001', 'seeded voice words')];
+    const ping1 = createFakeMessage({ ...BASE, messageId: '7002', content: 'fridge?', channelMessages: seeded });
+    await agent.handleMention(ping1.message);
+    expect(countText(provider.calls[0].messages, 'seeded voice words')).toBe(0);
+    expect(countText(provider.calls[0].messages, 'earlier chatter')).toBe(1);
+
+    const log = [...seeded, ping1.message, chat('7003', 'more chatter'), transcript('7004', 'caught-up voice words')];
+    const ping2 = createFakeMessage({ ...BASE, messageId: '7005', content: 'and now?', channelMessages: log });
+    await agent.handleMention(ping2.message);
+    expect(countText(provider.calls[1].messages, 'caught-up voice words')).toBe(0);
+    expect(countText(provider.calls[1].messages, 'more chatter')).toBe(1);
   });
 
   it('keeps only the newest 100 messages and says how many earlier ones were skipped', async () => {

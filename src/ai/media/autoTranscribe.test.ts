@@ -1,12 +1,16 @@
 import { ChannelType, MessageFlags } from 'discord.js';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import { type FakeMessageOptions, createFakeMessage } from '../../test-support/fakeDiscord';
 import {
+  TOO_LONG_HEADER,
   TRANSCRIPT_HEADER,
   VoiceAutoTranscriber,
   type VoiceAutoTranscriberOptions,
+  formatTooLongNote,
   formatTranscriptReply,
   isTranscriptReply,
+  isTranscriptReplyId,
 } from './autoTranscribe';
 import type { AudioInput, TranscriptionOutcome } from './types';
 
@@ -37,6 +41,14 @@ function voice(opts: FakeMessageOptions = {}) {
 
 const OK: TranscriptionOutcome = { status: 'ok', text: 'on joue ce soir?\nEnglish: are we playing tonight?', cached: false };
 
+beforeEach(() => {
+  setBotDbForTesting(new BotDb(':memory:'));
+});
+
+afterEach(() => {
+  setBotDbForTesting(undefined);
+});
+
 describe('VoiceAutoTranscriber', () => {
   it("replies to a member's voice message with a silent, ping-free transcript", async () => {
     const { transcriber, asked } = setup(OK);
@@ -56,15 +68,40 @@ describe('VoiceAutoTranscriber', () => {
     ]);
   });
 
-  it('labels transcripts of uploaded audio files with the file name', async () => {
-    const { transcriber } = setup({ status: 'ok', text: 'hello', cached: true });
+  it('leaves uploaded audio files alone (only real voice messages get a transcript reply)', async () => {
+    const { transcriber, asked } = setup({ status: 'ok', text: 'la la la', cached: false });
     const { message, recorders } = createFakeMessage({
-      attachments: [{ url: 'https://cdn.discordapp.com/a/b/memo.mp3', contentType: 'audio/mpeg', name: 'memo_1.mp3' }],
+      attachments: [{ url: 'https://cdn.discordapp.com/a/b/song.mp3', contentType: 'audio/mpeg', name: 'song.mp3' }],
     });
+    expect(await transcriber.handle(message)).toBe('skipped');
+    expect(asked).toEqual([]);
+    expect(recorders.reply.calls).toEqual([]);
+  });
+
+  it('posts a short, silent note for a voice message over VOICE_MAX_SECONDS', async () => {
+    const { transcriber } = setup({ status: 'too_long', durationSecs: 754 });
+    const { message, recorders } = voice({ replyImpl: async () => ({ id: 'note-1' }) });
+
     expect(await transcriber.handle(message)).toBe('posted');
-    expect((recorders.reply.calls[0][0] as { content: string }).content).toBe(
-      `${TRANSCRIPT_HEADER} · memo\\_1.mp3\n> hello`,
-    );
+
+    expect(recorders.reply.calls).toEqual([
+      [
+        {
+          content: '-# 🎙️ too long to transcribe (12:34)',
+          allowedMentions: { parse: [], repliedUser: false },
+          flags: MessageFlags.SuppressNotifications,
+        },
+      ],
+    ]);
+    expect(isTranscriptReplyId('note-1')).toBe(true);
+  });
+
+  it('remembers the ids of its transcript replies', async () => {
+    const { transcriber } = setup(OK);
+    const { message } = voice({ replyImpl: async () => ({ id: 'reply-1' }) });
+    await transcriber.handle(message);
+    expect(isTranscriptReplyId('reply-1')).toBe(true);
+    expect(isTranscriptReplyId('some-other-message')).toBe(false);
   });
 
   it('works in threads, and in a thread whose parent is on the allowlist', async () => {
@@ -102,7 +139,6 @@ describe('VoiceAutoTranscriber', () => {
   it.each<TranscriptionOutcome>([
     { status: 'ok', text: '', cached: false },
     { status: 'failed' },
-    { status: 'too_long', durationSecs: 900 },
     { status: 'unavailable' },
   ])('posts nothing without a transcript (%o)', async (outcome) => {
     const { transcriber } = setup(outcome);
@@ -156,7 +192,10 @@ describe('isTranscriptReply', () => {
     const own = createFakeMessage({ authorId: 'bot-1', botUserId: 'bot-1', content: `${TRANSCRIPT_HEADER}\n> hi` });
     const quoted = createFakeMessage({ authorId: 'user-2', botUserId: 'bot-1', content: `${TRANSCRIPT_HEADER}\n> hi` });
     const normal = createFakeMessage({ authorId: 'bot-1', botUserId: 'bot-1', content: 'hey' });
+    const note = createFakeMessage({ authorId: 'bot-1', botUserId: 'bot-1', content: formatTooLongNote(700) });
     expect(isTranscriptReply(own.message)).toBe(true);
+    expect(isTranscriptReply(note.message)).toBe(true);
+    expect(formatTooLongNote(700).startsWith(TOO_LONG_HEADER)).toBe(true);
     expect(isTranscriptReply(quoted.message)).toBe(false);
     expect(isTranscriptReply(normal.message)).toBe(false);
   });

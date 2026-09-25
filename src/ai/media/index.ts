@@ -1,16 +1,26 @@
 // Media understanding: audio transcription (Discord voice messages, audio files) and video description
 // (uploaded clips, videos behind shared links). These are the stable entry points the rest of the bot
 // calls — the chat agent (through the media enricher), the learner, summaries, the link reader and the
-// context-menu commands. Every call that reaches a model goes through OpenRouter with ZDR routing.
+// context-menu commands. The chat model itself never receives audio or video, only the text made here:
+//   - voice / audio → Whisper Large V3 on the speech-to-text endpoint (transcriber.ts), while every
+//     host serving it is verified zero-data-retention; otherwise a chat model with provider.zdr
+//   - video → VIDEO_MODEL (Gemini) watching the picture and hearing the soundtrack in one call
+//     (video.ts); long or huge clips → keyframes + the soundtrack's Whisper transcript
+//   - YouTube → metadata only (link reader): YouTube exposes no file the bot could upload, and only
+//     Gemini on AI Studio (not zero-data-retention) takes YouTube URLs
+//   - a follow-up question about a video → the video model watches it again (watchVideo with a
+//     question; the watch_video tool, read_link's `question`), within VIDEO_DAILY_BUDGET_USD
+// Every chat-completions call carries provider.zdr; the STT endpoint is covered by the host check.
 //
-// Results are cached in bot.db (transcripts by message id, descriptions by URL), so whichever feature
-// pays for a recording first, every later reader gets it for free.
+// Results are cached in bot.db (transcripts by message id, descriptions by URL, answers by URL and
+// question), so whichever feature pays for a recording first, every later reader gets it for free.
 import type OpenAI from 'openai';
 import { config } from '../../config';
+import { logger } from '../../logger';
 import { getOpenRouterClient } from '../openRouterClient';
 import { FfmpegTranscoder, type MediaTranscoder } from './transcoder';
 import { AudioTranscriber } from './transcriber';
-import type { AudioInput, VideoInput } from './types';
+import type { AudioInput, VideoInput, VideoOutcome } from './types';
 import { VideoDescriber } from './video';
 
 export type { AudioInput, TranscriptionOutcome, VideoInput, VideoOutcome } from './types';
@@ -53,10 +63,39 @@ export function setMediaForTesting(opts?: { transcriber?: AudioTranscriber; desc
   describer = opts?.describer;
 }
 
+const ROUTE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let routeCheckTimer: NodeJS.Timeout | undefined;
+
 /**
- * Transcribes an audio file: the words in the language they were spoken, plus a final "English: …"
- * line when that wasn't English. '' when the recording holds no speech; undefined when transcription
- * is unavailable, the recording is over VOICE_MAX_SECONDS or 25 MB, or the call failed.
+ * Verifies the transcription route now and then daily: a speech-to-text TRANSCRIPTION_MODEL is only
+ * used while every endpoint serving it is on OpenRouter's ZDR list (that endpoint ignores routing
+ * preferences), and the verdict — or a WARN plus the chat-model fallback — lands in the log at startup
+ * rather than on the first voice message. Idempotent; returns a stop function.
+ */
+export function startTranscriptionRouteChecks(intervalMs = ROUTE_CHECK_INTERVAL_MS): () => void {
+  const check = () => {
+    // Without a key nothing is transcribed, so there is no route to vouch for.
+    if (!config.openRouter.apiKey) return;
+    getAudioTranscriber()
+      .route()
+      .catch((error: unknown) => logger.warn('transcription: route check failed:', error));
+  };
+  if (!routeCheckTimer) {
+    check();
+    routeCheckTimer = setInterval(check, intervalMs);
+    routeCheckTimer.unref();
+  }
+  return () => {
+    if (routeCheckTimer) clearInterval(routeCheckTimer);
+    routeCheckTimer = undefined;
+  };
+}
+
+/**
+ * Transcribes an audio file: the words in the language they were spoken (the chat-model fallback also
+ * adds a final "English: …" line under non-English speech). '' when the recording holds no speech;
+ * undefined when transcription is unavailable, the recording is over VOICE_MAX_SECONDS or 25 MB, or
+ * the call failed.
  */
 export async function transcribeAudio(input: AudioInput): Promise<string | undefined> {
   const outcome = await getAudioTranscriber().transcribe(input);
@@ -75,6 +114,29 @@ export function getCachedTranscript(messageId: string): string | undefined {
 export async function describeVideo(input: VideoInput): Promise<string | undefined> {
   const outcome = await getVideoDescriber().describe(input);
   return outcome.status === 'ok' ? outcome.text : undefined;
+}
+
+/**
+ * describeVideo() with the full outcome, for callers that tell the chat model why nothing came back
+ * (over today's VIDEO_DAILY_BUDGET_USD, too large, unavailable). With `input.question`, the clip is
+ * watched to answer that question instead (cached per URL and question).
+ */
+export function watchVideo(input: VideoInput): Promise<VideoOutcome> {
+  return getVideoDescriber().describe(input);
+}
+
+/** How a video outcome that isn't a description reads to the chat model (in the bot's own voice). */
+export function videoOutcomeNote(outcome: Exclude<VideoOutcome, { status: 'ok' }>): string {
+  switch (outcome.status) {
+    case 'over_budget':
+      return 'not watched: out of popcorn money for today, the daily video budget is spent';
+    case 'too_large':
+      return 'too large to watch';
+    case 'unavailable':
+      return 'video understanding is unavailable';
+    default:
+      return "couldn't watch it";
+  }
 }
 
 /** A previously produced description for this URL, without doing any paid work. */

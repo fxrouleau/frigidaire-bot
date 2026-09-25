@@ -19,6 +19,20 @@ const SCHEMA = `
     model       TEXT    NOT NULL,
     created_at  INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS video_answers (
+    url_key      TEXT    NOT NULL,
+    question_key TEXT    NOT NULL,
+    question     TEXT    NOT NULL,
+    answer       TEXT    NOT NULL,
+    model        TEXT    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (url_key, question_key)
+  ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS transcript_replies (
+    reply_id   TEXT    PRIMARY KEY,
+    message_id TEXT    NOT NULL,
+    created_at INTEGER NOT NULL
+  );
 `;
 
 function db() {
@@ -74,6 +88,77 @@ export function storeVideoDescription(key: string, description: string, model: s
       .run(key, description, model, now);
   } catch (error) {
     logger.warn('media: failed to store a video description:', error);
+  }
+}
+
+// Answers to specific questions about a clip ("what does he say at the end?"), so asking the same thing
+// twice — or the chat model re-asking on the next turn — is free. The key is the normalized question:
+// case, spacing and trailing punctuation don't make a new question.
+export function questionKey(question: string): string {
+  return question
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[\s?!.…]+$/u, '')
+    .trim()
+    .slice(0, 500);
+}
+
+export function getStoredVideoAnswer(urlKey: string, question: string): string | undefined {
+  try {
+    const row = db()
+      .stmt('SELECT answer FROM video_answers WHERE url_key = ? AND question_key = ?')
+      .get(urlKey, questionKey(question)) as { answer: string } | undefined;
+    return row?.answer;
+  } catch (error) {
+    logger.warn('media: video answer lookup failed:', error);
+    return undefined;
+  }
+}
+
+export function storeVideoAnswer(
+  urlKey: string,
+  question: string,
+  answer: string,
+  model: string,
+  now = Date.now(),
+): void {
+  try {
+    db()
+      .stmt(
+        `INSERT INTO video_answers (url_key, question_key, question, answer, model, created_at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(url_key, question_key) DO UPDATE SET question = excluded.question, answer = excluded.answer,
+           model = excluded.model, created_at = excluded.created_at`,
+      )
+      .run(urlKey, questionKey(question), question.slice(0, 1000), answer, model, now);
+  } catch (error) {
+    logger.warn('media: failed to store a video answer:', error);
+  }
+}
+
+// The bot's own transcript replies, by Discord message id, so a member's reply to one can be told apart
+// from a reply to the bot without fetching the replied-to message. Rows older than this are pruned:
+// by then nobody replies to a transcript (and a fetched one is still recognized by its header).
+const TRANSCRIPT_REPLY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+export function rememberTranscriptReply(replyId: string, messageId: string, now = Date.now()): void {
+  try {
+    const botDb = db();
+    botDb
+      .stmt('INSERT OR REPLACE INTO transcript_replies (reply_id, message_id, created_at) VALUES (?, ?, ?)')
+      .run(replyId, messageId, now);
+    botDb.stmt('DELETE FROM transcript_replies WHERE created_at < ?').run(now - TRANSCRIPT_REPLY_RETENTION_MS);
+  } catch (error) {
+    logger.warn(`media: failed to record transcript reply ${replyId}:`, error);
+  }
+}
+
+export function isStoredTranscriptReply(replyId: string): boolean {
+  try {
+    return db().stmt('SELECT 1 FROM transcript_replies WHERE reply_id = ?').get(replyId) !== undefined;
+  } catch (error) {
+    logger.warn('media: transcript reply lookup failed:', error);
+    return false;
   }
 }
 

@@ -5,15 +5,16 @@
 //   - caches results per canonical link (LRU, 1 h; failures for less), so the enricher's preview, the
 //     tool call that follows it and the next turn's re-rendered history all cost one fetch — and
 //     de-duplicates concurrent reads of the same link
-//   - on request (read_link only), hands the first video to video understanding (describeVideo, the
-//     media feature) and caches the description with the content
-//   - vets every image/video URL it hands onward (previewImages, describeVideo): the chat provider and
-//     the media feature download those with plain fetch(), so a page's og:image pointing at an internal
-//     address — or at a public host that redirects to one — must be refused here, with every redirect
-//     hop checked and the final, redirect-free URL passed on
+//   - on request (read_link only), hands the first video to video understanding (watchVideo, the
+//     media feature) and caches the description with the content — or, with a question, has the video
+//     watched to answer it (answers are cached by the media feature, not with the content)
+//   - vets every image/video URL it hands onward (previewImages, describeVideo): only live, media-typed,
+//     redirect-free URLs reach the chat provider and the media feature (which fetch any non-Discord URL
+//     through this same guarded fetch again, so a page's og:image pointing at an internal address is
+//     refused twice over)
 import { config } from '../../config';
 import { logger } from '../../logger';
-import { type VideoInput, describeVideo as defaultDescribeVideo } from '../media';
+import { type VideoInput, type VideoOutcome, watchVideo as defaultWatchVideo, videoOutcomeNote } from '../media';
 import { TtlCache } from './cache';
 import { readBluesky } from './extractors/bluesky';
 import { ExtractError, type ExtractorContext, capText } from './extractors/common';
@@ -50,12 +51,18 @@ type CheckedMedia = { url: string; contentType: string; sizeBytes?: number };
 export type LinkReaderOptions = {
   fetch?: SafeFetch;
   now?: () => number;
-  describeVideo?: (input: VideoInput) => Promise<string | undefined>;
+  /** Video understanding (the media feature): a description, or with `input.question` an answer. */
+  watchVideo?: (input: VideoInput) => Promise<VideoOutcome>;
 };
 
 export type ReadOptions = {
   /** Hand the link's first video to video understanding (paid; read_link only). */
   watchVideos?: boolean;
+  /**
+   * Watch the link's first video to answer this question instead (paid; read_link / watch_video). The
+   * answer is returned on that video (`answer`), not cached with the content.
+   */
+  question?: string;
 };
 
 function failure(url: string, error: unknown): { result: LinkReadResult; permanent: boolean } {
@@ -105,7 +112,7 @@ function mediaTypeAcceptable(prefix: 'image/' | 'video/', contentType: string, u
 export class LinkReader {
   private readonly fetch: SafeFetch;
   private readonly now: () => number;
-  private readonly describeVideo: (input: VideoInput) => Promise<string | undefined>;
+  private readonly watchVideo: (input: VideoInput) => Promise<VideoOutcome>;
   private readonly cache: TtlCache<Entry>;
   private readonly mediaChecks: TtlCache<CheckedMedia | null>;
   private readonly inflight = new Map<string, Promise<Entry>>();
@@ -116,7 +123,7 @@ export class LinkReader {
   constructor(options: LinkReaderOptions = {}) {
     this.fetch = options.fetch ?? createSafeFetch();
     this.now = options.now ?? Date.now;
-    this.describeVideo = options.describeVideo ?? defaultDescribeVideo;
+    this.watchVideo = options.watchVideo ?? defaultWatchVideo;
     this.cache = new TtlCache<Entry>(CACHE_ENTRIES, this.now);
     this.mediaChecks = new TtlCache<CheckedMedia | null>(MEDIA_CHECK_ENTRIES, this.now);
   }
@@ -148,6 +155,10 @@ export class LinkReader {
     const { target } = identified;
 
     let entry = this.cache.get(target.key) ?? (await this.dedup(this.inflight, target.key, () => this.extract(target)));
+    const question = options.question?.trim();
+    if (question && entry.result.ok) {
+      return { ok: true, content: await this.askFirstVideo(entry.result.content, question) };
+    }
     if (options.watchVideos && entry.result.ok && !entry.videosDescribed) {
       const current = entry;
       entry = await this.dedup(this.describing, target.key, () => this.watchFirstVideo(target.key, current));
@@ -298,10 +309,23 @@ export class LinkReader {
     return updated;
   }
 
-  private async describe(video: LinkVideo, content: LinkContent): Promise<Partial<LinkVideo>> {
+  /** The first video's answer to `question` (the content itself is returned otherwise unchanged). */
+  private async askFirstVideo(content: LinkContent, question: string): Promise<LinkContent> {
+    const index = content.media.findIndex((m) => m.type === 'video');
+    if (index === -1) {
+      return { ...content, notes: [...(content.notes ?? []), 'no video in this link to watch'] };
+    }
+    const video = content.media[index] as LinkVideo;
+    const update = await this.describe(video, content, question);
+    return { ...content, media: content.media.map((item, i) => (i === index ? { ...video, ...update } : item)) };
+  }
+
+  /** A description of the video, or with `question` the answer to it; a note says why there is none. */
+  private async describe(video: LinkVideo, content: LinkContent, question?: string): Promise<Partial<LinkVideo>> {
     const maxSecs = config.linkReader.videoMaxSeconds;
     if (maxSecs === 0) return { note: joinNotes(video.note, 'video understanding is turned off') };
-    if (!video.url) return {};
+    // YouTube and players without a file: there is nothing to watch (the note already says why).
+    if (!video.url) return question ? { note: joinNotes(video.note, "can't watch this one") } : {};
     if (video.durationSecs !== undefined && video.durationSecs > maxSecs) {
       return {
         note: joinNotes(video.note, `too long to watch (${formatDuration(video.durationSecs)}); going by the text`),
@@ -314,18 +338,26 @@ export class LinkReader {
       return { note: joinNotes(video.note, `too large to watch (${Math.round(size / 1024 / 1024)} MB)`) };
     }
 
-    let description: string | undefined;
+    let outcome: VideoOutcome;
     try {
-      description = await this.describeVideo({
+      outcome = await this.watchVideo({
         url: file.url,
         contentType: file.contentType,
         context: videoContext(content),
+        ...(question ? { question } : {}),
       });
     } catch (error) {
-      logger.warn(`linkreader: describing the video of ${content.url} failed:`, error);
+      logger.warn(`linkreader: watching the video of ${content.url} failed:`, error);
+      outcome = { status: 'failed' };
     }
-    if (!description?.trim()) return { note: joinNotes(video.note, 'video understanding is unavailable right now') };
-    return { description: capText(description, MAX_VIDEO_DESCRIPTION_CHARS).text };
+    if (outcome.status === 'ok' && outcome.text.trim()) {
+      const text = capText(outcome.text, MAX_VIDEO_DESCRIPTION_CHARS).text ?? outcome.text.trim();
+      return question ? { answer: { question, text } } : { description: text };
+    }
+    if (outcome.status === 'over_budget' || outcome.status === 'too_large') {
+      return { note: joinNotes(video.note, videoOutcomeNote(outcome)) };
+    }
+    return { note: joinNotes(video.note, 'video understanding is unavailable right now') };
   }
 }
 

@@ -20,6 +20,7 @@ import { reactTools } from './tools/react';
 import { reminderTools } from './tools/reminders';
 import { sandboxTools } from './tools/sandbox';
 import { runSummaryTool } from './tools/summary';
+import { videoTools } from './tools/video';
 import type { ToolDefinition, ToolHandlerContext } from './types';
 
 // The categories the chat model may write. Everything the model sends is untrusted text: a
@@ -497,6 +498,7 @@ export const toolDefinitions: ToolDefinition[] = [
   ...birthdayTools,
   ...messageSearchTools,
   ...linkReaderTools,
+  ...videoTools,
   ...sandboxTools,
   ...featureRequestTools,
   ...costTools,
