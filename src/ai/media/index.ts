@@ -17,7 +17,7 @@ import { logger } from '../../logger';
 import { getOpenRouterClient } from '../openRouterClient';
 import { FfmpegTranscoder, type MediaTranscoder } from './transcoder';
 import { AudioTranscriber } from './transcriber';
-import type { AudioInput, VideoInput } from './types';
+import type { AudioInput, VideoInput, VideoOutcome } from './types';
 import { VideoDescriber } from './video';
 
 export type { AudioInput, TranscriptionOutcome, VideoInput, VideoOutcome } from './types';
@@ -111,6 +111,29 @@ export function getCachedTranscript(messageId: string): string | undefined {
 export async function describeVideo(input: VideoInput): Promise<string | undefined> {
   const outcome = await getVideoDescriber().describe(input);
   return outcome.status === 'ok' ? outcome.text : undefined;
+}
+
+/**
+ * describeVideo() with the full outcome, for callers that tell the chat model why nothing came back
+ * (over today's VIDEO_DAILY_BUDGET_USD, too large, unavailable). With `input.question`, the clip is
+ * watched to answer that question instead (cached per URL and question).
+ */
+export function watchVideo(input: VideoInput): Promise<VideoOutcome> {
+  return getVideoDescriber().describe(input);
+}
+
+/** How a video outcome that isn't a description reads to the chat model (in the bot's own voice). */
+export function videoOutcomeNote(outcome: Exclude<VideoOutcome, { status: 'ok' }>): string {
+  switch (outcome.status) {
+    case 'over_budget':
+      return 'not watched: out of popcorn money for today, the daily video budget is spent';
+    case 'too_large':
+      return 'too large to watch';
+    case 'unavailable':
+      return 'video understanding is unavailable';
+    default:
+      return "couldn't watch it";
+  }
 }
 
 /** A previously produced description for this URL, without doing any paid work. */

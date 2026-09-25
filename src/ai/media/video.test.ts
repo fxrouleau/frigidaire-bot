@@ -256,3 +256,105 @@ describe('VideoDescriber', () => {
     expect(requests).toHaveLength(1);
   });
 });
+
+describe('VideoDescriber: follow-up questions', () => {
+  const answered = loadFixture('video-answer');
+  const ANSWER = 'At 0:27 he yells "no way, NO WAY" as the triple kill banner appears, then laughs.';
+
+  it('answers a question by watching again, reusing the clip it just downloaded', async () => {
+    const { describer, requests, fetch } = setup([described, answered]);
+    await describer.describe({ url: CLIP_URL, contentType: 'video/mp4' });
+
+    const outcome = await describer.ask({ url: CLIP_URL, question: 'what does he yell at the end?' });
+
+    expect(outcome).toEqual({ status: 'ok', text: ANSWER, cached: false });
+    expect(fetch.urls).toHaveLength(1);
+    const [video, prompt] = userContent(requests[1]);
+    expect(video.type).toBe('video_url');
+    expect(String(prompt.text)).toContain('Answer this question about the video: "what does he yell at the end?"');
+    expect(String(prompt.text)).toContain("If it doesn't show or say that, say so plainly");
+    expect(String(prompt.text)).not.toContain('On-screen text:');
+    expect(requests[1].body.provider).toEqual({ zdr: true });
+    expect(requests[1].headers[FEATURE_HEADER.toLowerCase()]).toBe('video');
+  });
+
+  it('caches answers per clip and question (case and punctuation aside), apart from the description', async () => {
+    const { describer, requests } = setup([answered]);
+    await describer.ask({ url: CLIP_URL, question: 'What does he yell at the end?' });
+
+    expect(await describer.ask({ url: CLIP_URL, question: 'what does he yell at the end' })).toEqual({
+      status: 'ok',
+      text: ANSWER,
+      cached: true,
+    });
+    expect(requests).toHaveLength(1);
+    expect(describer.cached(CLIP_URL)).toBeUndefined();
+  });
+
+  it('routes describe() with a question to ask()', async () => {
+    const { describer, requests } = setup([answered]);
+    expect((await describer.describe({ url: CLIP_URL, question: 'who scores?' })).status).toBe('ok');
+    expect(String(userContent(requests[0])[1].text)).toContain('"who scores?"');
+  });
+
+  it('downloads again once the clip has left the short-lived cache', async () => {
+    let now = 1_000_000;
+    const { describer, fetch } = setup([described, answered], { now: () => now });
+    await describer.describe({ url: CLIP_URL });
+    now += 11 * 60 * 1000;
+    await describer.ask({ url: CLIP_URL, question: 'who scores?' });
+    expect(fetch.urls).toHaveLength(2);
+  });
+
+  it('asks about long clips from keyframes and the soundtrack transcript', async () => {
+    const transcoder = createFakeTranscoder({
+      probe: { durationSecs: 900, hasAudio: true, hasVideo: true },
+      sampleVideo: { durationSecs: 900, frames: [FRAME], audio: TRANSCODED_MP3 },
+    });
+    const { describer, requests } = setup([answered], { transcoder });
+    await describer.ask({ url: CLIP_URL, question: 'who scores?' });
+    const text = String(userContent(requests[0]).at(-1)?.text);
+    expect(userContent(requests[0])[0].type).toBe('image_url');
+    expect(text).toContain('Transcript of its audio:\nno way, NO WAY');
+    expect(text).toContain('Answer this question about the video: "who scores?"');
+  });
+});
+
+describe('VideoDescriber: daily budget', () => {
+  const overBudget = { check: () => ({ ok: false as const, spentUsd: 0.5012, budgetUsd: 0.5 }) };
+
+  it('neither downloads nor calls a model once the day’s budget is spent', async () => {
+    const { describer, requests, fetch } = setup([described], { budget: overBudget });
+    expect(await describer.describe({ url: CLIP_URL })).toEqual({ status: 'over_budget' });
+    expect(await describer.ask({ url: CLIP_URL, question: 'who scores?' })).toEqual({ status: 'over_budget' });
+    expect(fetch.urls).toEqual([]);
+    expect(requests).toEqual([]);
+  });
+
+  it('still serves what is already cached', async () => {
+    let spent = false;
+    const budget = { check: () => (spent ? overBudget.check() : { ok: true as const }) };
+    const { describer } = setup([described], { budget });
+    await describer.describe({ url: CLIP_URL });
+    spent = true;
+    expect(await describer.describe({ url: CLIP_URL })).toEqual({ status: 'ok', text: DESCRIPTION, cached: true });
+  });
+
+  it('stops before the keyframe call when the native attempt used up the budget, without cooling down', async () => {
+    let checks = 0;
+    const budget = { check: () => (++checks > 1 ? overBudget.check() : { ok: true as const }) };
+    const transcoder = createFakeTranscoder({
+      probe: { durationSecs: 10, hasAudio: true, hasVideo: true },
+      sampleVideo: { frames: [FRAME] },
+    });
+    const { describer, requests } = setup([serverError, serverError, described], { budget, transcoder });
+
+    expect(await describer.describe({ url: CLIP_URL })).toEqual({ status: 'over_budget' });
+    expect(requests).toHaveLength(2);
+
+    // Not a failure: tomorrow (here, a budget with room again) it is watched right away.
+    checks = -10;
+    expect((await describer.describe({ url: CLIP_URL })).status).toBe('ok');
+    expect(requests).toHaveLength(3);
+  });
+});

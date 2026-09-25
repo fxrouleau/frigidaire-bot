@@ -550,6 +550,13 @@ export const config = {
     get videoInputMode(): 'auto' | 'native' | 'frames' {
       return envEnum('VIDEO_INPUT_MODE', ['auto', 'native', 'frames'] as const, 'auto');
     },
+    /**
+     * Most the video model may spend per Eastern calendar day (USD, from the usage ledger's 'video' rows);
+     * past it, clips aren't watched until midnight ET. 0 = unlimited. Transcription is not counted.
+     */
+    get videoDailyBudgetUsd(): number {
+      return envNumber('VIDEO_DAILY_BUDGET_USD', 0.5, { min: 0 });
+    },
   },
 
   /** Reading shared links (src/ai/linkReader/). */

@@ -1,7 +1,10 @@
 // Media enricher: turns voice messages / audio / video attachments into model-visible text.
 //
 //   [voice message from Felix, 0:42: <transcript>]
-//   [video: <description>]
+//   [video msg:<message id>: <description>]
+//
+// The message id on a video line is the handle the chat model passes to watch_video to ask a follow-up
+// question about that clip.
 //
 // The triggering message and the one it replies to ('current' / 'reference') may be transcribed or
 // watched on the spot; seeded history only reads what is already cached, so a 25-message backfill never
@@ -10,7 +13,7 @@
 import type { Attachment, Message } from 'discord.js';
 import type { ContentEnricher, EnrichmentRole } from '../enrichers';
 import type { NormalizedContentPart } from '../types';
-import { getAudioTranscriber, getVideoDescriber } from './index';
+import { getAudioTranscriber, getVideoDescriber, videoOutcomeNote } from './index';
 import type { AudioInput, TranscriptionOutcome, VideoInput, VideoOutcome } from './types';
 import { audioAttachments, formatClock, isVoiceMessage, speakerName, transcriptKey, videoAttachments } from './voice';
 
@@ -90,10 +93,11 @@ async function renderVideo(
   role: EnrichmentRole,
   speaker: string,
 ): Promise<string> {
+  const head = `video msg:${message.id}`;
   let outcome: VideoOutcome;
   if (role === 'history') {
     const cached = deps.cachedDescription(attachment.url);
-    if (cached === undefined) return `[video: ${attachment.name} (not watched)]`;
+    if (cached === undefined) return `[${head}: ${attachment.name} (not watched)]`;
     outcome = { status: 'ok', text: cached, cached: true };
   } else {
     outcome = await deps.describe({
@@ -104,14 +108,8 @@ async function renderVideo(
     });
   }
 
-  switch (outcome.status) {
-    case 'ok':
-      return `[video: ${outcome.text}]`;
-    case 'too_large':
-      return `[video: ${attachment.name} (too large to watch)]`;
-    default:
-      return `[video: ${attachment.name} (couldn't watch it)]`;
-  }
+  if (outcome.status === 'ok') return `[${head}: ${outcome.text}]`;
+  return `[${head}: ${attachment.name} (${videoOutcomeNote(outcome)})]`;
 }
 
 export function createMediaEnricher(deps: MediaEnricherDeps = defaultDeps): ContentEnricher {

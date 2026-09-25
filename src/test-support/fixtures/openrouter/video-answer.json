@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "description": "Gemini answering one follow-up question about the same (fictional) gameplay clip, in the shape the question prompt asks for.",
+  "status": 200,
+  "request": {
+    "model": "google/gemini-3.5-flash-lite",
+    "max_tokens": 2048,
+    "messages": [
+      { "role": "system", "content": "You describe videos for a Discord bot ..." },
+      {
+        "role": "user",
+        "content": [
+          { "type": "video_url", "video_url": { "url": "data:video/mp4;base64,<clip>" } },
+          { "type": "text", "text": "Answer this question about the video: \"what does he yell at the end?\" ..." }
+        ]
+      }
+    ],
+    "provider": { "zdr": true }
+  },
+  "response": {
+    "id": "gen-test-video-002",
+    "provider": "Google",
+    "model": "google/gemini-3.5-flash-lite-20260721",
+    "object": "chat.completion",
+    "created": 1790000000,
+    "choices": [
+      {
+        "logprobs": null,
+        "finish_reason": "stop",
+        "native_finish_reason": "STOP",
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "At 0:27 he yells \"no way, NO WAY\" as the triple kill banner appears, then laughs.",
+          "refusal": null,
+          "reasoning": null
+        }
+      }
+    ],
+    "usage": { "prompt_tokens": 1655, "completion_tokens": 24, "total_tokens": 1679, "cost": 0.000557 }
+  }
+}

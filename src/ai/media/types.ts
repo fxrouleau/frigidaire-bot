@@ -13,6 +13,11 @@ export type VideoInput = {
   context?: string;
   /** When already known (e.g. from the link's metadata), spares a probe. */
   durationSecs?: number | null;
+  /**
+   * A specific question to answer by watching the clip (a follow-up about a video someone shared),
+   * instead of the general description. Answers are cached per (clip, question).
+   */
+  question?: string;
 };
 
 /**
@@ -29,5 +34,7 @@ export type TranscriptionOutcome =
 export type VideoOutcome =
   | { status: 'ok'; text: string; cached: boolean }
   | { status: 'too_large' }
+  /** VIDEO_DAILY_BUDGET_USD is spent for today (Eastern): nothing was downloaded or called. */
+  | { status: 'over_budget' }
   | { status: 'unavailable' }
   | { status: 'failed' };
