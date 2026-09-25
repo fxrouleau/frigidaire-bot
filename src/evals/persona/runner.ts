@@ -4,13 +4,15 @@
 // and handed to the judge.
 //
 // Everything the bot would normally persist stays in memory: the memory store is injected per scenario,
-// the agent gets no conversation persistence, and callers point bot.db at ':memory:' (the CLI does).
+// the agent gets no conversation persistence, and callers point bot.db and the message archive at
+// ':memory:' (the CLI does). Tools whose effects leave the process are never offered (EVAL_EXCLUDED_TOOLS).
 // Scenarios run one at a time because the memory store is a process-wide singleton.
 import type { Message } from 'discord.js';
 import { AgentOrchestrator } from '../../ai/agent';
 import { setMemoryStoreForTesting } from '../../ai/memory';
 import type { EmbeddingProvider } from '../../ai/memory/embeddingProvider';
 import { MemoryStore, SELF_DIAGNOSIS_CATEGORIES } from '../../ai/memory/memoryStore';
+import { toolDefinitions } from '../../ai/tools';
 import type { AiProvider } from '../../ai/types';
 import { createFakeBotMessage, createFakeMessage } from '../../test-support/fakeDiscord';
 import type { Judge, JudgeVerdict } from './judge';
@@ -25,6 +27,13 @@ import {
   type SeedEmbed,
   castMember,
 } from './scenarioFile';
+
+/**
+ * Tools the eval never offers, whatever the local .env configures: request_feature would file a real
+ * GitHub issue with the owner's token, run_code would run on the local sandbox sidecar. Every other
+ * tool writes only to the per-scenario memory store or the in-memory bot.db, or reads like it does in prod.
+ */
+export const EVAL_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(['request_feature', 'run_code']);
 
 // What the agent posts when a turn fails (src/ai/agent.ts); a reply equal to it is a failed turn.
 const AGENT_ERROR_REPLY = 'Sorry, I encountered an error while processing your request.';
@@ -187,7 +196,8 @@ export async function runScenario(
     const provider: AiProvider = {
       id: inner.id,
       defaultModel: inner.defaultModel,
-      supportedTools: inner.supportedTools,
+      // Hidden from the model (the provider's list is what it sees) AND unhandled by the agent below.
+      supportedTools: inner.supportedTools.filter((tool) => !EVAL_EXCLUDED_TOOLS.has(tool.name)),
       chat: async (input) => {
         try {
           const response = await inner.chat(input);
@@ -200,7 +210,10 @@ export async function runScenario(
       },
       generateImage: inner.generateImage?.bind(inner),
     };
-    const agent = new AgentOrchestrator({ resolveProvider: () => provider });
+    const agent = new AgentOrchestrator({
+      resolveProvider: () => provider,
+      tools: toolDefinitions.filter((tool) => !EVAL_EXCLUDED_TOOLS.has(tool.name)),
+    });
 
     const spendBefore = await deps.spendSoFar?.();
     const started = Date.now();

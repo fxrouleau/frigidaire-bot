@@ -35,7 +35,7 @@ export default defineEvent(Events.ClientReady, {
   },
 });
 
-/** Posts the digest if a full period has elapsed since the last run, then advances the watermark. */
+/** Posts the digest if a full period has elapsed since the last run, then (once posted) advances the watermark. */
 export async function runDigestCheck(client: Client): Promise<void> {
   try {
     const store = getMemoryStore();
@@ -77,7 +77,12 @@ export async function runDigestCheck(client: Client): Promise<void> {
       spend: readSpend(periodStart, now),
     });
 
-    await sendToReportChannel(client, digest);
+    // A post that didn't land leaves the watermark alone, so the next check retries the same period
+    // instead of that week's digest (and its spend days) never being posted anywhere.
+    if (!(await sendToReportChannel(client, digest))) {
+      logger.warn('Digest: the report channel post failed; retrying at the next check.');
+      return;
+    }
     store.setState(WATERMARK_KEY, now.toISOString());
   } catch (error) {
     logger.warn('Digest check failed:', error);

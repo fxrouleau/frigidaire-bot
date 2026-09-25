@@ -33,7 +33,11 @@ export default defineEvent(Events.ClientReady, {
 
       const shortSha = currentSha.slice(0, 7);
       const headline = `🚀 Deployed \`${shortSha}\` · ${formatTimestampET(new Date())} ET`;
-      await sendToReportChannel(client, formatAnnouncement(headline, await channelBlock(client)));
+      // Only a ping that landed marks the sha announced; otherwise the next boot on it tries again.
+      if (!(await sendToReportChannel(client, formatAnnouncement(headline, await channelBlock(client))))) {
+        logger.warn(`Deploy announce for ${shortSha} was not posted; it will be retried on the next start.`);
+        return;
+      }
       store.setState(STORED_SHA_KEY, currentSha);
     } catch (error) {
       logger.warn('Deploy announce failed:', error);

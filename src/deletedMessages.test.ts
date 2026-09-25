@@ -65,7 +65,17 @@ describe('DeletedMessageReposter', () => {
     const [channel, identity, payload] = sendCalls[0];
     expect(channel.id).toBe('channel-1');
     expect(identity).toEqual({ name: 'Jasper', avatar: 'https://cdn.example/avatar.png' });
-    expect(payload).toEqual({ content: 'something edgy', files: [] });
+    expect(payload).toEqual({ content: 'something edgy', files: [], allowedMentions: { parse: [] } });
+  });
+
+  it('reposts mentions inert: the original already pinged, and a webhook must not ping @everyone for them', async () => {
+    const { reposter, sendCalls } = makeReposter({ now: () => T0 + 10_000 });
+    const fake = jasperMessage({ content: '@everyone <@&123456789012345678> <@234567890123456789> goblin' });
+
+    reposter.observe(fake.message);
+    await reposter.handleDelete(fake.message);
+
+    expect(sendCalls[0][2]).toMatchObject({ allowedMentions: { parse: [] } });
   });
 
   it("watches a member's linked side account too, and reposts it as that account", async () => {
@@ -190,7 +200,11 @@ describe('DeletedMessageReposter', () => {
       attachmentNames: ['spicy.png'],
     });
     const [, , payload] = sendCalls[0];
-    expect(payload).toEqual({ content: undefined, files: [{ attachment: bytes, name: 'spicy.png' }] });
+    expect(payload).toEqual({
+      content: undefined,
+      files: [{ attachment: bytes, name: 'spicy.png' }],
+      allowedMentions: { parse: [] },
+    });
   });
 
   it('still reposts the text when an attachment could not be downloaded', async () => {
@@ -201,7 +215,7 @@ describe('DeletedMessageReposter', () => {
 
     reposter.observe(fake.message);
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
-    expect(sendCalls[0][2]).toEqual({ content: 'something edgy', files: [] });
+    expect(sendCalls[0][2]).toEqual({ content: 'something edgy', files: [], allowedMentions: { parse: [] } });
   });
 
   it('reports "empty" when there is nothing left to repost', async () => {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reportPlatformHealth, resetPlatformHealthForTesting } from '../links/fixerHealth';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
-import { createFakeChannel, createFakeClient } from '../test-support/fakeDiscord';
+import { createFakeChannel, createFakeClient, sentContent } from '../test-support/fakeDiscord';
 import linkFixAlertsEvent from './linkFixAlerts';
 
 async function flush(): Promise<void> {
@@ -36,7 +36,7 @@ describe('linkFixAlerts event', () => {
     reportPlatformHealth('instagram', 'up', Date.now(), 'uuinstagram.com');
     await flush();
 
-    const posts = report.recorders.send.calls.map((call) => String(call[0]));
+    const posts = report.recorders.send.calls.map((call) => sentContent(call[0]));
     expect(posts).toHaveLength(2);
     expect(posts[0]).toContain('Instagram link fixing is down');
     expect(posts[0]).toContain('instagram7.com: down');

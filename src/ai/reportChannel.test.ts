@@ -1,6 +1,6 @@
 import type { Channel } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createFakeChannel, createFakeClient } from '../test-support/fakeDiscord';
+import { createFakeChannel, createFakeClient, sentContent } from '../test-support/fakeDiscord';
 import { logger } from '../logger';
 import { getReportChannelId, sendToReportChannel } from './reportChannel';
 
@@ -26,23 +26,40 @@ describe('getReportChannelId', () => {
     process.env.REPORT_CHANNEL_ID = `  ${CHANNEL_ID}  `;
     expect(getReportChannelId()).toBe(CHANNEL_ID);
   });
+
+  it('strips the quotes a compose `- REPORT_CHANNEL_ID="…"` list entry keeps, like every other env read', () => {
+    process.env.REPORT_CHANNEL_ID = `"${CHANNEL_ID}"`;
+    expect(getReportChannelId()).toBe(CHANNEL_ID);
+  });
 });
 
 describe('sendToReportChannel', () => {
-  it('is a no-op (no channel fetch) when REPORT_CHANNEL_ID is unset', async () => {
+  it('is a no-op (no channel fetch) when REPORT_CHANNEL_ID is unset, and says nothing was posted', async () => {
     const { client, recorders } = createFakeClient();
-    await sendToReportChannel(client, 'hello');
+    await expect(sendToReportChannel(client, 'hello')).resolves.toBe(false);
     expect(recorders.channelsFetch.calls).toHaveLength(0);
   });
 
-  it('sends a short message as a single chunk', async () => {
+  it('sends a short message as a single chunk that pings nobody, and reports it posted', async () => {
     process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
     const fakeChannel = createFakeChannel({ id: CHANNEL_ID });
     const { client } = createFakeClient({ channelsById: { [CHANNEL_ID]: fakeChannel.channel } });
 
-    await sendToReportChannel(client, 'short message');
+    await expect(sendToReportChannel(client, 'short message @everyone')).resolves.toBe(true);
 
-    expect(fakeChannel.recorders.send.calls).toEqual([['short message']]);
+    expect(fakeChannel.recorders.send.calls).toEqual([
+      [{ content: 'short message @everyone', allowedMentions: { parse: [] } }],
+    ]);
+  });
+
+  it('reports a failed send as not posted (without throwing)', async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const fakeChannel = createFakeChannel({ id: CHANNEL_ID, sendError: new Error('Missing Permissions') });
+    const { client } = createFakeClient({ channelsById: { [CHANNEL_ID]: fakeChannel.channel } });
+
+    await expect(sendToReportChannel(client, 'hi')).resolves.toBe(false);
+    expect(fakeChannel.recorders.send.calls).toHaveLength(1);
   });
 
   it('splits an oversized message into multiple <=2000-char sends, preserving order and content', async () => {
@@ -55,7 +72,7 @@ describe('sendToReportChannel', () => {
 
     await sendToReportChannel(client, text);
 
-    const chunks = fakeChannel.recorders.send.calls.map(([c]) => String(c));
+    const chunks = fakeChannel.recorders.send.calls.map(([c]) => sentContent(c));
     expect(chunks.length).toBeGreaterThan(1);
     for (const chunk of chunks) {
       expect(chunk.length).toBeLessThanOrEqual(2000);
@@ -70,7 +87,7 @@ describe('sendToReportChannel', () => {
     const warn = vi.spyOn(logger, 'warn');
     const { client } = createFakeClient({ channelsById: { [CHANNEL_ID]: null as unknown as Channel } });
 
-    await expect(sendToReportChannel(client, 'hi')).resolves.toBeUndefined();
+    await expect(sendToReportChannel(client, 'hi')).resolves.toBe(false);
     expect(warn).toHaveBeenCalled();
   });
 
@@ -80,7 +97,7 @@ describe('sendToReportChannel', () => {
     const notText = { id: CHANNEL_ID, isTextBased: () => false } as unknown as Channel;
     const { client } = createFakeClient({ channelsById: { [CHANNEL_ID]: notText } });
 
-    await sendToReportChannel(client, 'hi');
+    await expect(sendToReportChannel(client, 'hi')).resolves.toBe(false);
 
     expect(warn).toHaveBeenCalled();
   });
@@ -91,7 +108,7 @@ describe('sendToReportChannel', () => {
     // createFakeClient throws for ids absent from the map.
     const { client } = createFakeClient({ channelsById: { [CHANNEL_ID]: createFakeChannel().channel } });
 
-    await expect(sendToReportChannel(client, 'hi')).resolves.toBeUndefined();
+    await expect(sendToReportChannel(client, 'hi')).resolves.toBe(false);
     expect(warn).toHaveBeenCalled();
   });
 });

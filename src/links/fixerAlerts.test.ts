@@ -20,18 +20,23 @@ type Harness = {
   sent: string[];
   timers: Array<{ callback: () => void; delayMs: number; cancelled: boolean }>;
   setNow: (ms: number) => void;
+  /** While true, every post fails the way sendToReportChannel reports it (resolves false). */
+  setFailing: (failing: boolean) => void;
   change: (platform: Platform, state: PlatformState, detail?: string) => Promise<void>;
   fireTimers: () => Promise<void>;
 };
 
 function harness(store: AlertStore = memoryAlertStore()): Harness {
   let now = 0;
+  let failing = false;
   const sent: string[] = [];
   const states = new Map<Platform, PlatformState>();
   const timers: Harness['timers'] = [];
   const alerter = new FixerAlerter({
     send: async (text) => {
+      if (failing) return false;
       sent.push(text);
+      return true;
     },
     currentState: (platform) => states.get(platform) ?? 'unknown',
     minIntervalMs: INTERVAL,
@@ -62,6 +67,9 @@ function harness(store: AlertStore = memoryAlertStore()): Harness {
     timers,
     setNow: (ms) => {
       now = ms;
+    },
+    setFailing: (value) => {
+      failing = value;
     },
     change,
     fireTimers,
@@ -164,6 +172,46 @@ describe('FixerAlerter', () => {
     expect(after.sent).toEqual([recoveryAlertText('bluesky', 'fxbsky.app', 3 * HOUR)]);
   });
 
+  it('records nothing for a down alert that did not post, and re-sends it on the re-check', async () => {
+    const store = memoryAlertStore();
+    const h = harness(store);
+    h.setFailing(true);
+    await h.change('instagram', 'down', 'every fixer 5xx');
+
+    expect(h.sent).toEqual([]);
+    expect(store.get('instagram')).toBeUndefined(); // the channel was never told
+    expect(h.timers).toHaveLength(1);
+
+    h.setFailing(false);
+    h.setNow(10 * 60 * 1000);
+    await h.fireTimers();
+
+    expect(h.sent).toEqual([downAlertText('instagram', 'every fixer 5xx')]);
+    expect(store.get('instagram')).toEqual({ state: 'down', at: 10 * 60 * 1000 });
+  });
+
+  it('retries a recovery alert that did not post, and drops a failed down alert once the platform is back', async () => {
+    const h = harness();
+    await h.change('tiktok', 'down');
+    h.setFailing(true);
+    h.setNow(HOUR);
+    await h.change('tiktok', 'up', 'tnktok.com');
+    expect(h.sent).toHaveLength(1);
+
+    h.setFailing(false);
+    await h.fireTimers();
+    expect(h.sent).toEqual([downAlertText('tiktok', 'a.test: down'), recoveryAlertText('tiktok', 'tnktok.com', HOUR)]);
+
+    // A down alert that failed, then a recovery before the re-check: nothing to say either way.
+    h.setFailing(true);
+    h.setNow(INTERVAL + HOUR);
+    await h.change('reddit', 'down');
+    h.setFailing(false);
+    await h.change('reddit', 'up', 'vxreddit.com');
+    await h.fireTimers();
+    expect(h.sent).toHaveLength(2);
+  });
+
   it('keeps going when a send fails', async () => {
     const sent: string[] = [];
     let fail = true;
@@ -172,10 +220,12 @@ describe('FixerAlerter', () => {
       send: async (text) => {
         if (fail) throw new Error('Discord is down');
         sent.push(text);
+        return true;
       },
       currentState: (platform) => states.get(platform) ?? 'unknown',
       minIntervalMs: INTERVAL,
       now: () => 0,
+      schedule: () => () => {},
     });
     states.set('tiktok', 'down');
     await expect(

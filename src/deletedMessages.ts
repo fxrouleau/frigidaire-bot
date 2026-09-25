@@ -160,6 +160,9 @@ export class DeletedMessageReposter {
     const repost = await this.send(channel, snapshot.identity, {
       content: snapshot.content.length > 0 ? snapshot.content : undefined,
       files: attachments.map((a) => ({ attachment: a.data, name: a.name })),
+      // The original already pinged whoever it mentioned. And a webhook isn't bound by the author's
+      // Mention Everyone permission, so parsing here could turn their @everyone into a real ping.
+      allowedMentions: { parse: [] },
     });
     if (repost?.id) {
       recordRelay({
