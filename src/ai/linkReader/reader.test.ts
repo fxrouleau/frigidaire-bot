@@ -39,15 +39,15 @@ function setup(
 ) {
   let now = 1_000_000;
   const fetch = createFakeSafeFetch(routes);
-  const describeVideo = vi.fn(async (_input: VideoInput): Promise<VideoOutcome> => {
+  const watchVideo = vi.fn(async (_input: VideoInput): Promise<VideoOutcome> => {
     if (describeResult === null) return { status: 'failed' };
     return typeof describeResult === 'string' ? { status: 'ok', text: describeResult, cached: false } : describeResult;
   });
-  const reader = new LinkReader({ fetch, now: () => now, watchVideo: describeVideo });
+  const reader = new LinkReader({ fetch, now: () => now, watchVideo });
   return {
     reader,
     fetch,
-    describeVideo,
+    watchVideo,
     advance: (ms: number) => {
       now += ms;
     },
@@ -151,17 +151,17 @@ describe('LinkReader video understanding', () => {
   const mp4 = { contentType: 'video/mp4', headers: { 'content-length': '3000000' }, body: Buffer.alloc(4) };
 
   it('describes the first video only when asked, with the vetted final URL, and caches it', async () => {
-    const { reader, describeVideo, fetch } = setup({
+    const { reader, watchVideo, fetch } = setup({
       [`${API}222`]: { body: videoTweet(12) },
       'https://video.twimg.com/v.mp4': { ...mp4, finalUrl: 'https://video.twimg.com/v.mp4?final=1' },
     });
     const preview = await reader.read('https://x.com/a/status/222');
-    expect(describeVideo).not.toHaveBeenCalled();
+    expect(watchVideo).not.toHaveBeenCalled();
     expect(preview.ok && (preview.content.media[0] as LinkVideo).description).toBeUndefined();
 
     const watched = await reader.read('https://x.com/a/status/222', { watchVideos: true });
-    expect(describeVideo).toHaveBeenCalledTimes(1);
-    expect(describeVideo.mock.calls[0][0]).toEqual({
+    expect(watchVideo).toHaveBeenCalledTimes(1);
+    expect(watchVideo.mock.calls[0][0]).toEqual({
       url: 'https://video.twimg.com/v.mp4?final=1',
       contentType: 'video/mp4',
       context: 'A tweet posted by @someone; caption: tweet 222',
@@ -172,16 +172,16 @@ describe('LinkReader video understanding', () => {
     expect(watched.ok && (watched.content.media[0] as LinkVideo).description).toBe('a cat knocks a glass off a table');
 
     await reader.read('https://x.com/a/status/222', { watchVideos: true });
-    expect(describeVideo).toHaveBeenCalledTimes(1);
+    expect(watchVideo).toHaveBeenCalledTimes(1);
     const cached = reader.peek('https://x.com/a/status/222');
     expect(cached?.ok && (cached.content.media[0] as LinkVideo).description).toBe('a cat knocks a glass off a table');
   });
 
   it('hands a long video over too, with its duration, so the media feature skims it', async () => {
-    const { reader, describeVideo } = setup({ [`${API}222`]: { body: videoTweet(1200) }, 'https://video.twimg.com/v.mp4': mp4 });
+    const { reader, watchVideo } = setup({ [`${API}222`]: { body: videoTweet(1200) }, 'https://video.twimg.com/v.mp4': mp4 });
     const result = await reader.read('https://x.com/a/status/222', { watchVideos: true });
-    expect(describeVideo).toHaveBeenCalledTimes(1);
-    expect(describeVideo.mock.calls[0][0]).toMatchObject({ url: 'https://video.twimg.com/v.mp4', durationSecs: 1200 });
+    expect(watchVideo).toHaveBeenCalledTimes(1);
+    expect(watchVideo.mock.calls[0][0]).toMatchObject({ url: 'https://video.twimg.com/v.mp4', durationSecs: 1200 });
     expect(result.ok && (result.content.media[0] as LinkVideo).description).toBe('a cat knocks a glass off a table');
   });
 
@@ -196,19 +196,19 @@ describe('LinkReader video understanding', () => {
 
   it('honors LINK_READER_WATCH_VIDEOS=false (off)', async () => {
     vi.stubEnv('LINK_READER_WATCH_VIDEOS', 'false');
-    const { reader, describeVideo } = setup({ [`${API}222`]: { body: videoTweet(12) }, 'https://video.twimg.com/v.mp4': mp4 });
+    const { reader, watchVideo } = setup({ [`${API}222`]: { body: videoTweet(12) }, 'https://video.twimg.com/v.mp4': mp4 });
     const result = await reader.read('https://x.com/a/status/222', { watchVideos: true });
-    expect(describeVideo).not.toHaveBeenCalled();
+    expect(watchVideo).not.toHaveBeenCalled();
     expect(result.ok && (result.content.media[0] as LinkVideo).note).toBe('video understanding is turned off');
   });
 
   it('notes an unreachable or non-video file', async () => {
-    const { reader, describeVideo } = setup({
+    const { reader, watchVideo } = setup({
       [`${API}222`]: { body: videoTweet(12) },
       'https://video.twimg.com/v.mp4': { contentType: 'text/html', body: '<html>login</html>' },
     });
     const result = await reader.read('https://x.com/a/status/222', { watchVideos: true });
-    expect(describeVideo).not.toHaveBeenCalled();
+    expect(watchVideo).not.toHaveBeenCalled();
     expect(result.ok && (result.content.media[0] as LinkVideo).note).toBe("the video file couldn't be opened");
   });
 
@@ -234,13 +234,13 @@ describe('LinkReader: a question about the video', () => {
   const mp4 = { contentType: 'video/mp4', headers: { 'content-length': '3000000' }, body: Buffer.alloc(4) };
 
   it('watches the first video to answer it, without caching the answer with the content', async () => {
-    const { reader, describeVideo } = setup(
+    const { reader, watchVideo } = setup(
       { [`${API}222`]: { body: videoTweet(12) }, 'https://video.twimg.com/v.mp4': mp4 },
       'he says "run it back"',
     );
     const result = await reader.read('https://x.com/a/status/222', { question: 'what does he say at the end?' });
 
-    expect(describeVideo.mock.calls[0][0]).toMatchObject({
+    expect(watchVideo.mock.calls[0][0]).toMatchObject({
       url: 'https://video.twimg.com/v.mp4',
       question: 'what does he say at the end?',
     });
@@ -253,7 +253,7 @@ describe('LinkReader: a question about the video', () => {
   });
 
   it("can't watch a video without a file (YouTube), and says so", async () => {
-    const { reader, describeVideo } = setup({});
+    const { reader, watchVideo } = setup({});
     const content = {
       url: 'https://www.youtube.com/watch?v=x',
       source: 'youtube' as const,
@@ -272,16 +272,16 @@ describe('LinkReader: a question about the video', () => {
       videosDescribed: false,
     });
     const result = await reader.read('https://www.youtube.com/watch?v=x', { question: 'who wins?' });
-    expect(describeVideo).not.toHaveBeenCalled();
+    expect(watchVideo).not.toHaveBeenCalled();
     expect(result.ok && (result.content.media[0] as LinkVideo).note).toBe(
       "YouTube doesn't expose the video file; going by title and description; can't watch this one",
     );
   });
 
   it('notes a link without any video', async () => {
-    const { reader, describeVideo } = setup({ [`${API}111`]: { body: tweet('111') } });
+    const { reader, watchVideo } = setup({ [`${API}111`]: { body: tweet('111') } });
     const result = await reader.read('https://x.com/a/status/111', { question: 'who wins?' });
-    expect(describeVideo).not.toHaveBeenCalled();
+    expect(watchVideo).not.toHaveBeenCalled();
     expect(result.ok && result.content.notes).toEqual(['no video in this link to watch']);
   });
 });

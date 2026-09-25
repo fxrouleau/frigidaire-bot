@@ -32,15 +32,15 @@ function installReader() {
     }),
     'https://video.twimg.com/v.mp4': { contentType: 'video/mp4', body: Buffer.alloc(4) },
   });
-  const describeVideo = vi.fn(
+  const watchVideo = vi.fn(
     async (input: VideoInput): Promise<VideoOutcome> => ({
       status: 'ok',
       text: input.question ? 'he says "again!"' : 'someone dances in a kitchen',
       cached: false,
     }),
   );
-  setLinkReaderForTesting(new LinkReader({ fetch, watchVideo: describeVideo }));
-  return { fetch, describeVideo };
+  setLinkReaderForTesting(new LinkReader({ fetch, watchVideo }));
+  return { fetch, watchVideo };
 }
 
 afterEach(() => {
@@ -58,23 +58,23 @@ describe('read_link', () => {
   });
 
   it('reads the link, watching its video', async () => {
-    const { describeVideo } = installReader();
+    const { watchVideo } = installReader();
     const output = await readLink.handler(context(), { url: 'https://x.com/someone/status/111' });
     expect(output.startsWith(UNTRUSTED_HEADER)).toBe(true);
     expect(output).toContain('tweet by Some One (@someone) — https://x.com/someone/status/111');
     expect(output).toContain('tweet 111');
     expect(output).toContain('- video (0:05): someone dances in a kitchen');
-    expect(describeVideo).toHaveBeenCalledTimes(1);
+    expect(watchVideo).toHaveBeenCalledTimes(1);
   });
 
   it('answers a question about the video instead of describing it', async () => {
-    const { describeVideo } = installReader();
+    const { watchVideo } = installReader();
     const output = await readLink.handler(context(), {
       url: 'https://x.com/someone/status/111',
       question: ' what does he say at the end? ',
     });
-    expect(describeVideo).toHaveBeenCalledTimes(1);
-    expect(describeVideo.mock.calls[0][0].question).toBe('what does he say at the end?');
+    expect(watchVideo).toHaveBeenCalledTimes(1);
+    expect(watchVideo.mock.calls[0][0].question).toBe('what does he say at the end?');
     expect(output).toContain('asked "what does he say at the end?" — watching it says: he says "again!"');
     expect(output).not.toContain('someone dances in a kitchen');
   });

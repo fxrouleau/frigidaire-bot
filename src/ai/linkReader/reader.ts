@@ -8,7 +8,7 @@
 //   - on request (read_link only), hands the first video to video understanding (watchVideo, the
 //     media feature) and caches the description with the content — or, with a question, has the video
 //     watched to answer it (answers are cached by the media feature, not with the content)
-//   - vets every image/video URL it hands onward (previewImages, describeVideo): only live, media-typed,
+//   - vets every image/video URL it hands onward (previewImages, describe): only live, media-typed,
 //     redirect-free URLs reach the chat provider and the media feature (which fetch any non-Discord URL
 //     through this same guarded fetch again, so a page's og:image pointing at an internal address is
 //     refused twice over)
