@@ -228,7 +228,8 @@ export class ArchiveSync {
     while (!this.stopped) {
       const messages = await this.fetchWithRetry(channel, { before: cursor, limit: PAGE_SIZE });
       if (!messages) {
-        store.recordBackfillError(channelId, 'fetch failed', this.deps.now());
+        // A stop is not a failure: the saved cursor resumes the import next run.
+        if (!this.stopped) store.recordBackfillError(channelId, 'fetch failed', this.deps.now());
         return;
       }
       const bounds = pageBounds(messages);
@@ -321,6 +322,7 @@ export class ArchiveSync {
       const delay = this.deps.delayMs();
       const wait = attempt === 0 ? delay : Math.min(60_000, Math.max(2000, delay) * 2 ** attempt);
       if (this.requestsMade > 0 || attempt > 0) await this.deps.sleep(wait);
+      if (this.stopped) return undefined;
       this.requestsMade++;
       try {
         return await channel.fetchPage(options);
