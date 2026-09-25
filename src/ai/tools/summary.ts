@@ -1,7 +1,8 @@
 // "Catch me up": summarizing a stretch of channel history. Self-contained — it fetches the messages,
 // renders them into a transcript, and calls OpenRouter directly (ZDR, tagged 'summary') — so it does
-// not depend on the chat provider. The summary text goes back to the chat model as a tool result; the
-// chat model relays it in the bot's voice.
+// not depend on the chat provider. This is the bot's only summary pipeline: the summarize_messages tool
+// hands its text to the chat model as a tool result (relayed in the bot's voice), and the "Summarize
+// from here" command posts summarizeChannelResult()'s summary itself.
 //
 // People: the summarizer gets a WHO'S WHO block for the people in the stretch — everyone who talked
 // and everyone the messages refer to (mentions, or any name they go by: display name, handle, IRL
@@ -60,8 +61,14 @@ export type SummaryDeps = {
 };
 
 export type SummarizeChannelOptions = SummaryDeps & {
-  /** The message asking for the summary: its channel is summarized and it is itself left out. */
+  /** A message in the channel to summarize; `messageRole` says what it is. */
   message: Message;
+  /**
+   * 'request' (default): `message` asks for the summary, so it is left out and history is read back
+   * from it. 'target': `message` was picked from the channel ("Summarize from here"), so it is
+   * summarized like any other message in the range and history is read back from `end`.
+   */
+  messageRole?: 'request' | 'target';
   start: Date;
   /** Defaults to now. */
   end?: Date;
@@ -458,21 +465,23 @@ async function prepare(opts: SummarizeChannelOptions, now: Date): Promise<Prepar
   const startMs = start.getTime();
   const endMs = end.getTime();
 
+  const isRequest = (opts.messageRole ?? 'request') === 'request';
   let fetched: Message[];
   let complete = true;
   if (opts.prefetched) {
     fetched = opts.prefetched;
   } else {
     // Start from the request itself when the range runs up to it (the request is left out), else
-    // from the end of the range: no need to page through everything said after it.
-    const before = endMs >= message.createdTimestamp ? message.id : snowflakeAt(endMs + 1);
+    // from the end of the range: no need to page through everything said after it. A target message
+    // is where the range starts, so its history is read back from the end.
+    const before = isRequest && endMs >= message.createdTimestamp ? message.id : snowflakeAt(endMs + 1);
     const walk = await walkBack(message, before, (msg) => msg.createdTimestamp < startMs);
     fetched = walk.messages;
     complete = walk.complete;
   }
 
   const inRange = fetched
-    .filter((m) => m.id !== message.id && m.createdTimestamp >= startMs && m.createdTimestamp <= endMs)
+    .filter((m) => (!isRequest || m.id !== message.id) && m.createdTimestamp >= startMs && m.createdTimestamp <= endMs)
     .sort(newestFirst);
 
   const store = getMemoryStore();
@@ -495,8 +504,10 @@ async function prepare(opts: SummarizeChannelOptions, now: Date): Promise<Prepar
     };
   }
 
+  // Only a request message was written by the requester; a target message's author is someone else.
   const requesterName = opts.requesterId
-    ? (ctx.identitiesById.get(opts.requesterId)?.display_name ?? attributeMessage(message)?.authorName)
+    ? (ctx.identitiesById.get(opts.requesterId)?.display_name ??
+      (isRequest ? attributeMessage(message)?.authorName : undefined))
     : undefined;
   const header = [
     `Channel: ${channelLabel(message)}`,
@@ -532,12 +543,47 @@ ${[...gaps, ...transcript.lines].join('\n')}`;
   return { prompt, transcript, people, start, end, complete };
 }
 
+/** Why there is no summary. */
+export type SummaryFailure = 'no_messages' | 'history_unreadable' | 'model_failed' | 'model_empty';
+
+/** The pipeline's outcome, for callers that present it themselves (the "Summarize from here" command). */
+export type ChannelSummaryResult =
+  | {
+      ok: true;
+      /** The summarizer's text. */
+      summary: string;
+      /** "Summary of #channel from … to … Eastern (N messages from M people):" */
+      header: string;
+      /** Plain sentences about what the summary could not cover (history limits, skipped messages). */
+      caveats: string[];
+      /** "People in this stretch: …", so the chat model can bring its own memory of them. */
+      peopleFooter?: string;
+    }
+  | {
+      ok: false;
+      reason: SummaryFailure;
+      /** A plain explanation, written for the chat model. */
+      message: string;
+    };
+
 /**
  * Summarizes the messages of `message`'s channel between `start` and `end` for the chat model. Returns
- * text for the model either way: the summary with a one-line range header and any caveats, or a
- * plain explanation of what went wrong (no messages, missing permission, model failure).
+ * text for the model either way: the summary with a one-line range header, any caveats and the people
+ * footer, or a plain explanation of what went wrong (no messages, missing permission, model failure).
  */
 export async function summarizeChannel(opts: SummarizeChannelOptions): Promise<string> {
+  const result = await summarizeChannelResult(opts);
+  if (!result.ok) return result.message;
+  return [
+    result.header,
+    result.summary,
+    ...result.caveats.map((c) => `(Note: ${c})`),
+    ...(result.peopleFooter ? [result.peopleFooter] : []),
+  ].join('\n');
+}
+
+/** summarizeChannel() as data: the same pipeline, one model call, nothing formatted for a reader yet. */
+export async function summarizeChannelResult(opts: SummarizeChannelOptions): Promise<ChannelSummaryResult> {
   const now = opts.now?.() ?? new Date();
 
   let prepared: PreparedSummary;
@@ -545,9 +591,13 @@ export async function summarizeChannel(opts: SummarizeChannelOptions): Promise<s
     prepared = await prepare(opts, now);
   } catch (error) {
     logger.warn(`summary: reading history of channel ${opts.message.channel.id} failed:`, error);
-    return "Couldn't read this channel's history (missing permission or a Discord error), so there is no summary.";
+    return {
+      ok: false,
+      reason: 'history_unreadable',
+      message: "Couldn't read this channel's history (missing permission or a Discord error), so there is no summary.",
+    };
   }
-  if (prepared.error !== undefined) return prepared.error;
+  if (prepared.error !== undefined) return { ok: false, reason: 'no_messages', message: prepared.error };
 
   let text: string | undefined;
   try {
@@ -568,11 +618,15 @@ export async function summarizeChannel(opts: SummarizeChannelOptions): Promise<s
     text = response.choices?.[0]?.message?.content?.trim() || undefined;
   } catch (error) {
     logger.error(`summary: model call failed for channel ${opts.message.channel.id}:`, error);
-    return 'The summary model call failed, so there is no summary right now. Try again in a bit.';
+    return {
+      ok: false,
+      reason: 'model_failed',
+      message: 'The summary model call failed, so there is no summary right now. Try again in a bit.',
+    };
   }
   if (!text) {
     logger.warn(`summary: empty model response for channel ${opts.message.channel.id}`);
-    return 'The summary model returned nothing. Try again in a bit.';
+    return { ok: false, reason: 'model_empty', message: 'The summary model returned nothing. Try again in a bit.' };
   }
 
   const { transcript, people: stretchPeople, start, end, complete } = prepared;
@@ -585,9 +639,13 @@ export async function summarizeChannel(opts: SummarizeChannelOptions): Promise<s
   if (!complete) caveats.push('History before the first summarized message could not be fetched.');
 
   const people = `${transcript.speakers} ${transcript.speakers === 1 ? 'person' : 'people'}`;
-  const headerLine = `Summary of ${channelLabel(opts.message)} from ${formatTimestampET(start)} to ${formatTimestampET(end)} Eastern (${transcript.included} messages from ${people}):`;
-  const footer = formatPeopleFooter(stretchPeople);
-  return [headerLine, text, ...caveats.map((c) => `(Note: ${c})`), ...(footer ? [footer] : [])].join('\n');
+  return {
+    ok: true,
+    summary: text,
+    header: `Summary of ${channelLabel(opts.message)} from ${formatTimestampET(start)} to ${formatTimestampET(end)} Eastern (${transcript.included} messages from ${people}):`,
+    caveats,
+    peopleFooter: formatPeopleFooter(stretchPeople),
+  };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -662,33 +720,4 @@ export async function runSummaryTool(
   return capped
     ? `${summary}\n(Note: summaries cover at most 7 days, so this starts at ${formatTimestampET(start)} instead of ${formatTimestampET(parsedStart)}.)`
     : summary;
-}
-
-// ---------------------------------------------------------------------------------------------------
-// Legacy entry point
-// ---------------------------------------------------------------------------------------------------
-
-export type SummaryPrep = {
-  prompt: string;
-  error?: string;
-};
-
-/**
- * @deprecated The provider-based summary path (OpenRouterProvider.summarizeMessages) is no longer
- * called by the summarize_messages tool, which uses summarizeChannel(); this adapter only keeps that
- * method compiling until it is removed. Same fetch/render pipeline, with the instructions inlined.
- */
-export async function prepareSummaryPrompt(message: Message, startTime: string, endTime: string): Promise<SummaryPrep> {
-  const start = parseEasternDateTime(startTime);
-  const end = parseEasternDateTime(endTime);
-  if (!start || !end) {
-    return { prompt: '', error: "Invalid date format. Use Eastern wall-clock time as 'YYYY-MM-DD HH:MM'." };
-  }
-  if (start.getTime() > end.getTime()) return { prompt: '', error: 'The start time must be before the end time.' };
-  if (end.getTime() - start.getTime() > MAX_SUMMARY_RANGE_MS) {
-    return { prompt: '', error: 'The maximum timeframe for a summary is one week.' };
-  }
-  const prepared = await prepare({ message, start, end }, new Date());
-  if (prepared.error !== undefined) return { prompt: '', error: prepared.error };
-  return { prompt: `${SUMMARY_SYSTEM_PROMPT}\n\n${prepared.prompt}` };
 }

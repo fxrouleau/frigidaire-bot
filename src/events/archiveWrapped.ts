@@ -1,6 +1,6 @@
-// Monthly and yearly "Wrapped" stats posts (src/archive/wrapped.ts). Off unless the archive is on and
-// WRAPPED_CHANNEL_ID (or MAIN_CHANNEL_ID) is set; WRAPPED_ENABLED=false also disables it. The check is
-// cheap and idempotent (a bot.db watermark), so it simply runs every few minutes.
+// The yearly "Wrapped" stats post (src/archive/wrapped.ts), on Jan 1 from 15:00 ET. Off unless the
+// archive is on and WRAPPED_CHANNEL_ID (or REPORT_CHANNEL_ID) is set; WRAPPED_ENABLED=false also
+// disables it. The check is cheap and idempotent (a bot.db watermark), so it simply runs every few minutes.
 import { Events } from 'discord.js';
 import { discordWrappedDeps, runWrappedCheck } from '../archive/wrapped';
 import { config } from '../config';

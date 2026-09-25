@@ -165,6 +165,64 @@ describe('computeWrappedStats', () => {
     });
   });
 
+  it('finds the most reacted member message, never counting the bot, the bot’s own reaction, or deleted messages', () => {
+    const kekw = { id: '300000000000000001', name: 'kekw', animated: true };
+    const messages = [
+      // 3 member reactions + the bot's own 💀 (count 4, me) → 3.
+      et(3, 12, 0, {
+        authorId: FELIX,
+        content: 'first',
+        reactions: [
+          { ...kekw, count: 2 },
+          { id: null, name: '💀', count: 2, me: true },
+        ],
+      }),
+      // Only the bot reacted: not reacted at all.
+      et(4, 12, 0, { authorId: JASON, authorName: 'Jason', reactions: [{ id: null, name: '🔥', count: 1, me: true }] }),
+      // A tie with the first (3), but later: loses.
+      et(5, 12, 0, { authorId: MARC, authorName: 'Marc', content: 'tie', reactions: [{ id: null, name: '😂', count: 3 }] }),
+      // More reactions, but the bot's own reply: never a member message.
+      et(6, 12, 0, { authorId: BOT_USER_ID, source: 'bot', reactions: [{ id: null, name: '😂', count: 9 }] }),
+      // More reactions, but deleted.
+      et(7, 12, 0, { authorId: MARC, authorName: 'Marc', reactions: [{ id: null, name: '😂', count: 8 }] }),
+      // Most reactions, but outside the scope below.
+      et(8, 12, 0, { authorId: MARC, authorName: 'Marc', channelId: CLIPS, reactions: [{ id: null, name: '😂', count: 7 }] }),
+    ];
+    store.upsertMessages(messages);
+    store.markDeleted([messages[4].id], messages[4].createdAt + 1000);
+
+    const scoped = computeWrappedStats({ startMs: START, endMs: END, channelIds: [MAIN] }, { store });
+    expect(scoped.mostReacted).toEqual({
+      authorId: FELIX,
+      authorName: 'Felix',
+      total: 3,
+      reactions: [
+        { id: '300000000000000001', name: 'kekw', animated: true, count: 2 },
+        { id: null, name: '💀', animated: false, count: 1 },
+      ],
+      content: 'first',
+      messageId: messages[0].id,
+      channelId: MAIN,
+      guildId: messages[0].guildId,
+    });
+
+    const everywhere = computeWrappedStats({ startMs: START, endMs: END }, { store });
+    expect(everywhere.mostReacted).toMatchObject({ channelId: CLIPS, total: 7, authorName: 'Marc' });
+  });
+
+  it('describes an image-only most reacted message by what it carried', () => {
+    store.upsertMessages([
+      et(3, 12, 0, {
+        attachments: [{ name: 'meme.png', type: 'image/png', size: 10, url: 'https://cdn.example/meme.png' }],
+        embeds: [{ title: 'ignored when there is a file' }],
+        reactions: [{ id: null, name: '😂', count: 5 }],
+      }),
+    ]);
+    const stats = computeWrappedStats({ startMs: START, endMs: END }, { store });
+    expect(stats.mostReacted).toMatchObject({ content: '', attachmentName: 'meme.png', linkTitle: 'ignored when there is a file' });
+    expect(computeWrappedStats({ startMs: END, endMs: END + MINUTE }, { store }).mostReacted).toBeUndefined();
+  });
+
   it('exposes per-author counts and channel reads for other features', () => {
     seed();
     expect(messageCountsByAuthor({ startMs: START, endMs: END }, store, 1)).toEqual([
