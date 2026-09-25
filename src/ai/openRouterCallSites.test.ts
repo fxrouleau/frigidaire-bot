@@ -4,9 +4,11 @@
 // source file with TypeScript's own parser (so strings, comments and regexes can't fool it) and checks
 // each OpenAI-SDK call site and each raw request to OpenRouter. When it fails, fix the call site; don't
 // loosen the check.
+// The parser comes from TypeScript 6's side-by-side package: TypeScript 7 (the `typescript` dependency, which
+// builds and type-checks the project) ships no JavaScript API yet.
 import fs from 'node:fs';
 import path from 'node:path';
-import ts from 'typescript';
+import ts from '@typescript/typescript6';
 import { describe, expect, it } from 'vitest';
 
 const SRC_DIR = path.join(__dirname, '..');

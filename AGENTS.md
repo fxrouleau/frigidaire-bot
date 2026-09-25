@@ -12,7 +12,7 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 
 ## Tech stack
 
-- **Runtime**: Node.js 26 (`node:26-alpine`), TypeScript 5.9 (strict, `es2024`, CommonJS output)
+- **Runtime**: Node.js 26 (`node:26-alpine`), TypeScript 7 (the native Go `tsc`; strict, `es2024`, CommonJS output). TS 7 has no JavaScript API yet, so `@typescript/typescript6` supplies the parser `openRouterCallSites.test.ts` uses, and the dev scripts (`replay`, `eval:*`, nodemon) run through `tsx`
 - **Package manager**: Yarn 4.18 via Corepack, node-modules linker
 - **Discord**: discord.js 14
 - **AI**: OpenRouter through the `openai` SDK (chat completions + embeddings) and its `/api/alpha/decisions` endpoint (TypeSafe "System One" decision models, used by the message judge)

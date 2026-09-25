@@ -10,7 +10,7 @@
 // includes names: never a member's real display name, nickname, username or IRL name (even with made-up
 // facts attached), and ids stay placeholders (1000…, 2000…, 9000…).
 //
-// (Not named scenarios.ts: under ts-node, `require('./scenarios')` would resolve to scenarios.json first.)
+// (Not named scenarios.ts: under CommonJS resolution, `require('./scenarios')` can resolve to scenarios.json first.)
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 

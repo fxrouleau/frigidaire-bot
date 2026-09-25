@@ -27,7 +27,7 @@ RUN yarn check:ci && yarn typecheck && yarn build && yarn test
 FROM test AS build
 RUN yarn build
 
-# ---- prod-deps: the runtime node_modules only (no biome/typescript/vitest/nodemon/ts-node) ----
+# ---- prod-deps: the runtime node_modules only (no biome/typescript/vitest/nodemon/tsx) ----
 FROM base AS prod-deps
 RUN yarn workspaces focus --all --production
 
