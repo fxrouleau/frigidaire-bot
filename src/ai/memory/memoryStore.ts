@@ -169,6 +169,17 @@ type KeywordHits = { exact: Memory[]; partial: Memory[] };
  */
 export const NON_PERSON_SUBJECTS: ReadonlySet<string> = new Set(['server', 'bot', 'general', 'everyone', 'here']);
 
+/** The `source` of the rows the personality learner writes (its observation and self-improvement passes). */
+export const LEARNER_SOURCES = { observation: 'observation', selfImprovement: 'self-improvement' } as const;
+
+// SQL literal list, same reasoning as SELF_DIAGNOSIS_NOT_IN: compile-time constants only.
+const LEARNER_SOURCES_IN = Object.values(LEARNER_SOURCES)
+  .map((s) => `'${s}'`)
+  .join(', ');
+
+/** The shape of a Discord id (snowflake). The old learner also stored ids like "456" from its prompt examples. */
+const SNOWFLAKE = /^\d{15,21}$/;
+
 /**
  * Comparison key for names: case-, accent- and spacing-insensitive ("Mariè" = "marie", "Big  Mike" =
  * "big mike"). Display names are arbitrary Unicode, so this runs in JS rather than as a SQL collation.
@@ -844,11 +855,14 @@ export class MemoryStore {
    * 2. Every active memory without a subject_user_id whose subject is a name exactly one member goes by
    *    — display name, Discord handle, first-seen name, IRL name or nickname, case-insensitively, on
    *    any of their accounts — gets that member's MAIN id. (Real case: the learner filed memories under
-   *    "lapinlune", which is a member's handle, not his display name.) A row whose id belongs to nobody
-   *    the bot knows (no identities row, not in LINKED_ACCOUNTS) counts as having none: the learner
-   *    used to store whatever id the model wrote, e.g. one copied from its prompt's examples, and such a
-   *    row is otherwise found by no lookup (getForPerson only takes id-less rows by name) and never
-   *    dedups with the member's rows. A known member's id is never overwritten.
+   *    "lapinlune", which is a member's handle, not his display name.) A row whose id is junk counts as
+   *    having none: the old learner stored whatever id the model wrote, e.g. one copied from its
+   *    prompt's examples ("456") or a garbled snowflake, and such a row is otherwise found by no lookup
+   *    (getForPerson only takes id-less rows by name) and never dedups with the member's rows. Junk means
+   *    an id nobody the bot knows has (no identities row, not in LINKED_ACCOUNTS) that is either not
+   *    shaped like a Discord id or on a learner row. Other writers (remember_fact, "Remember this") file
+   *    rows under real accounts that may have no identities row yet, so their ids are kept, as is a
+   *    known member's id.
    *
    * Step 2 is stricter than interactive lookups (src/ai/people.ts), which let a display name outrank
    * another member's nickname: these rows are old and their subject was whatever the name meant back
@@ -884,13 +898,22 @@ export class MemoryStore {
     const storedIds = this.stmt(
       'SELECT DISTINCT subject_user_id AS id FROM memories WHERE active = 1 AND subject_user_id IS NOT NULL',
     ).all() as { id: string }[];
-    const strangerIds = JSON.stringify(storedIds.map((r) => r.id).filter((id) => !knownIds.has(id)));
-    const unlinked = '(subject_user_id IS NULL OR subject_user_id IN (SELECT value FROM json_each(?)))';
+    const unknownIds = storedIds.map((r) => r.id).filter((id) => !knownIds.has(id));
+    // Which unknown ids are junk: one that is not even shaped like a Discord id, on any row; a snowflake
+    // only on a row the learner wrote (only the old learner stored ids unchecked). remember_fact and
+    // "Remember this" legitimately file rows under real accounts that have no identities row (a member
+    // @-mentioned before they ever posted, an old message's author): those ids are never taken away.
+    const strangers = {
+      junk: JSON.stringify(unknownIds.filter((id) => !SNOWFLAKE.test(id))),
+      unknown: JSON.stringify(unknownIds),
+    };
+    const stranger = `(subject_user_id IN (SELECT value FROM json_each(@junk))
+      OR (source IN (${LEARNER_SOURCES_IN}) AND subject_user_id IN (SELECT value FROM json_each(@unknown))))`;
 
     const subjects = this.stmt(
       `SELECT DISTINCT subject FROM memories
-       WHERE active = 1 AND ${unlinked} AND subject IS NOT NULL`,
-    ).all(strangerIds) as { subject: string }[];
+       WHERE active = 1 AND (subject_user_id IS NULL OR ${stranger}) AND subject IS NOT NULL`,
+    ).all(strangers) as { subject: string }[];
 
     let ambiguous = 0;
     const assignments: { subject: string; userId: string }[] = [];
@@ -909,12 +932,11 @@ export class MemoryStore {
         'UPDATE memories SET subject_user_id = ? WHERE subject = ? AND active = 1 AND subject_user_id IS NULL',
       );
       const restampStrangers = this.stmt(
-        `UPDATE memories SET subject_user_id = ?
-         WHERE subject = ? AND active = 1 AND subject_user_id IN (SELECT value FROM json_each(?))`,
+        `UPDATE memories SET subject_user_id = @userId WHERE subject = @subject AND active = 1 AND ${stranger}`,
       );
       for (const { subject, userId } of assignments) {
         changed += stampNameOnly.run(userId, subject).changes;
-        const moved = restampStrangers.run(userId, subject, strangerIds).changes;
+        const moved = restampStrangers.run({ userId, subject, ...strangers }).changes;
         restamped += moved;
         changed += moved;
       }

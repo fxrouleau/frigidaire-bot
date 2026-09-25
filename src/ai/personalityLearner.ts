@@ -6,7 +6,7 @@ import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
 import { attributeMessage } from '../relay';
 import { getCachedTranscript } from './media';
-import { type Identity, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
+import { type Identity, LEARNER_SOURCES, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
 import { getOpenRouterClient } from './openRouterClient';
 import { checkNickname, foldMembers, type Member, matchMemberByName, memoryKeyFor, parseMemberName } from './people';
 import { formatEmojiLines, formatIdentityLines } from './promptSections';
@@ -783,7 +783,7 @@ export class PersonalityLearner {
       config.models.learner,
       [{ type: 'text', text: personalityPrompt }, ...messageParts],
       channelId,
-      'observation',
+      LEARNER_SOURCES.observation,
       'PersonalityLearner',
       'learner',
     );
@@ -816,7 +816,7 @@ export class PersonalityLearner {
           config.models.selfImprovement,
           [{ type: 'text', text: selfImprovementPrompt }, ...messageParts],
           channelId,
-          'self-improvement',
+          LEARNER_SOURCES.selfImprovement,
           'SelfImprovementLearner',
           'self_improvement',
         );
