@@ -48,8 +48,10 @@ export function createNameMatcher(names: readonly string[]): (text: string) => s
 }
 
 /**
- * The follow-up rule: the bot spoke in this channel at most `followupSeconds` before the message, and
- * the message's author is who it was talking to. `followupSeconds` of 0 disables the rule.
+ * The follow-up rule as the eval states it: the bot spoke in this channel at most `followupSeconds`
+ * before the message (the exchange is still going), and the author is one of its partners in that
+ * exchange. `followupSeconds` of 0 disables the rule. The live gate tracks the same two facts from
+ * routed turns (AddressedGate); an eval case gives them directly.
  */
 export function isFollowup(
   secondsSinceBotSpoke: number | undefined,

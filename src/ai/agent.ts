@@ -226,6 +226,18 @@ type UserEntryOptions = { attribution?: MessageAttribution; replyHeader?: string
 
 type ChannelNotesSource = () => { notes: Record<string, string>; invalid: boolean };
 
+export type HandleMentionOptions = {
+  /**
+   * Nobody pinged the bot: the gate (src/gate/) judged the message was meant for it anyway. The turn's
+   * context note says so, so the model doesn't talk as if it had been mentioned.
+   */
+  unprompted?: boolean;
+};
+
+// Added to the dynamic context of a turn the gate routed (see HandleMentionOptions.unprompted).
+export const UNPROMPTED_NOTE =
+  "Nobody pinged you this time: the last message doesn't @-mention you or reply to you. You're chiming in on your own because it was clearly meant for you (you were named, or you're mid-conversation with them). Don't say they pinged, tagged or mentioned you; just answer like you were part of the conversation.";
+
 export type AgentOrchestratorOptions = {
   resolveProvider?: () => AiProvider;
   tools?: ToolDefinition[];
@@ -283,10 +295,10 @@ export class AgentOrchestrator {
     this.channelNotes = opts.channelNotes ?? (() => config.agent.channelNotes);
   }
 
-  handleMention(message: Message): Promise<void> {
+  handleMention(message: Message, opts: HandleMentionOptions = {}): Promise<void> {
     const channelId = message.channel.id;
     const previous = this.channelQueues.get(channelId) ?? Promise.resolve();
-    const run = previous.then(() => this.processMention(message));
+    const run = previous.then(() => this.processMention(message, opts));
     const settled = run.catch(() => undefined);
     this.channelQueues.set(channelId, settled);
     void settled.then(() => {
@@ -295,7 +307,7 @@ export class AgentOrchestrator {
     return run;
   }
 
-  private async processMention(message: Message): Promise<void> {
+  private async processMention(message: Message, opts: HandleMentionOptions): Promise<void> {
     const channelId = message.channel.id;
     const stopTyping = this.startTypingLoop(message);
     let provider: AiProvider | undefined;
@@ -332,7 +344,7 @@ export class AgentOrchestrator {
       // outside the tool loop. The static prompt (entries[0]) is never touched, preserving provider
       // prefix-caching.
       const priorInjectedIds = state.injectedMemoryIds ?? [];
-      const dynamic = await this.buildDynamicContextEntry(message, this.safeStore(), priorInjectedIds);
+      const dynamic = await this.buildDynamicContextEntry(message, this.safeStore(), priorInjectedIds, opts);
       let injectedMemoryIds = [...priorInjectedIds, ...dynamic.injectedIds];
 
       workingEntries = [
@@ -989,10 +1001,13 @@ Right before each new message you get a context note with the current time (East
     message: Message,
     store: MemoryStore | undefined,
     alreadyInjectedIds: number[],
+    opts: HandleMentionOptions = {},
   ): Promise<{ entry: ConversationEntry; injectedIds: number[] }> {
-    const header = [`Current time: ${describeNowET()} (America/New_York).`, ...this.describeChannel(message)].join(
-      '\n',
-    );
+    const header = [
+      `Current time: ${describeNowET()} (America/New_York).`,
+      ...this.describeChannel(message),
+      ...(opts.unprompted ? [UNPROMPTED_NOTE] : []),
+    ].join('\n');
 
     const sections = store ? await this.buildMemorySections(message, store, alreadyInjectedIds) : undefined;
     const text = sections?.text ? `${header}\n\n${sections.text}` : header;

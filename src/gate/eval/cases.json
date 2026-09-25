@@ -1854,6 +1854,246 @@
         "author": "Dom",
         "text": "shut up bot i'm not going"
       }
+    },
+    {
+      "id": "group-earlier-partner-pushback",
+      "label": true,
+      "note": "Kev talked to the bot earlier in this exchange and pushes back on its answer, although it last answered Marco",
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire who's the best adc rn"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "jinx, not close",
+          "replyTo": "Kev"
+        },
+        {
+          "author": "Marco",
+          "text": "@Frigidaire and top?"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "ksante unfortunately",
+          "replyTo": "Marco"
+        }
+      ],
+      "message": {
+        "author": "Kev",
+        "text": "nah jinx fell off hard this patch"
+      },
+      "botLastSpokeSecondsAgo": 15,
+      "talkingWithBot": true
+    },
+    {
+      "id": "group-earlier-partner-next-question",
+      "label": true,
+      "note": "a follow-up question from the first partner while the bot answers someone else",
+      "context": [
+        {
+          "author": "Dom",
+          "text": "@Frigidaire best jungler for climbing?"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "vi. press r, win game",
+          "replyTo": "Dom"
+        },
+        {
+          "author": "Nate",
+          "text": "@Frigidaire what about support"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "lulu, she carries your bad adc",
+          "replyTo": "Nate"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "and mid?"
+      },
+      "botLastSpokeSecondsAgo": 25,
+      "talkingWithBot": true
+    },
+    {
+      "id": "group-partner-answers-bot-question",
+      "label": true,
+      "note": "the bot asked the group something; an earlier partner answers it",
+      "context": [
+        {
+          "author": "Dom",
+          "text": "@Frigidaire we need a fifth for flex"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "who even plays support here",
+          "replyTo": "Dom"
+        },
+        {
+          "author": "Nate",
+          "text": "not me lol"
+        }
+      ],
+      "message": {
+        "author": "Dom",
+        "text": "i do and i'm cracked at it"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": true
+    },
+    {
+      "id": "group-newcomer-name-drop",
+      "label": true,
+      "note": "someone new joins the exchange by naming the bot",
+      "context": [
+        {
+          "author": "Kev",
+          "text": "@Frigidaire is a hotdog a sandwich"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "legally yes, spiritually no",
+          "replyTo": "Kev"
+        },
+        {
+          "author": "Kev",
+          "text": "coward answer"
+        }
+      ],
+      "message": {
+        "author": "Rizzo",
+        "text": "fridge settle it for real, sandwich or not"
+      },
+      "botLastSpokeSecondsAgo": 20,
+      "talkingWithBot": false
+    },
+    {
+      "id": "group-earlier-partner-to-friend",
+      "label": false,
+      "note": "a partner of the exchange talking to someone else in the chat",
+      "context": [
+        {
+          "author": "Theo",
+          "text": "@Frigidaire wings or pizza tonight"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "wings. pizza is a monday food",
+          "replyTo": "Theo"
+        },
+        {
+          "author": "Benny",
+          "text": "@Frigidaire what sauce"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "honey garlic, don't argue",
+          "replyTo": "Benny"
+        }
+      ],
+      "message": {
+        "author": "Theo",
+        "text": "benny you still coming at 8?"
+      },
+      "botLastSpokeSecondsAgo": 30,
+      "talkingWithBot": true
+    },
+    {
+      "id": "group-partner-laughs-at-other",
+      "label": false,
+      "note": "an earlier partner laughing at the bot roasting someone else",
+      "context": [
+        {
+          "author": "Sully",
+          "text": "@Frigidaire rate my build"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "solid, 7/10",
+          "replyTo": "Sully"
+        },
+        {
+          "author": "Marco",
+          "text": "@Frigidaire rate mine"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "did you pick items with your eyes closed",
+          "replyTo": "Marco"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "LMAOOO marco got cooked"
+      },
+      "botLastSpokeSecondsAgo": 10,
+      "talkingWithBot": true
+    },
+    {
+      "id": "nudge-rambler-keeps-going",
+      "label": false,
+      "note": "a ramble nudge is not a conversation: the live prefilter drops this (no name, not a partner)",
+      "context": [
+        {
+          "author": "Sully",
+          "text": "ok so pigeons. nobody has ever seen a baby pigeon"
+        },
+        {
+          "author": "Sully",
+          "text": "and the moon landing was the same year the pigeon census stopped"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "this is a #rambles moment",
+          "replyTo": "Sully"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "anyway the pigeons thing is real i'm telling you"
+      },
+      "botLastSpokeSecondsAgo": 10,
+      "talkingWithBot": false
+    },
+    {
+      "id": "nudge-rambler-talks-back",
+      "label": true,
+      "note": "answering the nudge by name",
+      "context": [
+        {
+          "author": "Sully",
+          "text": "ok so pigeons. nobody has ever seen a baby pigeon"
+        },
+        {
+          "author": "Sully",
+          "text": "and the moon landing was the same year the pigeon census stopped"
+        },
+        {
+          "author": "Frigidaire",
+          "bot": true,
+          "text": "this is a #rambles moment",
+          "replyTo": "Sully"
+        }
+      ],
+      "message": {
+        "author": "Sully",
+        "text": "fridge i am NOT rambling this is important"
+      },
+      "botLastSpokeSecondsAgo": 10,
+      "talkingWithBot": false
     }
   ]
 }

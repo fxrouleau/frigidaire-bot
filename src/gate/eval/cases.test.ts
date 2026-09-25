@@ -74,6 +74,24 @@ describe('the bundled eval set (src/gate/eval/cases.json)', () => {
     for (const c of followups) expect(passesPrefilter(c, NAMES, 120), c.id).toBe(true);
   });
 
+  it('covers exchanges with several people, where the bot last answered someone else', () => {
+    const group = cases.filter((c) => c.id.startsWith('group-'));
+    expect(group.filter((c) => c.label).length).toBeGreaterThanOrEqual(3);
+    expect(group.filter((c) => !c.label).length).toBeGreaterThanOrEqual(2);
+    // An earlier partner: the bot's latest message answers someone else, yet they are a candidate.
+    const earlier = group.filter((c) => c.talkingWithBot && c.context.at(-1)?.replyTo !== c.message.author);
+    expect(earlier.length).toBeGreaterThanOrEqual(3);
+    for (const c of group) expect(passesPrefilter(c, NAMES, 120), c.id).toBe(true);
+  });
+
+  it('covers the moment after a ramble nudge: no exchange, so only naming the bot gets through', () => {
+    const nudge = cases.filter((c) => c.id.startsWith('nudge-'));
+    expect(nudge.map((c) => [c.label, passesPrefilter(c, NAMES, 120)])).toEqual([
+      [false, false],
+      [true, true],
+    ]);
+  });
+
   it('contains no Discord ids or links (it is committed to a public repo)', () => {
     const raw = fs.readFileSync(BUNDLED, 'utf8');
     expect(raw).not.toMatch(/\d{17,20}/);

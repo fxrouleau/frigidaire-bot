@@ -176,14 +176,15 @@ describe('aiChat event: replying without a mention (the gate)', () => {
   });
 
   it('routes a message the gate says is addressed to the bot, and marks the turn done even if it fails', async () => {
-    vi.spyOn(addressedGate, 'evaluate').mockResolvedValue({ respond: true, trigger: 'name', probability: 0.9 });
+    vi.spyOn(addressedGate, 'evaluate').mockResolvedValue({ respond: true, trigger: 'name', probability: 0.9, cold: true });
     const noteTurnDone = vi.spyOn(addressedGate, 'noteTurnDone');
     vi.mocked(agent.handleMention).mockRejectedValueOnce(new Error('boom'));
     const fake = createFakeMessage({ content: 'fridge who wins worlds', botUserId: BOT_ID });
 
     await expect(aiChatEvent.execute(fake.message)).rejects.toThrow('boom');
 
-    expect(agent.handleMention).toHaveBeenCalledWith(fake.message);
+    // Unprompted: the agent tells the model nobody pinged it.
+    expect(agent.handleMention).toHaveBeenCalledWith(fake.message, { unprompted: true });
     expect(noteTurnDone).toHaveBeenCalledWith(fake.message);
   });
 
@@ -213,7 +214,56 @@ describe('aiChat event: replying without a mention (the gate)', () => {
 
     expect(fetchStub.mock.calls[0][0]).toBe(DECISIONS_ENDPOINT);
     expect(bodies[0]).toMatchObject({ model: 'typesafe/jev-1.13', provider: { zdr: true } });
-    expect(agent.handleMention).toHaveBeenCalledWith(fake.message);
+    expect(agent.handleMention).toHaveBeenCalledWith(fake.message, { unprompted: true });
+  });
+
+  it('end to end: after an explicit mention, the same member keeps talking without one', async () => {
+    vi.stubEnv('GATE_CHANNELS', 'gate-e2e-exchange');
+    vi.stubEnv('OPENROUTER_API_KEY', 'sk-test');
+    const fetchStub = vi.fn(
+      async () => new Response(JSON.stringify({ answers: { answer: { type: 'noul', noul: 0.88 } } }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchStub);
+    const inChannel = { botUserId: BOT_ID, channelId: 'gate-e2e-exchange', authorId: 'user-e2e' };
+    const pinged = createFakeMessage({ ...inChannel, messageId: 'x-1', content: 'yo', mentionedUserIds: [BOT_ID] });
+    const followup = createFakeMessage({ ...inChannel, messageId: 'x-2', content: 'ok but why is that' });
+    const stranger = createFakeMessage({ ...inChannel, messageId: 'x-3', authorId: 'user-other', content: 'lol' });
+
+    await aiChatEvent.execute(pinged.message);
+    await aiChatEvent.execute(followup.message);
+    await aiChatEvent.execute(stranger.message);
+
+    expect(vi.mocked(agent.handleMention).mock.calls).toEqual([
+      [pinged.message],
+      [followup.message, { unprompted: true }],
+    ]);
+    // Only the follow-up needed a decision: the stranger never talked to the bot and named nobody.
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+  });
+
+  it("a ramble nudge (the bot's reply that no turn asked for) does not start an exchange", async () => {
+    vi.stubEnv('GATE_CHANNELS', 'gate-e2e-nudge');
+    const fetchStub = vi.fn();
+    vi.stubGlobal('fetch', fetchStub);
+    const nudge = createFakeBotMessage({
+      botUserId: BOT_ID,
+      channelId: 'gate-e2e-nudge',
+      content: 'this is a #rambles moment',
+      repliedUserId: 'user-rambler',
+    });
+
+    await aiChatEvent.execute(nudge.message);
+    await aiChatEvent.execute(
+      createFakeMessage({
+        botUserId: BOT_ID,
+        channelId: 'gate-e2e-nudge',
+        authorId: 'user-rambler',
+        content: 'anyway as i was saying',
+      }).message,
+    );
+
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(agent.handleMention).not.toHaveBeenCalled();
   });
 
   it('never calls the decision model outside the gate channels', async () => {

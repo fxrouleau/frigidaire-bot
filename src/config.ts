@@ -584,20 +584,31 @@ export const config = {
         name.toLowerCase(),
       );
     },
-    /** A message from whoever the bot was just talking to is a candidate for this long; 0 disables. */
+    /**
+     * A channel has an active exchange while the bot answered someone there within this many seconds
+     * (sliding: every answer extends it). During one, messages from anyone the bot has exchanged with
+     * are candidates even without a name. 0 disables follow-ups (every name-drop is then cold).
+     */
     get followupSeconds(): number {
       return envInt('GATE_FOLLOWUP_SECONDS', 120, { min: 0 });
     },
-    /** Unsolicited replies per channel per 10 minutes; 0 ⇒ never reply unprompted. */
+    /**
+     * Runaway guard: unprompted replies per channel per rolling 10 minutes, all kinds together. High on
+     * purpose — conversations come in bursts and must not be cut off mid-exchange. 0 ⇒ never unprompted.
+     */
     get maxPer10Min(): number {
-      return envInt('GATE_MAX_PER_10MIN', 4, { min: 0 });
+      return envInt('GATE_MAX_PER_10MIN', 30, { min: 0 });
+    },
+    /** Cold interjections (a name-drop with no active exchange) per channel per rolling 10 minutes. */
+    get maxColdPer10Min(): number {
+      return envInt('GATE_MAX_COLD_PER_10MIN', 6, { min: 0 });
     },
     /** Probability at/above which the decision model's "addressed to the bot" counts as yes. */
     get threshold(): number {
       return envNumber('GATE_THRESHOLD', 0.7, { min: 0, max: 1 });
     },
     /**
-     * TypeSafe decision model for the gate and the ramble check. Pinned rather than `~typesafe/jev-latest`
+     * TypeSafe decision model for the gate. Pinned rather than `~typesafe/jev-latest`
      * because the thresholds are tuned against one model version. Only decision models are served by the
      * decisions endpoint, so anything else (a chat model id) ⇒ the default.
      */
@@ -607,13 +618,13 @@ export const config = {
     },
   },
 
-  /** Redirecting long rambles to their own channel (src/gate/). */
+  /** Redirecting a member's rambles to their own channel, judged on content (src/gate/). */
   ramble: {
-    /** Members whose rambles get redirected. Empty ⇒ feature off. */
+    /** Members whose rambles get redirected (side accounts resolve via LINKED_ACCOUNTS). Empty ⇒ feature off. */
     get userIds(): string[] {
       return envCsv('RAMBLE_USER_IDS');
     },
-    /** Where rambles belong. Unset ⇒ feature off (there is nowhere to point). */
+    /** Where rambles belong, and the archive's labelled set of real rambles. Unset ⇒ feature off. */
     get channelId(): string | undefined {
       return envString('RAMBLE_CHANNEL_ID');
     },
@@ -624,11 +635,13 @@ export const config = {
       const main = config.server.mainChannelId;
       return main ? [main] : [];
     },
+    /** Prefilter: this many messages in a row (nobody else in between) within the window ⇒ ask the judge. */
     get minMessages(): number {
-      return envInt('RAMBLE_MIN_MESSAGES', 4, { min: 1 });
+      return envInt('RAMBLE_MIN_MESSAGES', 3, { min: 1 });
     },
-    get minChars(): number {
-      return envInt('RAMBLE_MIN_CHARS', 800, { min: 1 });
+    /** Prefilter: one message with at least this many characters of prose ⇒ ask the judge. */
+    get longMessageChars(): number {
+      return envInt('RAMBLE_LONG_MESSAGE_CHARS', 600, { min: 1 });
     },
     get windowSeconds(): number {
       return envInt('RAMBLE_WINDOW_SECONDS', 300, { min: 1 });
@@ -637,9 +650,9 @@ export const config = {
     get cooldownMinutes(): number {
       return envNumber('RAMBLE_COOLDOWN_MINUTES', 120, { min: 0 });
     },
-    /** Probability at/above which the decision model's "this is a ramble" counts as yes. */
+    /** The judge's confidence at/above which its "this is a ramble" earns a nudge. */
     get threshold(): number {
-      return envNumber('RAMBLE_THRESHOLD', 0.7, { min: 0, max: 1 });
+      return envNumber('RAMBLE_THRESHOLD', 0.75, { min: 0, max: 1 });
     },
   },
 
