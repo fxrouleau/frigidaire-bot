@@ -39,7 +39,7 @@ function voice(opts: FakeMessageOptions = {}) {
   });
 }
 
-const OK: TranscriptionOutcome = { status: 'ok', text: 'on joue ce soir?\nEnglish: are we playing tonight?', cached: false };
+const OK: TranscriptionOutcome = { status: 'ok', text: 'on joue ce soir?\nouais vers 9h', cached: false };
 
 beforeEach(() => {
   setBotDbForTesting(new BotDb(':memory:'));
@@ -60,7 +60,7 @@ describe('VoiceAutoTranscriber', () => {
     expect(recorders.reply.calls).toEqual([
       [
         {
-          content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?\n> English: are we playing tonight?`,
+          content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?\n> ouais vers 9h`,
           allowedMentions: { parse: [], repliedUser: false },
           flags: MessageFlags.SuppressNotifications,
         },

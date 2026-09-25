@@ -6,8 +6,8 @@
 //          speechToText.ts). The transcript is what was said, in the language it was said.
 //   - chat (TRANSCRIPTION_FALLBACK_MODEL, default Gemini 3.5 Flash-Lite, or TRANSCRIPTION_MODEL itself
 //          when it is a chat model): an `input_audio` part to an audio-input chat model with
-//          provider.zdr pinned per request. Its prompt also asks for an "English: …" line under
-//          non-English speech (Whisper can't do that in the same call, and the group reads French anyway).
+//          provider.zdr pinned per request. Same output as Whisper: what was said, in the language it
+//          was said, with no translation line (the group reads French; the Translate command covers the rest).
 //
 // Pipeline: cache → duration guards (too long / under a second) → bounded download → send as-is when
 // the route takes the format, otherwise (or when the provider refuses it) transcode to MP3 → store
@@ -38,7 +38,7 @@ const DOWNLOAD_TIMEOUT_MS = 30_000;
 const TRANSCRIBE_TIMEOUT_MS = 120_000;
 // A failed recording is not retried on every chat turn that renders it; it gets another chance later.
 const FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
-// ~10 minutes of speech plus its translation fits comfortably; reasoning models spend part of it thinking.
+// ~10 minutes of speech fits comfortably; reasoning models spend part of it thinking.
 const MAX_OUTPUT_TOKENS = 8192;
 const MAX_TRANSCRIPT_CHARS = 12_000;
 const NO_SPEECH = '[no speech]';
@@ -51,7 +51,6 @@ const TRANSCRIBE_PROMPT = `Transcribe this recording.
 - Write exactly what is said, in the language it is spoken. Keep slang, profanity, names and code-switching as spoken. Don't translate, summarize, correct or censor. Pure filler sounds (um, uh) may be dropped.
 - When more than one person speaks, start each speaker's turn on a new line beginning with "- ".
 - Mention non-speech sounds only when they matter, in brackets, e.g. [laughs].
-- If any of the speech is not in English, end with one extra line: "English: " followed by an English translation of everything said.
 - If there is no intelligible speech (silence, noise, music without words), output exactly: ${NO_SPEECH}
 Output the transcript only: no preamble, no quotes, no timestamps, no notes.`;
 

@@ -19,7 +19,7 @@ export const TRANSCRIPT_HEADER = '-# 🎙️ transcript';
 export const TOO_LONG_HEADER = '-# 🎙️ too long to transcribe';
 
 const MAX_AUDIO_PER_MESSAGE = 3;
-// A 10-minute voice message with its translation runs ~4 messages; anything beyond that is cut.
+// A 10-minute voice message (~1,500 words) runs ~4-5 messages; anything beyond that is cut.
 const MAX_REPLY_CHUNKS = 5;
 const WRAP_AT = 1800;
 

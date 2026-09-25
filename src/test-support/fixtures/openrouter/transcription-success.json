@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Gemini transcribing a (fictional) French voice message through input_audio: verbatim transcript plus the English line the prompt asks for. Response shape as OpenRouter returns it for google/gemini-* on Google Vertex.",
+  "description": "Gemini transcribing a (fictional) French voice message through input_audio: verbatim transcript in the language spoken, no translation. Response shape as OpenRouter returns it for google/gemini-* on Google Vertex.",
   "status": 200,
   "request": {
     "model": "google/gemini-3.5-flash-lite",
@@ -31,7 +31,7 @@
         "index": 0,
         "message": {
           "role": "assistant",
-          "content": "salut tout le monde, on se fait une game ce soir?\nEnglish: hi everyone, are we playing a game tonight?",
+          "content": "salut tout le monde, on se fait une game ce soir?",
           "refusal": null,
           "reasoning": null
         }

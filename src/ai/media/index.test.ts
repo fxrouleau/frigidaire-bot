@@ -25,7 +25,7 @@ import { VideoDescriber } from './video';
 
 const VOICE_URL = 'https://cdn.discordapp.com/attachments/1/2/voice-message.ogg';
 const CLIP_URL = 'https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/clip.mp4';
-const TRANSCRIPT = 'salut tout le monde, on se fait une game ce soir?\nEnglish: hi everyone, are we playing a game tonight?';
+const TRANSCRIPT = 'salut tout le monde, on se fait une game ce soir?';
 
 function install(fixtures: OpenRouterFixture[] = []) {
   const { client, requests } = createCapturingClient(fixtures);

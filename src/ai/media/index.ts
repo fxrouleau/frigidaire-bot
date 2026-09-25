@@ -92,8 +92,8 @@ export function startTranscriptionRouteChecks(intervalMs = ROUTE_CHECK_INTERVAL_
 }
 
 /**
- * Transcribes an audio file: the words in the language they were spoken (the chat-model fallback also
- * adds a final "English: …" line under non-English speech). '' when the recording holds no speech;
+ * Transcribes an audio file: the words in the language they were spoken, never translated (on either
+ * route: speech-to-text or the chat-model fallback). '' when the recording holds no speech;
  * undefined when transcription is unavailable, the recording is over VOICE_MAX_SECONDS or 25 MB, or
  * the call failed.
  */

@@ -37,7 +37,7 @@ const success = loadFixture('transcription-success');
 const noSpeech = loadFixture('transcription-no-speech');
 const rejected = loadFixture('audio-format-rejected');
 const serverError = loadFixture('http-500-error');
-const TRANSCRIPT = 'salut tout le monde, on se fait une game ce soir?\nEnglish: hi everyone, are we playing a game tonight?';
+const TRANSCRIPT = 'salut tout le monde, on se fait une game ce soir?';
 
 const files = createFileFetch({
   [VOICE_URL]: { body: OGG_BYTES, contentType: 'audio/ogg' },
@@ -108,7 +108,8 @@ describe('AudioTranscriber', () => {
       input_audio: { data: OGG_BYTES.toString('base64'), format: 'ogg' },
     });
     expect(prompt.type).toBe('text');
-    expect(String(prompt.text)).toContain('English: ');
+    // Same output as the speech-to-text route: the words as spoken, no translation line.
+    expect(String(prompt.text)).not.toMatch(/English/);
   });
 
   it('transcodes a voice message to MP3 for models that only take wav/mp3', async () => {
@@ -374,7 +375,7 @@ describe('AudioTranscriber: Whisper route', () => {
       timestamp_granularities: ['segment'],
     });
     expect(request.headers[FEATURE_HEADER.toLowerCase()]).toBe('transcription');
-    // No translation line on this route.
+    // No translation line on either route.
     expect(outcome.status === 'ok' && outcome.text.includes('English:')).toBe(false);
     expect(getStoredTranscript('v1')).toBe(SAID);
   });
@@ -512,9 +513,9 @@ describe('cleanTranscript', () => {
     expect(cleanTranscript('"hello there"')).toBe('hello there');
   });
 
-  it('keeps inner quotes and the English line', () => {
+  it('keeps inner quotes and speaker lines', () => {
     expect(cleanTranscript('he said "go" and "stop"')).toBe('he said "go" and "stop"');
-    expect(cleanTranscript('hola\nEnglish: hello')).toBe('hola\nEnglish: hello');
+    expect(cleanTranscript('- hola\n- salut')).toBe('- hola\n- salut');
   });
 
   it('maps the no-speech marker to an empty transcript and nothing at all to undefined', () => {
