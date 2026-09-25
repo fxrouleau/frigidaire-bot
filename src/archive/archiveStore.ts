@@ -561,6 +561,23 @@ export class ArchiveStore {
     })();
   }
 
+  /**
+   * Re-applies a fresh API page to the messages of it that are already archived (edits, late link
+   * previews, Discord's current reaction counts); the others are left out, so this never widens what
+   * the archive holds. One transaction. Returns how many rows changed.
+   */
+  refreshMessages(inputs: ArchiveMessageInput[]): number {
+    if (inputs.length === 0) return 0;
+    return this.db.transaction(() => {
+      const existing = this.existingIds(inputs.map((i) => i.id));
+      let changed = 0;
+      for (const input of inputs) {
+        if (existing.has(input.id)) changed += this.stmt(UPSERT_SQL).run(this.params(input)).changes;
+      }
+      return changed;
+    })();
+  }
+
   private params(input: ArchiveMessageInput): Record<string, string | number | null> {
     return {
       id: input.id,
@@ -1031,6 +1048,14 @@ export class ArchiveStore {
            WHERE source != 'bot' AND instr(lower(author_name), ?) > 0 LIMIT 20`;
     const rows = this.stmt(sql).all(needle) as { author_id: string | null; author_name: string }[];
     return rows.map((r) => ({ authorId: r.author_id, authorName: r.author_name }));
+  }
+
+  /** Ids of a channel's live (not deleted) archived messages created at or after `sinceMs`. */
+  liveMessageIdsSince(channelId: string, sinceMs: number): string[] {
+    const rows = this.stmt(
+      'SELECT id FROM messages WHERE channel_id = ? AND created_at >= ? AND deleted_at IS NULL',
+    ).all(channelId, sinceMs) as { id: string }[];
+    return rows.map((r) => r.id);
   }
 
   /** Oldest archived message of a channel (deleted included: it still marks how far the archive reaches). */
