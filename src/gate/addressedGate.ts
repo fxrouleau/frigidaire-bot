@@ -20,7 +20,7 @@
 // so a member's side account continues their main account's exchange. This state is in memory: after
 // a restart, follow-ups without a name work again once the bot has answered someone.
 import type { Message } from 'discord.js';
-import { isTranscriptReply } from '../ai/media/autoTranscribe';
+import { isTranscriptReply, repliesToTranscript } from '../ai/media/autoTranscribe';
 import { getMemoryStore } from '../ai/memory';
 import { config } from '../config';
 import { canonicalUserId, isSamePerson } from '../linkedAccounts';
@@ -35,6 +35,8 @@ const DEFAULT_CONTEXT_SIZE = 6;
 // (aiChat always does; this is the backstop) stops counting after this long.
 const PENDING_TURN_TTL_MS = 5 * 60 * 1000;
 const LOG_EXCERPT_CHARS = 80;
+// Who a reply to the bot's transcript of a voice message is aimed at: the voice message, not the bot.
+const VOICE_MESSAGE_TARGET = 'a voice message';
 // How many routed message ids wasRouted() remembers (a few minutes of busy chat).
 const ROUTED_IDS_KEPT = 200;
 
@@ -307,7 +309,9 @@ export class AddressedGate {
     trackedSeconds: number | undefined,
     partner: boolean,
   ): Promise<AddressedInput> {
-    const history = await this.fetchHistory(message);
+    // The bot's voice-message transcripts are left out: they are not the bot talking (and a reply to
+    // one is a reply to the voice message, see replyTargetName).
+    const history = (await this.fetchHistory(message)).filter((m) => !isTranscriptReply(m));
     const context = history
       .map((m) => toChatLine(m, botId, botName))
       .filter((line): line is ChatLine => line !== undefined);
@@ -315,9 +319,9 @@ export class AddressedGate {
     let secondsSinceBotSpoke = trackedSeconds;
     let authorIsBotsPartner = partner;
     if (secondsSinceBotSpoke === undefined) {
-      // Nothing tracked (e.g. right after a restart): read the same facts off the fetched history. A
-      // voice-message transcript is not the bot speaking, nor the voice message's author its partner.
-      const lastOwn = history.findLast((m) => m.author.id === botId && !m.webhookId && !isTranscriptReply(m));
+      // Nothing tracked (e.g. right after a restart): read the same facts off the fetched history
+      // (transcripts already left out, so the voice message's author doesn't read as the bot's partner).
+      const lastOwn = history.findLast((m) => m.author.id === botId && !m.webhookId);
       if (lastOwn) {
         secondsSinceBotSpoke = (message.createdTimestamp - lastOwn.createdTimestamp) / 1000;
         authorIsBotsPartner ||= isSamePerson(lastOwn.mentions?.repliedUser?.id, message.author.id);
@@ -395,6 +399,7 @@ function resolveUserName(message: Message, id: string, botId: string, botName: s
 /** Who a Discord reply is aimed at, by name; undefined when the message is not a reply (or it's unknown). */
 function replyTargetName(message: Message, botId: string, botName: string): string | undefined {
   if (!message.reference?.messageId) return undefined;
+  if (repliesToTranscript(message)) return VOICE_MESSAGE_TARGET;
   const target = message.mentions?.repliedUser;
   if (!target) return undefined;
   return resolveUserName(message, target.id, botId, botName) || target.displayName || target.username || undefined;

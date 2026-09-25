@@ -141,6 +141,19 @@ describe('createEdgyJudge with a chat model', () => {
     expect((requests[0] as { provider: unknown }).provider).toEqual({ zdr: true });
   });
 
+  it('leaves a reasoning model room to answer: low effort, and max_tokens past the reasoning', async () => {
+    // The default chat model (GLM-5.3-Flash) reasons at 'max' unless told otherwise, and reasoning counts
+    // toward max_tokens: with 20 tokens it never got to the JSON, so every fallback failed closed.
+    const { client, requests } = chatClientSaying('{"edgy": true}');
+    const judge = createEdgyJudge({ model: 'typesafe/jev-1.13', client, fallbackModel: 'z-ai/glm-5.3-flash' });
+
+    expect(await judge(IMAGE_ONLY_INPUT)).toBe(true);
+
+    const request = requests[0] as { reasoning?: unknown; max_tokens?: number };
+    expect(request.reasoning).toEqual({ effort: 'low' });
+    expect(request.max_tokens).toBeGreaterThanOrEqual(1000);
+  });
+
   it('tolerates prose around the JSON', async () => {
     const { client } = chatClientSaying('Sure! {"edgy": false} — pretty tame.');
     const judge = createEdgyJudge({ model: 'some/chat-model', client });

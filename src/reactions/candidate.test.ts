@@ -103,6 +103,11 @@ describe('intakeSkipReason', () => {
     ).toBeUndefined();
   });
 
+  it('treats a reply that pings the bot as a reply, not a mention', () => {
+    const reply = message({ referencedMessageId: '999', repliedUserId: 'bot-1', replyPinged: true, content: 'ok' });
+    expect(intakeSkipReason(reply, SETTINGS)).toBe('replies to the bot');
+  });
+
   it('finds a reply to the bot through the message cache when Discord did not resolve the author', () => {
     const botMessage = message({ messageId: '999', authorId: 'bot-1', authorIsBot: true, content: 'answer' });
     const reply = message({ referencedMessageId: '999', content: 'ok', cached: [botMessage] });

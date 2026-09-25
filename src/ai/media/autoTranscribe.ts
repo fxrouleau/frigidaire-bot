@@ -40,12 +40,15 @@ const TRANSCRIBE_CHANNEL_TYPES: ReadonlySet<ChannelType> = new Set([
  * replays channel history to a model should skip these: the voice message they answer already carries
  * the transcript through the media enricher. And they are not the bot talking: a reply to one is a
  * reply to the voice message, not to the bot.
+ *
+ * By the header every transcript message opens with, else by the stored reply ids (continuations
+ * posted before each message carried a header of its own). The header is what answers for the bot's own
+ * MessageCreate: the id is stored only once the reply call returns, which can be after that event.
  */
 export function isTranscriptReply(message: Message): boolean {
   if (message.author.id !== message.client.user?.id) return false;
   const content = message.content ?? '';
   if (content.startsWith(TRANSCRIPT_HEADER) || content.startsWith(TOO_LONG_HEADER)) return true;
-  // Transcripts posted before every message of a long one carried the header: known by id.
   return isStoredTranscriptReply(message.id);
 }
 

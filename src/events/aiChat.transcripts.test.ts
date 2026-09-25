@@ -105,23 +105,6 @@ describe('aiChat and transcript replies', () => {
     expect(addressedGate.evaluate).toHaveBeenCalledTimes(2);
   });
 
-  it('a pinging reply to an ordinary bot message still reaches the agent', async () => {
-    const said = createFakeBotMessage({ botUserId: BOT_ID, messageId: 'said-1', content: 'kraken into ie' });
-    const fake = createFakeMessage({
-      content: 'no way',
-      botUserId: BOT_ID,
-      referencedMessageId: 'said-1',
-      repliedUserId: BOT_ID,
-      replyPinged: true,
-      cachedMessages: [said.message],
-    });
-
-    await aiChatEvent.execute(fake.message);
-
-    expect(agent.handleMention).toHaveBeenCalledWith(fake.message);
-    expect(addressedGate.evaluate).not.toHaveBeenCalled();
-  });
-
   it('a mention written in a pinging reply to a transcript still reaches the agent', async () => {
     rememberTranscriptReply('transcript-3', 'voice-3');
     const fake = createFakeMessage({

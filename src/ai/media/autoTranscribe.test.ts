@@ -177,6 +177,9 @@ describe('formatTranscriptReply', () => {
       expect(header).toBe(`${TRANSCRIPT_HEADER} (${index + 1}/4)`);
       for (const line of lines) expect(line.startsWith('>')).toBe(true);
     }
+    // Nothing lost or duplicated across the split.
+    const rejoined = chunks.flatMap((chunk) => chunk.split('\n').slice(1)).join(' ').replaceAll('> ', '');
+    expect(rejoined).toBe(words);
   });
 
   it('marks every message of a long transcript as a transcript reply, not the bot talking', () => {
