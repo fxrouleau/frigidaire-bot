@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   DESCRIPTION_MAX_CHARS,
   defuseEveryAt,
-  findDuplicate,
   issueSummary,
   renderIssueBody,
   renderSupportComment,
@@ -160,16 +159,5 @@ describe('duplicate titles', () => {
     expect(titleSimilarity('Add reminders', 'Add polls')).toBe(0);
     expect(titleSimilarity('Birthday reminders', 'Birthday announcements')).toBeLessThan(0.75);
     expect(titleSimilarity('Add', 'Add')).toBe(0);
-  });
-
-  it('findDuplicate returns only a clear match, and the closest one', () => {
-    const issues = [
-      { number: 1, title: 'Voice message transcription' },
-      { number: 2, title: 'Add reminder command' },
-      { number: 3, title: 'Reminder' },
-    ];
-    expect(findDuplicate('Reminders', issues)?.number).toBe(3);
-    expect(findDuplicate('Transcribe voice messages', issues)).toBeUndefined();
-    expect(findDuplicate('Weather command', issues)).toBeUndefined();
   });
 });

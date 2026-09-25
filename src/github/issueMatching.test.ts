@@ -60,6 +60,16 @@ describe('matchIssues', () => {
     expect(result.candidates).toEqual([]);
   });
 
+  it('only a clear title match is automatic, and the closest one wins', () => {
+    const open = [issue(1, 'Voice message transcription'), issue(2, 'Add reminder command'), issue(3, 'Reminder')];
+    expect(matchIssues('Reminders', { open, searchHits: [] }, opts).automatic?.number).toBe(3);
+    // Similar but not near-identical: a candidate for the model, not an automatic match.
+    const voice = matchIssues('Transcribe voice messages', { open, searchHits: [] }, opts);
+    expect(voice.automatic).toBeUndefined();
+    expect(voice.candidates.map((c) => c.issue.number)).toEqual([1]);
+    expect(matchIssues('Weather command', { open, searchHits: [] }, opts).automatic).toBeUndefined();
+  });
+
   it('prefers a near-identical open issue over a closed one, and falls back to a recently closed one', () => {
     const done = closed(3, 'Reminder command', 'completed', 10);
     const open = issue(9, 'Reminders command');

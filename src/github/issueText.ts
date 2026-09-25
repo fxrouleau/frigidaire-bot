@@ -268,16 +268,6 @@ export function titleSimilarity(a: string, b: string): number {
   return shared / (tokensA.size + tokensB.size - shared);
 }
 
-// A false "already requested" silently drops a member's request, while a missed duplicate costs the
-// owner one click to close: only near-identical titles count.
+// The automatic-duplicate shortcut (issueMatching.ts): an automatic match skips the chat model's
+// judgment, so only near-identical titles qualify; everything looser goes to the model as a candidate.
 export const DUPLICATE_THRESHOLD = 0.75;
-
-/** The open issue that is clearly the same request, if any (the most similar one wins). */
-export function findDuplicate<T extends { title: string }>(title: string, issues: T[]): T | undefined {
-  let best: { issue: T; score: number } | undefined;
-  for (const issue of issues) {
-    const score = titleSimilarity(title, issue.title);
-    if (score >= DUPLICATE_THRESHOLD && (!best || score > best.score)) best = { issue, score };
-  }
-  return best?.issue;
-}
