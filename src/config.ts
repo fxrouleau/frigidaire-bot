@@ -89,6 +89,9 @@ export const DEFAULT_TIKTOK_FIXERS = ['tnktok.com', 'fixtiktok.com', 'tfxktok.co
 // chat model also avoids a judge grading its own style.
 export const DEFAULT_EVAL_JUDGE_MODEL = 'google/gemini-3.1-pro-preview';
 
+// Env variables that hold channel ids, by name (see config.logging.channelVariables).
+const CHANNEL_VARIABLE_NAME = /(?:^|_)(?:CHANNEL_IDS?|CHANNELS)$|^CHANNEL_NOTES$/;
+
 export const DELETE_REPOST_MODES = ['edgy', 'always'] as const;
 export type DeleteRepostMode = (typeof DELETE_REPOST_MODES)[number];
 
@@ -293,6 +296,20 @@ export const config = {
     /** Files kept in total, the current one included (bot.log, bot.log.1, bot.log.2). */
     get fileMaxFiles(): number {
       return envInt('LOG_FILE_MAX_FILES', 3, { min: 1, max: 20 });
+    },
+    /**
+     * Every set variable that names Discord channels, found by naming convention rather than a list
+     * (…_CHANNEL_ID, …_CHANNEL_IDS, …_CHANNELS, CHANNEL_NOTES), so a channel variable added later shows
+     * up in the startup channel report (src/channelEnv.ts) without touching it. Sorted by name.
+     */
+    get channelVariables(): Array<{ name: string; value: string }> {
+      return Object.keys(process.env)
+        .filter((name) => CHANNEL_VARIABLE_NAME.test(name))
+        .sort()
+        .flatMap((name) => {
+          const value = envString(name);
+          return value === undefined ? [] : [{ name, value }];
+        });
     },
   },
 
