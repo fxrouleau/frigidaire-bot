@@ -34,6 +34,7 @@ export type UsageFeature =
   | 'wrapped'
   | 'birthday'
   | 'ramble'
+  | 'auto_react'
   | 'eval'
   | 'other';
 
