@@ -502,8 +502,10 @@ async function prepare(opts: SummarizeChannelOptions, now: Date): Promise<Prepar
     };
   }
 
+  // Only a request message was written by the requester; a target message's author is someone else.
   const requesterName = opts.requesterId
-    ? (ctx.identitiesById.get(opts.requesterId)?.display_name ?? attributeMessage(message)?.authorName)
+    ? (ctx.identitiesById.get(opts.requesterId)?.display_name ??
+      (isRequest ? attributeMessage(message)?.authorName : undefined))
     : undefined;
   const header = [
     `Channel: ${channelLabel(message)}`,

@@ -563,5 +563,17 @@ describe('summarizeChannelResult', () => {
     expect(prompt).toContain('Requested by Felix.');
     // Paged from the end of the range, not from the target (which would only see older messages).
     expect(BigInt(String(fetchCalls[0].before))).toBeGreaterThan(BigInt(after[1].id));
+
+    // A requester the identities table doesn't know is never mistaken for the target's author.
+    const again = okClient();
+    await summarizeChannelResult({
+      message: target,
+      messageRole: 'target',
+      start: target.createdAt,
+      requesterId: 'u-stranger',
+      client: again.client,
+      now,
+    });
+    expect(userPrompt(again.requests[0])).not.toContain('Requested by');
   });
 });
