@@ -67,7 +67,7 @@ describe('FeatureRequestService: filing', () => {
     expect(outcome).toMatchObject({ kind: 'filed', issue: { number: 1, htmlUrl: 'https://github.com/owner/repo/issues/1' } });
     const [create] = creates();
     expect(create?.body).toMatchObject({ title: 'Add polls', labels: ['feature-request', 'from-discord'] });
-    expect((create?.body as { body: string }).body).toContain('Requested by **Jason**');
+    expect((create?.body as { body: string }).body).toContain('🤖 Filed by Frigidaire for **Jason**');
     expect(rows()).toEqual([{ user_id: 'user-1', status: 'filed', issue_number: 1 }]);
   });
 
@@ -246,8 +246,9 @@ describe('FeatureRequestService: duplicates of an open issue get a +1 comment', 
     expect(rows()).toEqual([]);
     expect(fake.comments).toHaveLength(1);
     expect(fake.comments[0].issueNumber).toBe(7);
-    expect(fake.comments[0].body).toContain('+1 from **Jason**: It should work in threads too.');
-    expect(fake.comments[0].body).toContain('[jump to the request on Discord](https://discord.com/channels/g/c/m)');
+    expect(fake.comments[0].body).toContain(
+      '🤖 Filed by Frigidaire for **Jason** (+1: they asked for this too) · [the request on Discord](https://discord.com/channels/g/c/m)\n\nIt should work in threads too.',
+    );
     expect(commentRows()).toEqual([{ user_id: 'user-1', repo: 'owner/repo', issue_number: 7, status: 'posted' }]);
   });
 
@@ -410,7 +411,7 @@ describe('FeatureRequestService: candidates and the model’s decision', () => {
     expect((await service.submit(request('Add trivia night', { decision: { kind: 'new' } }), requester)).kind).toBe('filed');
   });
 
-  it('files a related request as a new issue that starts with "Related: #N"', async () => {
+  it('files a related request as a new issue with a "Related: #N" line on top', async () => {
     const { service, creates } = setup({ issues: related });
     await service.submit(request('Add polls with ranked choices'), requester);
     const outcome = await service.submit(
@@ -419,7 +420,9 @@ describe('FeatureRequestService: candidates and the model’s decision', () => {
     );
 
     expect(outcome).toMatchObject({ kind: 'filed', issue: { number: 6 }, relatedTo: { number: 4 } });
-    expect((creates()[0].body as { body: string }).body.startsWith('Related: #4\n\n### What')).toBe(true);
+    const body = (creates()[0].body as { body: string }).body;
+    expect(body.startsWith('🤖 Filed by Frigidaire for **Jason**')).toBe(true);
+    expect(body).toContain(')\n\nRelated: #4\n\n### What');
   });
 
   it('refuses to link to an issue that does not exist', async () => {
@@ -431,6 +434,24 @@ describe('FeatureRequestService: candidates and the model’s decision', () => {
     );
     expect(outcome).toEqual({ kind: 'unknown_issue', issueNumber: 42, reason: 'missing' });
     expect(creates()).toHaveLength(0);
+  });
+
+  it("never backs or links a stranger's issue that isn't a feature request (public repo)", async () => {
+    const stranger: FakeIssue = { number: 9, title: 'Anonymous polls', labels: [], authorAssociation: 'NONE' };
+    const { service, creates, fake } = setup({ issues: [...related, stranger] });
+    await service.submit(request('Add polls with ranked choices'), requester);
+    for (const decision of [
+      { kind: 'related_to', issueNumber: 9 },
+      { kind: 'duplicate_of', issueNumber: 9 },
+    ] as const) {
+      expect(await service.submit(request('Add polls with ranked choices', { decision }), requester)).toEqual({
+        kind: 'unknown_issue',
+        issueNumber: 9,
+        reason: 'not_a_request',
+      });
+    }
+    expect(creates()).toHaveLength(0);
+    expect(fake.comments).toHaveLength(0);
   });
 
   it('matches a reworded title to the reviewed request, but not a different request or a stale review', async () => {

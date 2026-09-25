@@ -48,6 +48,7 @@ describe('GitHubClient requests', () => {
       body: 'b',
       locked: false,
       isPullRequest: false,
+      authorAssociation: 'OWNER',
     });
   });
 

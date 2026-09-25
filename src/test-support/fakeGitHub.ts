@@ -1,7 +1,8 @@
 // An in-memory stand-in for the GitHub REST endpoints the feature-request flow uses (list open issues,
 // search issues, get one issue, create an issue, comment on one, create a label), served through an
 // injected fetch. Response shapes follow what api.github.com returns (issue objects with `html_url`,
-// `state`, `state_reason`, `closed_at`, `labels: [{ name }]`, and a `pull_request` key on pull requests;
+// `state`, `state_reason`, `closed_at`, `labels: [{ name }]`, `author_association`, and a `pull_request`
+// key on pull requests;
 // search results wrapped in `{ total_count, items, search_type }`; 422 `already_exists` for a duplicate
 // label). Failures can be scripted per method/path to exercise every error branch.
 import type { FetchLike } from '../github/client';
@@ -27,6 +28,11 @@ export type FakeIssue = {
   locked?: boolean;
   /** The issue was moved to this repo (`owner/name`): GET answers with the moved issue, as after a 301. */
   transferredTo?: string;
+  /**
+   * GitHub's `author_association`. Default 'OWNER': the bot files with the owner's token, and most tests
+   * stand for issues the owner (or the bot) opened. 'NONE' is a stranger on the public repo.
+   */
+  authorAssociation?: string;
 };
 
 export type FakeComment = { issueNumber: number; body: string; htmlUrl: string };
@@ -104,6 +110,7 @@ export function createFakeGitHub(opts: FakeGitHubOptions = {}): FakeGitHub {
       repository_url: `https://api.github.com/repos/${home}`,
       html_url: `https://github.com/${home}/${issue.isPullRequest ? 'pull' : 'issues'}/${issue.number}`,
       labels: issue.labels.map((name) => ({ name })),
+      author_association: issue.authorAssociation ?? 'OWNER',
       ...(issue.isPullRequest ? { pull_request: { url: 'https://api.github.com/pr' } } : {}),
     };
   };

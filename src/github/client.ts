@@ -73,6 +73,11 @@ export type GitHubIssue = {
   locked: boolean;
   /** The issues endpoints also return pull requests (they carry a `pull_request` key). */
   isPullRequest: boolean;
+  /**
+   * GitHub's `author_association`: the author's relation to the repo (OWNER, MEMBER, COLLABORATOR,
+   * CONTRIBUTOR, NONE, …). Undefined when the response leaves it out.
+   */
+  authorAssociation?: string;
 };
 
 export type IssueSearchType = 'lexical' | 'hybrid' | 'semantic';
@@ -328,6 +333,7 @@ function validationCodes(body: ErrorBody): string[] {
 function parseIssue(raw: unknown): GitHubIssue | undefined {
   if (!isRecord(raw)) return undefined;
   const { number, title, html_url: htmlUrl, labels, state_reason: stateReason, closed_at: closedAt, body } = raw;
+  const association = raw.author_association;
   if (typeof number !== 'number' || typeof title !== 'string' || typeof htmlUrl !== 'string') return undefined;
   const closedMs = typeof closedAt === 'string' ? Date.parse(closedAt) : Number.NaN;
   return {
@@ -345,6 +351,7 @@ function parseIssue(raw: unknown): GitHubIssue | undefined {
     body: typeof body === 'string' ? body : '',
     locked: raw.locked === true,
     isPullRequest: raw.pull_request !== undefined && raw.pull_request !== null,
+    authorAssociation: typeof association === 'string' ? association : undefined,
   };
 }
 

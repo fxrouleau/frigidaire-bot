@@ -10,8 +10,23 @@
 // "Plausible" is deliberately loose (a missed duplicate is worse than one extra tool round, and the model
 // makes the call), but semantic search always returns SOMETHING, so a search hit must share at least one
 // content word with the request's title to count; everything else needs some title overlap.
+//
+// Only feature requests are ever candidates: issues labelled `feature-request` (every issue the bot files
+// is) or opened by the owner or a collaborator. The repo is public, so any other issue is text from a
+// stranger, and candidates are shown to the chat model: an injection surface, and never a request a
+// member could be +1-ing anyway.
 import type { GitHubIssue } from './client';
 import { DUPLICATE_THRESHOLD, contentWords, issueSummary, titleSimilarity, titleTokens } from './issueText';
+
+export const FEATURE_REQUEST_LABEL = 'feature-request';
+/** `author_association` values of people with a say in the repo: the owner, org members, collaborators. */
+const TRUSTED_ASSOCIATIONS: ReadonlySet<string> = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
+/** A feature request the bot may match against: labelled as one, or opened by the owner/a collaborator. */
+export function isFeatureRequestIssue(issue: GitHubIssue): boolean {
+  if (issue.labels.includes(FEATURE_REQUEST_LABEL)) return true;
+  return issue.authorAssociation !== undefined && TRUSTED_ASSOCIATIONS.has(issue.authorAssociation);
+}
 
 /** Title overlap that makes an issue worth showing even without a search hit (e.g. 1 of 4 words). */
 export const RELATED_TITLE_THRESHOLD = 0.25;
@@ -70,12 +85,13 @@ export function searchTerms(title: string): string {
 }
 
 /**
- * Open issues always qualify. Closed ones only within the lookback window (an old decision is not worth
- * re-litigating, and the feature may have changed since), and never those closed as duplicates: the
- * issue they duplicate is the one to talk about, and it is found on its own.
+ * Feature requests only (see isFeatureRequestIssue). Open ones always qualify; closed ones only within
+ * the lookback window (an old decision is not worth re-litigating, and the feature may have changed
+ * since), and never those closed as duplicates: the issue they duplicate is the one to talk about, and
+ * it is found on its own.
  */
 export function isEligible(issue: GitHubIssue, now: number, closedLookbackMs: number): boolean {
-  if (issue.isPullRequest) return false;
+  if (issue.isPullRequest || !isFeatureRequestIssue(issue)) return false;
   if (issue.state === 'open') return true;
   if (issue.stateReason === 'duplicate' || closedLookbackMs <= 0) return false;
   return issue.closedAt !== undefined && issue.closedAt >= now - closedLookbackMs;

@@ -109,7 +109,7 @@ describe('request_feature handler', () => {
     expect(issue.body).toContain('Let members start a poll with options and see results.');
     expect(issue.body).toContain('- [ ] A poll can be started');
     expect(issue.body).toContain(
-      'Requested by **Jason** on Discord · [jump to the request](https://discord.com/channels/guild-7/channel-9/message-42)',
+      '🤖 Filed by Frigidaire for **Jason** · [the request on Discord](https://discord.com/channels/guild-7/channel-9/message-42)',
     );
   });
 
@@ -148,7 +148,8 @@ describe('request_feature handler', () => {
     expect(result).toContain('call request_feature again with decision "new"');
     expect(createdIssues()).toHaveLength(0);
     // Without extra_details, the +1 carries the member's own description (sanitized, no plain @).
-    expect(fake.comments[0].body).toContain('+1 from **Jason**: Polls please, with ＠everyone pinged.');
+    expect(fake.comments[0].body).toContain('🤖 Filed by Frigidaire for **Jason**');
+    expect(fake.comments[0].body).toContain('\n\nPolls please, with ＠everyone pinged.');
     expect(fake.comments[0].body).toContain('https://discord.com/channels/guild-7/channel-9/message-42');
   });
 
@@ -252,7 +253,7 @@ describe('request_feature: existing issues and the decision call', () => {
     await run(ranked);
     const result = await run({ ...ranked, decision: 'related_to', issue_number: '#4' });
     expect(result).toContain('Filed as GitHub issue #6 (linked as related to #4)');
-    expect(createdIssues()[0].body.startsWith('Related: #4\n\n')).toBe(true);
+    expect(createdIssues()[0].body).toContain('\n\nRelated: #4\n\n### What');
   });
 
   it('adds the +1 with the extra details on duplicate_of', async () => {
@@ -261,7 +262,8 @@ describe('request_feature: existing issues and the decision call', () => {
     await run(ranked);
     const result = await run({ ...ranked, decision: 'duplicate_of', issue_number: 4, extra_details: 'Ranked choice would be nice.' });
     expect(result).toContain("Added Jason's +1 to it");
-    expect(fake.comments[0].body.startsWith('+1 from **Jason**: Ranked choice would be nice.')).toBe(true);
+    expect(fake.comments[0].body.startsWith('🤖 Filed by Frigidaire for **Jason** (+1: they asked for this too)')).toBe(true);
+    expect(fake.comments[0].body).toContain('\n\nRanked choice would be nice.\n\n');
     expect(createdIssues()).toHaveLength(0);
   });
 
@@ -277,11 +279,18 @@ describe('request_feature: existing issues and the decision call', () => {
     expect(await run({ ...ranked, decision: 'yolo' })).toContain('Not filed yet');
   });
 
-  it('says so when the named issue does not exist or is a pull request', async () => {
-    const fake = createFakeGitHub({ issues: [{ number: 9, title: 'Fix', labels: [], isPullRequest: true }] });
+  it("says so when the named issue does not exist, is a pull request or isn't a feature request", async () => {
+    const fake = createFakeGitHub({
+      issues: [
+        { number: 9, title: 'Fix', labels: [], isPullRequest: true },
+        { number: 10, title: 'Polls', labels: [], authorAssociation: 'NONE' },
+      ],
+    });
     const { run } = setup({ fake });
     expect(await run({ ...ranked, decision: 'duplicate_of', issue_number: 99 })).toContain("there's no issue #99");
     expect(await run({ ...ranked, decision: 'duplicate_of', issue_number: 9 })).toContain('#9 is a pull request');
+    expect(await run({ ...ranked, decision: 'duplicate_of', issue_number: 10 })).toContain("#10 isn't a feature request");
+    expect(fake.comments).toHaveLength(0);
   });
 
   it('does not +1 twice for the same person, side accounts included', async () => {

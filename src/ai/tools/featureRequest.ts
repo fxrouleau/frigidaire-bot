@@ -274,9 +274,14 @@ function describeOutcome(outcome: FeatureRequestOutcome, requesterName: string):
     case 'candidates':
       return describeCandidates(outcome.candidates, outcome.dailyLimit, requesterName);
     case 'unknown_issue':
-      return outcome.reason === 'pull_request'
-        ? `Nothing done: #${outcome.issueNumber} is a pull request, not a feature request. Use an issue number from the list this tool gave you, or decision "new".`
-        : `Nothing done: there's no issue #${outcome.issueNumber} in the repo. Use an issue number from the list this tool gave you, or decision "new".`;
+      switch (outcome.reason) {
+        case 'pull_request':
+          return `Nothing done: #${outcome.issueNumber} is a pull request, not a feature request. Use an issue number from the list this tool gave you, or decision "new".`;
+        case 'not_a_request':
+          return `Nothing done: #${outcome.issueNumber} isn't a feature request (it isn't labelled feature-request and wasn't opened by the owner or a collaborator), so it can't be backed or linked. Use an issue number from the list this tool gave you, or decision "new".`;
+        default:
+          return `Nothing done: there's no issue #${outcome.issueNumber} in the repo. Use an issue number from the list this tool gave you, or decision "new".`;
+      }
     case 'not_allowed':
       return `Not filed: filing feature requests is limited to a few members right now, and ${requesterName} isn't one of them. Tell them to ask one of those members or the owner.`;
     case 'daily_limit':

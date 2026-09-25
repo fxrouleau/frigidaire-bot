@@ -3,7 +3,8 @@
 // (.github/workflows/claude-feature-request.yml).
 //
 // This module is the filing half: allowlist, per-member daily caps (bot.db), matching against existing
-// issues, and what happens on a match:
+// feature requests (labelled `feature-request`, or opened by the owner or a collaborator: on a public
+// repo any other issue is a stranger's text, see issueMatching.ts), and what happens on a match:
 //   - the same as an OPEN request      → the member's +1 is added to it as a comment (own daily cap)
 //   - the same as a recently CLOSED one → nothing is filed; the member hears it was done (closed as
 //     completed, which merging a "Closes #N" PR does) or that the owner passed on it (not planned)
@@ -16,7 +17,8 @@
 //
 // The bot never edits issues and never applies `claude-implement`: its token belongs to the repo owner,
 // so a label it applied would look exactly like the owner's approval to the workflow, and its comments
-// are owner comments too (see renderSupportComment for what that means for their text). The label set
+// are owner comments too (see renderSupportComment for what that means for their text). That is also
+// why every issue and comment it posts opens with "🤖 Filed by Frigidaire for <member>". The label set
 // below is fixed in code for that reason; nothing the model writes can extend it.
 import { isSamePerson } from '../linkedAccounts';
 import { logger } from '../logger';
@@ -24,8 +26,10 @@ import { type BotDb, getBotDb } from '../storage/botDb';
 import { GitHubApiError, type GitHubErrorKind, type GitHubIssue, type GitHubIssuesApi, type LabelSpec } from './client';
 import {
   type ClosedResolution,
+  FEATURE_REQUEST_LABEL,
   type IssueCandidate,
   closedResolution,
+  isFeatureRequestIssue,
   matchIssues,
   searchTerms,
 } from './issueMatching';
@@ -37,7 +41,7 @@ import {
   titleSimilarity,
 } from './issueText';
 
-export const FEATURE_REQUEST_LABEL = 'feature-request';
+export { FEATURE_REQUEST_LABEL };
 export const FROM_DISCORD_LABEL = 'from-discord';
 /** The owner's approval label; the workflow only acts on it when the repo owner applied it. */
 export const IMPLEMENT_LABEL = 'claude-implement';
@@ -99,6 +103,17 @@ const COMMENTS_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_feature_request_comments_issue ON feature_request_comments(repo, issue_number, user_id);
 `;
 
+export type UnknownIssueReason = 'missing' | 'pull_request' | 'not_a_request';
+
+/** Why an issue the model named can't be +1'd or related to (undefined: it can). */
+function unusableIssue(issue: GitHubIssue | undefined): UnknownIssueReason | undefined {
+  if (!issue) return 'missing';
+  if (issue.isPullRequest) return 'pull_request';
+  // A stranger's issue on the public repo: never +1'd with the owner's token, nor linked from a new one.
+  if (!isFeatureRequestIssue(issue)) return 'not_a_request';
+  return undefined;
+}
+
 /** What the model decided after seeing the candidates. */
 export type FeatureRequestDecision =
   | { kind: 'duplicate_of'; issueNumber: number }
@@ -128,7 +143,8 @@ export type FeatureRequestOutcome =
   | { kind: 'duplicate'; issue: GitHubIssue; automatic: boolean; support: SupportResult }
   | { kind: 'closed_match'; issue: GitHubIssue; resolution: ClosedResolution; automatic: boolean }
   | { kind: 'candidates'; candidates: IssueCandidate[]; dailyLimit?: DailyLimit }
-  | { kind: 'unknown_issue'; issueNumber: number; reason: 'missing' | 'pull_request' }
+  /** 'not_a_request': an issue that is neither labelled feature-request nor opened by the owner/a collaborator. */
+  | { kind: 'unknown_issue'; issueNumber: number; reason: UnknownIssueReason }
   | { kind: 'not_allowed' }
   | ({ kind: 'daily_limit' } & DailyLimit)
   | { kind: 'github_error'; error: GitHubApiError };
@@ -251,13 +267,8 @@ export class FeatureRequestService {
     let relatedTo: GitHubIssue | undefined;
     if (decision?.kind === 'related_to') {
       relatedTo = await this.client.getIssue(decision.issueNumber);
-      if (!relatedTo || relatedTo.isPullRequest) {
-        return {
-          kind: 'unknown_issue',
-          issueNumber: decision.issueNumber,
-          reason: relatedTo ? 'pull_request' : 'missing',
-        };
-      }
+      const unusable = unusableIssue(relatedTo);
+      if (unusable) return { kind: 'unknown_issue', issueNumber: decision.issueNumber, reason: unusable };
     }
     return this.file(draft, requester, relatedTo);
   }
@@ -268,9 +279,8 @@ export class FeatureRequestService {
     requester: FeatureRequester,
   ): Promise<FeatureRequestOutcome> {
     const issue = await this.client.getIssue(issueNumber);
-    if (!issue || issue.isPullRequest) {
-      return { kind: 'unknown_issue', issueNumber, reason: issue ? 'pull_request' : 'missing' };
-    }
+    const unusable = unusableIssue(issue);
+    if (!issue || unusable) return { kind: 'unknown_issue', issueNumber, reason: unusable ?? 'missing' };
     if (issue.state === 'closed') return this.closedMatch(issue, false, input.draft.title, requester);
     return this.duplicate(issue, false, input, requester);
   }
