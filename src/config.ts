@@ -485,9 +485,12 @@ export const config = {
     get wrappedEnabled(): boolean {
       return envBool('WRAPPED_ENABLED', true);
     },
-    /** Where the monthly/yearly Wrapped posts go. Defaults to the main channel; unset both ⇒ Wrapped off. */
+    /**
+     * Where the yearly Wrapped post goes. Defaults to the report channel (the owner looks at it there
+     * first), never the main channel on its own; unset both ⇒ Wrapped off.
+     */
     get wrappedChannelId(): string | undefined {
-      return envString('WRAPPED_CHANNEL_ID') ?? envString('MAIN_CHANNEL_ID');
+      return envString('WRAPPED_CHANNEL_ID') ?? config.report.channelId;
     },
     /** One roast-y intro line from the chat model on top of the deterministic stats. */
     get wrappedLlmIntro(): boolean {

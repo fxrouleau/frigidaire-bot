@@ -6,7 +6,14 @@
 // the bot and its relay copy already counts.
 import { easternParts } from '../ai/utils';
 import { config } from '../config';
-import { type ArchiveStore, VOICE_MESSAGE_FLAG, getArchiveStore } from './archiveStore';
+import {
+  type ArchiveStore,
+  type ArchivedAttachment,
+  type ArchivedEmbed,
+  type ArchivedReaction,
+  VOICE_MESSAGE_FLAG,
+  getArchiveStore,
+} from './archiveStore';
 
 export type StatsScope = {
   startMs: number;
@@ -53,6 +60,24 @@ export type WrappedStats = {
     guildId: string | null;
   };
   botPings: { total: number; top?: AuthorCount; botReplies: number };
+  /** The member message with the most member reactions (the bot's own reaction never counts). */
+  mostReacted?: MostReactedMessage;
+};
+
+export type MostReactedMessage = {
+  authorId: string | null;
+  authorName: string;
+  /** Reactions from everyone but the bot, over every emoji. */
+  total: number;
+  /** Its emojis, most used first, each without the bot's own reaction. */
+  reactions: { id: string | null; name: string; animated: boolean; count: number }[];
+  content: string;
+  /** What the message carried when it has no text: the first attachment's name, or a link preview's title. */
+  attachmentName?: string;
+  linkTitle?: string;
+  messageId: string;
+  channelId: string;
+  guildId: string | null;
 };
 
 const MEMBER = "source IN ('human', 'relay')";
@@ -324,5 +349,70 @@ export function computeWrappedStats(
           }
         : undefined,
     botPings,
+    mostReacted: mostReactedMessage(store, scope),
+  };
+}
+
+function parseJson<T>(raw: string | null): T[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The member message in scope with the most reactions. Counts come from reactions_json (Discord's own
+ * counts, kept current by the reaction events) minus the bot's own reaction, so the bot reacting can
+ * never make a message "most reacted". Ties go to the earlier message.
+ */
+function mostReactedMessage(store: ArchiveStore, scope: StatsScope): MostReactedMessage | undefined {
+  const s = scopeSql(scope, 'm');
+  const row = store.db
+    .prepare(
+      `SELECT m.id, m.author_id, m.author_name, m.content, m.channel_id, m.guild_id, m.reactions_json,
+              m.attachments_json, m.embeds_json,
+              SUM((j.value ->> '$.count') - COALESCE(j.value ->> '$.me', 0)) AS total
+       FROM messages m, json_each(m.reactions_json) j
+       WHERE ${s.where} AND m.reactions_json IS NOT NULL AND m.source IN ('human', 'relay') AND m.deleted_at IS NULL
+       GROUP BY m.seq
+       HAVING total > 0
+       ORDER BY total DESC, m.created_at ASC, m.seq ASC
+       LIMIT 1`,
+    )
+    .get(s.params) as
+    | {
+        id: string;
+        author_id: string | null;
+        author_name: string;
+        content: string;
+        channel_id: string;
+        guild_id: string | null;
+        reactions_json: string;
+        attachments_json: string | null;
+        embeds_json: string | null;
+        total: number;
+      }
+    | undefined;
+  if (!row) return undefined;
+  const reactions = parseJson<ArchivedReaction>(row.reactions_json)
+    .map((r) => ({ id: r.id, name: r.name, animated: r.animated === true, count: r.count - (r.me ? 1 : 0) }))
+    .filter((r) => r.count > 0)
+    .sort((a, b) => b.count - a.count || (a.id ?? a.name).localeCompare(b.id ?? b.name));
+  const attachment = parseJson<ArchivedAttachment>(row.attachments_json)[0];
+  const embed = parseJson<ArchivedEmbed>(row.embeds_json).find((e) => e.title);
+  return {
+    authorId: row.author_id,
+    authorName: row.author_name,
+    total: row.total,
+    reactions,
+    content: row.content,
+    ...(attachment ? { attachmentName: attachment.name } : {}),
+    ...(embed?.title ? { linkTitle: embed.title } : {}),
+    messageId: row.id,
+    channelId: row.channel_id,
+    guildId: row.guild_id,
   };
 }

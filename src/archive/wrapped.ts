@@ -1,17 +1,23 @@
-// "Wrapped": a stats post for the previous month (on the 1st, ~15:00 Eastern) and the previous year
-// (on Jan 1, same time) in WRAPPED_CHANNEL_ID, computed from the archive.
+// "Wrapped": a yearly stats post for the previous year, on Jan 1 from ~15:00 Eastern, in
+// WRAPPED_CHANNEL_ID (default: the report channel, so the owner sees it before the group does),
+// computed from the archive. There is no monthly post: once a year keeps it an event, not noise.
 //
 // The post is deterministic text; the only model output is one optional roast-y intro line (chat model,
-// ZDR-routed, tagged 'wrapped'), and any failure there just drops the line. Each period posts once: a
+// ZDR-routed, tagged 'wrapped'), and any failure there just drops the line. Each year posts once: a
 // watermark row in bot.db is claimed ('posting') before the stats and the intro are computed, switched
 // to 'sending' right before the first message goes out, and finalized after, so a restart, a second
 // tick or a redeploy never double-posts. A claim abandoned while still 'posting' (the bot restarted
 // mid-intro: nothing was sent) is taken over once stale; one abandoned while 'sending' never is, since
 // part of the post may be out.
 //
+// Preview: `!wrapped` (this year so far) or `!wrapped 2025` (a whole past year) typed in the report
+// channel posts the same text there on demand, so the owner can check it long before January. A
+// preview never touches the watermark.
+//
 // Privacy: the post is public to whoever can read the Wrapped channel, so only channels at least that
 // visible count (see makeAudienceAccess); a private channel's messages never surface in the stats, the
-// top channel, or the quoted longest message.
+// top channel, or the quoted messages. A preview counts only channels that are at least as visible as
+// BOTH the Wrapped channel and the channel the preview is posted in.
 import { type Client, escapeMarkdown } from 'discord.js';
 import type OpenAI from 'openai';
 import { getMemoryStore } from '../ai/memory';
@@ -22,83 +28,70 @@ import { config } from '../config';
 import { logger } from '../logger';
 import { getBotDb } from '../storage/botDb';
 import { splitMessage } from '../utils';
-import { type ArchiveStore, getArchiveStore } from './archiveStore';
+import { type ArchiveStore, type ArchivedChannel, getArchiveStore } from './archiveStore';
 import { getActiveArchiveSync } from './backfill';
-import { reconcileRelays } from './ingest';
+import { isThreadType, reconcileRelays } from './ingest';
 import { type GuildLike, type PermissionedChannel, allowedChannelIds, jumpLink, makeAudienceAccess } from './search';
-import { type AuthorCount, type LinkPlatform, type WrappedStats, computeWrappedStats } from './stats';
+import {
+  type AuthorCount,
+  type LinkPlatform,
+  type MostReactedMessage,
+  type WrappedStats,
+  computeWrappedStats,
+} from './stats';
 
 export type WrappedPeriod = {
-  kind: 'month' | 'year';
-  /** Watermark key: 'month:2026-08' or 'year:2025'. */
+  /** Watermark key: 'year:2025'. A year-so-far preview has 'preview:2026', which is never stored. */
   key: string;
-  /** Human label: 'August 2026' or '2025'. */
+  /** Human label: '2025'. */
   label: string;
+  year: number;
   startMs: number;
   endMs: number;
-  /** When the post is due: the period's end day at 15:00 Eastern. */
+  /** When the post is due: Jan 1 of the following year at 15:00 Eastern. */
   dueAtMs: number;
+  /** A preview of a year that isn't over: the numbers run up to `endMs` (the moment it was asked for). */
+  partial?: boolean;
 };
 
 const POST_HOUR_ET = 15;
-// A period is still posted when the bot comes back within this long after the due time (it was down on
-// the 1st); later than that, the moment has passed and the period is skipped.
+// A year is still posted when the bot comes back within this long after the due time (it was down on
+// Jan 1); later than that, the moment has passed and the year is skipped.
 const LATE_WINDOW_MS = 3 * 86_400_000;
 const MAX_ATTEMPTS = 3;
 const INTRO_TIMEOUT_MS = 30_000;
 // Far longer than computing the stats and the intro ever takes: a 'posting' claim this old was abandoned.
 const STALE_CLAIM_MS = 15 * 60_000;
+// Discord's launch year: nothing older can be in the archive.
+const FIRST_PREVIEW_YEAR = 2015;
+// The preview's "counted channels" footnote names at most this many.
+const MAX_LISTED_CHANNELS = 15;
 
-const MONTH_NAMES = [
-  'January',
-  'February',
-  'March',
-  'April',
-  'May',
-  'June',
-  'July',
-  'August',
-  'September',
-  'October',
-  'November',
-  'December',
-];
-const MONTH_SHORT = MONTH_NAMES.map((m) => m.slice(0, 3));
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-export function monthPeriod(year: number, month: number): WrappedPeriod {
-  const nextYear = month === 12 ? year + 1 : year;
-  const nextMonth = month === 12 ? 1 : month + 1;
-  const endMs = easternWallClockToDate(nextYear, nextMonth, 1).getTime();
-  return {
-    kind: 'month',
-    key: `month:${year}-${String(month).padStart(2, '0')}`,
-    label: `${MONTH_NAMES[month - 1]} ${year}`,
-    startMs: easternWallClockToDate(year, month, 1).getTime(),
-    endMs,
-    dueAtMs: easternWallClockToDate(nextYear, nextMonth, 1, POST_HOUR_ET).getTime(),
-  };
-}
 
 export function yearPeriod(year: number): WrappedPeriod {
   return {
-    kind: 'year',
     key: `year:${year}`,
     label: String(year),
+    year,
     startMs: easternWallClockToDate(year, 1, 1).getTime(),
     endMs: easternWallClockToDate(year + 1, 1, 1).getTime(),
     dueAtMs: easternWallClockToDate(year + 1, 1, 1, POST_HOUR_ET).getTime(),
   };
 }
 
-/** The periods whose post is due at `now` (monthly first, then yearly on Jan 1). */
+/** The current Eastern year from Jan 1 up to `now`, for a preview. */
+export function yearToDatePeriod(now: Date): WrappedPeriod {
+  const year = easternParts(now).year;
+  return { ...yearPeriod(year), key: `preview:${year}`, endMs: now.getTime(), partial: true };
+}
+
+/** The year whose post is due at `now` (Jan 1 from 15:00 ET, for LATE_WINDOW_MS), or nothing. */
 export function duePeriods(now: Date): WrappedPeriod[] {
-  const et = easternParts(now);
-  const previousMonth = et.month === 1 ? monthPeriod(et.year - 1, 12) : monthPeriod(et.year, et.month - 1);
-  const candidates = [previousMonth];
-  if (et.month === 1) candidates.push(yearPeriod(et.year - 1));
+  const previousYear = yearPeriod(easternParts(now).year - 1);
   const t = now.getTime();
-  return candidates.filter((p) => t >= p.dueAtMs && t < p.dueAtMs + LATE_WINDOW_MS);
+  return t >= previousYear.dueAtMs && t < previousYear.dueAtMs + LATE_WINDOW_MS ? [previousYear] : [];
 }
 
 // ---------------------------------------------------------------- watermark (bot.db)
@@ -202,9 +195,13 @@ export type WrappedRenderOptions = {
   intro?: string;
   /** How a person is shown: a mention (rendered without pinging) or a bold name. */
   person: (author: Pick<AuthorCount, 'authorId' | 'authorName'>) => string;
+  /** How a custom emoji is shown (unicode emojis are shown as themselves). */
   emoji: (emoji: { id: string; name: string; animated: boolean }) => string;
   channel: (id: string) => string;
-  coverageNote?: string;
+  /** A small-text line above the title (the preview banner). */
+  banner?: string;
+  /** Small-text lines under the post (import still running, what a preview counted). */
+  footnotes?: string[];
 };
 
 function n(value: number): string {
@@ -240,11 +237,19 @@ function snippet(content: string, max = 180): string {
   return escapeOutsideTokens(cut);
 }
 
+/** What the most reacted message said, or what it carried when it has no text (a meme is the usual winner). */
+function mostReactedPreview(message: MostReactedMessage): string {
+  if (message.content.trim()) return `"${snippet(message.content, 140)}"`;
+  if (message.attachmentName) return `[${escapeMarkdown(message.attachmentName)}]`;
+  if (message.linkTitle) return `[link: ${snippet(message.linkTitle, 100)}]`;
+  return '';
+}
+
 /** The Wrapped post. Pure: same stats and options, same text. Lines with nothing to report are left out. */
 export function renderWrapped(period: WrappedPeriod, stats: WrappedStats, opts: WrappedRenderOptions): string {
   const lines: string[] = [];
-  const title = period.kind === 'month' ? `${period.label}` : `the year ${period.label}`;
-  lines.push(`📦 **${escapeMarkdown(opts.botName)} Wrapped — ${title}**`);
+  if (opts.banner) lines.push(`-# ${opts.banner}`);
+  lines.push(`📦 **${escapeMarkdown(opts.botName)} Wrapped — ${period.label}${period.partial ? ' (so far)' : ''}**`);
   if (opts.intro) lines.push(`*${escapeMarkdown(opts.intro)}*`);
   lines.push('');
 
@@ -273,6 +278,17 @@ export function renderWrapped(period: WrappedPeriod, stats: WrappedStats, opts: 
   if (stats.topEmojis.length > 0) {
     lines.push(`😂 Top emojis: ${stats.topEmojis.map((e) => `${opts.emoji(e)} ×${n(e.count)}`).join(' · ')}`);
   }
+  if (stats.mostReacted) {
+    const top = stats.mostReacted;
+    const emojis = top.reactions
+      .slice(0, 3)
+      .map((r) => `${r.id ? opts.emoji({ id: r.id, name: r.name, animated: r.animated }) : r.name} ×${n(r.count)}`)
+      .join(' ');
+    const preview = mostReactedPreview(top);
+    lines.push(
+      `🔥 Most reacted message of the year: ${opts.person(top)} — ${plural(top.total, 'reaction')}${emojis ? ` (${emojis})` : ''}${preview ? ` — ${preview}` : ''} ${jumpLink({ guildId: top.guildId, channelId: top.channelId, id: top.messageId })}`,
+    );
+  }
   if (stats.links.length > 0) {
     lines.push(`🔗 Links: ${stats.links.map((l) => `${PLATFORM_LABELS[l.platform]} ${n(l.count)}`).join(' · ')}`);
   }
@@ -300,9 +316,8 @@ export function renderWrapped(period: WrappedPeriod, stats: WrappedStats, opts: 
   }
   if (fixes.length > 0) lines.push(fixes.join(' · '));
   if (stats.longest) {
-    const label = period.kind === 'month' ? 'Ramble of the month' : 'Ramble of the year';
     lines.push(
-      `📜 ${label}: ${opts.person(stats.longest)} with ${plural(stats.longest.length, 'character')} — "${snippet(stats.longest.content)}" ${jumpLink({ guildId: stats.longest.guildId, channelId: stats.longest.channelId, id: stats.longest.messageId })}`,
+      `📜 Ramble of the year: ${opts.person(stats.longest)} with ${plural(stats.longest.length, 'character')} — "${snippet(stats.longest.content)}" ${jumpLink({ guildId: stats.longest.guildId, channelId: stats.longest.channelId, id: stats.longest.messageId })}`,
     );
   }
   if (stats.botPings.total > 0) {
@@ -311,7 +326,8 @@ export function renderWrapped(period: WrappedPeriod, stats: WrappedStats, opts: 
       `🤖 You pinged me ${plural(stats.botPings.total, 'time')}${top}; I answered ${plural(stats.botPings.botReplies, 'time')}`,
     );
   }
-  if (opts.coverageNote) lines.push('', `-# ${opts.coverageNote}`);
+  const footnotes = opts.footnotes ?? [];
+  if (footnotes.length > 0) lines.push('', ...footnotes.map((note) => `-# ${note}`));
   return lines.join('\n');
 }
 
@@ -324,12 +340,14 @@ function statsDigest(
   nameOf: (a: Pick<AuthorCount, 'authorId' | 'authorName'>) => string,
 ): string {
   const parts = [
-    `${period.kind === 'month' ? 'Month' : 'Year'}: ${period.label}.`,
+    `Year: ${period.label}${period.partial ? ' (so far)' : ''}.`,
     `${n(stats.totalMessages)} messages from ${stats.activeMembers} people.`,
   ];
   if (stats.topMembers.length > 0)
     parts.push(`Top talkers: ${stats.topMembers.map((m) => `${nameOf(m)} (${n(m.count)})`).join(', ')}.`);
   if (stats.busiestHour) parts.push(`Peak hour: ${hourLabel(stats.busiestHour.hour)}.`);
+  if (stats.mostReacted)
+    parts.push(`Most reacted message: ${nameOf(stats.mostReacted)} (${n(stats.mostReacted.total)} reactions).`);
   if (stats.regrets.top[0])
     parts.push(`Most deleted-and-reposted: ${nameOf(stats.regrets.top[0])} (${stats.regrets.top[0].count}).`);
   if (stats.longest) parts.push(`Longest message: ${nameOf(stats.longest)}, ${n(stats.longest.length)} characters.`);
@@ -377,7 +395,7 @@ export async function generateWrappedIntro(
           {
             role: 'system',
             content:
-              'You write the one-line intro of a stats recap for a private Discord server of close friends who roast each other constantly. Be funny and a little mean about the numbers: call someone out by name. Crude is fine. Max 25 words, one line, no hashtags, no emojis, no quotation marks. Output only the line.',
+              'You write the one-line intro of a year-in-review stats recap for a private Discord server of close friends who roast each other constantly. Be funny and a little mean about the numbers: call someone out by name. Crude is fine. Max 25 words, one line, no hashtags, no emojis, no quotation marks. Output only the line.',
           },
           { role: 'user', content: statsDigest(period, stats, nameOf) },
         ],
@@ -393,9 +411,9 @@ export async function generateWrappedIntro(
   }
 }
 
-// ---------------------------------------------------------------- posting
+// ---------------------------------------------------------------- composing
 
-/** The Wrapped channel as the poster needs it; a discord.js guild text channel fits. */
+/** A channel Wrapped posts to (the Wrapped channel, or where a preview was asked for); a discord.js guild text channel fits. */
 export type WrappedChannel = PermissionedChannel & {
   guild: GuildLike & {
     roles: { cache: { values(): Iterable<unknown> } };
@@ -407,6 +425,7 @@ export type WrappedChannel = PermissionedChannel & {
 export type WrappedDeps = {
   now: () => Date;
   store: () => ArchiveStore;
+  /** The Wrapped channel (WRAPPED_CHANNEL_ID, else REPORT_CHANNEL_ID). */
   channelId: () => string | undefined;
   fetchChannel: (id: string) => Promise<WrappedChannel | undefined>;
   botUserId?: string;
@@ -420,9 +439,52 @@ export type WrappedDeps = {
   syncBusy: () => boolean;
 };
 
+type Composed = { stats: WrappedStats; text?: string };
+
+/** Stats for `period` over `channelIds`, and the post's text (undefined when nothing was said). */
+async function composeWrapped(
+  period: WrappedPeriod,
+  channelIds: string[],
+  guild: WrappedChannel['guild'],
+  deps: WrappedDeps,
+  extras: { banner?: string; footnotes?: string[] } = {},
+): Promise<Composed> {
+  const store = deps.store();
+  reconcileRelays(store, { sinceMs: period.startMs });
+  const stats = computeWrappedStats(
+    { startMs: period.startMs, endMs: period.endMs, channelIds },
+    { botUserId: deps.botUserId, store },
+  );
+  if (stats.totalMessages === 0) return { stats };
+
+  const nameOf = (a: Pick<AuthorCount, 'authorId' | 'authorName'>) => currentName(a.authorId) ?? a.authorName;
+  const intro = config.archive.wrappedLlmIntro ? await deps.intro(period, stats, nameOf) : undefined;
+  const coverage = coverageNote(store, period);
+  const text = renderWrapped(period, stats, {
+    botName: deps.botName,
+    intro,
+    person: (a) => (a.authorId ? `<@${a.authorId}>` : `**${escapeMarkdown(a.authorName)}**`),
+    emoji: (e) => (guild.emojis.cache.get(e.id) ? `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>` : `:${e.name}:`),
+    channel: (id) => `<#${id}>`,
+    banner: extras.banner,
+    footnotes: [...(coverage ? [coverage] : []), ...(extras.footnotes ?? [])],
+  });
+  return { stats, text };
+}
+
+async function sendChunks(channel: WrappedChannel, text: string, onSent?: (id: string) => void): Promise<void> {
+  for (const chunk of splitMessage(text)) {
+    // Mentions render as names but never ping anyone (the intro could also say @everyone).
+    const sent = await channel.send({ content: chunk, allowedMentions: { parse: [] } });
+    onSent?.(sent.id);
+  }
+}
+
+// ---------------------------------------------------------------- the yearly post
+
 let checkRunning = false;
 
-/** Posts every due, not-yet-posted period. Never throws. */
+/** Posts the due, not-yet-posted year, if any. Never throws. */
 export async function runWrappedCheck(deps: WrappedDeps): Promise<void> {
   if (checkRunning || deps.syncBusy()) return;
   checkRunning = true;
@@ -450,39 +512,22 @@ async function postPeriod(period: WrappedPeriod, deps: WrappedDeps): Promise<voi
       finishWrappedPeriod(period.key, 'retry', deps.now().getTime());
       return;
     }
-    const store = deps.store();
-    reconcileRelays(store, { sinceMs: period.startMs });
-
-    const access = makeAudienceAccess(channel.guild, channel);
-    const channelIds = allowedChannelIds(store, access);
-    const stats = computeWrappedStats(
-      { startMs: period.startMs, endMs: period.endMs, channelIds },
-      { botUserId: deps.botUserId, store },
-    );
-    if (stats.totalMessages === 0) {
-      logger.info(`wrapped: nothing archived for ${period.label}; skipping.`);
+    const channelIds = allowedChannelIds(deps.store(), makeAudienceAccess(channel.guild, channel));
+    const { text } = await composeWrapped(period, channelIds, channel.guild, deps);
+    if (!text) {
+      // WARN: a whole year with nothing to show is almost always a configuration problem (the Wrapped
+      // channel's audience can read no archived channel), and the year is not retried.
+      logger.warn(
+        `wrapped: nothing archived for ${period.label} in the ${channelIds.length} channel(s) as public as ${channelId}; skipping.`,
+      );
       finishWrappedPeriod(period.key, 'skipped', deps.now().getTime());
       return;
     }
 
-    const nameOf = (a: Pick<AuthorCount, 'authorId' | 'authorName'>) => currentName(a.authorId) ?? a.authorName;
-    const intro = config.archive.wrappedLlmIntro ? await deps.intro(period, stats, nameOf) : undefined;
-    const text = renderWrapped(period, stats, {
-      botName: deps.botName,
-      intro,
-      person: (a) => (a.authorId ? `<@${a.authorId}>` : `**${escapeMarkdown(a.authorName)}**`),
-      emoji: (e) =>
-        channel.guild.emojis.cache.get(e.id) ? `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>` : `:${e.name}:`,
-      channel: (id) => `<#${id}>`,
-      coverageNote: coverageNote(store, period),
-    });
-
     markWrappedSending(period.key, deps.now().getTime());
-    for (const chunk of splitMessage(text)) {
-      // Mentions render as names but never ping anyone (the intro could also say @everyone).
-      const sent = await channel.send({ content: chunk, allowedMentions: { parse: [] } });
-      firstId ??= sent.id;
-    }
+    await sendChunks(channel, text, (id) => {
+      firstId ??= id;
+    });
     finishWrappedPeriod(period.key, 'posted', deps.now().getTime(), firstId);
     logger.info(`wrapped: posted ${period.label} to ${channelId}.`);
   } catch (error) {
@@ -496,6 +541,113 @@ async function postPeriod(period: WrappedPeriod, deps: WrappedDeps): Promise<voi
     finishWrappedPeriod(period.key, 'retry', deps.now().getTime());
   }
 }
+
+// ---------------------------------------------------------------- the preview
+
+export type WrappedPreviewRequest = {
+  /** The channel the preview was asked for in (the report channel); the preview is posted there. */
+  channelId: string;
+  /** A whole past year; absent ⇒ the current year so far. */
+  year?: number;
+};
+
+/** `!wrapped` (this year so far) or `!wrapped 2025` (that year). Undefined for any other text. */
+export function parseWrappedPreviewCommand(content: string): Omit<WrappedPreviewRequest, 'channelId'> | undefined {
+  const match = content.trim().match(/^!wrapped(?:\s+(\d{4}))?$/i);
+  if (!match) return undefined;
+  return match[1] ? { year: Number(match[1]) } : {};
+}
+
+let previewRunning = false;
+
+/**
+ * Posts a preview of the Wrapped post into the channel it was asked for in. Everything is the real
+ * pipeline (stats, audience filter, intro line, rendering) except the watermark, which is never read
+ * or written. Answers every outcome in that channel; never throws.
+ */
+export async function runWrappedPreview(request: WrappedPreviewRequest, deps: WrappedDeps): Promise<void> {
+  if (previewRunning) return;
+  previewRunning = true;
+  let channel: WrappedChannel | undefined;
+  try {
+    channel = await deps.fetchChannel(request.channelId);
+    if (!channel) {
+      logger.warn(`wrapped: preview channel ${request.channelId} is missing or not a server text channel.`);
+      return;
+    }
+    await preview(request, channel, deps);
+  } catch (error) {
+    logger.warn('wrapped: preview failed:', error);
+    await channel
+      ?.send({ content: "-# couldn't build the Wrapped preview; the logs say why.", allowedMentions: { parse: [] } })
+      .catch(() => undefined);
+  } finally {
+    previewRunning = false;
+  }
+}
+
+async function preview(request: WrappedPreviewRequest, here: WrappedChannel, deps: WrappedDeps): Promise<void> {
+  const say = (text: string) => sendChunks(here, text);
+  const now = deps.now();
+  const currentYear = easternParts(now).year;
+  if (request.year !== undefined && (request.year > currentYear || request.year < FIRST_PREVIEW_YEAR)) {
+    await say(`-# no Wrapped for ${request.year}: pick a year from ${FIRST_PREVIEW_YEAR} to ${currentYear}.`);
+    return;
+  }
+  if (deps.syncBusy()) {
+    await say('-# still catching up on messages from while I was down; try `!wrapped` again in a minute.');
+    return;
+  }
+  const period =
+    request.year === undefined || request.year === currentYear ? yearToDatePeriod(now) : yearPeriod(request.year);
+
+  // The real post's audience: the Wrapped channel (defaulting to right here when none is configured).
+  const wrappedId = deps.channelId() ?? here.id;
+  const wrapped = wrappedId === here.id ? here : await deps.fetchChannel(wrappedId).catch(() => undefined);
+  const notes: string[] = [];
+  const hereAccess = makeAudienceAccess(here.guild, here);
+  let access = hereAccess;
+  if (wrapped) {
+    const wrappedAccess = makeAudienceAccess(wrapped.guild, wrapped);
+    access = (c: ArchivedChannel) => hereAccess(c) && wrappedAccess(c);
+  } else {
+    notes.push(`⚠️ can't see the Wrapped channel <#${wrappedId}>: the real post would fail. Counting for this channel.`);
+  }
+
+  const store = deps.store();
+  const channelIds = allowedChannelIds(store, access);
+  notes.push(countedChannelsNote(store, channelIds));
+  if (!config.archive.wrappedEnabled) notes.push('WRAPPED_ENABLED=false: the yearly post itself is off.');
+
+  const banner = `👀 preview, not the real post: that one goes to <#${wrappedId}> on Jan 1 at 3 PM ET`;
+  const { text } = await composeWrapped(period, channelIds, here.guild, deps, { banner, footnotes: notes });
+  if (!text) {
+    await say(
+      [
+        `-# nothing archived for ${period.label} in the channels this post would count.`,
+        ...notes.map((l) => `-# ${l}`),
+      ].join('\n'),
+    );
+    return;
+  }
+  await say(text);
+  logger.info(`wrapped: posted a preview of ${period.label} to ${here.id}.`);
+}
+
+/** "counted 3 channels: #a, #b, #c (+12 threads)" — so a wrong audience shows before January does. */
+function countedChannelsNote(store: ArchiveStore, channelIds: string[]): string {
+  if (channelIds.length === 0) return 'counted no channels: no archived channel is as visible as this post.';
+  const allowed = new Set(channelIds);
+  const channels = store.listChannels().filter((c) => allowed.has(c.id));
+  const top = channels.filter((c) => !isThreadType(c.type));
+  const threads = channels.length - top.length;
+  const named = top.slice(0, MAX_LISTED_CHANNELS).map((c) => `<#${c.id}>`);
+  const more = top.length > MAX_LISTED_CHANNELS ? ` and ${top.length - MAX_LISTED_CHANNELS} more` : '';
+  const threadNote = threads > 0 ? ` (+${plural(threads, 'thread')})` : '';
+  return `counted ${plural(top.length, 'channel')}: ${named.join(', ')}${more}${threadNote}`;
+}
+
+// ---------------------------------------------------------------- helpers
 
 function currentName(authorId: string | null): string | undefined {
   if (!authorId) return undefined;
