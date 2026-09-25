@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getMemoryStore } from '../../ai/memory';
+import { toolDefinitions } from '../../ai/tools';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import { FakeEmbeddingProvider } from '../../test-support/fakeEmbeddings';
 import { FakeProvider, textResponse, toolCallResponse } from '../../test-support/fakeProvider';
 import { type Judge, type JudgeInput, RUBRIC_DIMENSIONS } from './judge';
-import { type RunnerDeps, renderTranscript, runPersonaEval, runScenario } from './runner';
+import { EVAL_EXCLUDED_TOOLS, type RunnerDeps, renderTranscript, runPersonaEval, runScenario } from './runner';
 import { type ScenarioFile, parseScenarioFile } from './scenarioFile';
 
 const FILE: ScenarioFile = parseScenarioFile({
@@ -83,6 +84,7 @@ beforeEach(() => {
 afterEach(() => {
   setBotDbForTesting(undefined);
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe('runScenario', () => {
@@ -136,6 +138,26 @@ describe('runScenario', () => {
 
     expect(result.toolCalls).toEqual(['remember_fact']);
     expect(result.checks.find((c) => c.name === 'memory-has /Shopify/')).toMatchObject({ passed: true });
+  });
+
+  it('never offers or runs the tools whose effects leave the eval (a real GitHub issue, the sandbox)', async () => {
+    const hostTool = (name: string) => ({ ...REMEMBER_FACT, name });
+    const provider = new FakeProvider(
+      [
+        toolCallResponse([{ id: 'call-1', name: 'request_feature', arguments: { title: 'dark mode' } }]),
+        textResponse('filed it'),
+      ],
+      { supportedTools: [REMEMBER_FACT, hostTool('request_feature'), hostTool('run_code')] },
+    );
+    const handlers = toolDefinitions
+      .filter((tool) => EVAL_EXCLUDED_TOOLS.has(tool.name))
+      .map((tool) => vi.spyOn(tool, 'handler'));
+    expect(handlers).toHaveLength(EVAL_EXCLUDED_TOOLS.size);
+
+    await runScenario(FILE, ROAST, 'm', deps(provider));
+
+    expect(provider.calls[0].tools.map((tool) => tool.name)).toEqual(['remember_fact']);
+    for (const handler of handlers) expect(handler).not.toHaveBeenCalled();
   });
 
   it('marks a failed turn as an error and does not ask the judge', async () => {
