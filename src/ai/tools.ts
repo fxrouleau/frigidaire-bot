@@ -1,5 +1,14 @@
+import type { Message } from 'discord.js';
+import { logger } from '../logger';
 import { getMemoryStore } from './memory';
-import { type Memory, SELF_DIAGNOSIS_CATEGORIES } from './memory/memoryStore';
+import {
+  type Memory,
+  type MemoryStore,
+  NON_PERSON_SUBJECTS,
+  SELF_DIAGNOSIS_CATEGORIES,
+  nameKey,
+} from './memory/memoryStore';
+import { type ResolvedPerson, cleanSubject, resolvePerson } from './memory/people';
 import { emojiSyntax } from './promptSections';
 import { birthdayTools } from './tools/birthdays';
 import { costTools } from './tools/costs';
@@ -9,6 +18,7 @@ import { messageSearchTools } from './tools/messageSearch';
 import { reactTools } from './tools/react';
 import { reminderTools } from './tools/reminders';
 import { sandboxTools } from './tools/sandbox';
+import { runSummaryTool } from './tools/summary';
 import type { ToolDefinition, ToolHandlerContext } from './types';
 
 // The categories the chat model may write. Everything the model sends is untrusted text: a
@@ -48,36 +58,57 @@ function formatMemoryLine(m: Memory): string {
   return `[id:${m.id}] [${m.category}] ${m.subject}: ${m.content} (saved: ${m.created_at}, updated: ${m.updated_at})`;
 }
 
+/**
+ * The member a tool's subject refers to (see resolvePerson). Tool contexts in tests may carry no
+ * message; a store failure only costs the resolution, never the tool call.
+ */
+function resolveSubject(store: MemoryStore, subject: string, message: Message | undefined): ResolvedPerson | undefined {
+  try {
+    return resolvePerson(store, subject, message);
+  } catch (error) {
+    logger.warn(`Resolving memory subject "${subject}" failed:`, error);
+    return undefined;
+  }
+}
+
+/** A person's memories under every name they have had, or the rows filed under a plain subject. */
+function memoriesAbout(
+  store: MemoryStore,
+  person: ResolvedPerson | undefined,
+  subject: string,
+  limit: number,
+): Memory[] {
+  return person
+    ? store.getForPerson({ userId: person.userId, names: person.names }, limit)
+    : store.getBySubject(subject, limit);
+}
+
 const summarizeTool: ToolDefinition = {
   name: 'summarize_messages',
   description:
-    "Summarize the messages in the channel within a given timeframe. The user's current time is an ISO 8601 string. The maximum timeframe to summarize is one week.",
+    'Summarize what was said in this channel over a stretch of time ("catch me up", "what did I miss", "tldr of last night"). Times are Eastern wall-clock (America/New_York) written as \'YYYY-MM-DD HH:MM\'; work them out from the current Eastern time in your context. Vague phrases: "last night" ≈ 18:00 yesterday, "this morning" ≈ 06:00 today, "today" = since 00:00 today, "the last hour" = one hour before now. For "what did I miss" / "since I left", set since_my_last_message instead of guessing a time. Covers at most the last 7 days.',
   parameters: {
     type: 'object',
     properties: {
       start_time: {
         type: 'string',
-        format: 'date-time',
-        description: 'The start of the time range for the summary, in ISO 8601 format. E.g., "2025-10-03T03:00:00Z".',
+        description:
+          "Start of the range, Eastern wall-clock 'YYYY-MM-DD HH:MM' (e.g. '2026-09-24 18:00'). Required unless since_my_last_message is true.",
       },
       end_time: {
         type: 'string',
-        format: 'date-time',
+        description: 'End of the range, Eastern wall-clock \'YYYY-MM-DD HH:MM\'. Omit for "until now".',
+      },
+      since_my_last_message: {
+        type: 'boolean',
         description:
-          'The end of the time range for the summary, in ISO 8601 format. If the user asks for "today", this should be the current time.',
+          'True to start from when the person asking was last active in this channel before now (their messages from the last few minutes do not count). start_time is then ignored.',
       },
     },
-    required: ['start_time', 'end_time'],
+    required: [],
     additionalProperties: false,
   },
-  handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
-    if (!ctx.provider.summarizeMessages) {
-      return 'This provider does not support summarizing messages.';
-    }
-    const startTime = String(args.start_time ?? '');
-    const endTime = String(args.end_time ?? '');
-    return ctx.provider.summarizeMessages(ctx.message, startTime, endTime);
-  },
+  handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => runSummaryTool(ctx.message, args),
 };
 
 const imageTool: ToolDefinition = {
@@ -123,13 +154,17 @@ const rememberFactTool: ToolDefinition = {
     type: 'object',
     properties: {
       category: { type: 'string', enum: [...CHAT_MEMORY_CATEGORIES] },
-      subject: { type: 'string', description: 'Who/what this is about. Use Discord display name or "server".' },
+      subject: {
+        type: 'string',
+        description:
+          'Who/what this is about: the person\'s display name (a nickname, real name, or "me" for whoever is talking also works — it is matched to the member), or "server" for the group.',
+      },
       content: { type: 'string', description: 'What to remember. Be concise.' },
     },
     required: ['category', 'subject', 'content'],
     additionalProperties: false,
   },
-  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+  handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const category = parseCategory(args.category);
     if (!category) {
       return `Invalid category "${String(args.category)}". Use one of: ${CHAT_MEMORY_CATEGORIES.join(', ')}.`;
@@ -138,11 +173,23 @@ const rememberFactTool: ToolDefinition = {
     if (!content) {
       return 'Nothing to remember: content was empty.';
     }
-    const subject = optionalString(args.subject) ?? 'general';
+    const rawSubject = optionalString(args.subject) ?? 'general';
 
     const store = getMemoryStore();
-    const id = await store.save({ category, subject, content, source: 'conversation' });
-    return `Saved to memory (id: ${id}).`;
+    // A person's memories are keyed by their Discord id and filed under their CURRENT display name, so
+    // "Derrick", "@Wheezer" and "me" all land on the same member and survive renames. Anything else
+    // ('server', a topic, someone the bot has never seen) is kept as written.
+    const person = resolveSubject(store, rawSubject, ctx.message);
+    const cleaned = cleanSubject(rawSubject) || rawSubject;
+    const subject = person?.displayName ?? (NON_PERSON_SUBJECTS.has(nameKey(cleaned)) ? nameKey(cleaned) : cleaned);
+    const id = await store.save({
+      category,
+      subject,
+      content,
+      source: 'conversation',
+      subject_user_id: person?.userId,
+    });
+    return person ? `Saved to memory (id: ${id}) about ${person.displayName}.` : `Saved to memory (id: ${id}).`;
   },
 };
 
@@ -154,7 +201,10 @@ const recallMemoriesTool: ToolDefinition = {
     type: 'object',
     properties: {
       query: { type: 'string', description: "What to search for — a person's name, a topic, an event, etc." },
-      subject: { type: 'string', description: 'Optional: filter by person display name or "server".' },
+      subject: {
+        type: 'string',
+        description: 'Optional: filter by person (any name they go by, or "me") or "server".',
+      },
       category: {
         type: 'string',
         enum: [...CHAT_MEMORY_CATEGORIES, 'all'],
@@ -164,7 +214,7 @@ const recallMemoriesTool: ToolDefinition = {
     required: ['query'],
     additionalProperties: false,
   },
-  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+  handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const store = getMemoryStore();
     const query = optionalString(args.query) ?? '';
     const subject = optionalString(args.subject);
@@ -181,16 +231,18 @@ const recallMemoriesTool: ToolDefinition = {
       }
     };
 
-    // 1. Subject-keyed rows first: an explicit subject filter, then the query itself read as a name.
-    if (subject) add(store.getBySubject(subject, 20));
-    if (query) add(store.getBySubject(query, 20));
+    // 1. Person-keyed rows first: an explicit subject filter, then the query itself read as a name. A
+    //    name that resolves to a member pulls their memories by id and under every name they've had.
+    if (subject) add(memoriesAbout(store, resolveSubject(store, subject, ctx.message), subject, 20));
+    if (query) add(memoriesAbout(store, resolveSubject(store, query, ctx.message), query, 20));
 
     // 2. Hybrid (semantic + keyword) search for topic matches.
     if (query) {
       try {
         add(await store.search(query, 20));
-      } catch {
+      } catch (error) {
         // Search may fail (e.g. embeddings and FTS both unavailable); fall back to subject-only results.
+        logger.warn('recall_memories: search failed, returning subject matches only:', error);
       }
     }
 

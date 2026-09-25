@@ -70,6 +70,13 @@ try {
   logger.warn('Memory compaction on startup failed:', error);
 }
 
+// Link name-only memories to member ids (idempotent; logs its own counts).
+try {
+  getMemoryStore().stampSubjectUserIds();
+} catch (error) {
+  logger.warn('Memory subject-id stamp on startup failed:', error);
+}
+
 // Embedding backfill: once at startup, then periodically. The periodic re-run is the self-heal for
 // memories saved while the embeddings API was down (they stay vector-less and invisible to gated
 // semantic search until a backfill picks them up) and for EMBEDDING_MODEL switches.

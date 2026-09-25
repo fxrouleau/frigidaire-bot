@@ -3,9 +3,13 @@ import type OpenAI from 'openai';
 import type { ChatCompletionContentPart } from 'openai/resources/chat/completions';
 import { config } from '../config';
 import { logger } from '../logger';
-import type { MemoryStore } from './memory/memoryStore';
+import { attributeMessage } from '../relay';
+import { getCachedTranscript } from './media';
+import { type Identity, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
+import { matchIdentityByName, namesOf } from './memory/people';
 import { getOpenRouterClient } from './openRouterClient';
 import { formatEmojiLines, formatIdentityLines } from './promptSections';
+import { type UsageFeature, featureRequestOptions } from './usage';
 import { formatTimestampET } from './utils';
 
 // Single source of truth for valid categories — a runtime value (not just a type) because the TTL
@@ -238,6 +242,83 @@ Respond ONLY with a JSON object. If nothing actionable, respond with {"observati
 }`;
 }
 
+// Image parts per learner request: every image is paid vision input, and a busy meme channel can post
+// dozens between cycles. The newest ones are kept; older ones become a text placeholder.
+export const MAX_LEARNER_IMAGES = 8;
+const IMAGE_PLACEHOLDER = '[image not shown]';
+const MAX_VOICE_TRANSCRIPT_CHARS = 2_000;
+const PER_PERSON_MEMORY_LIMIT = 25;
+
+/**
+ * Keeps the `max` most recent image parts (parts are in chronological order) and replaces older ones
+ * with a text placeholder, so the model still knows those messages carried an image.
+ */
+export function capImageParts(
+  parts: ChatCompletionContentPart[],
+  max: number,
+): { parts: ChatCompletionContentPart[]; kept: number; dropped: number } {
+  const imageIndexes = parts.flatMap((part, index) => (part.type === 'image_url' ? [index] : []));
+  const dropped = Math.max(0, imageIndexes.length - max);
+  const drop = new Set(imageIndexes.slice(0, dropped));
+  return {
+    parts: parts.map((part, index) => (drop.has(index) ? { type: 'text', text: IMAGE_PLACEHOLDER } : part)),
+    kept: imageIndexes.length - dropped,
+    dropped,
+  };
+}
+
+/** Image URLs a message carries: image attachments, then one preview image per embed. */
+function imageUrls(msg: Message): string[] {
+  const urls: string[] = [];
+  for (const attachment of msg.attachments.values()) {
+    if (attachment.contentType?.startsWith('image/') && attachment.url) urls.push(attachment.url);
+  }
+  for (const embed of msg.embeds) {
+    // Discord's media proxy over the third-party origin, like the chat agent: the origin may be
+    // hotlink-protected or gone, the proxy serves what Discord already cached.
+    const image = embed.image ?? embed.thumbnail;
+    const url = image?.proxyURL || image?.url;
+    if (url) urls.push(url);
+  }
+  return urls;
+}
+
+/** A transcript the media feature already produced for this message. Cache only: the learner never pays to transcribe. */
+function cachedTranscript(messageId: string): string | undefined {
+  try {
+    const transcript = getCachedTranscript(messageId)?.trim();
+    if (!transcript) return undefined;
+    return transcript.length > MAX_VOICE_TRANSCRIPT_CHARS
+      ? `${transcript.slice(0, MAX_VOICE_TRANSCRIPT_CHARS - 1)}…`
+      : transcript;
+  } catch (error) {
+    logger.warn(`PersonalityLearner: transcript lookup failed for message ${messageId}:`, error);
+    return undefined;
+  }
+}
+
+/** Snowflake order: timestamp first, then the id itself (equal-length decimal strings compare lexically). */
+function isNewer(a: Message, b: Message): boolean {
+  if (a.createdTimestamp !== b.createdTimestamp) return a.createdTimestamp > b.createdTimestamp;
+  return a.id.length !== b.id.length ? a.id.length > b.id.length : a.id > b.id;
+}
+
+/** A fetched message the learner looks at, attributed to the person who wrote it. */
+type ObservedMessage = {
+  msg: Message;
+  /** Discord id of the real author; absent only for an old relay whose author could not be matched. */
+  authorId?: string;
+  authorName: string;
+  source: 'human' | 'relay';
+};
+
+export type PersonalityLearnerOptions = {
+  intervalMs?: number;
+  minMessages?: number;
+  /** OpenRouter client; defaults to the shared one (tests inject a replay client). */
+  client?: OpenAI;
+};
+
 export class PersonalityLearner {
   private readonly store: MemoryStore;
   private readonly intervalMs: number;
@@ -246,12 +327,16 @@ export class PersonalityLearner {
   private readonly activeChannels = new Set<string>();
   private readonly ignoredChannels: Set<string>;
   private client: OpenAI | undefined;
+  // A cycle can outlast the interval (slow model, many channels); the next tick must not start a
+  // second one that re-reads the same watermarks and saves every observation twice.
+  private cycleInFlight = false;
 
-  constructor(store: MemoryStore, intervalMs?: number) {
+  constructor(store: MemoryStore, opts: PersonalityLearnerOptions = {}) {
     this.store = store;
-    this.intervalMs = intervalMs ?? config.learner.intervalMs;
-    this.minMessages = config.learner.minMessages;
+    this.intervalMs = opts.intervalMs ?? config.learner.intervalMs;
+    this.minMessages = opts.minMessages ?? config.learner.minMessages;
     this.ignoredChannels = new Set(config.learner.ignoredChannels);
+    this.client = opts.client;
   }
 
   start(discordClient: Client): void {
@@ -260,9 +345,7 @@ export class PersonalityLearner {
     logger.info(`PersonalityLearner started (interval: ${this.intervalMs}ms, min messages: ${this.minMessages})`);
 
     this.timer = setInterval(() => {
-      this.observe(discordClient).catch((error) => {
-        logger.error('PersonalityLearner observation failed:', error);
-      });
+      void this.observeOnce(discordClient);
     }, this.intervalMs);
   }
 
@@ -279,9 +362,31 @@ export class PersonalityLearner {
     this.activeChannels.add(channelId);
   }
 
-  private buildRelevantMemoriesSummary(subjectsInBatch: Set<string>): string {
+  /**
+   * One observation cycle over the channels that saw activity since the last one. Never throws. When
+   * the previous cycle is still running this one is skipped, and the channels it would have handled
+   * stay queued for the next tick.
+   */
+  async observeOnce(discordClient: Client): Promise<void> {
+    if (this.cycleInFlight) {
+      logger.warn('PersonalityLearner: previous observation cycle still running, skipping this tick');
+      return;
+    }
+    this.cycleInFlight = true;
+    try {
+      await this.observe(discordClient);
+    } catch (error) {
+      logger.error('PersonalityLearner observation failed:', error);
+    } finally {
+      this.cycleInFlight = false;
+    }
+  }
+
+  private buildRelevantMemoriesSummary(observed: ObservedMessage[], identitiesById: Map<string, Identity>): string {
     // Fetch memories keyed on who actually participated in this batch, plus server-wide
-    // and bot-subject context. Avoids dumping all ~1000 memories into every prompt.
+    // and bot-subject context. Avoids dumping all ~1000 memories into every prompt. A participant's
+    // memories are looked up by their Discord id and every name they have had, so rows filed under an
+    // old display name still count as "already known".
     const seen = new Set<number>();
     const chunks: string[] = [];
 
@@ -293,9 +398,16 @@ export class PersonalityLearner {
       }
     };
 
-    const PER_SUBJECT_LIMIT = 25;
-    for (const subject of subjectsInBatch) {
-      push(this.store.getBySubject(subject, PER_SUBJECT_LIMIT));
+    const participants = new Map<string, { userId?: string; names: string[] }>();
+    for (const o of observed) {
+      const key = o.authorId ?? `name:${o.authorName}`;
+      if (participants.has(key)) continue;
+      const identity = o.authorId ? identitiesById.get(o.authorId) : undefined;
+      participants.set(key, { userId: o.authorId, names: namesOf(identity, [o.authorName]) });
+    }
+
+    for (const participant of participants.values()) {
+      push(this.store.getForPerson(participant, PER_PERSON_MEMORY_LIMIT));
     }
     push(this.store.getBySubject('server', 25));
 
@@ -303,8 +415,7 @@ export class PersonalityLearner {
     return chunks.join('\n');
   }
 
-  private formatLearnerIdentitiesSection(): string {
-    const identities = this.store.getAllIdentities().filter((i) => i.active !== 0);
+  private formatLearnerIdentitiesSection(identities: Identity[]): string {
     if (identities.length === 0) return '';
 
     return `\nKnown server identities (Discord ID → canonical name). Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${formatIdentityLines(identities).join('\n')}\n`;
@@ -323,6 +434,96 @@ export class PersonalityLearner {
   }
 
   /**
+   * Humans, plus the bot's relays of them (link-fix and regret reposts, which Discord marks as bot
+   * messages), attributed to the real author; other bots, integrations and the bot's own replies are
+   * dropped. Returned in chronological order.
+   */
+  private attributeAll(messages: Message[], identitiesById: Map<string, Identity>): ObservedMessage[] {
+    const observed: ObservedMessage[] = [];
+    for (const msg of [...messages].sort((a, b) => a.createdTimestamp - b.createdTimestamp)) {
+      const attribution = attributeMessage(msg);
+      if (!attribution) continue;
+      // Fetched history usually lacks member data (no nickname); the identities table carries each
+      // member's current display name, which is what observation subjects must use.
+      const known = attribution.authorId ? identitiesById.get(attribution.authorId)?.display_name : undefined;
+      observed.push({
+        msg,
+        authorId: attribution.authorId,
+        authorName: known ?? attribution.authorName,
+        source: attribution.source,
+      });
+    }
+    return observed;
+  }
+
+  /**
+   * Safety net for the identityTracker event (which misses messages during downtime). Fetched history
+   * rarely carries member data, and without it the only names on hand are the global display name or
+   * username — which must never overwrite a known server nickname, so those only seed unknown members.
+   */
+  private refreshIdentity(msg: Message): void {
+    try {
+      const memberName = msg.member?.displayName;
+      if (memberName) {
+        this.store.upsertIdentity(msg.author.id, memberName);
+      } else if (!this.store.getIdentityById(msg.author.id)) {
+        const fallback = msg.author.displayName || msg.author.username;
+        if (fallback) this.store.upsertIdentity(msg.author.id, fallback);
+      }
+    } catch (error) {
+      logger.warn('PersonalityLearner: upsertIdentity failed:', error);
+    }
+  }
+
+  /**
+   * Interleaved content parts, one text line per message (plus a cached voice transcript when there is
+   * one) followed by its images, capped at MAX_LEARNER_IMAGES image parts.
+   */
+  private buildMessageParts(observed: ObservedMessage[], channelId: string): ChatCompletionContentPart[] {
+    const parts: ChatCompletionContentPart[] = [];
+    for (const o of observed) {
+      const ts = formatTimestampET(o.msg.createdAt);
+      const idSuffix = o.authorId ? ` (id:${o.authorId})` : '';
+      parts.push({ type: 'text', text: `[${ts}] [${o.authorName}${idSuffix}] ${o.msg.content}` });
+      const transcript = cachedTranscript(o.msg.id);
+      if (transcript) parts.push({ type: 'text', text: `[voice message transcript: ${transcript}]` });
+      for (const url of imageUrls(o.msg)) {
+        parts.push({ type: 'image_url', image_url: { url } });
+      }
+    }
+
+    const capped = capImageParts(parts, MAX_LEARNER_IMAGES);
+    if (capped.dropped > 0) {
+      logger.info(
+        `PersonalityLearner: Including ${capped.kept} images from channel ${channelId}, dropped ${capped.dropped} older ones (cap ${MAX_LEARNER_IMAGES} per request)`,
+      );
+    } else if (capped.kept > 0) {
+      logger.info(`PersonalityLearner: Including ${capped.kept} images from channel ${channelId}`);
+    }
+    return capped.parts;
+  }
+
+  /**
+   * Files an observation under the member it is about: a valid subject_user_id wins and its member's
+   * current display name becomes the subject (the model sometimes writes a nickname); a name without
+   * an id is matched against the identities; 'server'/'bot' (lowercased) never carry an id.
+   */
+  private normalizeSubject(obs: Observation, identities: Identity[]): { subject: string; subjectUserId?: string } {
+    const subject = obs.subject.trim();
+    if (NON_PERSON_SUBJECTS.has(nameKey(subject))) return { subject: nameKey(subject) };
+
+    // A JSON number cannot hold a snowflake exactly (18+ digits exceed 2^53), so only strings count.
+    const rawId = typeof obs.subject_user_id === 'string' ? obs.subject_user_id.trim() : '';
+    if (/^\d+$/.test(rawId)) {
+      const identity = identities.find((i) => i.discord_user_id === rawId);
+      return { subject: identity?.display_name ?? subject, subjectUserId: rawId };
+    }
+
+    const match = matchIdentityByName(identities, subject);
+    return match ? { subject: match.display_name, subjectUserId: match.discord_user_id } : { subject };
+  }
+
+  /**
    * Sends content parts to an LLM, parses the JSON response, and saves valid observations +
    * identity updates. Returns counts of what was saved.
    */
@@ -333,17 +534,21 @@ export class PersonalityLearner {
     channelId: string,
     source: string,
     label: string,
+    feature: UsageFeature,
   ): Promise<{ observations: number; identityUpdates: number }> {
     logger.info(`${label}: Sending request to ${model} for channel ${channelId}`);
 
-    const response = await openai.chat.completions.create({
-      model,
-      max_tokens: 1536,
-      temperature: 0.3,
-      messages: [{ role: 'user', content: contentParts }],
-      // @ts-expect-error OpenRouter-specific field
-      provider: { zdr: true },
-    });
+    const response = await openai.chat.completions.create(
+      {
+        model,
+        max_tokens: 1536,
+        temperature: 0.3,
+        messages: [{ role: 'user', content: contentParts }],
+        // @ts-expect-error OpenRouter-specific field
+        provider: { zdr: true },
+      },
+      featureRequestOptions(feature),
+    );
 
     const text = response.choices?.[0]?.message?.content?.trim();
     if (!text) return { observations: 0, identityUpdates: 0 };
@@ -354,9 +559,10 @@ export class PersonalityLearner {
       return { observations: 0, identityUpdates: 0 };
     }
 
+    const identities = this.store.getAllIdentities().filter((i) => i.active !== 0);
     let observations = 0;
     for (const obs of parsed.observations) {
-      if (!obs.category || !obs.subject || !obs.content) continue;
+      if (!obs.category || typeof obs.subject !== 'string' || !obs.subject.trim() || !obs.content) continue;
 
       // Runtime whitelist: the parser doesn't validate categories, and the TTL sweep keys on exact
       // strings — an invented category would silently produce a never-expiring memory.
@@ -366,12 +572,13 @@ export class PersonalityLearner {
         continue;
       }
 
+      const { subject, subjectUserId } = this.normalizeSubject(obs, identities);
       await this.store.save({
         category,
-        subject: obs.subject,
+        subject,
         content: obs.content,
         source,
-        subject_user_id: obs.subject_user_id,
+        subject_user_id: subjectUserId,
       });
       observations++;
     }
@@ -408,166 +615,124 @@ export class PersonalityLearner {
 
     for (const channelId of channelsToProcess) {
       try {
-        const channel = await discordClient.channels.fetch(channelId);
-        if (!channel || channel.type !== ChannelType.GuildText) continue;
-
-        const textChannel = channel as TextChannel;
-        const lastMessageId = this.store.getLastObserved(channelId);
-
-        const fetchOptions: { limit: number; after?: string } = { limit: 100 };
-        if (lastMessageId) {
-          fetchOptions.after = lastMessageId;
-        }
-
-        const messages: Collection<string, Message> = await textChannel.messages.fetch(fetchOptions);
-        if (messages.size === 0) continue;
-
-        // Filter out bot messages
-        const humanMessages = [...messages.values()].filter((msg) => !msg.author.bot).reverse();
-
-        if (humanMessages.length < this.minMessages) {
-          logger.info(
-            `PersonalityLearner: Skipping channel ${channelId} — only ${humanMessages.length}/${this.minMessages} messages`,
-          );
-          continue;
-        }
-
-        logger.info(
-          `PersonalityLearner: Processing ${humanMessages.length} messages from channel ${channelId} (#${textChannel.name})`,
-        );
-
-        // Mechanically upsert identities for every observed author (safety net — the
-        // identityTracker event may have missed messages during downtime).
-        for (const msg of humanMessages) {
-          if (msg.webhookId) continue;
-          const name = msg.member?.displayName || msg.author.username;
-          if (name) {
-            try {
-              this.store.upsertIdentity(msg.author.id, name);
-            } catch (error) {
-              logger.warn('PersonalityLearner: upsertIdentity failed:', error);
-            }
-          }
-        }
-
-        // Build interleaved content parts: text + images per message
-        const messageParts: ChatCompletionContentPart[] = [];
-        let imageCount = 0;
-        for (const msg of humanMessages) {
-          const name = msg.member?.displayName || msg.author.username;
-          const ts = formatTimestampET(msg.createdAt);
-          const idSuffix = !msg.webhookId && !msg.author.bot ? ` (id:${msg.author.id})` : '';
-          messageParts.push({ type: 'text', text: `[${ts}] [${name}${idSuffix}] ${msg.content}` });
-          // Inline image parts from attachments
-          for (const attachment of msg.attachments.values()) {
-            if (attachment.contentType?.startsWith('image/')) {
-              messageParts.push({ type: 'image_url', image_url: { url: attachment.url } });
-              imageCount++;
-            }
-          }
-          // Inline image parts from embeds
-          for (const embed of msg.embeds) {
-            if (embed.image?.url) {
-              messageParts.push({ type: 'image_url', image_url: { url: embed.image.url } });
-              imageCount++;
-            }
-            if (embed.thumbnail?.url) {
-              messageParts.push({ type: 'image_url', image_url: { url: embed.thumbnail.url } });
-              imageCount++;
-            }
-          }
-        }
-
-        if (imageCount > 0) {
-          logger.info(`PersonalityLearner: Including ${imageCount} images from channel ${channelId}`);
-        }
-
-        // --- Pass 1: Personality analysis ---
-        const subjectsInBatch = new Set<string>();
-        for (const msg of humanMessages) {
-          const name = msg.member?.displayName || msg.author.username;
-          if (name) subjectsInBatch.add(name);
-        }
-
-        const existingMemoriesSummary = this.buildRelevantMemoriesSummary(subjectsInBatch);
-        const identitiesSection = this.formatLearnerIdentitiesSection();
-        const emojisSection = this.formatLearnerEmojisSection();
-
-        const personalityPrompt = buildPersonalityPrompt({
-          identitiesSection,
-          emojisSection,
-          existingMemoriesSummary,
-        });
-
-        const personalityParts: ChatCompletionContentPart[] = [
-          { type: 'text', text: personalityPrompt },
-          ...messageParts,
-        ];
-
-        const personalityResult = await this.analyzeAndSave(
-          openai,
-          config.models.learner,
-          personalityParts,
-          channelId,
-          'observation',
-          'PersonalityLearner',
-        );
-
-        if (personalityResult.observations > 0 || personalityResult.identityUpdates > 0) {
-          logger.info(
-            `PersonalityLearner: Saved ${personalityResult.observations} observations, ${personalityResult.identityUpdates} identity updates from channel ${channelId}`,
-          );
-        } else {
-          logger.info(`PersonalityLearner: No new observations from channel ${channelId}`);
-        }
-
-        // --- Pass 2: Self-improvement analysis (optional) ---
-        if (selfImprovementEnabled) {
-          try {
-            const existingSelfImprovement = SELF_IMPROVEMENT_CATEGORIES.flatMap((cat) =>
-              this.store.getByCategory(cat, 60),
-            );
-            const existingSelfImprovementSummary =
-              existingSelfImprovement.length > 0
-                ? existingSelfImprovement.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')
-                : '(none yet)';
-
-            const selfImprovementPrompt = buildSelfImprovementPrompt({ botName, existingSelfImprovementSummary });
-
-            const selfImprovementParts: ChatCompletionContentPart[] = [
-              { type: 'text', text: selfImprovementPrompt },
-              ...messageParts,
-            ];
-
-            const selfImprovementResult = await this.analyzeAndSave(
-              openai,
-              config.models.selfImprovement,
-              selfImprovementParts,
-              channelId,
-              'self-improvement',
-              'SelfImprovementLearner',
-            );
-
-            if (selfImprovementResult.observations > 0) {
-              logger.info(
-                `SelfImprovementLearner: Saved ${selfImprovementResult.observations} observations from channel ${channelId}`,
-              );
-            } else {
-              logger.info(`SelfImprovementLearner: No new observations from channel ${channelId}`);
-            }
-          } catch (error) {
-            logger.warn('SelfImprovementLearner: Self-improvement pass failed, continuing:', error);
-          }
-        }
-
-        // Update last observed message ID (newest message in the batch)
-        const newestMessage = [...messages.values()][0];
-        if (newestMessage) {
-          this.store.setLastObserved(channelId, newestMessage.id);
-        }
+        await this.observeChannel(discordClient, openai, channelId, botName, selfImprovementEnabled);
       } catch (error) {
         logger.error(`PersonalityLearner: Error processing channel ${channelId}:`, error);
       }
     }
+  }
+
+  private async observeChannel(
+    discordClient: Client,
+    openai: OpenAI,
+    channelId: string,
+    botName: string,
+    selfImprovementEnabled: boolean,
+  ): Promise<void> {
+    const channel = await discordClient.channels.fetch(channelId);
+    if (!channel || channel.type !== ChannelType.GuildText) return;
+
+    const textChannel = channel as TextChannel;
+    const lastMessageId = this.store.getLastObserved(channelId);
+
+    const fetchOptions: { limit: number; after?: string } = { limit: 100 };
+    if (lastMessageId) {
+      fetchOptions.after = lastMessageId;
+    }
+
+    const messages: Collection<string, Message> = await textChannel.messages.fetch(fetchOptions);
+    if (messages.size === 0) return;
+
+    const fetched = [...messages.values()];
+    let observed = this.attributeAll(fetched, this.identitiesById());
+
+    if (observed.length < this.minMessages) {
+      logger.info(
+        `PersonalityLearner: Skipping channel ${channelId} — only ${observed.length}/${this.minMessages} messages`,
+      );
+      return;
+    }
+
+    const relayed = observed.filter((o) => o.source === 'relay').length;
+    logger.info(
+      `PersonalityLearner: Processing ${observed.length} messages (${relayed} relayed) from channel ${channelId} (#${textChannel.name})`,
+    );
+
+    // Mechanically upsert identities for every observed author, then re-attribute so labels use the
+    // refreshed names.
+    for (const o of observed) {
+      if (o.source === 'human') this.refreshIdentity(o.msg);
+    }
+    const identitiesById = this.identitiesById();
+    observed = this.attributeAll(fetched, identitiesById);
+
+    const messageParts = this.buildMessageParts(observed, channelId);
+
+    // --- Pass 1: Personality analysis ---
+    const activeIdentities = [...identitiesById.values()].filter((i) => i.active !== 0);
+    const personalityPrompt = buildPersonalityPrompt({
+      identitiesSection: this.formatLearnerIdentitiesSection(activeIdentities),
+      emojisSection: this.formatLearnerEmojisSection(),
+      existingMemoriesSummary: this.buildRelevantMemoriesSummary(observed, identitiesById),
+    });
+
+    const personalityResult = await this.analyzeAndSave(
+      openai,
+      config.models.learner,
+      [{ type: 'text', text: personalityPrompt }, ...messageParts],
+      channelId,
+      'observation',
+      'PersonalityLearner',
+      'learner',
+    );
+
+    if (personalityResult.observations > 0 || personalityResult.identityUpdates > 0) {
+      logger.info(
+        `PersonalityLearner: Saved ${personalityResult.observations} observations, ${personalityResult.identityUpdates} identity updates from channel ${channelId}`,
+      );
+    } else {
+      logger.info(`PersonalityLearner: No new observations from channel ${channelId}`);
+    }
+
+    // --- Pass 2: Self-improvement analysis (optional) ---
+    if (selfImprovementEnabled) {
+      try {
+        const existingSelfImprovement = SELF_IMPROVEMENT_CATEGORIES.flatMap((cat) => this.store.getByCategory(cat, 60));
+        const existingSelfImprovementSummary =
+          existingSelfImprovement.length > 0
+            ? existingSelfImprovement.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')
+            : '(none yet)';
+
+        const selfImprovementPrompt = buildSelfImprovementPrompt({ botName, existingSelfImprovementSummary });
+
+        const selfImprovementResult = await this.analyzeAndSave(
+          openai,
+          config.models.selfImprovement,
+          [{ type: 'text', text: selfImprovementPrompt }, ...messageParts],
+          channelId,
+          'self-improvement',
+          'SelfImprovementLearner',
+          'self_improvement',
+        );
+
+        if (selfImprovementResult.observations > 0) {
+          logger.info(
+            `SelfImprovementLearner: Saved ${selfImprovementResult.observations} observations from channel ${channelId}`,
+          );
+        } else {
+          logger.info(`SelfImprovementLearner: No new observations from channel ${channelId}`);
+        }
+      } catch (error) {
+        logger.warn('SelfImprovementLearner: Self-improvement pass failed, continuing:', error);
+      }
+    }
+
+    // Advance the watermark to the newest fetched message (bot messages included: they were seen).
+    const newestMessage = fetched.reduce((newest, msg) => (isNewer(msg, newest) ? msg : newest));
+    this.store.setLastObserved(channelId, newestMessage.id);
+  }
+
+  private identitiesById(): Map<string, Identity> {
+    return new Map(this.store.getAllIdentities().map((i) => [i.discord_user_id, i]));
   }
 }
