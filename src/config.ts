@@ -273,10 +273,32 @@ export const config = {
   // ---- Feature sections. Each feature adds its getters inside its own section only. ----
 
   /** Reminders and polls (src/scheduling/, src/ai/tools/reminders.ts). */
-  reminders: {},
+  reminders: {
+    /** Pending reminders one member may have set at once (a runaway tool loop can't flood the table). */
+    get maxPerUser(): number {
+      return envInt('REMINDERS_MAX_PER_USER', 25, { min: 1, max: 1000 });
+    },
+  },
 
   /** Birthday announcements (src/scheduling/, src/ai/tools/birthdays.ts). */
-  birthdays: {},
+  birthdays: {
+    /** Where birthday announcements go; defaults to MAIN_CHANNEL_ID. Unset (both) ⇒ announcements off. */
+    get channelId(): string | undefined {
+      return envString('BIRTHDAY_CHANNEL_ID') ?? config.server.mainChannelId;
+    },
+    /** Kill switch for the announcements alone; the birthday tools keep working either way. */
+    get announceEnabled(): boolean {
+      return envBool('BIRTHDAY_ANNOUNCE_ENABLED', true);
+    },
+    /** Eastern hour (0–23) from which the day's birthdays are announced: afternoon, not midnight. */
+    get announceHour(): number {
+      return envInt('BIRTHDAY_ANNOUNCE_HOUR', 15, { min: 0, max: 23 });
+    },
+    /** `userId:MM-DD` / `userId:YYYY-MM-DD` entries applied at startup for users without a birthday yet. */
+    get seed(): string[] {
+      return envCsv('BIRTHDAYS_SEED');
+    },
+  },
 
   /** Local message archive, search and Wrapped (src/archive/). */
   archive: {},
