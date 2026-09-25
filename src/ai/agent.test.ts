@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeMessage } from '../test-support/fakeDiscord';
 import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
 import { FakeProvider, errorStep, textResponse, toolCallResponse } from '../test-support/fakeProvider';
-import { AgentOrchestrator } from './agent';
+import { AgentOrchestrator, ERROR_REPLIES } from './agent';
 import { ConversationPersistence } from './conversationPersistence';
 import type { ConversationState } from './conversationStore';
 import { loadErrorCapture } from './debugCapture';
@@ -244,7 +244,8 @@ describe('AgentOrchestrator.handleMention', () => {
 
     await orchestrator.handleMention(fake.message);
 
-    expect(fake.recorders.reply.calls.some(([arg]) => typeof arg === 'string' && /encountered an error/.test(arg))).toBe(
+    // An in-character line from the pool, not a canned apology.
+    expect(fake.recorders.reply.calls.some(([arg]) => typeof arg === 'string' && ERROR_REPLIES.includes(arg))).toBe(
       true,
     );
 
@@ -294,7 +295,7 @@ describe('AgentOrchestrator.handleMention', () => {
     expect(fake.recorders.send.calls).toContainEqual(['via send']);
   });
 
-  it('reuses conversation state across mentions in the same channel', async () => {
+  it('reuses conversation state across mentions and only catches up on what was said since', async () => {
     const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
     const orchestrator = makeOrchestrator(provider);
     const fake1 = createFakeMessage({ content: 'first message', channelId: 'shared', messageId: 'm1' });
@@ -303,9 +304,10 @@ describe('AgentOrchestrator.handleMention', () => {
     await orchestrator.handleMention(fake1.message);
     await orchestrator.handleMention(fake2.message);
 
-    // History is only fetched on the first mention.
-    expect(fake1.recorders.messagesFetch.calls).toHaveLength(1);
-    expect(fake2.recorders.messagesFetch.calls).toHaveLength(0);
+    // The window is seeded once; the second mention only asks for the messages before itself (the
+    // ones since the first ping), not for a fresh 25-message seed.
+    expect(fake1.recorders.messagesFetch.calls).toEqual([[{ limit: 25, before: 'm1' }]]);
+    expect(fake2.recorders.messagesFetch.calls).toEqual([[{ limit: 100, before: 'm2' }]]);
     // The second call carries more history than the first.
     expect(provider.calls[1].messages.length).toBeGreaterThan(provider.calls[0].messages.length);
   });
@@ -589,9 +591,9 @@ describe('AgentOrchestrator per-turn memory refresh', () => {
     expect(embeddings.calls.filter((c) => c.kind === 'query')).toHaveLength(1);
   });
 
-  it('splices in NO developer entry when no memories match (no blank dynamic message)', async () => {
-    // Empty store: speaker bucket, contextual search, and mentioned pulls all come back empty, so the
-    // dynamic context entry must be undefined — not a developer message with empty text.
+  it('always splices in the dynamic entry (time + channel) even when no memories match', async () => {
+    // Empty store: speaker bucket, contextual search, and mentioned pulls all come back empty; the entry
+    // still carries the current time and channel, and no empty memory headings.
     setMemoryStoreForTesting(new MemoryStore(':memory:'));
 
     const provider = new FakeProvider([textResponse('Hi')]);
@@ -603,12 +605,12 @@ describe('AgentOrchestrator per-turn memory refresh', () => {
     const developerEntries = provider.calls[0].messages.filter(
       (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
     );
-    // Exactly the static prompt — the empty dynamic entry was dropped, not pushed blank.
-    expect(developerEntries).toHaveLength(1);
-    for (const dev of developerEntries) {
-      const text = dev.content.map((p) => (p.type === 'text' ? p.text : '')).join('');
-      expect(text.trim().length).toBeGreaterThan(0);
-    }
+    expect(developerEntries).toHaveLength(2);
+    const dynamic = dynamicContextText(provider, 0);
+    expect(dynamic).toMatch(/^Current time: [A-Z][a-z]+day \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2} E[SD]T/);
+    expect(dynamic).toContain('Channel: #general');
+    expect(dynamic).not.toContain('What you know');
+    expect(dynamic).not.toContain('Relevant to this conversation');
   });
 
   it('refreshes the speaker bucket when a different user speaks mid-conversation', async () => {
@@ -716,8 +718,12 @@ describe('AgentOrchestrator robustness', () => {
       .map((e) => e.content.map((p) => (p.type === 'text' ? p.text : '')).join(''));
     // Without serialization both turns read the same empty state and the second never saw 'first'.
     expect(secondTurnAssistantTexts).toContain('first');
-    // The channel history was seeded exactly once — the second turn reused the first turn's state.
-    expect(a.recorders.messagesFetch.calls.length + b.recorders.messagesFetch.calls.length).toBe(1);
+    // The channel history was seeded exactly once — the second turn reused the first turn's state and
+    // only caught up on what came after the first ping.
+    const seeds = [...a.recorders.messagesFetch.calls, ...b.recorders.messagesFetch.calls].filter(
+      ([arg]) => (arg as { limit?: number }).limit === 25,
+    );
+    expect(seeds).toHaveLength(1);
     expect(a.recorders.reply.calls).toContainEqual(['first']);
     expect(b.recorders.reply.calls).toContainEqual(['second']);
   });
@@ -733,7 +739,7 @@ describe('AgentOrchestrator robustness', () => {
 
     await expect(orchestrator.handleMention(fake.message)).resolves.toBeUndefined();
 
-    expect(fake.recorders.reply.calls.some(([arg]) => /encountered an error/.test(String(arg)))).toBe(true);
+    expect(fake.recorders.reply.calls.some(([arg]) => ERROR_REPLIES.includes(String(arg)))).toBe(true);
     expect(provider.calls).toHaveLength(0);
   });
 

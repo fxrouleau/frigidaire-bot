@@ -111,7 +111,7 @@ const imageTool: ToolDefinition = {
     const prompt = String(args.prompt ?? '');
     const refinePrevious = args.refine_previous === true || args.refine_previous === 'true';
     const sourceImageUrl = optionalString(args.source_image_url);
-    return ctx.provider.generateImage(ctx.message, prompt, { refinePrevious, sourceImageUrl });
+    return ctx.provider.generateImage(ctx.message, prompt, { refinePrevious, sourceImageUrl, turn: ctx.turn });
   },
 };
 

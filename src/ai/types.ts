@@ -8,6 +8,14 @@ export type ConversationEntry =
       role: 'system' | 'developer' | 'assistant' | 'user';
       content: NormalizedContentPart[];
       name?: string;
+      /**
+       * Discord ids of the message(s) this entry renders: the source message of a user entry, every chunk
+       * of a sent reply, every message quoted in a reply-context entry. Lets a turn tell whether a message
+       * is already in the window (e.g. the one being replied to); dropped along with the entry on trim.
+       */
+      messageIds?: string[];
+      /** Ids of the long-term memories rendered into this (developer) entry, for cross-turn dedup. */
+      memoryIds?: number[];
     }
   | {
       kind: 'tool_call';
@@ -26,7 +34,9 @@ export type ConversationEntry =
 // older version are discarded on restore (the conversation simply starts fresh), so a shape change
 // can never feed a stale-shaped blob back into the running orchestrator.
 // v2: dropped the multi-provider era fields (providerId, thoughts, thoughtSignature).
-export const CONVERSATION_STATE_SCHEMA_VERSION = 2;
+// v3: message entries carry their Discord `messageIds` / rendered `memoryIds`; the state carries
+// `lastSeenMessageId`.
+export const CONVERSATION_STATE_SCHEMA_VERSION = 3;
 
 export type ProviderToolType = 'function' | 'web_search';
 
@@ -53,6 +63,8 @@ export type ProviderChatResponse = {
   toolCalls: ProviderToolCall[];
   outputEntries: ConversationEntry[];
   raw?: unknown;
+  /** The model that actually answered (OpenRouter's `model` field; differs from the request under fallbacks). */
+  servedBy?: string;
 };
 
 /** A file a tool wants attached to the bot's reply for this turn (a generated image, a sandbox chart, …). */
@@ -100,11 +112,18 @@ export type ChatInput = {
   toolChoice?: 'auto' | 'none';
 };
 
-export type ImageGenerationOptions = { refinePrevious?: boolean; sourceImageUrl?: string };
+export type ImageGenerationOptions = {
+  refinePrevious?: boolean;
+  sourceImageUrl?: string;
+  /** The current chat turn: the generated image is attached to the bot's reply instead of posted on its own. */
+  turn?: TurnEffects;
+};
 
 export interface AiProvider {
   id: string;
   defaultModel: string;
+  /** Every model a chat request may be served by, primary first (fallback routing). Absent ⇒ [defaultModel]. */
+  readonly chatModels?: string[];
   supportedTools: ProviderToolDefinition[];
   chat(input: ChatInput): Promise<ProviderChatResponse>;
   summarizeMessages?(message: Message, startTime: string, endTime: string): Promise<string>;

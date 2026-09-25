@@ -10,6 +10,7 @@ import { CONVERSATION_STATE_SCHEMA_VERSION } from './types';
 type SerializedState = {
   entries: ConversationState['entries'];
   injectedMemoryIds?: number[];
+  lastSeenMessageId?: string;
 };
 
 // Hard cap on a serialized state blob. A runaway conversation should degrade to "not persisted"
@@ -78,6 +79,7 @@ export class ConversationPersistence {
     const serializable: SerializedState = {
       entries: state.entries,
       injectedMemoryIds: state.injectedMemoryIds,
+      lastSeenMessageId: state.lastSeenMessageId,
     };
 
     let stateJson: string;
@@ -145,6 +147,7 @@ export class ConversationPersistence {
       entries: parsed.entries ?? [],
       timestamp: row.updated_at,
       injectedMemoryIds: parsed.injectedMemoryIds,
+      lastSeenMessageId: parsed.lastSeenMessageId,
     };
   }
 

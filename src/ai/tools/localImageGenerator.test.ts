@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import type OpenAI from 'openai';
-import { extractImageFromResponse } from './localImageGenerator';
+import OpenAI from 'openai';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '../../logger';
+import { createFakeMessage } from '../../test-support/fakeDiscord';
+import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
+import { createTurnEffects } from '../types';
+import { FEATURE_HEADER } from '../usage';
+import { GENERATED_IMAGE_NAME, extractImageFromResponse, generateLocalImage } from './localImageGenerator';
 
 function makeResponse(overrides: Partial<OpenAI.ChatCompletion['choices'][0]['message']>): OpenAI.ChatCompletion {
   return {

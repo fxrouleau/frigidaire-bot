@@ -8,6 +8,9 @@ export type ConversationState = {
   // so a memory rendered once isn't repeated on later turns. Plain number[] — kept JSON-serializable
   // on purpose (conversation state is persisted across restarts).
   injectedMemoryIds?: number[];
+  // Discord id of the newest message this window has accounted for (the last triggering message). The
+  // next turn fetches what was said after it, so the bot isn't blind to the chat between two pings.
+  lastSeenMessageId?: string;
 };
 
 export class ConversationStore {

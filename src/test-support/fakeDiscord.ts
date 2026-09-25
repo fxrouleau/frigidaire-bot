@@ -55,9 +55,23 @@ export type FakeMessageOptions = {
   // The author of the message this one replies to, when Discord resolved it (reply pings on).
   repliedUserId?: string | null;
   referencedMessageId?: string | null;
+  // MessageReferenceType of the reference (0 = reply, 1 = forward); omitted ⇒ no `type` field.
+  referencedMessageType?: number;
   memberIsNull?: boolean;
   historyMessages?: Message[];
   fetchedMessageById?: Record<string, Message>;
+  // A channel log with Discord's fetch semantics: fetch({ limit, before, after, around }) filters and
+  // limits it by snowflake like the API (ids must be numeric), and fetch(id) finds messages in it. When
+  // set, it replaces `historyMessages` for list fetches; `fetchedMessageById` still answers id fetches.
+  channelMessages?: Message[];
+  guildId?: string;
+  channelName?: string;
+  channelTopic?: string | null;
+  // Thread channels: isThread() is true and the parent is reported.
+  parentChannelId?: string;
+  parentChannelName?: string;
+  system?: boolean;
+  reactImpl?: (emoji: unknown) => Promise<unknown>;
   replyImpl?: (content: unknown) => Promise<unknown>;
   sendImpl?: (content: unknown) => Promise<unknown>;
   // Make the fake webhook's send() reject (exercises repost error paths).
@@ -73,9 +87,44 @@ export type FakeMessage = {
     messagesFetch: Recorder<[unknown], Promise<unknown>>;
     delete: Recorder<[], Promise<unknown>>;
     createWebhook: Recorder<[unknown], Promise<unknown>>;
+    react: Recorder<[unknown], Promise<unknown>>;
   };
   webhooks: FakeWebhook[];
 };
+
+type FetchListOptions = { limit?: number; before?: string; after?: string; around?: string };
+
+const byIdDesc = (a: Message, b: Message) => {
+  const x = BigInt(a.id);
+  const y = BigInt(b.id);
+  return x < y ? 1 : x > y ? -1 : 0;
+};
+
+/** Discord's list-fetch semantics over a channel log: newest first, filtered by snowflake, limited. */
+function fetchFromLog(log: Message[], options: FetchListOptions): Message[] {
+  const limit = options.limit ?? 50;
+  const sorted = [...log].sort(byIdDesc);
+  if (options.around !== undefined) {
+    const pivot = BigInt(options.around);
+    const older = sorted.filter((m) => BigInt(m.id) <= pivot);
+    const newer = sorted.filter((m) => BigInt(m.id) > pivot).reverse();
+    // Roughly half on each side of the pivot (the pivot itself counts on the older side).
+    const takeNewer = newer.slice(0, Math.floor(limit / 2));
+    const takeOlder = older.slice(0, limit - takeNewer.length);
+    return [...takeNewer.reverse(), ...takeOlder];
+  }
+  if (options.after !== undefined) {
+    const after = BigInt(options.after);
+    // The messages directly after the id (the oldest ones), returned newest first.
+    return sorted
+      .filter((m) => BigInt(m.id) > after)
+      .reverse()
+      .slice(0, limit)
+      .reverse();
+  }
+  const before = options.before !== undefined ? BigInt(options.before) : undefined;
+  return sorted.filter((m) => before === undefined || BigInt(m.id) < before).slice(0, limit);
+}
 
 let fakeWebhookMessageCounter = 0;
 
@@ -148,6 +197,8 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   const send = createRecorder<[unknown], Promise<unknown>>((c) => sendImpl(c));
   const sendTyping = createRecorder<[], Promise<void>>(async () => {});
   const deleteRecorder = createRecorder<[], Promise<unknown>>(async () => ({}) as unknown);
+  const reactImpl = opts.reactImpl ?? (async (_emoji: unknown) => ({}) as unknown);
+  const react = createRecorder<[unknown], Promise<unknown>>((emoji) => reactImpl(emoji));
   const createWebhook = createRecorder<[unknown], Promise<unknown>>(async (_options) => {
     const hook = createFakeWebhook(opts.webhookSendImpl);
     webhooks.push(hook);
@@ -155,14 +206,17 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   });
   const messagesFetch = createRecorder<[unknown], Promise<unknown>>(async (arg) => {
     if (typeof arg === 'string') {
-      const found = fetchedMessageById[arg];
+      const found = fetchedMessageById[arg] ?? opts.channelMessages?.find((m) => m.id === arg);
       if (!found) {
         throw new Error(`No fetched message registered for id "${arg}"`);
       }
       return found as unknown;
     }
     const collection = new Collection<string, Message>();
-    for (const msg of historyMessages) {
+    const listed = opts.channelMessages
+      ? fetchFromLog(opts.channelMessages, (arg ?? {}) as FetchListOptions)
+      : historyMessages;
+    for (const msg of listed) {
       collection.set(msg.id, msg);
     }
     return collection as unknown;
@@ -176,8 +230,18 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
         displayAvatarURL: (_opts?: unknown) => 'https://cdn.example/avatar.png',
       };
 
+  const guildId = opts.guildId ?? 'guild-1';
+  const isThreadChannel =
+    channelType === ChannelType.PublicThread ||
+    channelType === ChannelType.PrivateThread ||
+    channelType === ChannelType.AnnouncementThread;
+  const isDmChannel = channelType === ChannelType.DM || channelType === ChannelType.GroupDM;
+
   const built = {
     id: messageId,
+    url: `https://discord.com/channels/${guildId}/${channelId}/${messageId}`,
+    guildId,
+    system: opts.system ?? false,
     content,
     createdAt,
     createdTimestamp: createdAt.getTime(),
@@ -199,26 +263,40 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
       members: mentionMembers,
       repliedUser: opts.repliedUserId ? { id: opts.repliedUserId } : null,
     },
-    reference: referencedMessageId ? { messageId: referencedMessageId } : null,
+    reference: referencedMessageId
+      ? {
+          messageId: referencedMessageId,
+          channelId,
+          guildId,
+          ...(opts.referencedMessageType !== undefined ? { type: opts.referencedMessageType } : {}),
+        }
+      : null,
     client: {
       user: { id: botUserId, displayName: botDisplayName },
     },
     channel: {
       id: channelId,
       type: channelType,
+      name: opts.channelName ?? 'general',
+      topic: opts.channelTopic ?? null,
+      parentId: opts.parentChannelId ?? null,
+      parent: opts.parentChannelId ? { id: opts.parentChannelId, name: opts.parentChannelName ?? 'parent' } : null,
       isTextBased: () => true,
+      isThread: () => isThreadChannel,
+      isDMBased: () => isDmChannel,
       send,
       sendTyping,
       createWebhook,
       messages: { fetch: messagesFetch },
     },
     reply,
+    react,
     delete: deleteRecorder,
   };
 
   return {
     message: built as unknown as EventMessage,
-    recorders: { reply, send, sendTyping, messagesFetch, delete: deleteRecorder, createWebhook },
+    recorders: { reply, send, sendTyping, messagesFetch, delete: deleteRecorder, createWebhook, react },
     webhooks,
   };
 }
