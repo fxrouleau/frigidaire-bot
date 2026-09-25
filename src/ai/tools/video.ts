@@ -11,7 +11,7 @@
 // YouTube can't be watched under zero data retention; the link reader says so and goes by the text.
 import type { Message } from 'discord.js';
 import { channelInfoOf } from '../../archive/ingest';
-import { makeChannelAccess } from '../../archive/search';
+import { replyAccessFor } from '../../archive/search';
 import { logger } from '../../logger';
 import { formatLinkForTool } from '../linkReader/format';
 import { getLinkReader } from '../linkReader/reader';
@@ -139,7 +139,10 @@ async function findRecentVideo(ctx: ToolHandlerContext, deps: WatchVideoDeps): P
   return "No video in the recent messages here. Pass the message (the msg:<id> on its [video …] line, or a jump link) or the video's URL.";
 }
 
-/** A message named by a jump link: this server only, and only channels the asker can read. */
+/**
+ * A message named by a jump link: this server only, and only channels the asker can read that are at
+ * least as visible as this one (what the bot says about the video is posted here).
+ */
 async function fetchLinked(ctx: ToolHandlerContext, guildId: string, channelId: string, messageId: string) {
   const asker = ctx.message;
   if (channelId === asker.channel.id) return fetchIn(asker, messageId);
@@ -148,9 +151,11 @@ async function fetchLinked(ctx: ToolHandlerContext, guildId: string, channelId: 
   try {
     const channel = guild.channels.cache.get(channelId) ?? (await guild.channels.fetch(channelId));
     if (!channel || !channel.isTextBased()) return "I can't open that channel.";
-    const access = makeChannelAccess(guild, asker.member, { currentChannelId: asker.channel.id });
-    if (!access({ ...channelInfoOf(channel), guildId: guild.id, updatedAt: 0 })) {
-      return "That message is in a channel you can't read, so I won't watch it.";
+    const access = replyAccessFor(asker);
+    const row = { ...channelInfoOf(channel), guildId: guild.id, updatedAt: 0 };
+    if (!access.asker(row)) return "That message is in a channel you can't read, so I won't watch it.";
+    if (!access.audience(row)) {
+      return "That message is in a channel that's more private than this one, so I won't talk about it here.";
     }
     return await channel.messages.fetch(messageId);
   } catch (error) {

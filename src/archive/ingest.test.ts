@@ -221,6 +221,32 @@ describe('live ingest', () => {
     expect(store.getMessage(stranger.id)).toBeUndefined();
   });
 
+  it("keeps the archived reactions on a gateway edit (discord.js rebuilds an uncached message without them)", async () => {
+    const original = archivableMessage({
+      content: 'old news',
+      reactions: [
+        { name: '😂', count: 7 },
+        { id: '300000000000000001', name: 'kekw', count: 3 },
+      ],
+    });
+    archiveNewMessage(original);
+    // An edit (or a pin) after a restart: a full message, content and author present, reaction cache empty.
+    const edited = archivableMessage({ id: original.id, content: 'old news (edited)', editedAt: T0 + 5000 });
+    expect(edited.partial).toBe(false);
+    expect(await archiveMessageUpdate(edited)).toBe(true);
+    expect(store.getMessage(original.id)).toMatchObject({
+      content: 'old news (edited)',
+      reactions: [
+        { id: '300000000000000001', name: 'kekw', count: 3 },
+        { id: null, name: '😂', count: 7 },
+      ],
+    });
+    // A pin changes nothing else: nothing is written.
+    const pinned = archivableMessage({ id: original.id, content: 'old news (edited)', editedAt: T0 + 5000 });
+    expect(await archiveMessageUpdate(pinned)).toBe(false);
+    expect(store.getMessage(original.id)?.reactions).toHaveLength(2);
+  });
+
   it('fetches a partial message to apply its edit (and its current reactions), and gives up quietly when that fails', async () => {
     const original = archivableMessage({ content: 'before' });
     archiveNewMessage(original);
@@ -329,6 +355,11 @@ describe('archive events', () => {
       {} as Parameters<typeof bulkDeleteEvent.execute>[1],
     );
     expect(store.getMessage(second.id)?.deletedAt).not.toBeNull();
+    // A purge is recorded as one, so Wrapped doesn't count it as the author's own deletion.
+    const kindOf = (id: string) =>
+      (store.db.prepare('SELECT deleted_kind AS kind FROM messages WHERE id = ?').get(id) as { kind: string }).kind;
+    expect(kindOf(message.id)).toBe('message');
+    expect(kindOf(second.id)).toBe('bulk');
 
     const inThread = archivableMessage({
       id: snowflake(T0, 6),

@@ -188,6 +188,43 @@ describe('watch_video', () => {
     expect(watched).toEqual([]);
   });
 
+  it("won't talk here about a video from a more private channel, even when the asker can read it", async () => {
+    const { tool, watched } = setup();
+    const secret = videoPost('900000000000000077');
+    const everyone = 'guild-1';
+    const mods = '400000000000000001';
+    const modLogs = {
+      id: '761000000000000001',
+      name: 'mod-logs',
+      type: ChannelType.GuildText,
+      parentId: null,
+      guildId: 'guild-1',
+      isTextBased: () => true,
+      // The asker is a mod; everyone else only through the mods role.
+      permissionsFor: (target: { id: string }) => ({ has: () => target.id === 'asker' || target.id === mods }),
+      messages: { fetch: async () => secret },
+    };
+    const { message } = asker();
+    Object.assign(message, {
+      // The channel being asked from: everyone reads it.
+      channel: Object.assign(message.channel, { permissionsFor: () => ({ has: () => true }) }),
+      guild: {
+        id: 'guild-1',
+        roles: { cache: new Collection([everyone, mods].map((id) => [id, { id }])) },
+        channels: { cache: new Collection<string, unknown>([[modLogs.id, modLogs]]), fetch: async () => modLogs },
+      },
+      member: { id: 'asker' },
+    });
+
+    const output = await tool.handler(ctx(message), {
+      question: 'what happens?',
+      message_or_url: `https://discord.com/channels/guild-1/${modLogs.id}/900000000000000077`,
+    });
+
+    expect(output).toBe("That message is in a channel that's more private than this one, so I won't talk about it here.");
+    expect(watched).toEqual([]);
+  });
+
   it('hands other URLs to the link reader with the question', async () => {
     const { tool, read, watched } = setup();
     const output = await tool.handler(ctx(asker().message), {

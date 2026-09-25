@@ -274,6 +274,49 @@ describe('gap fill', () => {
     expect(store.countMessages(CHANNEL)).toBe(260);
   });
 
+  it('resumes an interrupted gap fill where it stopped, although live ingest archived newer messages', async () => {
+    backfillIds = [];
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const history = fakeHistory(260);
+    channels.set(CHANNEL, history);
+    const archive = (from: number, to: number) =>
+      store.upsertMessages(
+        history.messages.slice(from, to).map((m) => archiveInput({ id: m.id, createdAt: m.createdTimestamp })),
+      );
+    archive(0, 10);
+    // The first page arrives, then every retry of the second fails (or the bot restarts right there).
+    history.failures.push(undefined, ...Array.from({ length: 4 }, () => new Error('socket hang up')));
+    expect(await new ArchiveSync(makeDeps()).gapFill()).toBe(100);
+    expect(store.pendingGapFills()).toEqual([{ channelId: CHANNEL, cursorId: history.messages[109].id }]);
+    // Meanwhile live ingest archived the newest messages: the newest archived id is past the hole.
+    archive(250, 260);
+
+    history.calls = [];
+    expect(await new ArchiveSync(makeDeps()).gapFill()).toBe(140);
+    expect(history.calls.map((c) => c.after)).toEqual([history.messages[109].id, history.messages[209].id]);
+    expect(store.countMessages(CHANNEL)).toBe(260);
+    expect(store.pendingGapFills()).toEqual([]);
+  });
+
+  it('keeps no cursor once a channel is caught up, and resumes one saved before any page', async () => {
+    backfillIds = [];
+    const history = fakeHistory(30);
+    channels.set(CHANNEL, history);
+    store.upsertMessages(history.messages.map((m) => archiveInput({ id: m.id, createdAt: m.createdTimestamp })));
+    // A run that stopped before its first page (the cursor is where it would have started) …
+    store.startGapFill(CHANNEL, history.messages[4].id, now);
+    // … when everything was archived since: one request, nothing new, the cursor is gone.
+    expect(await new ArchiveSync(makeDeps()).gapFill()).toBe(0);
+    expect(history.calls.map((c) => c.after)).toEqual([history.messages[4].id]);
+    expect(store.pendingGapFills()).toEqual([]);
+
+    // Up to date and nothing pending: no request, nothing saved.
+    history.calls = [];
+    expect(await new ArchiveSync(makeDeps()).gapFill()).toBe(0);
+    expect(history.calls).toEqual([]);
+    expect(store.pendingGapFills()).toEqual([]);
+  });
+
   it('costs no request for an up-to-date channel, or one that is gone from the cache', async () => {
     backfillIds = [];
     const upToDate = fakeHistory(5);

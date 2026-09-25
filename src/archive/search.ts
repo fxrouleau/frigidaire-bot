@@ -69,6 +69,57 @@ export function makeChannelAccess(
   };
 }
 
+/** A guild whose roles can be listed (for audience checks); a discord.js Guild fits. */
+export type AudienceGuild = GuildLike & { roles: { cache: { values(): Iterable<unknown> } } };
+
+/** The parts of the triggering message reply access needs; a discord.js Message fits. */
+export type ReplyContext = {
+  guild: GuildLike | null;
+  member: unknown;
+  channelId: string;
+  channel?: unknown;
+};
+
+/** Who may see what the bot shows in its reply, per archived channel (see replyAccessFor). */
+export type ReplyAccess = {
+  /** The asker can read the channel. */
+  asker: (channel: ArchivedChannel) => boolean;
+  /** Everyone who can read the reply can read the channel too. */
+  audience: (channel: ArchivedChannel) => boolean;
+  /** Both: the channel's messages may be shown in the reply. */
+  allows: (channel: ArchivedChannel) => boolean;
+};
+
+function hasRoles(guild: GuildLike): guild is AudienceGuild {
+  const roles = (guild as Partial<AudienceGuild>).roles;
+  return typeof roles?.cache?.values === 'function';
+}
+
+function asPermissioned(channel: unknown): PermissionedChannel | undefined {
+  const candidate = channel as Partial<PermissionedChannel> | null | undefined;
+  return candidate && typeof candidate.permissionsFor === 'function' ? (candidate as PermissionedChannel) : undefined;
+}
+
+/**
+ * Which archived channels' messages the bot may show in its reply to `message` (search results, a linked
+ * message's context, a linked video). The reply is posted in the message's channel, so two rules apply:
+ * the asker must be able to read the channel (makeChannelAccess), and the channel must be at least as
+ * visible as the reply's channel (makeAudienceAccess), or a private channel (mod logs, a two-person
+ * channel) would be quoted to everyone reading the reply: an admin asking in #general, or "Ask Fridge" on
+ * a message by someone who can read more than the member who clicked it. The reply's own channel always
+ * counts. Without a guild, or when the reply channel's audience can't be read, nothing else does.
+ */
+export function replyAccessFor(message: ReplyContext): ReplyAccess {
+  const { guild, channelId } = message;
+  const asker = makeChannelAccess(guild, message.member, { currentChannelId: channelId });
+  const reply = asPermissioned(message.channel) ?? (guild ? guildChannel(guild, channelId) : undefined);
+  const audience: (channel: ArchivedChannel) => boolean =
+    guild && reply && hasRoles(guild)
+      ? makeAudienceAccess(guild, reply)
+      : (channel) => channel.id === channelId && asker(channel);
+  return { asker, audience, allows: (channel) => asker(channel) && audience(channel) };
+}
+
 /** The archived channel ids `access` allows, for ArchiveFilters.allowedChannelIds. */
 export function allowedChannelIds(store: ArchiveStore, access: (channel: ArchivedChannel) => boolean): string[] {
   return store
@@ -305,7 +356,7 @@ export function backfillNotice(store: ArchiveStore): string | undefined {
  * Private threads never count; ignored channels never count.
  */
 export function makeAudienceAccess(
-  guild: GuildLike & { roles: { cache: { values(): Iterable<unknown> } } },
+  guild: AudienceGuild,
   target: PermissionedChannel,
 ): (channel: ArchivedChannel) => boolean {
   const audience = [...guild.roles.cache.values()].filter((role) => canView(target, role));

@@ -1,5 +1,6 @@
 // Search over the local message archive (see src/archive/): what was said, by whom, when, and the
-// conversation around a message. Results only ever include channels the asking member can read.
+// conversation around a message. Results only ever include channels the asking member can read AND
+// that are at least as visible as the channel the answer is posted in (replyAccessFor).
 import type { Message } from 'discord.js';
 import { type ArchiveFilters, type ArchiveStore, compareSnowflakes, getArchiveStore } from '../../archive/archiveStore';
 import { channelInfoOf, isArchivableChannel, toArchiveInput } from '../../archive/ingest';
@@ -7,8 +8,8 @@ import {
   allowedChannelIds,
   backfillNotice,
   formatMessageLine,
-  makeChannelAccess,
   makeRenderContext,
+  replyAccessFor,
   resolveAuthor,
   resolveChannels,
 } from '../../archive/search';
@@ -34,11 +35,14 @@ function clampInt(raw: unknown, fallback: number, min: number, max: number): num
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
-/** Channels the triggering message's author may read, plus the channel they are asking from. */
+/** Archived channels whose messages may be shown in the answer to `message` (see replyAccessFor). */
 function accessFor(message: Message, store: ArchiveStore): string[] {
-  const access = makeChannelAccess(message.guild, message.member, { currentChannelId: message.channelId });
-  return allowedChannelIds(store, access);
+  return allowedChannelIds(store, replyAccessFor(message).allows);
 }
+
+const UNREADABLE = "That message is in a channel you can't read, so I can't show it.";
+const MORE_PRIVATE =
+  "That message is in a channel that's more private than this one, so I won't show it here. Ask me about it in a channel as private as that one.";
 
 function botNames(message: Message): string[] {
   const user = message.client?.user;
@@ -159,9 +163,10 @@ async function getMessageContext(ctx: ToolHandlerContext, args: Record<string, u
     const live = await contextFromDiscord(ctx.message, ref, before, after, store);
     return live ?? withNotice("That message isn't in the archive and I couldn't fetch it from Discord.", store);
   }
-  if (!accessFor(ctx.message, store).includes(target.channelId)) {
-    return "That message is in a channel you can't read, so I can't show it.";
-  }
+  const access = replyAccessFor(ctx.message);
+  const channel = store.getChannel(target.channelId);
+  if (!channel || !access.asker(channel)) return UNREADABLE;
+  if (!access.audience(channel)) return MORE_PRIVATE;
   if (target.deletedAt !== null) return 'That message was deleted.';
 
   const render = makeRenderContext(store);
@@ -171,15 +176,15 @@ async function getMessageContext(ctx: ToolHandlerContext, args: Record<string, u
     `→ ${formatMessageLine(target, render)}`,
     ...window.after.map((m) => `  ${formatMessageLine(m, render)}`),
   ];
-  const channel = render.nameOfChannel(target.channelId) ?? target.channelId;
-  return [`Conversation around that message in #${channel} (→ marks it):`, ...lines].join('\n');
+  return [`Conversation around that message in #${channel.name} (→ marks it):`, ...lines].join('\n');
 }
 
 /**
  * Fallback for a message the archive doesn't have (a channel not imported yet): read the surrounding
  * messages straight from Discord. Read-only on purpose — inserting an isolated old window would break
  * the archive's "contiguous from its oldest message" invariant the backfill relies on. Same access
- * rule as the archive: the asker must be able to read the channel, ignored channels stay off-limits.
+ * rule as the archive: the asker must be able to read the channel, it must be at least as visible as
+ * the channel the answer goes to, and ignored channels stay off-limits.
  */
 async function contextFromDiscord(
   asker: Message,
@@ -195,8 +200,9 @@ async function contextFromDiscord(
     const channel = guild.channels.cache.get(channelId) ?? (await guild.channels.fetch(channelId));
     if (!channel || !channel.isTextBased() || !isArchivableChannel(channel)) return undefined;
     const row = { ...channelInfoOf(channel), guildId: guild.id, updatedAt: 0 };
-    const access = makeChannelAccess(guild, asker.member, { currentChannelId: asker.channelId });
-    if (!access(row)) return "That message is in a channel you can't read, so I can't show it.";
+    const access = replyAccessFor(asker);
+    if (!access.asker(row)) return UNREADABLE;
+    if (!access.audience(row)) return MORE_PRIVATE;
 
     const fetched = await channel.messages.fetch({ around: ref.messageId, limit: Math.min(100, before + after + 1) });
     const ordered = [...fetched.values()].sort((a, b) => compareSnowflakes(a.id, b.id));

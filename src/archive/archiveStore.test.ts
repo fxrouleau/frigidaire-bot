@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { archiveInput, snowflake } from '../test-support/fakeArchive';
 import { ArchiveStore, compareSnowflakes, ftsTerms, normalizeReactions } from './archiveStore';
@@ -308,6 +312,54 @@ describe('ArchiveStore — reads', () => {
     store.upsertMessages([voice, relay, oldVoice]);
     expect(store.pendingTranscriptIds(T0 - DAY, 10)).toEqual([voice.id]);
     expect(store.unresolvedRelayIds(T0 - DAY, 10)).toEqual([relay.id]);
+  });
+});
+
+describe('ArchiveStore — deletion kinds', () => {
+  const kindOf = (db: ArchiveStore, id: string) =>
+    (db.db.prepare('SELECT deleted_kind AS kind FROM messages WHERE id = ?').get(id) as { kind: string | null }).kind;
+
+  it('records why a message was deleted: a single delete, a purge, or its channel', () => {
+    const single = archiveInput({ id: snowflake(T0, 1) });
+    const purged = archiveInput({ id: snowflake(T0, 2) });
+    const inThread = archiveInput({ id: snowflake(T0, 3), channelId: THREAD, parentChannelId: CHANNEL });
+    store.upsertMessages([single, purged, inThread]);
+    store.markDeleted([single.id], T0 + DAY);
+    store.markDeleted([purged.id], T0 + DAY, 'bulk');
+    store.markChannelDeleted(THREAD, T0 + DAY);
+    expect([single, purged, inThread].map((m) => kindOf(store, m.id))).toEqual(['message', 'bulk', 'channel']);
+    // A later delete of an already-deleted row changes nothing, its kind included.
+    expect(store.markDeleted([purged.id], T0 + 2 * DAY)).toBe(0);
+    expect(kindOf(store, purged.id)).toBe('bulk');
+  });
+
+  it('adds the column to an archive.db created before it existed', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-migrate-'));
+    const file = path.join(dir, 'archive.db');
+    try {
+      const old = new ArchiveStore(file);
+      const deleted = archiveInput({ id: snowflake(T0, 1) });
+      old.upsertMessage(deleted);
+      old.markDeleted([deleted.id], T0 + DAY);
+      old.close();
+      const raw = new Database(file);
+      raw.exec('ALTER TABLE messages DROP COLUMN deleted_kind');
+      raw.close();
+
+      const reopened = new ArchiveStore(file);
+      try {
+        expect(kindOf(reopened, deleted.id)).toBeNull();
+        const fresh = archiveInput({ id: snowflake(T0, 2) });
+        reopened.upsertMessage(fresh);
+        reopened.markDeleted([fresh.id], T0 + DAY, 'bulk');
+        expect(kindOf(reopened, fresh.id)).toBe('bulk');
+        reopened.checkFtsIntegrity();
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

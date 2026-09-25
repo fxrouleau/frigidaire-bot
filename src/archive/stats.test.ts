@@ -105,6 +105,26 @@ describe('computeWrappedStats', () => {
     return messages;
   }
 
+  it("counts only single deletions as the author's own: not a purge or a deleted thread", () => {
+    const own = et(5, 12, 0, { authorId: JASPER, authorName: 'Jasper', content: 'oops' });
+    const purged = [1, 2, 3].map((i) => et(5, 13, i, { authorId: REMI, content: `spam ${i}` }));
+    const thread = [1, 2, 3, 4].map((i) =>
+      et(6, 20, i, { authorId: MARC, authorName: 'Marc', channelId: THREAD, parentChannelId: MAIN, content: `t ${i}` }),
+    );
+    store.upsertMessages([own, ...purged, ...thread]);
+    store.markDeleted([own.id], own.createdAt + MINUTE);
+    store.markDeleted(
+      purged.map((m) => m.id),
+      Date.UTC(2026, 0, 5, 19),
+      'bulk',
+    );
+    // The thread itself was deleted; its parent (and so its place in Wrapped's scope) remains.
+    store.markChannelDeleted(THREAD, Date.UTC(2026, 0, 7));
+
+    const stats = computeWrappedStats({ startMs: START, endMs: END, channelIds: [MAIN, THREAD] }, { store });
+    expect(stats.deletions).toEqual({ total: 1, top: { authorId: JASPER, authorName: 'Jasper', count: 1 } });
+  });
+
   it('computes every Wrapped number for a month', () => {
     seed();
     const stats = computeWrappedStats({ startMs: START, endMs: END }, { store, botUserId: BOT_USER_ID });

@@ -6,7 +6,9 @@
 //   redeploys on every merge) picks up exactly where it stopped.
 // - Gap fill: after downtime, every channel with history is paged forward from its newest archived
 //   message, so messages posted while the bot was offline are not missing. Channels whose last message
-//   (as Discord reports it in the channel cache) is already archived cost no request at all.
+//   (as Discord reports it in the channel cache) is already archived cost no request at all. The id a
+//   channel's gap fill has reached is saved with each page: live ingest archives newer messages in the
+//   meantime, so a run that stops early resumes from there instead of skipping the rest of the gap.
 //
 // Both are polite (ARCHIVE_BACKFILL_DELAY_MS between requests; discord.js additionally honors 429s),
 // fetch with cache:false (hundreds of thousands of messages must not pile up in discord.js' cache), and
@@ -27,9 +29,6 @@ import {
 
 const PAGE_SIZE = 100;
 const PROGRESS_EVERY_PAGES = 25;
-// A gap fill is for downtime, not for importing a whole channel; a channel further behind than this
-// continues on the next run (its newest archived message has moved forward by then).
-const MAX_GAP_FILL_PAGES = 100;
 const MAX_ATTEMPTS = 4;
 // A channel whose backfill failed (no access, deleted, persistent errors) is retried after this long.
 const ERROR_RETRY_MS = 60 * 60 * 1000;
@@ -136,42 +135,65 @@ export class ArchiveSync {
     }
   }
 
-  /** Pages forward from each channel's newest archived message to catch what was posted while offline. */
+  /**
+   * Pages forward from each channel's newest archived message to catch what was posted while offline,
+   * and finishes gap fills an earlier run left unfinished from where they stopped.
+   */
   async gapFill(): Promise<number> {
     const store = this.deps.store();
+    // Read before the first await: live ingest is already archiving newer messages.
+    const starts = new Map(store.channelsWithHistory().map((c) => [c.channelId, c.newestId]));
+    const pending = store.pendingGapFills();
+    for (const { channelId, cursorId } of pending) starts.set(channelId, cursorId);
+    const pendingIds = new Set(pending.map((p) => p.channelId));
     let total = 0;
-    for (const { channelId, newestId } of store.channelsWithHistory()) {
+    for (const [channelId, from] of starts) {
       if (this.stopped) break;
       const cached = this.deps.peekChannel(channelId);
       // Not in the channel cache: deleted, no longer visible, or an archived thread (a new message
       // would have unarchived it, putting it back in the cache). Nothing to catch up on.
       if (!cached || !isArchivableChannel(cached)) continue;
-      if (!cached.lastMessageId || compareSnowflakes(cached.lastMessageId, newestId) <= 0) continue;
-      total += await this.gapFillChannel(cached, newestId);
+      if (!cached.lastMessageId || compareSnowflakes(cached.lastMessageId, from) <= 0) {
+        if (pendingIds.has(channelId)) store.finishGapFill(channelId);
+        continue;
+      }
+      total += await this.gapFillChannel(cached, from);
     }
     if (total > 0) logger.info(`archive: gap fill archived ${total} message(s) posted while the bot was offline.`);
     return total;
   }
 
-  private async gapFillChannel(channel: HistorySource, newestId: string): Promise<number> {
+  private async gapFillChannel(channel: HistorySource, from: string): Promise<number> {
     const store = this.deps.store();
+    const label = `#${channel.name ?? channel.id}`;
     store.upsertChannel(channelInfoOf(channel));
-    let cursor = newestId;
+    // Saved before the first request, so a run that stops before its first page resumes here too.
+    store.startGapFill(channel.id, from, this.deps.now());
+    let cursor = from;
     let added = 0;
-    for (let page = 0; page < MAX_GAP_FILL_PAGES; page++) {
-      if (this.stopped) break;
+    let pages = 0;
+    while (!this.stopped) {
       const messages = await this.fetchWithRetry(channel, { after: cursor, limit: PAGE_SIZE });
-      if (!messages) break;
+      // A failed request keeps the saved cursor: the next run retries from there.
+      if (!messages) return added;
       const bounds = pageBounds(messages);
-      if (!bounds) break;
-      added += store.upsertMessages(messages.map((m) => toArchiveInput(m)).filter((i) => i !== undefined));
+      if (!bounds) {
+        store.finishGapFill(channel.id);
+        return added;
+      }
+      if (compareSnowflakes(bounds.newest.id, cursor) <= 0) {
+        logger.warn(`archive: gap fill for ${label} got a page that doesn't move forward; retrying next run.`);
+        return added;
+      }
+      const done = messages.length < PAGE_SIZE;
+      const inputs = messages.map((m) => toArchiveInput(m)).filter((i) => i !== undefined);
+      added += store.saveGapFillPage(channel.id, inputs, { newestId: bounds.newest.id, done }, this.deps.now());
+      if (done) return added;
       cursor = bounds.newest.id;
-      if (messages.length < PAGE_SIZE) return added;
-    }
-    if (!this.stopped) {
-      logger.warn(
-        `archive: gap fill for #${channel.name ?? channel.id} stopped after ${MAX_GAP_FILL_PAGES} pages; continuing next run.`,
-      );
+      pages++;
+      if (pages % PROGRESS_EVERY_PAGES === 0) {
+        logger.info(`archive: gap fill for ${label}: ${pages} page(s), +${added.toLocaleString('en-US')} so far.`);
+      }
     }
     return added;
   }
