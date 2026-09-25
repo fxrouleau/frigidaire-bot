@@ -11,7 +11,7 @@
 // makes the call), but semantic search always returns SOMETHING, so a search hit must share at least one
 // content word with the request's title to count; everything else needs some title overlap.
 import type { GitHubIssue } from './client';
-import { DUPLICATE_THRESHOLD, issueSummary, titleSimilarity, titleTokens } from './issueText';
+import { DUPLICATE_THRESHOLD, contentWords, issueSummary, titleSimilarity, titleTokens } from './issueText';
 
 /** Title overlap that makes an issue worth showing even without a search hit (e.g. 1 of 4 words). */
 export const RELATED_TITLE_THRESHOLD = 0.25;
@@ -61,9 +61,12 @@ export type IssueMatches = {
   candidates: IssueCandidate[];
 };
 
-/** The request title's content words, as search keywords ('' when it has none). */
+/**
+ * The request title's content words, as search keywords ('' when it has none). Unstemmed: the search
+ * does its own matching, and a crude stem ("anonymou") would match nothing.
+ */
 export function searchTerms(title: string): string {
-  return [...titleTokens(title)].slice(0, MAX_SEARCH_TERMS).join(' ');
+  return contentWords(title).slice(0, MAX_SEARCH_TERMS).join(' ');
 }
 
 /**

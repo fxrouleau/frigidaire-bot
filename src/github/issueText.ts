@@ -250,15 +250,26 @@ const REQUEST_FILLER: ReadonlySet<string> = new Set([
   'you',
 ]);
 
-/** Content words of a title, lowercased and lightly stemmed ("reminders" and "reminder" are one word). */
-export function titleTokens(title: string): Set<string> {
+/** Content words of a title as written (lowercased, deduplicated, in order): the search keywords. */
+export function contentWords(title: string): string[] {
   const words = clean(title)
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .split(' ')
-    .filter((word) => word.length > 0 && !STOP_WORDS.has(word) && !REQUEST_FILLER.has(word))
-    .map((word) => (word.length > 3 && word.endsWith('s') && !word.endsWith('ss') ? word.slice(0, -1) : word));
-  return new Set(words);
+    .filter((word) => word.length > 0 && !STOP_WORDS.has(word) && !REQUEST_FILLER.has(word));
+  return [...new Set(words)];
+}
+
+/**
+ * Content words of a title, lightly stemmed ("reminders" and "reminder" are one word). The stemming is
+ * crude ("anonymous" → "anonymou"), which is fine for comparing two titles and wrong for anything else.
+ */
+export function titleTokens(title: string): Set<string> {
+  return new Set(
+    contentWords(title).map((word) =>
+      word.length > 3 && word.endsWith('s') && !word.endsWith('ss') ? word.slice(0, -1) : word,
+    ),
+  );
 }
 
 /** Jaccard similarity of two titles' content words (0 when either has none). */

@@ -27,8 +27,9 @@ function closed(number: number, title: string, reason: string | undefined, daysA
 const opts = { now: NOW, closedLookbackMs: LOOKBACK };
 
 describe('searchTerms', () => {
-  it('sends the title’s content words, not the request filler', () => {
+  it('sends the title’s content words as written, not the request filler', () => {
     expect(searchTerms('Add a remindme command for the bot')).toBe('remindme command');
+    expect(searchTerms('Anonymous polls, anonymous votes')).toBe('anonymous polls votes');
     expect(searchTerms('Please add')).toBe('');
   });
 });
