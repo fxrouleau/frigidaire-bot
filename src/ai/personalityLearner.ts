@@ -8,7 +8,7 @@ import { attributeMessage } from '../relay';
 import { getCachedTranscript } from './media';
 import { type Identity, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
 import { getOpenRouterClient } from './openRouterClient';
-import { type Member, foldMembers, matchMemberByName, memoryKeyFor } from './people';
+import { type Member, checkNickname, foldMembers, matchMemberByName, memoryKeyFor, parseMemberName } from './people';
 import { formatEmojiLines, formatIdentityLines } from './promptSections';
 import { type UsageFeature, featureRequestOptions } from './usage';
 import { formatTimestampET } from './utils';
@@ -540,25 +540,85 @@ export class PersonalityLearner {
   }
 
   /**
-   * Files an observation under the member it is about: a valid subject_user_id wins and its member's
-   * current display name becomes the subject (the model sometimes writes a nickname); a name without
-   * an id is matched against every name the members go by; 'server'/'bot' (lowercased) never carry an
-   * id. The id is always the member's MAIN account (a side account's id or name counts as its member).
+   * Files an observation under the member it is about: a subject_user_id that belongs to a member wins
+   * and its member's current display name becomes the subject (the model sometimes writes a nickname);
+   * otherwise the name is matched against every name the members go by (an id no member has, e.g. one
+   * copied from the prompt's examples or a garbled snowflake, is ignored rather than stored); 'server'/
+   * 'bot' (lowercased) never carry an id. The id is always the member's MAIN account (a side account's
+   * id or name counts as its member).
    */
-  private normalizeSubject(obs: Observation, members: Member[]): { subject: string; subjectUserId?: string } {
-    const subject = obs.subject.trim();
+  private normalizeSubject(
+    rawSubject: string,
+    rawUserId: unknown,
+    members: Member[],
+  ): { subject: string; subjectUserId?: string } {
+    const subject = rawSubject.trim();
     if (NON_PERSON_SUBJECTS.has(nameKey(subject))) return { subject: nameKey(subject) };
 
     // A JSON number cannot hold a snowflake exactly (18+ digits exceed 2^53), so only strings count.
-    const rawId = typeof obs.subject_user_id === 'string' ? obs.subject_user_id.trim() : '';
+    const rawId = typeof rawUserId === 'string' ? rawUserId.trim() : '';
     if (/^\d+$/.test(rawId)) {
-      const userId = canonicalUserId(rawId);
-      const member = members.find((m) => m.userId === userId);
-      return { subject: member?.displayName ?? subject, subjectUserId: userId };
+      const member = members.find((m) => m.userId === canonicalUserId(rawId));
+      if (member) return { subject: member.displayName, subjectUserId: member.userId };
     }
 
     const match = matchMemberByName(members, subject);
     return match ? { subject: match.displayName, subjectUserId: match.userId } : { subject };
+  }
+
+  /**
+   * Applies one of the model's identity_updates. Its fields are untrusted JSON (null, numbers, a string
+   * where a list belongs), and the model is a background guesser: it only fills in a real name when
+   * none is on record (a name members gave through set_member_info is never replaced by a joke read as
+   * a real name), and adds a nickname only when set_member_info would and no other member goes by it in
+   * any form. Returns whether the identity changed.
+   */
+  private applyIdentityUpdate(update: unknown, label: string): boolean {
+    if (!update || typeof update !== 'object') return false;
+    const { discord_user_id: rawId, irl_name: rawIrl, aliases_add: rawAliases } = update as Record<string, unknown>;
+    const accountId = typeof rawId === 'string' ? rawId.trim() : '';
+    if (!accountId) return false;
+    // Real names and nicknames belong to the person: a side account's update goes on the main
+    // account's row (the side row keeps only its own display name and handle), when there is one.
+    const mainId = canonicalUserId(accountId);
+    const target = this.store.getIdentityById(mainId) ? mainId : accountId;
+    const identity = this.store.getIdentityById(target);
+    if (!identity) return false;
+    const who = `${identity.display_name} (${target})`;
+
+    let irlName: string | undefined;
+    const irl = parseMemberName(rawIrl);
+    if (irl === 'invalid') {
+      logger.info(`${label}: ignoring a real name for ${who} that is not a name`);
+    } else if (irl && !identity.irl_name) {
+      irlName = irl;
+    } else if (irl && identity.irl_name && nameKey(irl) !== nameKey(identity.irl_name)) {
+      logger.info(`${label}: keeping ${who}'s real name "${identity.irl_name}" over the suggested "${irl}"`);
+    }
+
+    const aliases: string[] = [];
+    for (const raw of Array.isArray(rawAliases) ? rawAliases : []) {
+      const alias = parseMemberName(raw);
+      if (!alias || alias === 'invalid' || aliases.some((a) => nameKey(a) === nameKey(alias))) continue;
+      const check = checkNickname(this.store, mainId, identity.display_name, alias);
+      if (check.alreadyKnown) continue;
+      const reason = check.refusal ?? check.note;
+      if (reason) {
+        logger.info(`${label}: not adding nickname "${alias}" to ${who}: ${reason}`);
+        continue;
+      }
+      aliases.push(alias);
+    }
+
+    const changed = this.store.updateIdentityMeta(target, { irl_name: irlName, aliases_add: aliases });
+    if (changed) {
+      const parts = [
+        ...(irlName ? [`real name ${irlName}`] : []),
+        ...(aliases.length > 0 ? [`nicknames ${aliases.map((a) => `"${a}"`).join(', ')}`] : []),
+      ];
+      logger.info(`${label}: identity update for ${who}: ${parts.join('; ')}`);
+    }
+    return changed;
   }
 
   /**
@@ -599,8 +659,13 @@ export class PersonalityLearner {
 
     const members = foldMembers(this.store.getAllIdentities());
     let observations = 0;
-    for (const obs of parsed.observations) {
-      if (!obs.category || typeof obs.subject !== 'string' || !obs.subject.trim() || !obs.content) continue;
+    // The parser only guarantees arrays: every field is checked here, because one malformed entry (a
+    // null, a number) must not throw and cost the whole cycle (the watermark only advances after it).
+    for (const raw of parsed.observations as unknown[]) {
+      if (!raw || typeof raw !== 'object') continue;
+      const obs = raw as Record<string, unknown>;
+      if (typeof obs.category !== 'string' || typeof obs.subject !== 'string' || !obs.subject.trim()) continue;
+      if (typeof obs.content !== 'string' || !obs.content.trim()) continue;
 
       // Runtime whitelist: the parser doesn't validate categories, and the TTL sweep keys on exact
       // strings — an invented category would silently produce a never-expiring memory.
@@ -610,7 +675,7 @@ export class PersonalityLearner {
         continue;
       }
 
-      const { subject, subjectUserId } = this.normalizeSubject(obs, members);
+      const { subject, subjectUserId } = this.normalizeSubject(obs.subject, obs.subject_user_id, members);
       await this.store.save({
         category,
         subject,
@@ -622,17 +687,12 @@ export class PersonalityLearner {
     }
 
     let identityUpdates = 0;
-    for (const update of parsed.identity_updates ?? []) {
-      if (!update.discord_user_id) continue;
-      // Real names and nicknames belong to the person: a side account's update goes on the main
-      // account's row (the side row keeps only its own display name and handle), when there is one.
-      const mainId = canonicalUserId(String(update.discord_user_id));
-      const target = this.store.getIdentityById(mainId) ? mainId : String(update.discord_user_id);
-      const changed = this.store.updateIdentityMeta(target, {
-        irl_name: update.irl_name,
-        aliases_add: update.aliases_add,
-      });
-      if (changed) identityUpdates++;
+    for (const update of (parsed.identity_updates ?? []) as unknown[]) {
+      try {
+        if (this.applyIdentityUpdate(update, label)) identityUpdates++;
+      } catch (error) {
+        logger.warn(`${label}: Skipping an identity update that failed for channel ${channelId}:`, error);
+      }
     }
 
     return { observations, identityUpdates };

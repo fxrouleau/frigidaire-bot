@@ -527,6 +527,64 @@ export function memoryKeyFor(
 }
 
 // ---------------------------------------------------------------------------------------------------
+// Recording a member's names (set_member_info, the learner's identity updates)
+// ---------------------------------------------------------------------------------------------------
+
+/** The longest real name or nickname recorded for a member: one short line of plain text. */
+export const MAX_MEMBER_NAME_LENGTH = 48;
+
+/**
+ * A real name or nickname to record, undefined when there is none (not a string, or blank), or
+ * 'invalid' for anything that is not a name (markup, mass pings, links, an essay).
+ */
+export function parseMemberName(raw: unknown): string | undefined | 'invalid' {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const value = raw.trim();
+  if (/[<>\n]|@(everyone|here)\b|https?:/i.test(value)) return 'invalid';
+  const name = cleanSubject(value).replace(/\s+/g, ' ');
+  if (!name || name.length > MAX_MEMBER_NAME_LENGTH) return 'invalid';
+  return name;
+}
+
+/**
+ * Whether a nickname may be added to a member (`userId` is their main account id): not a word that
+ * names the group, not one of their own names already (`alreadyKnown`), and not another member's
+ * display name, handle or first-seen name (lookups rank those above nicknames, so it would never find
+ * this member anyway). Returns the refusal, or a note when the nickname is also someone else's real
+ * name or nickname, or neither when it is fine.
+ */
+export function checkNickname(
+  store: MemoryStore,
+  userId: string,
+  displayName: string,
+  nickname: string,
+): { refusal?: string; note?: string; alreadyKnown?: boolean } {
+  const key = nameKey(nickname);
+  if (NON_PERSON_SUBJECTS.has(key) || ['me', 'i', 'myself'].includes(key)) {
+    return { refusal: `"${nickname}" can't be a nickname.` };
+  }
+  // Members, not accounts: a name one of their own side accounts goes by is theirs already.
+  const members = foldMembers(store.getAllIdentities());
+  const own = members.find((m) => m.userId === userId);
+  if ([displayName, ...(own?.names ?? [])].some((n) => nameKey(n) === key)) {
+    return { refusal: `${displayName} already goes by "${nickname}".`, alreadyKnown: true };
+  }
+  const others = members.filter((m) => m.userId !== userId);
+  const goesBy = (member: Member, names: (i: Identity) => (string | null | undefined)[]) =>
+    member.rows.some((row) => names(row).some((n) => nameKey(n) === key));
+  const owner = others.find((m) => goesBy(m, (i) => [i.display_name, i.username, i.canonical_name]));
+  if (owner) {
+    return {
+      refusal: `"${nickname}" is ${owner.displayName}'s own name, so it can't also be ${displayName}'s nickname.`,
+    };
+  }
+  const sharer = others.find((m) => goesBy(m, (i) => [i.irl_name, ...i.aliases]));
+  return sharer
+    ? { note: `${sharer.displayName} also goes by "${nickname}", so that name alone won't tell them apart.` }
+    : {};
+}
+
+// ---------------------------------------------------------------------------------------------------
 // Finding people in chat text
 // ---------------------------------------------------------------------------------------------------
 
