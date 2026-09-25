@@ -11,6 +11,7 @@
 // The catalog is one ~750 KB request per day, shared by every media call. When it can't be fetched,
 // callers fall back to name-based defaults (see staticModelInfo) and send no reasoning override.
 import type OpenAI from 'openai';
+import { config } from '../../config';
 import { logger } from '../../logger';
 import { getOpenRouterClient } from '../openRouterClient';
 import { featureRequestOptions } from '../usage';
@@ -146,6 +147,7 @@ function lookup(models: Map<string, ModelInfo> | undefined, model: string): Mode
 let shared: ModelCatalog | undefined;
 
 export function getModelCatalog(): ModelCatalog {
-  if (!shared) shared = new ModelCatalog();
+  // Hermetic under Vitest, like the other shared media instances (see index.ts).
+  if (!shared) shared = new ModelCatalog({ client: () => (config.isTest ? undefined : getOpenRouterClient()) });
   return shared;
 }

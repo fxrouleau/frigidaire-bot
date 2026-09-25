@@ -1,4 +1,3 @@
-import { FfmpegTranscoder, type MediaTranscoder } from './transcoder';
 // Media understanding: audio transcription (Discord voice messages, audio files) and video description
 // (uploaded clips, videos behind shared links). These are the stable entry points the rest of the bot
 // calls — the chat agent (through the media enricher), the learner, summaries, the link reader and the
@@ -6,6 +5,10 @@ import { FfmpegTranscoder, type MediaTranscoder } from './transcoder';
 //
 // Results are cached in bot.db (transcripts by message id, descriptions by URL), so whichever feature
 // pays for a recording first, every later reader gets it for free.
+import type OpenAI from 'openai';
+import { config } from '../../config';
+import { getOpenRouterClient } from '../openRouterClient';
+import { FfmpegTranscoder, type MediaTranscoder } from './transcoder';
 import { AudioTranscriber } from './transcriber';
 import type { AudioInput, VideoInput } from './types';
 import { VideoDescriber } from './video';
@@ -16,6 +19,12 @@ let transcoder: MediaTranscoder | undefined;
 let transcriber: AudioTranscriber | undefined;
 let describer: VideoDescriber | undefined;
 
+// Under Vitest the shared instances never reach OpenRouter, even on a machine with a key exported:
+// tests that render messages through the default enricher must stay hermetic.
+function defaultClient(): OpenAI | undefined {
+  return config.isTest ? undefined : getOpenRouterClient();
+}
+
 function sharedTranscoder(): MediaTranscoder {
   if (!transcoder) transcoder = new FfmpegTranscoder();
   return transcoder;
@@ -23,13 +32,17 @@ function sharedTranscoder(): MediaTranscoder {
 
 /** The process-wide transcriber (in-flight dedup and failure cooldowns are per instance). */
 export function getAudioTranscriber(): AudioTranscriber {
-  if (!transcriber) transcriber = new AudioTranscriber({ transcoder: sharedTranscoder() });
+  if (!transcriber) transcriber = new AudioTranscriber({ client: defaultClient, transcoder: sharedTranscoder() });
   return transcriber;
 }
 
 export function getVideoDescriber(): VideoDescriber {
   if (!describer) {
-    describer = new VideoDescriber({ transcoder: sharedTranscoder(), transcriber: getAudioTranscriber() });
+    describer = new VideoDescriber({
+      client: defaultClient,
+      transcoder: sharedTranscoder(),
+      transcriber: getAudioTranscriber(),
+    });
   }
   return describer;
 }
