@@ -35,9 +35,10 @@ RUN yarn workspaces focus --all --production
 FROM node:26-alpine AS prod
 # su-exec: the entrypoint starts as root only long enough to make the data volume writable by the
 # unprivileged `node` user, then drops privileges for the bot process itself.
-# ffmpeg/ffprobe: voice messages (Ogg/Opus) are re-encoded to MP3 for the transcription model, and
-# videos too big to send whole are sampled into keyframes + an audio track (src/ai/media/transcoder.ts).
-# About 130 MB installed. Without it, voice messages are still sent as Ogg and small clips still work.
+# ffmpeg/ffprobe (src/ai/media/transcoder.ts): videos too big to send whole are sampled into keyframes
+# + an audio track, clips for models that can't hear get their soundtrack transcribed, and audio a model
+# refuses (or can't take, e.g. Ogg for non-Gemini models) is re-encoded to MP3. About 130 MB installed.
+# Without it the media features degrade (voice messages still go to Gemini as-is) rather than fail.
 RUN apk add --no-cache su-exec ffmpeg
 # Baked in by CI (docker-push.yml) so the bot can announce which commit it's running.
 ARG GIT_SHA=""

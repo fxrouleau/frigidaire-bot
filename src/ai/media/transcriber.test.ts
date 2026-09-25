@@ -21,6 +21,8 @@ import { AudioTranscriber, type AudioTranscriberOptions, INLINE_AUDIO_MAX_BYTES,
 const VOICE_URL = 'https://cdn.discordapp.com/attachments/1/2/voice-message.ogg?ex=1&hm=sig';
 const MP3_URL = 'https://cdn.discordapp.com/attachments/1/3/memo.mp3';
 const MODEL = 'google/gemini-3.5-flash-lite';
+// An audio model outside the Gemini family: only wav/mp3 go as-is, so a voice message is transcoded.
+const BASELINE_MODEL = 'openai/gpt-audio-mini';
 
 const success = loadFixture('transcription-success');
 const noSpeech = loadFixture('transcription-no-speech');
@@ -69,7 +71,7 @@ afterEach(() => {
 });
 
 describe('AudioTranscriber', () => {
-  it('transcodes a Discord voice message to MP3 and sends it with ZDR routing and the transcription tag', async () => {
+  it('sends a Discord voice message to Gemini as-is, with ZDR routing and the transcription tag', async () => {
     const { transcriber, requests, transcoder } = setup([success]);
 
     const outcome = await transcriber.transcribe({
@@ -80,7 +82,8 @@ describe('AudioTranscriber', () => {
     });
 
     expect(outcome).toEqual({ status: 'ok', text: TRANSCRIPT, cached: false });
-    expect(transcoder.calls.toMp3).toEqual([{ input: OGG_BYTES, maxSeconds: 600 }]);
+    // Vertex documents audio/ogg for Gemini 3.5 Flash-Lite: no ffmpeg round trip.
+    expect(transcoder.calls.toMp3).toEqual([]);
     expect(requests).toHaveLength(1);
     const [request] = requests;
     expect(request.url).toBe('https://openrouter.ai/api/v1/chat/completions');
@@ -93,10 +96,22 @@ describe('AudioTranscriber', () => {
     const [audio, prompt] = userContent(request);
     expect(audio).toEqual({
       type: 'input_audio',
-      input_audio: { data: TRANSCODED_MP3.toString('base64'), format: 'mp3' },
+      input_audio: { data: OGG_BYTES.toString('base64'), format: 'ogg' },
     });
     expect(prompt.type).toBe('text');
     expect(String(prompt.text)).toContain('English: ');
+  });
+
+  it('transcodes a voice message to MP3 for models that only take wav/mp3', async () => {
+    const { transcriber, requests, transcoder } = setup([success], { model: () => BASELINE_MODEL });
+
+    await transcriber.transcribe({ url: VOICE_URL, contentType: 'audio/ogg', messageId: 'msg-1', durationSecs: 4 });
+
+    expect(transcoder.calls.toMp3).toEqual([{ input: OGG_BYTES, maxSeconds: 600 }]);
+    expect(userContent(requests[0])[0]).toEqual({
+      type: 'input_audio',
+      input_audio: { data: TRANSCODED_MP3.toString('base64'), format: 'mp3' },
+    });
   });
 
   it('caches by message id: the second ask is free', async () => {
@@ -161,7 +176,7 @@ describe('AudioTranscriber', () => {
 
   it('uses the source length the transcoder reports for transcoded files', async () => {
     const transcoder = createFakeTranscoder({ toMp3: { data: TRANSCODED_MP3, durationSecs: 900 } });
-    const { transcriber, requests } = setup([success], { transcoder });
+    const { transcriber, requests } = setup([success], { transcoder, model: () => BASELINE_MODEL });
     expect(await transcriber.transcribe({ url: VOICE_URL, messageId: 'm' })).toEqual({
       status: 'too_long',
       durationSecs: 900,
@@ -172,16 +187,20 @@ describe('AudioTranscriber', () => {
   it('retries as MP3 when the provider refuses a native container', async () => {
     const { transcriber, requests, transcoder } = setup([rejected, success]);
 
-    const outcome = await transcriber.transcribe({ url: MP3_URL, messageId: 'msg-4', durationSecs: 10 });
+    const outcome = await transcriber.transcribe({ url: VOICE_URL, messageId: 'msg-4', durationSecs: 10 });
 
     expect(outcome.status).toBe('ok');
     expect(requests).toHaveLength(2);
+    expect((userContent(requests[0])[0].input_audio as { format: string }).format).toBe('ogg');
     expect(transcoder.calls.toMp3).toHaveLength(1);
     expect((userContent(requests[1])[0].input_audio as { data: string }).data).toBe(TRANSCODED_MP3.toString('base64'));
   });
 
   it('still tries the original container once when ffmpeg is missing', async () => {
-    const { transcriber, requests } = setup([success], { transcoder: createMissingTranscoder() });
+    const { transcriber, requests } = setup([success], {
+      transcoder: createMissingTranscoder(),
+      model: () => BASELINE_MODEL,
+    });
 
     const outcome = await transcriber.transcribe({ url: VOICE_URL, messageId: 'msg-5', durationSecs: 3 });
 
@@ -194,7 +213,7 @@ describe('AudioTranscriber', () => {
 
   it('treats a file without an audio track as silence', async () => {
     const transcoder = createFakeTranscoder({ toMp3: undefined });
-    const { transcriber, requests } = setup([success], { transcoder });
+    const { transcriber, requests } = setup([success], { transcoder, model: () => BASELINE_MODEL });
     expect(await transcriber.transcribe({ url: VOICE_URL, messageId: 'm' })).toEqual({
       status: 'ok',
       text: '',
@@ -257,7 +276,7 @@ describe('AudioTranscriber', () => {
   });
 
   it('sends no reasoning override when the catalog has none for the model', async () => {
-    const { transcriber, requests } = setup([success], { model: () => 'openai/gpt-audio-mini' });
+    const { transcriber, requests } = setup([success], { model: () => BASELINE_MODEL });
     await transcriber.transcribe({ url: MP3_URL, messageId: 'm', durationSecs: 5 });
     expect(requests[0].body.reasoning).toBeUndefined();
   });

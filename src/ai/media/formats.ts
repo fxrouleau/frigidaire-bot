@@ -149,12 +149,12 @@ export function detectVideoMime(
   return extension ? VIDEO_EXTENSIONS[extension] : undefined;
 }
 
-// What a model accepts without transcoding. Gemini is served with ZDR only on Google Vertex, whose
-// documented audio inputs are aac/flac/mp3/m4a/mpeg/opus/pcm/wav/webm — notably not audio/ogg, the
-// container of every Discord voice message — so Ogg is transcoded to MP3 rather than risked. Any other
-// model gets the two formats every audio-input model on OpenRouter takes (and the only two the OpenAI
-// SDK types admit). A native send that is still rejected falls back to MP3 (see transcriber.ts).
-const GEMINI_AUDIO_FORMATS: ReadonlySet<AudioFormat> = new Set(['wav', 'mp3', 'aac', 'flac', 'm4a']);
+// What a model accepts without transcoding. Gemini is served with ZDR only on Google Vertex, whose audio
+// understanding docs (checked 2026-09-25) list aac/flac/mp3/m4a/mpeg/mp4/ogg/pcm/wav/webm for Gemini 3.5
+// Flash-Lite and newer — so Discord voice messages (Ogg/Opus) go as-is, with no ffmpeg round trip. Any
+// other model gets the two formats every audio-input model on OpenRouter takes (and the only two the
+// OpenAI SDK types admit). A native send the provider still refuses is retried as MP3 (transcriber.ts).
+const GEMINI_AUDIO_FORMATS: ReadonlySet<AudioFormat> = new Set(['wav', 'mp3', 'aac', 'flac', 'm4a', 'ogg', 'webm']);
 const BASELINE_AUDIO_FORMATS: ReadonlySet<AudioFormat> = new Set(['wav', 'mp3']);
 
 export function nativeAudioFormats(model: string): ReadonlySet<AudioFormat> {

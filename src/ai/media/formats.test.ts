@@ -66,10 +66,10 @@ describe('detectVideoMime', () => {
 });
 
 describe('model capabilities', () => {
-  it('sends Gemini the Vertex-documented containers as-is but never Ogg', () => {
+  it('sends Gemini the Vertex-documented containers as-is, Ogg included', () => {
     const gemini = nativeAudioFormats('google/gemini-3.5-flash-lite');
-    expect([...gemini].sort()).toEqual(['aac', 'flac', 'm4a', 'mp3', 'wav']);
-    expect(gemini.has('ogg')).toBe(false);
+    expect([...gemini].sort()).toEqual(['aac', 'flac', 'm4a', 'mp3', 'ogg', 'wav', 'webm']);
+    expect(gemini.has('aiff')).toBe(false);
   });
 
   it('gives unknown models only wav/mp3', () => {

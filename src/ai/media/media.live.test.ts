@@ -5,7 +5,7 @@
 //
 // What they establish (a fraction of a cent per run; grep the output for MEDIA_LIVE):
 //   - the transcription model accepts our audio parts on a zero-data-retention endpoint, for a WAV built
-//     in memory and for Discord's own Ogg/Opus container, and reports a tone as "no speech";
+//     in memory and (reported) for Discord's own Ogg/Opus container, and reports a tone as "no speech";
 //   - the video model describes a clip sent as a base64 data URL on a ZDR endpoint;
 //   - which candidate video models (LIVE_VIDEO_MODELS, csv) have a ZDR endpoint that takes base64 video
 //     — reported, not asserted, since that is a routing fact about OpenRouter's providers, not our code;
@@ -102,7 +102,7 @@ describe.skipIf(!RUN_LIVE)('media pipeline live checks (paid, opt-in)', () => {
   );
 
   it(
-    "sends Discord's Ogg/Opus as-is when ffmpeg is missing, and reports whether the endpoint took it",
+    "sends Discord's Ogg/Opus as-is, and reports whether the endpoint took it",
     async () => {
       setBotDbForTesting(new BotDb(':memory:'));
       const transcriber = new AudioTranscriber({
@@ -112,8 +112,9 @@ describe.skipIf(!RUN_LIVE)('media pipeline live checks (paid, opt-in)', () => {
         catalog,
       });
       const outcome = await transcriber.transcribe({ url: OGG_URL, messageId: 'live-ogg', durationSecs: 2 });
-      // Reported, not asserted: prod transcodes Ogg to MP3 with ffmpeg; this only tells whether the
-      // ffmpeg-less fallback would work on today's endpoints.
+      // Reported, not asserted: prod sends Ogg to Gemini as-is (Vertex documents audio/ogg) and re-encodes
+      // to MP3 when refused. 'failed' here means every voice message pays for a refused request first:
+      // then take 'ogg' out of GEMINI_AUDIO_FORMATS (formats.ts). No transcoder here, so no fallback.
       console.log(`MEDIA_LIVE transcription ogg-native ${JSON.stringify(outcome)}`);
       expect(['ok', 'failed']).toContain(outcome.status);
       setBotDbForTesting(undefined);
