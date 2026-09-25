@@ -638,8 +638,30 @@ export const config = {
     },
   },
 
-  /** Filing member feature requests as GitHub issues (src/ai/tools/featureRequest.ts). */
-  featureRequests: {},
+  /** Filing member feature requests as GitHub issues (src/ai/tools/featureRequest.ts, src/github/). */
+  featureRequests: {
+    /** Fine-grained PAT scoped to the one repo with Issues read/write. Never logged. */
+    get githubToken(): string | undefined {
+      return envString('GITHUB_TOKEN');
+    },
+    /** `owner/name` of the repo that receives the issues; anything not shaped like that counts as unset. */
+    get githubRepo(): string | undefined {
+      const value = envString('GITHUB_REPO');
+      return value && /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(value) ? value : undefined;
+    },
+    /** The request_feature tool is only offered when both the token and the repo are configured. */
+    get enabled(): boolean {
+      return Boolean(this.githubToken && this.githubRepo);
+    },
+    /** Issues one member may file per rolling 24 hours. */
+    get maxPerDay(): number {
+      return envInt('FEATURE_REQUEST_MAX_PER_DAY', 3, { min: 1, max: 100 });
+    },
+    /** Discord user ids allowed to file; empty ⇒ every member can. */
+    get userIds(): string[] {
+      return envCsv('FEATURE_REQUEST_USER_IDS');
+    },
+  },
 
   /** OpenRouter usage/cost accounting (src/ai/usage.ts). */
   costs: {
