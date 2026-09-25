@@ -19,7 +19,7 @@ import { config } from '../../config';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import { createFakeTranscoder, createFileFetch, createMissingTranscoder } from '../../test-support/fakeMedia';
 import { getOpenRouterClient } from '../openRouterClient';
-import { ModelCatalog } from './modelCatalog';
+import { ModelCatalog } from '../modelCatalog';
 import { completeMedia, describeError } from './modelCall';
 import { AudioTranscriber } from './transcriber';
 import { VideoDescriber } from './video';
@@ -67,7 +67,7 @@ const files = createFileFetch({
 });
 
 describe.skipIf(!RUN_LIVE)('media pipeline live checks (paid, opt-in)', () => {
-  const catalog = new ModelCatalog({ client: getOpenRouterClient });
+  const catalog = new ModelCatalog();
 
   it(
     'finds the configured models in the catalog with the modalities they need',

@@ -2,8 +2,8 @@
 // client that replays fixtures while capturing each request's body AND headers (the feature tag rides
 // in a header), and a fetch that serves in-memory files by URL.
 import OpenAI from 'openai';
-import type { ModelCatalog, ModelInfo } from '../ai/media/modelCatalog';
 import type { MediaTranscoder, ProbeResult, VideoSample } from '../ai/media/transcoder';
+import type { ModelCatalog, ModelInfo } from '../ai/modelCatalog';
 import type { OpenRouterFixture } from './openRouterFetch';
 
 // Minimal buffers with the right magic numbers for format sniffing.

@@ -15,11 +15,11 @@
 import type OpenAI from 'openai';
 import { config } from '../../config';
 import { logger } from '../../logger';
+import { type ModelCatalog, type ModelInfo, getModelCatalog } from '../modelCatalog';
 import { getOpenRouterClient } from '../openRouterClient';
 import { downloadMedia, redact } from './download';
 import { detectVideoMime } from './formats';
 import { type MediaContentPart, completeMedia, describeError } from './modelCall';
-import { type ModelCatalog, type ModelInfo, getModelCatalog } from './modelCatalog';
 import { getStoredVideoDescription, mediaCacheKey, storeVideoDescription } from './store';
 import type { MediaTranscoder } from './transcoder';
 import type { AudioTranscriber } from './transcriber';

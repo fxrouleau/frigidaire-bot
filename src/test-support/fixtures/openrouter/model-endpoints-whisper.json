@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "description": "GET /api/v1/models/openai/whisper-large-v3/endpoints (public), trimmed; as served on 2026-09-25: DeepInfra, Together and Groq, all three on the ZDR list.",
+  "status": 200,
+  "response": {
+    "data": {
+      "id": "openai/whisper-large-v3",
+      "name": "OpenAI: Whisper Large V3",
+      "architecture": {
+        "tokenizer": "GPT",
+        "instruct_type": null,
+        "modality": "audio->transcription",
+        "input_modalities": [
+          "audio"
+        ],
+        "output_modalities": [
+          "transcription"
+        ]
+      },
+      "endpoints": [
+        {
+          "name": "DeepInfra | openai/whisper-large-v3",
+          "model_id": "openai/whisper-large-v3",
+          "provider_name": "DeepInfra",
+          "tag": "deepinfra/us",
+          "pricing": {
+            "prompt": "0.0000075",
+            "completion": "0",
+            "discount": 0
+          },
+          "status": 0
+        },
+        {
+          "name": "Together | openai/whisper-large-v3",
+          "model_id": "openai/whisper-large-v3",
+          "provider_name": "Together",
+          "tag": "together",
+          "pricing": {
+            "prompt": "0.000025",
+            "completion": "0",
+            "discount": 0
+          },
+          "status": 0
+        },
+        {
+          "name": "Groq | openai/whisper-large-v3",
+          "model_id": "openai/whisper-large-v3",
+          "provider_name": "Groq",
+          "tag": "groq",
+          "pricing": {
+            "prompt": "0.0000308333333333",
+            "completion": "0",
+            "discount": 0
+          },
+          "status": 0
+        }
+      ]
+    }
+  }
+}

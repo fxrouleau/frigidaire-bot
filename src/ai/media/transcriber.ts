@@ -11,11 +11,11 @@
 import type OpenAI from 'openai';
 import { config } from '../../config';
 import { logger } from '../../logger';
+import { type ModelCatalog, getModelCatalog } from '../modelCatalog';
 import { getOpenRouterClient } from '../openRouterClient';
 import { downloadMedia, redact } from './download';
 import { type AudioFormat, detectAudioFormat, nativeAudioFormats } from './formats';
 import { completeMedia, describeError, isInputRejection } from './modelCall';
-import { type ModelCatalog, getModelCatalog } from './modelCatalog';
 import { getStoredTranscript, mediaCacheKey, storeTranscript } from './store';
 import type { MediaTranscoder } from './transcoder';
 import type { AudioInput, TranscriptionOutcome } from './types';

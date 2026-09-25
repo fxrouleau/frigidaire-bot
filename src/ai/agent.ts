@@ -18,7 +18,7 @@ import { logFailure } from './failureLogger';
 import { estimateTokens, historyBudgetFor, trimHistory } from './historyBudget';
 import { getMemoryStore } from './memory';
 import type { EmojiRow, Identity, Memory, MemoryStore } from './memory/memoryStore';
-import { type ModelContextLengths, getModelContextLengths } from './modelInfo';
+import { type ModelContextLengths, getModelContextLengths } from './modelCatalog';
 import { findNamedPeople, identityNames } from './namedPeople';
 import { emojiCdnUrl, findCustomEmojis, formatIdentityLines } from './promptSections';
 import { getProvider } from './providerRegistry';
