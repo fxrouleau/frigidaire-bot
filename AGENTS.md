@@ -160,7 +160,7 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
   - a chat/embeddings/responses call that isn't visibly ZDR-routed;
   - `new OpenAI(` outside `openRouterClient.ts`;
   - a file that talks to OpenRouter but never records usage (the exemption is `modelCatalog.ts`: free public metadata);
-  - a call that caps `max_tokens` below 4000 without a `reasoning` field (see Reasoning budgets; the exemption is `emojiCaptioner.ts`: Claude only reasons when asked);
+  - a call that caps `max_tokens` below 4000 without a `reasoning` field (see Reasoning budgets below; the exemption is `emojiCaptioner.ts`: Claude only reasons when asked);
   - a `UsageFeature` member that no production code mentions (a tag nothing sends).
 
   Pass options inline: `create(body, { ...featureRequestOptions('x'), timeout })`.
@@ -906,7 +906,7 @@ Sidecar-only (the `sandbox` service's own environment, read by `server.py`): `SA
   - Tests needing memory inject `new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() })` via `setMemoryStoreForTesting()`.
   - Anything that can write an error capture stubs `DEBUG_CAPTURE_DIR` (or sets `DEBUG_CAPTURE=0`).
   - Clocks are injected, or faked with `vi.useFakeTimers({ toFake: ['Date'] })`.
-- **Guard tests** worth knowing: `openRouterCallSites.test.ts` (tags, ZDR, reasoning under a small cap, no unused `UsageFeature`), `config.test.ts` (a startup-summary token per config section, no secrets in it), `eventModule.test.ts` (every event file), `claudeWorkflow.test.ts` (the owner-only guard, the auth default, no `@` in bot comments), `dockerPushPaths.test.ts` (push triggers cover every build input), `scenarioFile.test.ts` / `cases.test.ts` (placeholder ids, no links), `loadEnv.test.ts` (dotenv first).
+- **Guard tests** worth knowing: `openRouterCallSites.test.ts` (tags, ZDR, reasoning under a small cap, no unused `UsageFeature`), `config.test.ts` (a startup-summary token per config section, no secrets in it, no `process.env` read outside `config.ts`), `eventModule.test.ts` (every event file), `claudeWorkflow.test.ts` (the owner-only guard, the auth default, no `@` in bot comments), `dockerPushPaths.test.ts` (push triggers cover every build input), `scenarioFile.test.ts` / `cases.test.ts` (placeholder ids, no links), `loadEnv.test.ts` (dotenv first).
 - `src/test-support/`:
   - `fakeProvider.ts`: scripted `AiProvider` (`textResponse()`, `toolCallResponse()`, `errorStep()`), records every `chat()` input.
   - `fakeDiscord.ts`: `createFakeMessage()` (typed as the exact `MessageCreate` argument). Its options cover channel types incl. threads and parents, attachments with size/duration, embeds incl. `proxyURL`, mentions, `replyPinged`, `cachedMessages`, a channel message log with Discord's before/after/around fetch rules, reference details, flags, polls, webhook recorders and send failures. Also `createFakeChannel()`, `createFakeClient()` (a ready `Client<true>`), `createFakeBotMessage()`, `sentContent()`.
