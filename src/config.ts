@@ -279,7 +279,42 @@ export const config = {
   birthdays: {},
 
   /** Local message archive, search and Wrapped (src/archive/). */
-  archive: {},
+  archive: {
+    /** Master switch: false ⇒ no ingest, no backfill, no search tools, no Wrapped. */
+    get enabled(): boolean {
+      return envBool('ARCHIVE_ENABLED', true);
+    },
+    /** Channel ids never archived, searched or counted (a parent channel id covers its threads). */
+    get ignoredChannels(): string[] {
+      return envCsv('ARCHIVE_IGNORE_CHANNELS');
+    },
+    /** false ⇒ neither the history backfill nor the after-downtime gap fill runs (live ingest still does). */
+    get backfillEnabled(): boolean {
+      return envBool('ARCHIVE_BACKFILL_ENABLED', true);
+    },
+    /** Channels whose full history is imported. Defaults to the main channel; unset both ⇒ none. */
+    get backfillChannels(): string[] {
+      const fromEnv = envCsv('ARCHIVE_BACKFILL_CHANNELS');
+      if (fromEnv.length > 0) return fromEnv;
+      const main = envString('MAIN_CHANNEL_ID');
+      return main ? [main] : [];
+    },
+    /** Pause between history requests. discord.js already obeys 429s; this keeps the import polite. */
+    get backfillDelayMs(): number {
+      return envInt('ARCHIVE_BACKFILL_DELAY_MS', 1100, { min: 0, max: 60_000 });
+    },
+    get wrappedEnabled(): boolean {
+      return envBool('WRAPPED_ENABLED', true);
+    },
+    /** Where the monthly/yearly Wrapped posts go. Defaults to the main channel; unset both ⇒ Wrapped off. */
+    get wrappedChannelId(): string | undefined {
+      return envString('WRAPPED_CHANNEL_ID') ?? envString('MAIN_CHANNEL_ID');
+    },
+    /** One roast-y intro line from the chat model on top of the deterministic stats. */
+    get wrappedLlmIntro(): boolean {
+      return envBool('WRAPPED_LLM_INTRO', true);
+    },
+  },
 
   /** Voice-message transcription and video understanding (src/ai/media/). */
   media: {},
