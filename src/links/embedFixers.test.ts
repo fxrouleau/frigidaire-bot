@@ -483,6 +483,11 @@ describe('markdown safety', () => {
     ['a spoiler stays spoilered', '||https://x.com/jason/status/123||', '||https://tw.test/jason/status/123||'],
     ['a spoiler inside a sentence', 'lol ||https://x.com/jason/status/123|| rip', 'lol ||https://tw.test/jason/status/123|| rip'],
     ['a masked link keeps its )', '[this](https://x.com/u/status/1)', '[this](https://tw.test/u/status/1)'],
+    [
+      'a masked link whose text is the URL',
+      '[https://x.com/u/status/1](https://x.com/u/status/1)',
+      '[https://tw.test/u/status/1](https://tw.test/u/status/1)',
+    ],
     ['a parenthesized link keeps its )', '(see https://x.com/u/status/1)', '(see https://tw.test/u/status/1)'],
     ['bold', '**https://x.com/u/status/1**', '**https://tw.test/u/status/1**'],
     ['italic underscores', '_https://x.com/u/status/1_', '_https://tw.test/u/status/1_'],

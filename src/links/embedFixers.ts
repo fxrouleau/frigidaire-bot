@@ -52,9 +52,10 @@ const POST_PATTERNS: Record<Platform, RegExp> = {
 };
 
 // Whatever follows the post-shaped part (query, fragment, extra path) is part of the token so the whole
-// link is replaced. Whitespace, `<>` (embed suppression), `|` (spoilers) and backticks (code) always end
-// it; trailing markdown/punctuation is trimmed afterwards (trimLinkEnd).
-const TAIL = '[^\\s<>|`]*';
+// link is replaced. Whitespace, `<>` (embed suppression), `|` (spoilers), backticks (code) and square
+// brackets (masked-link syntax — never raw in these platforms' URLs) always end it; trailing
+// markdown/punctuation is trimmed afterwards (trimLinkEnd).
+const TAIL = '[^\\s<>|`\\[\\]]*';
 
 const URL_PATTERNS = Object.fromEntries(
   PLATFORMS.map((platform) => [platform, new RegExp(POST_PATTERNS[platform].source + TAIL, 'gi')]),

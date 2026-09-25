@@ -35,7 +35,6 @@ describe('trimLinkEnd', () => {
     ['https://x.com/u/status/1~~', '~~', 'https://x.com/u/status/1'],
     ['https://x.com/u/status/1.', 'end of sentence ', 'https://x.com/u/status/1'],
     ['https://x.com/u/status/1?!', 'what ', 'https://x.com/u/status/1'],
-    ['https://x.com/u/status/1]', '[', 'https://x.com/u/status/1'],
     ['https://x.com/u/status/1).', '(', 'https://x.com/u/status/1'],
   ])('%s after %j → %s', (url, before, expected) => {
     expect(trimLinkEnd(url, before)).toBe(expected);

@@ -76,9 +76,10 @@ function count(text: string, char: string): number {
 
 /**
  * Trims markdown and sentence punctuation off the end of a matched URL so the replacement leaves it
- * in the message: `)` / `]` when they don't balance an opener inside the URL (masked links, parenthesized
+ * in the message: `)` when it doesn't balance an opener inside the URL (masked links, parenthesized
  * links), `*` `_` `~` when the same delimiter opened earlier in the message (bold/italic/strikethrough),
- * and trailing sentence punctuation. `|` and backticks never get this far: the URL patterns exclude them.
+ * and trailing sentence punctuation. `|`, backticks and square brackets never get this far: the URL
+ * patterns exclude them.
  */
 export function trimLinkEnd(url: string, textBefore: string): string {
   let end = url.length;
@@ -88,8 +89,6 @@ export function trimLinkEnd(url: string, textBefore: string): string {
     if (SENTENCE_END.has(char)) {
       end--;
     } else if (char === ')' && count(head, ')') > count(head, '(')) {
-      end--;
-    } else if (char === ']' && count(head, ']') > count(head, '[')) {
       end--;
     } else if (EMPHASIS.has(char) && textBefore.includes(char)) {
       end--;
