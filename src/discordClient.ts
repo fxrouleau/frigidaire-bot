@@ -1,6 +1,6 @@
 // The Discord client's construction options, kept out of app.ts (which logs in on import) so the
-// partials contract can be tested.
-import { Client, type ClientOptions, GatewayIntentBits, Partials } from 'discord.js';
+// partials and allowed-mentions contracts can be tested.
+import { Client, type ClientOptions, GatewayIntentBits, type MessageMentionOptions, Partials } from 'discord.js';
 
 export const DISCORD_INTENTS: readonly GatewayIntentBits[] = [
   GatewayIntentBits.Guilds,
@@ -26,8 +26,15 @@ export const DISCORD_PARTIALS: readonly Partials[] = [
   Partials.User,
 ];
 
+// What a bot post may ping when the send itself doesn't say (every plain-string reply, the report
+// channel, webhook sends through this client). Chat replies carry model-written text, and the model
+// echoes whatever members and fetched pages feed it, so "@everyone" or a role mention in a reply would
+// otherwise ping for real (Discord's default parses every mention type). Only user mentions and the
+// reply ping stay on: the bot addressing someone by <@id>, and the author of the message it answers.
+// Sends that pass their own allowedMentions (reminders, birthdays, link reposts, commands) override it.
 export function discordClientOptions(): ClientOptions {
-  return { intents: [...DISCORD_INTENTS], partials: [...DISCORD_PARTIALS] };
+  const allowedMentions: MessageMentionOptions = { parse: ['users'], repliedUser: true };
+  return { intents: [...DISCORD_INTENTS], partials: [...DISCORD_PARTIALS], allowedMentions };
 }
 
 export function createDiscordClient(): Client {
