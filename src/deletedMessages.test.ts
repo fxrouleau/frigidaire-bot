@@ -2,6 +2,8 @@ import { ChannelType } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { JudgeInput } from './ai/messageJudge';
 import { DeletedMessageReposter } from './deletedMessages';
+import { getRelay } from './relay';
+import { BotDb, setBotDbForTesting } from './storage/botDb';
 import { createFakeMessage } from './test-support/fakeDiscord';
 import type { sendViaWebhook } from './utils';
 
@@ -49,6 +51,7 @@ function jasperMessage(overrides: Parameters<typeof createFakeMessage>[0] = {}) 
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  setBotDbForTesting(undefined);
 });
 
 describe('DeletedMessageReposter', () => {
@@ -66,6 +69,17 @@ describe('DeletedMessageReposter', () => {
     expect(channel.id).toBe('channel-1');
     expect(identity).toEqual({ name: 'Jasper', avatar: 'https://cdn.example/avatar.png' });
     expect(payload).toEqual({ content: 'something edgy', files: [] });
+  });
+
+  it('records the repost as a relay of the deleted message', async () => {
+    setBotDbForTesting(new BotDb(':memory:'));
+    const { reposter } = makeReposter({ now: () => T0 + 10_000 });
+    const fake = jasperMessage({ messageId: 'm-regret' });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+
+    expect(getRelay('repost-1')).toMatchObject({ authorId: JASPER, kind: 'regret', originalId: 'm-regret' });
   });
 
   it("watches a member's linked side account too, and reposts it as that account", async () => {

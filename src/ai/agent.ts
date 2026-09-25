@@ -8,7 +8,7 @@ import {
 import { config } from '../config';
 import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
-import { type MessageAttribution, attributeMessage } from '../relay';
+import { type MessageAttribution, attributeMessage, getRelays } from '../relay';
 import { splitMessage } from '../utils';
 import type { ConversationPersistence } from './conversationPersistence';
 import { type ConversationState, ConversationStore } from './conversationStore';
@@ -685,7 +685,8 @@ export class AgentOrchestrator {
    * What was said in the channel since the window last looked (between the previous triggering message
    * and this one), rendered as history. Capped at the newest MAX_INTERVENING_MESSAGES; a skipped older
    * remainder is summarized in one developer line. Messages already in the window (the bot's own
-   * replies, anything quoted in a reply context) are not repeated. A fetch failure degrades to nothing.
+   * replies, anything quoted in a reply context, the relay of a message it already has) are not repeated.
+   * A fetch failure degrades to nothing.
    */
   private async buildInterveningEntries(message: Message, state: ConversationState): Promise<ConversationEntry[]> {
     const since = state.lastSeenMessageId;
@@ -700,8 +701,15 @@ export class AgentOrchestrator {
     }
 
     const known = collectMessageIds(state.entries);
+    // A relay of a message the window already shows is that message again: link fixing deletes a ping
+    // and reposts it through a webhook right after the turn that read it (the relay has a newer id).
+    const relays = getRelays(fetched.messages.filter((msg) => msg.webhookId).map((msg) => msg.id));
+    const alreadyShown = (msg: Message) => {
+      const originalId = relays.get(msg.id)?.originalId;
+      return known.has(msg.id) || (originalId !== undefined && known.has(originalId));
+    };
     const rendered = await Promise.all(
-      fetched.messages.filter((msg) => !known.has(msg.id)).map((msg) => this.renderHistoryMessage(msg)),
+      fetched.messages.filter((msg) => !alreadyShown(msg)).map((msg) => this.renderHistoryMessage(msg)),
     );
     const entries = rendered.filter((e): e is ConversationEntry => e !== undefined);
 

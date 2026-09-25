@@ -159,7 +159,14 @@ describe('repostMessage', () => {
 
     expect(outcome.status).toBe('reposted');
     const repostId = (outcome as Extract<RepostOutcome, { status: 'reposted' }>).repostId;
-    expect(getRelay(repostId)).toMatchObject({ authorId: 'user-7', authorName: 'Jasper', channelId: 'chan-9', kind: 'link_fix' });
+    expect(getRelay(repostId)).toMatchObject({
+      authorId: 'user-7',
+      authorName: 'Jasper',
+      channelId: 'chan-9',
+      kind: 'link_fix',
+      // The deleted original, so a window that already showed it doesn't show the repost again.
+      originalId: fake.message.id,
+    });
   });
 
   it('prefers the member nickname over the author displayName for the webhook name', async () => {
