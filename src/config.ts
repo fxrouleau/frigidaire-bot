@@ -303,7 +303,15 @@ export const config = {
   costs: {},
 
   /** Discord application commands: right-click message/user menu entries (src/commands/). */
-  commands: {},
+  commands: {
+    /**
+     * Master switch. False ⇒ the bot registers an empty command set at startup (the entries disappear from the
+     * Apps menu instead of lingering as dead buttons) and refuses any interaction that still arrives.
+     */
+    get enabled(): boolean {
+      return envBool('COMMANDS_ENABLED', true);
+    },
+  },
 
   /** True inside the Vitest runner — the structural test-hermeticity guard. */
   get isTest(): boolean {
