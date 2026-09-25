@@ -134,13 +134,7 @@ export class AddressedGate {
       activity?.botSpokeAt !== undefined ? (message.createdTimestamp - activity.botSpokeAt) / 1000 : undefined;
     const trackedPartner = activity?.partnerId === message.author.id;
     const followup = isFollowup(trackedSeconds, trackedPartner, settings.followupSeconds);
-    const trigger: GateTrigger | undefined = nameHit
-      ? followup
-        ? 'name+followup'
-        : 'name'
-      : followup
-        ? 'followup'
-        : undefined;
+    const trigger = triggerFor(nameHit !== undefined, followup);
     if (!trigger) return { respond: false, reason: 'no_trigger' };
 
     const botId = message.client.user.id;
@@ -263,6 +257,12 @@ export class AddressedGate {
       return [];
     }
   }
+}
+
+function triggerFor(nameHit: boolean, followup: boolean): GateTrigger | undefined {
+  if (nameHit && followup) return 'name+followup';
+  if (nameHit) return 'name';
+  return followup ? 'followup' : undefined;
 }
 
 function botDisplayName(message: Message): string {
