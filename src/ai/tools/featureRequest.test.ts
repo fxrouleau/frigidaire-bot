@@ -17,8 +17,9 @@ function makeMessage(opts: { authorId?: string; displayName?: string; bot?: bool
     authorIsBot: opts.bot ?? false,
     channelId: 'channel-9',
     messageId: 'message-42',
+    guildId: 'guild-7',
   });
-  return Object.assign(message, { guildId: 'guild-7', channelId: 'channel-9' });
+  return Object.assign(message, { channelId: 'channel-9' });
 }
 
 function setup(opts: { fake?: FakeGitHub; failures?: ScriptedFailure[] } = {}) {
