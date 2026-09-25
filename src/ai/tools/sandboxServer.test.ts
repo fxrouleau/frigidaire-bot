@@ -1,7 +1,7 @@
 // End-to-end: the real sidecar (sandbox/server.py) on a loopback port, driven through the bot's own client.
-// Skipped where python3 isn't available; CI's test image has it (the base stage installs it for native
-// modules), so this runs as part of the gate. The full image, with numpy & co and the container hardening,
-// is exercised by sandbox/ci-smoke.sh (Docker) instead.
+// Skipped where python3 isn't available; CI's test image has it and bash (the Dockerfile's base stage installs
+// both, checked below), so this runs as part of the gate. The full image, with numpy & co and the container
+// hardening, is exercised by sandbox/ci-smoke.sh (Docker) instead.
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +19,26 @@ const TOKEN = 'server-test-token';
 const canRunServer =
   process.platform === 'linux' &&
   spawnSync('python3', ['-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)']).status === 0;
+
+// The CI gate runs this file in the Dockerfile's test image (node:26-alpine plus what its base stage installs).
+// An interpreter missing there fails every run in that language in CI only: a dev machine has bash, while
+// alpine ships busybox's sh. node comes with the image.
+describe('the Dockerfile base stage (the CI test image)', () => {
+  it('installs every interpreter sandbox/server.py launches', () => {
+    const dockerfile = readFileSync(path.resolve(__dirname, '../../../Dockerfile'), 'utf8');
+    const base = /^FROM \S+ AS base$([\s\S]*?)^FROM /m.exec(dockerfile)?.[1] ?? '';
+    const installed = [...base.matchAll(/apk add --no-cache ([^\n]+)/g)].flatMap((match) =>
+      match[1].trim().split(/\s+/),
+    );
+    const languages = /^LANGUAGES\b[^\n]*\n([\s\S]*?)^\}/m.exec(readFileSync(SERVER_SCRIPT, 'utf8'))?.[1] ?? '';
+    const commands = [...languages.matchAll(/\(\[([^,\]]+)/g)].map((match) =>
+      match[1].trim() === 'sys.executable' ? 'python3' : match[1].trim().replace(/^'|'$/g, ''),
+    );
+
+    expect(commands).toEqual(expect.arrayContaining(['python3', 'bash', 'node']));
+    expect(installed).toEqual(expect.arrayContaining(commands.filter((command) => command !== 'node')));
+  });
+});
 
 /** Starts the server on a free port and resolves with its base URL once it logs that it's listening. */
 function startServer(
@@ -307,12 +327,23 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
   });
 
   it('wipes a workspace left over its file-count limit, even files hidden in an unreadable directory', async () => {
+    // Two runs, so the outcome doesn't race the server's in-run check (polled every 0.25 s): one run that
+    // crosses the limit is killed mid-way whenever a poll lands before it finishes, i.e. under load. The first
+    // stays under the 2000 entries and always finishes; the second hides the directory again and crosses the
+    // limit only if the files in it are counted.
+    const hide = await runInSandbox(
+      { language: 'bash', code: 'mkdir hidden && cd hidden && touch $(seq 1500) && chmod 000 . && echo made', timeoutSeconds: 20 },
+      client(),
+    );
+    expect(hide).toMatchObject({ ok: true, result: { stdout: 'made\n', workspace_over_limit: false } });
+
     const outcome = await runInSandbox(
-      { language: 'bash', code: 'mkdir hidden && cd hidden && touch $(seq 2500) && chmod 000 . && echo made', timeoutSeconds: 20 },
+      { language: 'bash', code: 'chmod 000 hidden && touch $(seq 600)', timeoutSeconds: 20 },
       client(),
     );
 
-    expect(outcome).toMatchObject({ ok: true, result: { stdout: 'made\n', workspace_over_limit: true } });
+    // Caught during the run or right after it, either way the workspace is over and gets wiped.
+    expect(outcome).toMatchObject({ ok: true, result: { workspace_over_limit: true } });
     expect(existsSync(path.join(workspace, 'hidden'))).toBe(false);
   });
 

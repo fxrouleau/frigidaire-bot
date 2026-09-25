@@ -5,7 +5,9 @@ FROM node:26-alpine AS base
 # node-gyp toolchain. better-sqlite3 13 ships N-API prebuilds (linuxmusl x64/arm64 included) and its binding.gyp
 # builds nothing when one matches, but Yarn still runs node-gyp on it, and it compiles from source on any other
 # platform. (sharp 0.35 needs none of this: its @img/sharp-linuxmusl-* packages are prebuilt.)
-RUN apk add --no-cache python3 make g++
+# python3 and bash also serve the CI gate: src/ai/tools/sandboxServer.test.ts starts sandbox/server.py and runs
+# python and bash snippets through it (busybox's sh is not bash). The prod stage starts from a fresh image.
+RUN apk add --no-cache python3 make g++ bash
 # Corepack is no longer bundled with Node 25+ — install it from npm
 RUN npm install -g corepack && corepack enable
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
