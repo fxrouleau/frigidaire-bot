@@ -502,6 +502,22 @@ describe('subject_user_id (soft-FK to identities)', () => {
   it('getForPerson() with neither an id nor a name returns nothing', () => {
     expect(store.getForPerson({ names: [] })).toEqual([]);
   });
+
+  it("getForPerson() never claims another member's id-stamped row through a shared name", async () => {
+    // Member 111 is displayed as "Alex"; member 222's IRL name or nickname is also "Alex".
+    await store.save({ category: 'fact', subject: 'Alex', content: 'Works at the depot', subject_user_id: '111' });
+    await store.save({ category: 'fact', subject: 'Alex', content: 'Played hockey as a kid' });
+    await store.save({ category: 'fact', subject: 'Sam', content: 'Collects vinyl', subject_user_id: '222' });
+
+    const forSam = store.getForPerson({ userId: '222', names: ['Sam', 'Alex'] }).map((m) => m.content);
+    expect(forSam.sort()).toEqual(['Collects vinyl', 'Played hockey as a kid']);
+
+    const forAlex = store.getForPerson({ userId: '111', names: ['Alex'] }).map((m) => m.content);
+    expect(forAlex.sort()).toEqual(['Played hockey as a kid', 'Works at the depot']);
+
+    // A name-only lookup (no id known) still takes every row filed under the name.
+    expect(store.getForPerson({ names: ['Alex'] })).toHaveLength(2);
+  });
 });
 
 describe('identities', () => {

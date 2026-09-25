@@ -692,15 +692,27 @@ export class MemoryStore {
    * the id column existed, and by remember_fact, only carry a name. The id counts for every account of
    * the person (LINKED_ACCOUNTS): a row still stamped with a side account's id is theirs too. Callers
    * build `person` with memoryKeyFor() (src/ai/people.ts), which collects every name.
+   *
+   * With an id, a name only claims rows that carry no id: two members can share a name (someone's IRL
+   * name or nickname is another member's display name), and a row stamped with the other member's id
+   * is about them (see samePerson()). Without an id, every row filed under one of the names matches.
    */
   getForPerson(person: { userId?: string; names: string[] }, limit = 20): Memory[] {
     const names = [...new Set(person.names.map((n) => n.trim()).filter((n) => n.length > 0))];
     const ids = person.userId ? accountIdsFor(person.userId) : [];
     if (ids.length === 0 && names.length === 0) return [];
+    if (ids.length === 0) {
+      return this.stmt(
+        `SELECT * FROM memories
+         WHERE active = 1 AND subject IN (SELECT value FROM json_each(?))
+         ORDER BY updated_at DESC LIMIT ?`,
+      ).all(JSON.stringify(names), limit) as Memory[];
+    }
     return this.stmt(
       `SELECT * FROM memories
        WHERE active = 1
-         AND (subject_user_id IN (SELECT value FROM json_each(?)) OR subject IN (SELECT value FROM json_each(?)))
+         AND (subject_user_id IN (SELECT value FROM json_each(?))
+              OR (subject_user_id IS NULL AND subject IN (SELECT value FROM json_each(?))))
        ORDER BY updated_at DESC LIMIT ?`,
     ).all(JSON.stringify(ids), JSON.stringify(names), limit) as Memory[];
   }
