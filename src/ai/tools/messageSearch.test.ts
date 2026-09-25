@@ -15,6 +15,14 @@ const THREAD = '100000000000000003';
 const REMI = '200000000000000001';
 const JASPER = '200000000000000002';
 const ASKER = '200000000000000003';
+const EVERYONE_ROLE = GUILD_ID;
+const MODS_ROLE = '400000000000000001';
+// Which roles can read each channel (the asker's own access is `viewable`).
+const ROLE_ACCESS: Record<string, string[]> = {
+  [MAIN]: [EVERYONE_ROLE, MODS_ROLE],
+  [CLIPS]: [EVERYONE_ROLE, MODS_ROLE],
+  [MODLOGS]: [MODS_ROLE],
+};
 // 2026-01-15 12:00 Eastern (EST, UTC-5).
 const T0 = Date.UTC(2026, 0, 15, 17, 0);
 const MINUTE = 60_000;
@@ -33,7 +41,7 @@ type AskerOptions = {
   live?: Record<string, Message[]>;
 };
 
-/** The triggering message: its author, guild and the ViewChannel answer per guild channel. */
+/** The triggering message: its author, guild and the ViewChannel answer per guild channel and role. */
 function asker(opts: AskerOptions = {}): Message {
   const viewable = new Set(opts.viewable ?? [MAIN, CLIPS]);
   const guildChannel = (id: string, name: string, type = ChannelType.GuildText) => ({
@@ -42,7 +50,9 @@ function asker(opts: AskerOptions = {}): Message {
     type,
     parentId: null,
     isTextBased: () => true,
-    permissionsFor: () => ({ has: () => viewable.has(id) }),
+    permissionsFor: (target: { id: string }) => ({
+      has: () => (target.id === ASKER ? viewable.has(id) : (ROLE_ACCESS[id]?.includes(target.id) ?? false)),
+    }),
     messages: {
       fetch: async (options: { around: string; limit: number }) =>
         new Collection((opts.live?.[id] ?? []).map((m) => [m.id, m])),
@@ -53,14 +63,17 @@ function asker(opts: AskerOptions = {}): Message {
     [CLIPS, guildChannel(CLIPS, 'clips')],
     [MODLOGS, guildChannel(MODLOGS, 'mod-logs')],
   ]);
+  const channelId = opts.channelId ?? MAIN;
   return {
     id: snowflake(T0 + 999 * MINUTE),
-    channelId: opts.channelId ?? MAIN,
+    channelId,
+    channel: channels.get(channelId),
     author: { id: ASKER },
     member: { id: ASKER },
     client: { user: { id: BOT_USER_ID, username: 'frigidaire', displayName: 'Frigidaire' } },
     guild: {
       id: GUILD_ID,
+      roles: { cache: new Collection([EVERYONE_ROLE, MODS_ROLE].map((id) => [id, { id }])) },
       channels: {
         cache: channels,
         fetch: async (id: string) => {
@@ -273,6 +286,22 @@ describe('search_messages', () => {
     expect(await search({ query: 'ban' }, asker({ channelId: MODLOGS }))).toContain('secret ban');
   });
 
+  it('never quotes a more private channel into this one, even when the asker can read it', async () => {
+    // A mod asking in the main channel (or "Ask Fridge" on a mod's message there): everyone reading the
+    // answer would see mod-logs' messages. Asked from mod-logs itself, both are fine.
+    seedChannels();
+    store.upsertMessages([at(0, { content: 'secret ban', channelId: MODLOGS }), at(1, { content: 'public ban' })]);
+    const mod = { viewable: [MAIN, CLIPS, MODLOGS] };
+    const fromMain = await search({ query: 'ban' }, asker(mod));
+    expect(fromMain).toContain('public ban');
+    expect(fromMain).not.toContain('secret');
+    const fromModLogs = await search({ query: 'ban' }, asker({ ...mod, channelId: MODLOGS }));
+    expect(fromModLogs).toContain('secret ban');
+    expect(fromModLogs).toContain('public ban');
+    // An explicit channel filter doesn't get around it.
+    expect(await search({ query: 'ban', channel: 'mod-logs' }, asker(mod))).toContain('No messages matching "ban"');
+  });
+
   it('never shows ignored channels', async () => {
     seedChannels();
     store.upsertMessages([at(0, { content: 'clip one', channelId: CLIPS })]);
@@ -344,6 +373,19 @@ describe('get_message_context', () => {
     expect(await context({ message: secret.id })).toContain("in a channel you can't read");
   });
 
+  it("won't show a more private channel's conversation here, even to someone who can read it", async () => {
+    seedConversation();
+    const secret = at(10, { content: 'secret', channelId: MODLOGS });
+    store.upsertMessage(secret);
+    const mod = { viewable: [MAIN, CLIPS, MODLOGS] };
+    const here = await context({ message: secret.id }, asker(mod));
+    expect(here).toContain('more private than this one');
+    expect(here).not.toContain('secret');
+    expect(await context({ message: secret.id }, asker({ ...mod, channelId: MODLOGS }))).toContain(
+      'Conversation around that message in #mod-logs',
+    );
+  });
+
   it('reads a message the archive does not have straight from Discord (read-only)', async () => {
     seedChannels();
     const live = [0, 1, 2].map((i) =>
@@ -369,6 +411,13 @@ describe('get_message_context', () => {
       asker({ live: { [MODLOGS]: live } }),
     );
     expect(hidden).toContain("in a channel you can't read");
+
+    const morePrivate = await context(
+      { message: `https://discord.com/channels/${GUILD_ID}/${MODLOGS}/${live[1].id}` },
+      asker({ viewable: [MAIN, CLIPS, MODLOGS], live: { [MODLOGS]: live } }),
+    );
+    expect(morePrivate).toContain('more private than this one');
+    expect(morePrivate).not.toContain('live 1');
 
     const missing = await context({ message: snowflake(T0 - 5000 * MINUTE) });
     expect(missing).toContain("isn't in the archive");

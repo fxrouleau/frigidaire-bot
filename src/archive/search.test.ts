@@ -2,7 +2,14 @@ import { ChannelType } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GUILD_ID } from '../test-support/fakeArchive';
 import type { ArchivedChannel } from './archiveStore';
-import { type GuildLike, jumpLink, makeAudienceAccess, makeChannelAccess, renderContent } from './search';
+import {
+  type GuildLike,
+  jumpLink,
+  makeAudienceAccess,
+  makeChannelAccess,
+  renderContent,
+  replyAccessFor,
+} from './search';
 
 const MAIN = '100000000000000001';
 const PRIVATE = '100000000000000004';
@@ -11,7 +18,7 @@ const EVERYONE = GUILD_ID;
 const MODS = '400000000000000001';
 
 // Which targets (member ids or role ids) can view each guild channel.
-const VISIBLE: Record<string, string[]> = { [MAIN]: [EVERYONE, MODS, 'member-1'], [PRIVATE]: [MODS] };
+const VISIBLE: Record<string, string[]> = { [MAIN]: [EVERYONE, MODS, 'member-1', 'mod-1'], [PRIVATE]: [MODS, 'mod-1'] };
 
 function guild(): GuildLike & { roles: { cache: Map<string, { id: string }> } } {
   const channel = (id: string) => ({
@@ -83,6 +90,42 @@ describe('makeAudienceAccess', () => {
     const access = makeAudienceAccess(g, target as never);
     expect(access(archived(PRIVATE))).toBe(true);
     expect(access(archived(MAIN))).toBe(false);
+  });
+});
+
+describe('replyAccessFor', () => {
+  it('needs both: the asker can read the channel, and it is at least as visible as the reply channel', () => {
+    const g = guild();
+    const main = g.channels.cache.get(MAIN);
+    // A mod asking in the main channel: mod logs are readable to them, but not to everyone reading the answer.
+    const fromMain = replyAccessFor({ guild: g, member: { id: 'mod-1' }, channelId: MAIN, channel: main });
+    expect(fromMain.allows(archived(MAIN))).toBe(true);
+    expect(fromMain.allows(archived(THREAD, ChannelType.PublicThread, MAIN))).toBe(true);
+    expect(fromMain.asker(archived(PRIVATE))).toBe(true);
+    expect(fromMain.audience(archived(PRIVATE))).toBe(false);
+    expect(fromMain.allows(archived(PRIVATE))).toBe(false);
+
+    // Asked from the mod channel (found in the guild cache), both count.
+    const fromPrivate = replyAccessFor({ guild: g, member: { id: 'mod-1' }, channelId: PRIVATE });
+    expect(fromPrivate.allows(archived(PRIVATE))).toBe(true);
+    expect(fromPrivate.allows(archived(MAIN))).toBe(true);
+
+    // The audience rule never widens what the asker can read.
+    const member = replyAccessFor({ guild: g, member: { id: 'member-1' }, channelId: PRIVATE });
+    expect(member.audience(archived(MAIN))).toBe(true);
+    expect(member.allows(archived(PRIVATE))).toBe(true); // the channel being asked from
+    expect(member.allows(archived(MAIN))).toBe(true);
+    const outsider = replyAccessFor({ guild: g, member: { id: 'member-2' }, channelId: PRIVATE });
+    expect(outsider.allows(archived(MAIN))).toBe(false);
+  });
+
+  it("allows only the reply's own channel without a guild or a readable audience", () => {
+    expect(replyAccessFor({ guild: null, member: null, channelId: MAIN }).allows(archived(MAIN))).toBe(true);
+    const noRoles: GuildLike = { id: GUILD_ID, channels: guild().channels };
+    const access = replyAccessFor({ guild: noRoles, member: { id: 'mod-1' }, channelId: PRIVATE });
+    expect(access.allows(archived(PRIVATE))).toBe(true);
+    expect(access.asker(archived(MAIN))).toBe(true);
+    expect(access.allows(archived(MAIN))).toBe(false);
   });
 });
 
