@@ -70,8 +70,12 @@ export type FakeMessageOptions = {
   // `.members`. `member: false` puts the user in `.users` only (not a guild member). When omitted,
   // `mentionedUserIds` still populates `.users` with bare entries (no display name) for has() checks.
   mentionedUsers?: Array<{ id: string; displayName?: string; username?: string; member?: boolean }>;
-  // The author of the message this one replies to, when Discord resolved it (reply pings on).
+  // The author of the message this one replies to, when Discord resolved it (`mentions.repliedUser`:
+  // discord.js sets it for every reply whose target still exists, ping or not).
   repliedUserId?: string | null;
+  // The reply pinged its target (Discord's default): like Discord, the replied user is then also in
+  // `mentions.users`, but not in `mentions.parsedUsers` (the mentions written in the text).
+  repliedUserPinged?: boolean;
   // Display data for `mentions.repliedUser`; a member display name also puts them in guild.members.cache.
   repliedUserDisplayName?: string;
   repliedMemberDisplayName?: string;
@@ -98,6 +102,8 @@ export type FakeMessageOptions = {
   // limits it by snowflake like the API (ids must be numeric), and fetch(id) finds messages in it. When
   // set, it replaces `historyMessages` for list fetches; `fetchedMessageById` still answers id fetches.
   channelMessages?: Message[];
+  // `channel.messages.cache` (discord.js caches, among others, the message a live reply refers to).
+  cachedMessages?: Message[];
   // Defaults to 'guild-1' (null for DMs, like discord.js).
   guildId?: string | null;
   channelName?: string;
@@ -246,6 +252,11 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
       mentionMembers.set(m.id, { id: m.id, displayName: m.displayName });
     }
   }
+  // What the text mentions; Discord's `mentions.users` also holds the author a reply pinged.
+  const parsedMentionUsers = new Collection(mentionUsers);
+  if (opts.repliedUserId && opts.repliedUserPinged && !mentionUsers.has(opts.repliedUserId)) {
+    mentionUsers.set(opts.repliedUserId, { id: opts.repliedUserId });
+  }
 
   const embeds = (opts.embeds ?? []).map((embed) => ({
     image: embed.imageUrl ? { url: embed.imageUrl, proxyURL: embed.imageProxyUrl } : null,
@@ -355,6 +366,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     stickers,
     mentions: {
       users: mentionUsers,
+      parsedUsers: parsedMentionUsers,
       members: mentionMembers,
       repliedUser: opts.repliedUserId
         ? { id: opts.repliedUserId, displayName: opts.repliedUserDisplayName, username: opts.repliedUserDisplayName }
@@ -387,7 +399,10 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
       send,
       sendTyping,
       createWebhook,
-      messages: { fetch: messagesFetch },
+      messages: {
+        fetch: messagesFetch,
+        cache: new Collection((opts.cachedMessages ?? []).map((m) => [m.id, m])),
+      },
       ...threadFields,
     },
     reply,

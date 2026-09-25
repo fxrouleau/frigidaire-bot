@@ -23,13 +23,52 @@ afterEach(() => {
 });
 
 describe('aiChat and transcript replies', () => {
-  it('a reply (with ping) to a transcript reply goes to the gate, not straight to the agent', async () => {
+  it('a reply to a transcript reply goes to the gate, not straight to the agent', async () => {
     rememberTranscriptReply('transcript-1', 'voice-1');
     const fake = createFakeMessage({
       content: 'lmao he really said that',
       botUserId: BOT_ID,
       referencedMessageId: 'transcript-1',
       repliedUserId: BOT_ID,
+    });
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).not.toHaveBeenCalled();
+    expect(addressedGate.evaluate).toHaveBeenCalledWith(fake.message);
+    expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
+  });
+
+  it('a reply that pings the transcript (Discord lists the bot in the mentions) is still not a mention', async () => {
+    rememberTranscriptReply('transcript-1', 'voice-1');
+    const fake = createFakeMessage({
+      content: 'lmao he really said that',
+      botUserId: BOT_ID,
+      referencedMessageId: 'transcript-1',
+      repliedUserId: BOT_ID,
+      repliedUserPinged: true,
+    });
+    expect(fake.message.mentions.users.has(BOT_ID)).toBe(true);
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).not.toHaveBeenCalled();
+    expect(addressedGate.evaluate).toHaveBeenCalledWith(fake.message);
+  });
+
+  it('recognizes a cached transcript reply it has no record of by its header, even with the author resolved', async () => {
+    const transcript = createFakeBotMessage({
+      botUserId: BOT_ID,
+      messageId: 'old-transcript',
+      content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?`,
+    });
+    const fake = createFakeMessage({
+      content: 'ouais',
+      botUserId: BOT_ID,
+      referencedMessageId: 'old-transcript',
+      repliedUserId: BOT_ID,
+      repliedUserPinged: true,
+      cachedMessages: [transcript.message],
     });
 
     await aiChatEvent.execute(fake.message);
@@ -63,6 +102,8 @@ describe('aiChat and transcript replies', () => {
       content: 'fridge what did he mean',
       botUserId: BOT_ID,
       referencedMessageId: 'transcript-2',
+      repliedUserId: BOT_ID,
+      repliedUserPinged: true,
       mentionedUserIds: [BOT_ID],
     });
 

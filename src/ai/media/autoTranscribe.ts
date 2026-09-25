@@ -53,6 +53,19 @@ export function isTranscriptReplyId(messageId: string): boolean {
   return isStoredTranscriptReply(messageId);
 }
 
+/**
+ * Whether `message` is a Discord reply to one of the bot's transcript replies (it answers the voice
+ * message, not the bot): by the stored ids, else by the replied-to message itself when discord.js has
+ * it cached (it caches the message a live reply refers to). Never fetches.
+ */
+export function repliesToTranscript(message: Message): boolean {
+  const referencedId = message.reference?.messageId;
+  if (!referencedId) return false;
+  if (isTranscriptReplyId(referencedId)) return true;
+  const referenced = message.channel.messages.cache.get(referencedId);
+  return referenced !== undefined && isTranscriptReply(referenced);
+}
+
 /** The note posted instead of a transcript for a voice message over VOICE_MAX_SECONDS. */
 export function formatTooLongNote(durationSecs: number): string {
   return `${TOO_LONG_HEADER} (${formatClock(durationSecs)})`;

@@ -1,16 +1,24 @@
 import { Events, type Message } from 'discord.js';
 import type { HandleMentionOptions } from '../ai/agent';
 import { agent } from '../ai/agentInstance';
-import { isTranscriptReply, isTranscriptReplyId } from '../ai/media/autoTranscribe';
+import { isTranscriptReply, repliesToTranscript } from '../ai/media/autoTranscribe';
 import { defineEvent } from '../eventModule';
 import { addressedGate } from '../gate';
 import { logger } from '../logger';
 
+/**
+ * The bot is @-mentioned in the text. Not `mentions.users`: Discord also lists there the author a reply
+ * pinged (a reply's default), and whether a reply is meant for the bot is isReplyToBot()'s call.
+ */
+function mentionsBot(message: Message): boolean {
+  return message.mentions.parsedUsers.has(message.client.user.id);
+}
+
 async function isReplyToBot(message: Message): Promise<boolean> {
   if (!message.reference?.messageId) return false;
   // The bot's auto-transcript of a voice message isn't the bot talking: a reply to it answers the voice message.
-  if (isTranscriptReplyId(message.reference.messageId)) return false;
-  // Discord resolves the replied-to author into the mentions when the reply pings them, which
+  if (repliesToTranscript(message)) return false;
+  // discord.js resolves the replied-to author whenever the replied-to message still exists, which
   // answers the question without a REST fetch for every reply posted server-wide.
   const repliedUser = message.mentions.repliedUser;
   if (repliedUser) return repliedUser.id === message.client.user.id;
@@ -44,7 +52,7 @@ export default defineEvent(Events.MessageCreate, {
     if (message.author.bot) return;
 
     const author = message.member?.displayName || message.author.username;
-    const explicitMention = message.mentions.users.has(message.client.user.id);
+    const explicitMention = mentionsBot(message);
     const replyToBot = await isReplyToBot(message);
 
     if (explicitMention || replyToBot) {

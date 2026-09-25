@@ -74,6 +74,24 @@ describe('aiChat event', () => {
     expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
   });
 
+  it('routes a reply that pings the bot (the reply ping is not a mention in the text) as a reply', async () => {
+    const answer = createFakeBotMessage({ botUserId: BOT_ID, messageId: 'ref-1', content: 'kraken into ie' });
+    const fake = createFakeMessage({
+      content: 'why tho',
+      botUserId: BOT_ID,
+      referencedMessageId: 'ref-1',
+      repliedUserId: BOT_ID,
+      repliedUserPinged: true,
+      cachedMessages: [answer.message],
+    });
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).toHaveBeenCalledTimes(1);
+    expect(agent.handleMention).toHaveBeenCalledWith(fake.message);
+    expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
+  });
+
   it('does NOT route (and does not fetch) when the resolved replied-to user is a human', async () => {
     const fake = createFakeMessage({
       content: 'replying to a human with ping',

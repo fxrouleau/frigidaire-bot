@@ -1,6 +1,8 @@
 import { ChannelType, Collection, type Message } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LinkReader, setLinkReaderForTesting } from '../ai/linkReader/reader';
+import { TRANSCRIPT_HEADER } from '../ai/media/autoTranscribe';
+import { rememberTranscriptReply } from '../ai/media/store';
 import { recordRelay } from '../relay';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { type FakeMessageOptions, createFakeMessage } from '../test-support/fakeDiscord';
@@ -99,6 +101,36 @@ describe('intakeSkipReason', () => {
     expect(
       intakeSkipReason(message({ referencedMessageId: '999', repliedUserId: 'dale', content: 'hahaha' }), SETTINGS),
     ).toBeUndefined();
+  });
+
+  it('treats a reply that pings the bot as a reply, not a mention', () => {
+    const reply = message({ referencedMessageId: '999', repliedUserId: 'bot-1', repliedUserPinged: true, content: 'ok' });
+    expect(intakeSkipReason(reply, SETTINGS)).toBe('replies to the bot');
+  });
+
+  it("accepts a reply (ping or not) to a voice-message transcript: that's not the bot talking", () => {
+    rememberTranscriptReply('998', 'voice-1');
+    const stored = message({
+      referencedMessageId: '998',
+      repliedUserId: 'bot-1',
+      repliedUserPinged: true,
+      content: 'hahaha he really said that',
+    });
+    expect(intakeSkipReason(stored, SETTINGS)).toBeUndefined();
+
+    const transcript = message({
+      messageId: '997',
+      authorId: 'bot-1',
+      authorIsBot: true,
+      content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?`,
+    });
+    const cached = message({
+      referencedMessageId: '997',
+      repliedUserId: 'bot-1',
+      content: 'ouais je suis la',
+      cached: [transcript],
+    });
+    expect(intakeSkipReason(cached, SETTINGS)).toBeUndefined();
   });
 
   it('finds a reply to the bot through the message cache when Discord did not resolve the author', () => {

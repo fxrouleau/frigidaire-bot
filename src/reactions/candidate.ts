@@ -6,6 +6,7 @@ import type { Message } from 'discord.js';
 import { formatLinkPreview } from '../ai/linkReader/format';
 import { getLinkReader } from '../ai/linkReader/reader';
 import { findLinks } from '../ai/linkReader/targets';
+import { repliesToTranscript } from '../ai/media/autoTranscribe';
 import { config } from '../config';
 import { attributeMessage } from '../relay';
 import type { Candidate, CandidateSnapshot } from './autoReactor';
@@ -69,6 +70,8 @@ function tooSlight(message: Message): string | undefined {
 }
 
 function isReplyToBot(message: Message, botId: string): boolean {
+  // A voice-message transcript isn't the bot talking (aiChat's rule): a reply to it answers the voice message.
+  if (repliesToTranscript(message)) return false;
   if (message.mentions.repliedUser) return message.mentions.repliedUser.id === botId;
   const referenced = message.reference?.messageId;
   if (!referenced) return false;
@@ -94,7 +97,8 @@ export function intakeSkipReason(message: Message, settings: IntakeSettings): st
   } else if (message.author.bot) {
     return message.author.id === botId ? 'own message' : 'bot';
   }
-  if (botId && message.mentions.users.has(botId)) return 'mentions the bot';
+  // Mentioned in the text: `mentions.users` also holds the author a reply pinged, which isReplyToBot() judges.
+  if (botId && message.mentions.parsedUsers.has(botId)) return 'mentions the bot';
   if (botId && isReplyToBot(message, botId)) return 'replies to the bot';
   if (namesBot(message.content, settings.botNames)) return 'names the bot';
   return tooSlight(message);
