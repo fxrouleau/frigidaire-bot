@@ -7,19 +7,38 @@ import { addressedGate } from '../gate';
 import { logger } from '../logger';
 
 async function isReplyToBot(message: Message): Promise<boolean> {
-  if (!message.reference?.messageId) return false;
+  const referencedId = message.reference?.messageId;
+  if (!referencedId) return false;
   // The bot's auto-transcript of a voice message isn't the bot talking: a reply to it answers the voice message.
-  if (isTranscriptReplyId(message.reference.messageId)) return false;
-  // Discord resolves the replied-to author into the mentions when the reply pings them, which
-  // answers the question without a REST fetch for every reply posted server-wide.
+  if (isTranscriptReplyId(referencedId)) return false;
+  const botId = message.client.user.id;
+  // Discord resolves the replied-to author (ping or not), which rules out replies to anyone else without
+  // a REST fetch for every reply posted server-wide.
   const repliedUser = message.mentions.repliedUser;
-  if (repliedUser) return repliedUser.id === message.client.user.id;
+  if (repliedUser && repliedUser.id !== botId) return false;
+  // A reply to the bot: Discord ships the replied-to message along and discord.js caches it, so telling a
+  // transcript the bot has no record of (by its header) from a real reply normally costs nothing.
+  const cached = message.channel.messages.cache?.get(referencedId);
+  if (cached?.author) return cached.author.id === botId && !isTranscriptReply(cached);
+  if (repliedUser) return true;
   try {
-    const repliedTo = await message.channel.messages.fetch(message.reference.messageId);
-    return repliedTo.author.id === message.client.user.id && !isTranscriptReply(repliedTo);
+    const repliedTo = await message.channel.messages.fetch(referencedId);
+    return repliedTo.author.id === botId && !isTranscriptReply(repliedTo);
   } catch {
     return false;
   }
+}
+
+/**
+ * The bot's id typed into the message. Discord also lists the replied-to author among the mentions when
+ * a reply pings, so `mentions.users` alone would make every pinged reply to the bot (a voice-message
+ * transcript included) an explicit mention; replies are isReplyToBot()'s call.
+ */
+function mentionsBot(message: Message): boolean {
+  const botId = message.client.user.id;
+  if (!message.mentions.users.has(botId)) return false;
+  if (message.mentions.repliedUser?.id !== botId) return true;
+  return (message.content ?? '').includes(`<@${botId}>`) || (message.content ?? '').includes(`<@!${botId}>`);
 }
 
 /** Runs one agent turn; the gate learns when it ends (see AddressedGate.noteTurnDone). */
@@ -44,7 +63,7 @@ export default defineEvent(Events.MessageCreate, {
     if (message.author.bot) return;
 
     const author = message.member?.displayName || message.author.username;
-    const explicitMention = message.mentions.users.has(message.client.user.id);
+    const explicitMention = mentionsBot(message);
     const replyToBot = await isReplyToBot(message);
 
     if (explicitMention || replyToBot) {

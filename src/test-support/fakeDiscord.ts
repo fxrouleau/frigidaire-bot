@@ -94,6 +94,9 @@ export type FakeMessageOptions = {
   memberIsNull?: boolean;
   historyMessages?: Message[];
   fetchedMessageById?: Record<string, Message>;
+  // The channel's message cache (`channel.messages.cache`), e.g. the replied-to message discord.js caches
+  // from a reply's payload. Omitted ⇒ the channel has no `cache` at all (id fetches go to `fetch`).
+  cachedMessages?: Message[];
   // A channel log with Discord's fetch semantics: fetch({ limit, before, after, around }) filters and
   // limits it by snowflake like the API (ids must be numeric), and fetch(id) finds messages in it. When
   // set, it replaces `historyMessages` for list fetches; `fetchedMessageById` still answers id fetches.
@@ -387,7 +390,10 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
       send,
       sendTyping,
       createWebhook,
-      messages: { fetch: messagesFetch },
+      messages: {
+        fetch: messagesFetch,
+        ...(opts.cachedMessages ? { cache: new Collection(opts.cachedMessages.map((m) => [m.id, m])) } : {}),
+      },
       ...threadFields,
     },
     reply,
