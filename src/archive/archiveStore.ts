@@ -329,6 +329,15 @@ const SCHEMA = `
     error_at   INTEGER,
     updated_at INTEGER NOT NULL
   );
+
+  -- A gap fill in progress: the newest id it has stored so far. Live ingest archives newer messages
+  -- meanwhile, so a run that stops early (restart, failed request) must resume here, not from the
+  -- channel's newest archived message, or the rest of the gap would never be fetched.
+  CREATE TABLE IF NOT EXISTS gap_fill_state (
+    channel_id TEXT    PRIMARY KEY,
+    cursor_id  TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
 `;
 
 // Upsert. On conflict only the mutable parts change, and only when something actually differs: an
@@ -1106,6 +1115,46 @@ export class ArchiveStore {
       });
       return added;
     })();
+  }
+
+  // ---------------------------------------------------------------- gap fill state
+
+  /** Gap fills an earlier run started and did not finish, with the id each one had reached. */
+  pendingGapFills(): { channelId: string; cursorId: string }[] {
+    return (
+      this.stmt('SELECT channel_id, cursor_id FROM gap_fill_state').all() as { channel_id: string; cursor_id: string }[]
+    ).map((r) => ({ channelId: r.channel_id, cursorId: r.cursor_id }));
+  }
+
+  /** Records that a channel's gap fill runs from `cursorId` on, before its first request. */
+  startGapFill(channelId: string, cursorId: string, now = Date.now()): void {
+    this.stmt(
+      `INSERT INTO gap_fill_state (channel_id, cursor_id, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(channel_id) DO UPDATE SET cursor_id = excluded.cursor_id, updated_at = excluded.updated_at`,
+    ).run(channelId, cursorId, now);
+  }
+
+  /**
+   * Stores one gap-fill page and, in the same transaction, moves the channel's cursor to the page's
+   * newest id (or forgets it when `done`). Returns how many of the page's messages were new.
+   */
+  saveGapFillPage(
+    channelId: string,
+    inputs: ArchiveMessageInput[],
+    page: { newestId: string; done: boolean },
+    now = Date.now(),
+  ): number {
+    return this.db.transaction(() => {
+      const added = this.upsertMessages(inputs);
+      if (page.done) this.finishGapFill(channelId);
+      else this.startGapFill(channelId, page.newestId, now);
+      return added;
+    })();
+  }
+
+  /** The channel's gap fill is complete (or there was nothing to fetch). */
+  finishGapFill(channelId: string): void {
+    this.stmt('DELETE FROM gap_fill_state WHERE channel_id = ?').run(channelId);
   }
 
   recordBackfillError(channelId: string, error: string, now = Date.now()): void {
