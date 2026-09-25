@@ -809,7 +809,16 @@ export class AgentOrchestrator {
       return { header: '(replying to a message that could not be loaded)' };
     }
 
-    const header = `(replying to ${this.contextAuthorLabel(referenced)} — ${referenced.url})`;
+    // A reply to one of the bot's auto-transcripts is a reply to the voice message it transcribes: the
+    // words are the member's, and that message's enrichers carry the transcript. When the voice message
+    // can't be loaded, the transcript stands in, labelled as one (never as the bot talking).
+    const voice = await this.transcribedVoiceMessage(message, referenced);
+    if (voice) referenced = voice;
+    const header = voice
+      ? `(replying to ${this.contextAuthorLabel(referenced)}'s voice message — ${referenced.url})`
+      : isTranscriptReply(referenced)
+        ? `(replying to a voice message's transcript — ${referenced.url})`
+        : `(replying to ${this.contextAuthorLabel(referenced)} — ${referenced.url})`;
     if (inWindow(referenced.id)) return { header, entry: await this.enrichKnownReference(referenced, window) };
 
     const chain: Message[] = [referenced];
@@ -929,8 +938,31 @@ export class AgentOrchestrator {
     return { kind: 'message', role: 'user', content: [{ type: 'text', text: label }, ...fresh] };
   }
 
-  /** Who wrote a message, for context lines: the real author of a relay, "<bot> (you)", or "<name> [bot]". */
+  /** The voice message `referenced` transcribes, when it is one of the bot's auto-transcripts and loads. */
+  private async transcribedVoiceMessage(message: Message, referenced: Message): Promise<Message | undefined> {
+    if (!isTranscriptReply(referenced)) return undefined;
+    const voiceId = replyParentId(referenced, message.channel.id);
+    if (!voiceId) return undefined;
+    try {
+      return await message.channel.messages.fetch(voiceId);
+    } catch (error) {
+      logger.warn(`Could not fetch the voice message ${voiceId} behind transcript ${referenced.id}:`, error);
+      return undefined;
+    }
+  }
+
+  /**
+   * Who wrote a message, for context lines: the real author of a relay, "<bot> (you)", or "<name> [bot]".
+   * The bot's auto-transcripts are a member's words, not the bot talking: "transcript of <name>'s voice
+   * message" (the name when the voice message is in the channel's message cache).
+   */
   private contextAuthorLabel(msg: Message): string {
+    if (isTranscriptReply(msg)) {
+      const voiceId = msg.reference?.messageId;
+      const voice = voiceId ? msg.channel.messages.cache?.get(voiceId) : undefined;
+      const speaker = voice ? attributeMessage(voice)?.authorName : undefined;
+      return speaker ? `transcript of ${speaker}'s voice message` : 'transcript of a voice message';
+    }
     if (msg.author.id === msg.client.user.id && !msg.webhookId) return `${msg.client.user.displayName} (you)`;
     const attribution = attributeMessage(msg);
     if (attribution) return attribution.authorName;
