@@ -20,6 +20,7 @@
 // so a member's side account continues their main account's exchange. This state is in memory: after
 // a restart, follow-ups without a name work again once the bot has answered someone.
 import type { Message } from 'discord.js';
+import { isTranscriptReply } from '../ai/media/autoTranscribe';
 import { getMemoryStore } from '../ai/memory';
 import { config } from '../config';
 import { canonicalUserId, isSamePerson } from '../linkedAccounts';
@@ -314,8 +315,9 @@ export class AddressedGate {
     let secondsSinceBotSpoke = trackedSeconds;
     let authorIsBotsPartner = partner;
     if (secondsSinceBotSpoke === undefined) {
-      // Nothing tracked (e.g. right after a restart): read the same facts off the fetched history.
-      const lastOwn = history.findLast((m) => m.author.id === botId && !m.webhookId);
+      // Nothing tracked (e.g. right after a restart): read the same facts off the fetched history. A
+      // voice-message transcript is not the bot speaking, nor the voice message's author its partner.
+      const lastOwn = history.findLast((m) => m.author.id === botId && !m.webhookId && !isTranscriptReply(m));
       if (lastOwn) {
         secondsSinceBotSpoke = (message.createdTimestamp - lastOwn.createdTimestamp) / 1000;
         authorIsBotsPartner ||= isSamePerson(lastOwn.mentions?.repliedUser?.id, message.author.id);

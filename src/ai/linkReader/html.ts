@@ -255,8 +255,18 @@ export type PageMetadata = {
   meta: Record<string, string>;
 };
 
+// A page controls its title, names and URLs, and they ride into every model call that shows the link:
+// a real title is a line and a real URL a few hundred characters, not the 2 MB a page can hold.
+const MAX_LABEL_CHARS = 500;
+const MAX_URL_CHARS = 2048;
+
+/** A page-supplied title, name or date, cut to MAX_LABEL_CHARS. */
+function label(value: string | undefined): string | undefined {
+  return value !== undefined && value.length > MAX_LABEL_CHARS ? `${value.slice(0, MAX_LABEL_CHARS - 1)}…` : value;
+}
+
 function resolveUrl(value: string | undefined, baseUrl: string): string | undefined {
-  if (!value) return undefined;
+  if (!value || value.length > MAX_URL_CHARS) return undefined;
   try {
     const url = new URL(value.trim(), baseUrl);
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : undefined;
@@ -295,11 +305,13 @@ export function extractMetadata(html: string, baseUrl: string): PageMetadata {
         meta[key].push(content);
       }
     } else if (tag.name === 'title' && documentTitle === undefined) {
-      documentTitle = collapseWhitespace(decodeEntities(rawTextAfter(html, lower, tag))) || undefined;
+      documentTitle = label(collapseWhitespace(decodeEntities(rawTextAfter(html, lower, tag))) || undefined);
     } else if (tag.name === 'link' && !canonical && tag.attrs.rel?.toLowerCase().split(/\s+/).includes('canonical')) {
       canonical = resolveUrl(tag.attrs.href, baseUrl);
     } else if (tag.name === 'html' && !lang && tag.attrs.lang) {
-      lang = tag.attrs.lang.trim();
+      // A language tag ("en", "fr-CA"): anything longer isn't one.
+      const tagValue = tag.attrs.lang.trim();
+      if (tagValue.length <= 35) lang = tagValue;
     }
   }
 
@@ -331,21 +343,25 @@ export function extractMetadata(html: string, baseUrl: string): PageMetadata {
   for (const [key, values] of Object.entries(meta)) flatMeta[key] = values[0];
 
   return {
-    title: firstOf(meta, ['og:title', 'twitter:title']) ?? documentTitle,
+    title: label(firstOf(meta, ['og:title', 'twitter:title'])) ?? documentTitle,
     documentTitle,
     description: firstOf(meta, ['og:description', 'twitter:description', 'description']),
-    siteName: firstOf(meta, ['og:site_name', 'application-name']),
-    author: firstOf(meta, ['author', 'article:author', 'parsely-author', 'sailthru.author', 'dc.creator', 'byl']),
-    publishedAt: firstOf(meta, [
-      'article:published_time',
-      'datepublished',
-      'publish-date',
-      'pubdate',
-      'parsely-pub-date',
-      'dc.date',
-      'date',
-    ]),
-    type: firstOf(meta, ['og:type']),
+    siteName: label(firstOf(meta, ['og:site_name', 'application-name'])),
+    author: label(
+      firstOf(meta, ['author', 'article:author', 'parsely-author', 'sailthru.author', 'dc.creator', 'byl']),
+    ),
+    publishedAt: label(
+      firstOf(meta, [
+        'article:published_time',
+        'datepublished',
+        'publish-date',
+        'pubdate',
+        'parsely-pub-date',
+        'dc.date',
+        'date',
+      ]),
+    ),
+    type: label(firstOf(meta, ['og:type'])),
     canonicalUrl: canonical ?? resolveUrl(firstOf(meta, ['og:url']), baseUrl),
     lang,
     images,
@@ -389,9 +405,15 @@ const ARTICLE_TYPES = new Set([
 export function extractJsonLd(html: string): unknown[] {
   const lower = html.toLowerCase();
   const blocks: unknown[] = [];
+  // A "<script" inside an earlier script's text is text, not a tag. Skipping those also keeps this
+  // linear: an unclosed script's text runs to the end of the page, and 50k of them each scanned it.
+  let textEnd = 0;
   for (const tag of findTags(html, ['script'])) {
+    if (tag.start < textEnd) continue;
+    const close = lower.indexOf('</script', tag.end);
+    textEnd = close === -1 ? html.length : close;
     if (!tag.attrs.type?.toLowerCase().includes('ld+json')) continue;
-    const raw = rawTextAfter(html, lower, tag).trim();
+    const raw = html.slice(tag.end, textEnd).trim();
     if (!raw || raw.length > 1_000_000) continue;
     try {
       blocks.push(JSON.parse(raw));
@@ -446,12 +468,12 @@ export function findJsonLdArticle(blocks: unknown[]): JsonLdArticle | undefined 
   if (!best) return undefined;
   const body = stringField(best, 'articleBody') ?? stringField(best, 'text');
   return {
-    type: typesOf(best)[0],
-    headline: stringField(best, 'headline') ?? stringField(best, 'name'),
+    type: label(typesOf(best)[0]),
+    headline: label(stringField(best, 'headline') ?? stringField(best, 'name')),
     description: stringField(best, 'description'),
     body: body ? decodeEntities(body) : undefined,
-    author: nameOf(best.author) ?? nameOf(best.creator),
-    datePublished: stringField(best, 'datePublished') ?? stringField(best, 'uploadDate'),
+    author: label(nameOf(best.author) ?? nameOf(best.creator)),
+    datePublished: label(stringField(best, 'datePublished') ?? stringField(best, 'uploadDate')),
   };
 }
 
@@ -494,6 +516,9 @@ function stripElements(html: string, names: string[]): string {
   const opener = new RegExp(`<(${names.join('|')})(?=[\\s/>])`, 'g');
   let out = '';
   let cursor = 0;
+  // Names with no closing tag left in the rest of the document: a later opener needn't look again
+  // (each look scans to the end, which a page of 100k unclosed <nav> would do 100k times).
+  const unclosed = new Set<string>();
   for (let match = opener.exec(lower); match; match = opener.exec(lower)) {
     out += html.slice(cursor, match.index);
     const name = match[1];
@@ -505,8 +530,9 @@ function stripElements(html: string, names: string[]): string {
     if (lower[tagEnd - 1] === '/') {
       cursor = tagEnd + 1;
     } else {
-      const close = lower.indexOf(`</${name}`, tagEnd);
+      const close = unclosed.has(name) ? -1 : lower.indexOf(`</${name}`, tagEnd);
       if (close === -1) {
+        unclosed.add(name);
         cursor = RAW_ELEMENTS.has(name) ? html.length : tagEnd + 1;
       } else {
         const closeEnd = lower.indexOf('>', close);
@@ -546,17 +572,70 @@ function elementContents(html: string, name: string): string[] {
   return results;
 }
 
-const BLOCK_TAGS =
-  /<\/?(?:p|div|br|ul|ol|dl|dd|dt|h[1-6]|tr|table|thead|tbody|section|article|main|blockquote|pre|hr|figure|figcaption|summary|details|caption|address)(?=[\s/>])[^>]*>/gi;
+const BLOCK_TAGS = new Set([
+  'p',
+  'div',
+  'br',
+  'ul',
+  'ol',
+  'dl',
+  'dd',
+  'dt',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'tr',
+  'table',
+  'thead',
+  'tbody',
+  'section',
+  'article',
+  'main',
+  'blockquote',
+  'pre',
+  'hr',
+  'figure',
+  'figcaption',
+  'summary',
+  'details',
+  'caption',
+  'address',
+]);
+
+/** What a tag becomes in the text: list items a dash, cells a space, block elements a line break. */
+function tagReplacement(tag: string): string {
+  const match = /^<(\/?)([a-z][a-z0-9]*)(?=[\s/>])/i.exec(tag);
+  if (!match) return '';
+  const closing = match[1] === '/';
+  const name = match[2].toLowerCase();
+  if (name === 'li') return closing ? '' : '\n- ';
+  if (name === 'td' || name === 'th') return closing ? '' : ' ';
+  return BLOCK_TAGS.has(name) ? '\n' : '';
+}
+
+/**
+ * Every tag (a `<` up to the next `>`) replaced, in one pass. Not a regex like /<[^>]*>/g: from every
+ * `<` with no `>` after it, that pattern scans to the end of the page before giving up, so a page of
+ * 100k stray `<` took seconds (and 2 MB of them, most of an hour) of blocked event loop.
+ */
+function replaceTags(fragment: string): string {
+  let out = '';
+  let cursor = 0;
+  for (let open = fragment.indexOf('<'); open !== -1; open = fragment.indexOf('<', cursor)) {
+    const close = fragment.indexOf('>', open + 1);
+    // No `>` left: no later `<` can close either, and the rest is text.
+    if (close === -1) break;
+    out += fragment.slice(cursor, open) + tagReplacement(fragment.slice(open, close + 1));
+    cursor = close + 1;
+  }
+  return out + fragment.slice(cursor);
+}
 
 function htmlFragmentToText(fragment: string): string {
-  const text = decodeEntities(
-    fragment
-      .replace(/<li(?=[\s/>])[^>]*>/gi, '\n- ')
-      .replace(/<(?:td|th)(?=[\s/>])[^>]*>/gi, ' ')
-      .replace(BLOCK_TAGS, '\n')
-      .replace(/<[^>]*>/g, ''),
-  );
+  const text = decodeEntities(replaceTags(fragment));
   return text
     .replace(ZERO_WIDTH, '')
     .replace(/\r\n?/g, '\n')

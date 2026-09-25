@@ -209,6 +209,21 @@ describe('AddressedGate decision', () => {
     expect(input.authorIsBotsPartner).toBe(false);
   });
 
+  it("doesn't read its voice-message transcripts off the history as the bot speaking to their author", async () => {
+    const { gate, classify } = harness();
+    const history = [
+      human('', { at: T0 - 60_000, authorId: 'user-1', authorDisplayName: 'Marco' }).message,
+      botPost(T0 - 55_000, { content: '-# 🎙️ transcript\n> on joue ce soir?', repliedUserId: 'user-1' }),
+    ];
+    const fake = human('fridge on joue ou pas', { historyMessages: [...history].reverse() });
+
+    await gate.evaluate(fake.message);
+
+    const input = classify.mock.calls[0][0];
+    expect(input.secondsSinceBotSpoke).toBeUndefined();
+    expect(input.authorIsBotsPartner).toBe(false);
+  });
+
   it('still decides (without context) when the history fetch fails', async () => {
     const { gate, classify } = harness();
     const fake = human('fridge help');

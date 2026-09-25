@@ -32,30 +32,8 @@ describe('aiChat and transcript replies', () => {
       botUserId: BOT_ID,
       referencedMessageId: 'transcript-1',
       repliedUserId: BOT_ID,
-      mentionedUserIds: [BOT_ID],
-    });
-
-    await aiChatEvent.execute(fake.message);
-
-    expect(agent.handleMention).not.toHaveBeenCalled();
-    expect(addressedGate.evaluate).toHaveBeenCalledWith(fake.message);
-    expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
-  });
-
-  it('recognizes an unrecorded transcript by its header when Discord resolved the reply (ping on)', async () => {
-    const transcript = createFakeBotMessage({
-      botUserId: BOT_ID,
-      messageId: 'old-transcript-2',
-      content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?`,
-    });
-    const fake = createFakeMessage({
-      content: 'ouais',
-      botUserId: BOT_ID,
-      referencedMessageId: 'old-transcript-2',
-      repliedUserId: BOT_ID,
-      mentionedUserIds: [BOT_ID],
-      // discord.js caches the replied-to message that Discord ships with the reply.
-      cachedMessages: [transcript.message],
+      // Discord's default: the reply pings, which also lists the bot in mentions.users.
+      replyPinged: true,
     });
 
     await aiChatEvent.execute(fake.message);
@@ -74,7 +52,7 @@ describe('aiChat and transcript replies', () => {
         botUserId: BOT_ID,
         referencedMessageId: 'own-1',
         repliedUserId: BOT_ID,
-        mentionedUserIds: [BOT_ID],
+        replyPinged: true,
         cachedMessages,
       });
 
@@ -101,6 +79,62 @@ describe('aiChat and transcript replies', () => {
     await aiChatEvent.execute(fake.message);
 
     expect(agent.handleMention).not.toHaveBeenCalled();
+  });
+
+  it('recognizes a transcript it has no record of from the cached replied-to message, pinged or not', async () => {
+    const transcript = createFakeBotMessage({
+      botUserId: BOT_ID,
+      messageId: 'pruned-transcript',
+      content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?`,
+    });
+    for (const replyPinged of [true, false]) {
+      const fake = createFakeMessage({
+        content: 'ouais',
+        botUserId: BOT_ID,
+        referencedMessageId: 'pruned-transcript',
+        repliedUserId: BOT_ID,
+        replyPinged,
+        cachedMessages: [transcript.message],
+      });
+
+      await aiChatEvent.execute(fake.message);
+
+      expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
+    }
+    expect(agent.handleMention).not.toHaveBeenCalled();
+    expect(addressedGate.evaluate).toHaveBeenCalledTimes(2);
+  });
+
+  it('a pinging reply to an ordinary bot message still reaches the agent', async () => {
+    const said = createFakeBotMessage({ botUserId: BOT_ID, messageId: 'said-1', content: 'kraken into ie' });
+    const fake = createFakeMessage({
+      content: 'no way',
+      botUserId: BOT_ID,
+      referencedMessageId: 'said-1',
+      repliedUserId: BOT_ID,
+      replyPinged: true,
+      cachedMessages: [said.message],
+    });
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).toHaveBeenCalledWith(fake.message);
+    expect(addressedGate.evaluate).not.toHaveBeenCalled();
+  });
+
+  it('a mention written in a pinging reply to a transcript still reaches the agent', async () => {
+    rememberTranscriptReply('transcript-3', 'voice-3');
+    const fake = createFakeMessage({
+      content: `<@${BOT_ID}> what did he mean`,
+      botUserId: BOT_ID,
+      referencedMessageId: 'transcript-3',
+      repliedUserId: BOT_ID,
+      replyPinged: true,
+    });
+
+    await aiChatEvent.execute(fake.message);
+
+    expect(agent.handleMention).toHaveBeenCalledWith(fake.message);
   });
 
   it('an explicit mention in a reply to a transcript still reaches the agent', async () => {

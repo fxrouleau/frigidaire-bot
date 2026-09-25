@@ -16,6 +16,7 @@ import { config } from '../../config';
 import { logger } from '../../logger';
 import { attributeMessage } from '../../relay';
 import { getCachedTranscript } from '../media';
+import { isTranscriptReply } from '../media/autoTranscribe';
 import { getMemoryStore } from '../memory';
 import type { Identity, MemoryStore } from '../memory/memoryStore';
 import { requireOpenRouterClient } from '../openRouterClient';
@@ -196,8 +197,10 @@ function authorOf(msg: Message, ctx: RenderContext): Author | undefined {
     const name = known ?? attribution.authorName;
     return { key: attribution.authorId ?? `name:${name}`, name, isBot: false, userId: attribution.authorId };
   }
-  // The bot's own replies are part of what happened; other bots and integrations are not.
+  // The bot's own replies are part of what happened; other bots and integrations are not. Its
+  // transcripts of voice messages are not its words: the voice message's line carries the transcript.
   if (!msg.webhookId && ctx.botId && msg.author.id === ctx.botId) {
+    if (isTranscriptReply(msg)) return undefined;
     return { key: `bot:${ctx.botId}`, name: ctx.botName, isBot: true };
   }
   return undefined;

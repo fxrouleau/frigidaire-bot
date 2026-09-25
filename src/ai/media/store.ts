@@ -33,6 +33,7 @@ const SCHEMA = `
     message_id TEXT    NOT NULL,
     created_at INTEGER NOT NULL
   );
+  CREATE INDEX IF NOT EXISTS transcript_replies_by_message ON transcript_replies (message_id);
 `;
 
 function db() {
@@ -160,6 +161,37 @@ export function isStoredTranscriptReply(replyId: string): boolean {
     logger.warn('media: transcript reply lookup failed:', error);
     return false;
   }
+}
+
+/** The ids of the transcript replies the bot posted to these messages. */
+export function transcriptRepliesTo(messageIds: string[]): string[] {
+  if (messageIds.length === 0) return [];
+  try {
+    const rows = db()
+      .stmt('SELECT reply_id FROM transcript_replies WHERE message_id IN (SELECT value FROM json_each(?))')
+      .all(JSON.stringify(messageIds)) as { reply_id: string }[];
+    return rows.map((row) => row.reply_id);
+  } catch (error) {
+    logger.warn('media: transcript reply lookup failed:', error);
+    return [];
+  }
+}
+
+/**
+ * Forgets the transcripts of these messages: the first recording's (keyed by the message id) and the
+ * others' (`<message id>:<attachment id>`, see transcriptKey). Returns the rows removed.
+ */
+export function forgetTranscripts(messageIds: string[]): number {
+  let removed = 0;
+  try {
+    const statement = db().stmt(
+      "DELETE FROM transcripts WHERE message_id = ? OR (message_id >= (? || ':') AND message_id < (? || ';'))",
+    );
+    for (const id of messageIds) removed += statement.run(id, id, id).changes;
+  } catch (error) {
+    logger.warn('media: failed to forget transcripts:', error);
+  }
+  return removed;
 }
 
 // Discord CDN attachment URLs carry expiring signature parameters (ex/is/hm) and the same file is

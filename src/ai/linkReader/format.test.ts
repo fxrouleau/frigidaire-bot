@@ -91,6 +91,24 @@ describe('formatLinkPreview', () => {
     );
   });
 
+  it("bounds a page's title, author and site name, whatever the extractor passed on", () => {
+    const huge = 'z'.repeat(100_000);
+    const content: LinkContent = {
+      url: 'https://example.com/a',
+      source: 'web',
+      kind: 'article',
+      title: huge,
+      author: huge,
+      site: huge,
+      text: 'short body',
+      media: [],
+    };
+    const preview = formatLinkPreview('https://example.com/a', { ok: true, content });
+    expect(preview.length).toBeLessThan(800);
+    expect(preview).toContain(': short body]');
+    expect(formatLinkForTool({ ok: true, content }).length).toBeLessThan(1000);
+  });
+
   it('hints that an unwatched video can be opened with read_link', () => {
     const content: LinkContent = {
       url: 'https://www.tiktok.com/@a/video/1',

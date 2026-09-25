@@ -94,6 +94,18 @@ describe('toArchiveInput — what is archived and as whom', () => {
     expect(interaction?.source).toBe('bot');
   });
 
+  it("skips the bot's transcripts of voice messages: they are a member's words, archived on the voice message", () => {
+    const replies = [
+      '-# 🎙️ transcript\n> on joue ce soir?',
+      '-# 🎙️ transcript (2/2)\n> suite',
+      '-# 🎙️ too long to transcribe (12:34)',
+    ];
+    for (const content of replies) {
+      const transcript = archivableMessage({ authorId: BOT_USER_ID, authorBot: true, content, replyToId: '1' });
+      expect(toArchiveInput(transcript)).toBeUndefined();
+    }
+  });
+
   it('skips other bots, other integrations’ webhooks, system messages, DMs, partials and unsupported channels', () => {
     expect(toArchiveInput(archivableMessage({ authorId: '999', authorBot: true }))).toBeUndefined();
     expect(

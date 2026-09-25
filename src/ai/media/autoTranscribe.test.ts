@@ -12,6 +12,7 @@ import {
   isTranscriptReply,
   isTranscriptReplyId,
 } from './autoTranscribe';
+import { rememberTranscriptReply } from './store';
 import type { AudioInput, TranscriptionOutcome } from './types';
 
 const VOICE_URL = 'https://cdn.discordapp.com/attachments/1/2/voice-message.ogg';
@@ -166,24 +167,34 @@ describe('formatTranscriptReply', () => {
     );
   });
 
-  it('splits long transcripts into quoted messages under 2000 characters', () => {
+  it('splits long transcripts into quoted messages under 2000 characters, each with the header', () => {
     const words = Array.from({ length: 900 }, (_, i) => `word${i}`).join(' ');
     const chunks = formatTranscriptReply(words);
-    expect(chunks.length).toBeGreaterThan(1);
-    for (const chunk of chunks) {
+    expect(chunks.length).toBe(4);
+    for (const [index, chunk] of chunks.entries()) {
       expect(chunk.length).toBeLessThanOrEqual(2000);
-      for (const line of chunk.split('\n').filter((l) => l !== TRANSCRIPT_HEADER)) {
-        expect(line.startsWith('>')).toBe(true);
-      }
+      const [header, ...lines] = chunk.split('\n');
+      expect(header).toBe(`${TRANSCRIPT_HEADER} (${index + 1}/4)`);
+      for (const line of lines) expect(line.startsWith('>')).toBe(true);
     }
-    expect(chunks[0].startsWith(TRANSCRIPT_HEADER)).toBe(true);
+  });
+
+  it('marks every message of a long transcript as a transcript reply, not the bot talking', () => {
+    const words = Array.from({ length: 600 }, (_, i) => `mot${i}`).join(' ');
+    const chunks = formatTranscriptReply(words);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const [index, content] of chunks.entries()) {
+      const posted = createFakeMessage({ messageId: `t-${index}`, authorId: 'bot-1', botUserId: 'bot-1', content });
+      expect(isTranscriptReply(posted.message)).toBe(true);
+    }
   });
 
   it('cuts runaway transcripts after five messages', () => {
     const chunks = formatTranscriptReply(Array.from({ length: 200 }, () => 'x'.repeat(100)).join('\n'));
     expect(chunks).toHaveLength(5);
+    expect(chunks[4].startsWith(`${TRANSCRIPT_HEADER} (5/5)\n`)).toBe(true);
     expect(chunks[4].endsWith('-# (transcript cut short)')).toBe(true);
-    expect(chunks[4].length).toBeLessThanOrEqual(2000);
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(2000);
   });
 });
 
@@ -198,5 +209,11 @@ describe('isTranscriptReply', () => {
     expect(formatTooLongNote(700).startsWith(TOO_LONG_HEADER)).toBe(true);
     expect(isTranscriptReply(quoted.message)).toBe(false);
     expect(isTranscriptReply(normal.message)).toBe(false);
+  });
+
+  it('knows a stored transcript reply without its header (a later message of a transcript posted before)', () => {
+    rememberTranscriptReply('old-part-2', 'voice-9');
+    const part = createFakeMessage({ messageId: 'old-part-2', authorId: 'bot-1', botUserId: 'bot-1', content: '> suite' });
+    expect(isTranscriptReply(part.message)).toBe(true);
   });
 });

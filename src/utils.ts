@@ -113,6 +113,17 @@ export function webhookTargetOf(channel: Channel): WebhookTarget | undefined {
   }
 }
 
+/**
+ * Whether the message @-mentions this user in its text. `mentions.users` alone can't tell: a reply that
+ * pings (Discord's default) puts the replied-to author there too, so replying to someone's post would
+ * count as mentioning them.
+ */
+export function mentionsInText(message: Message, userId: string): boolean {
+  if (!message.mentions.users.has(userId)) return false;
+  if (message.mentions.repliedUser?.id !== userId) return true;
+  return message.content.includes(`<@${userId}>`) || message.content.includes(`<@!${userId}>`);
+}
+
 /** The identity a message's author would have as a webhook: server nickname first, then display name. */
 export function identityOf(message: Message): WebhookIdentity {
   return {

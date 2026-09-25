@@ -77,6 +77,26 @@ describe('extractMetadata', () => {
   it('falls back to <title> when there is no og:title', () => {
     expect(extractMetadata('<title>Only &lt;title&gt;</title>', 'https://x.example/').title).toBe('Only <title>');
   });
+
+  it('bounds what a hostile page controls: titles, names, dates, language and URLs', () => {
+    const huge = 'x'.repeat(200_000);
+    const hostile = `<html lang="${huge}"><head><title>${huge}</title>
+      <meta property="og:title" content="${huge}"><meta property="og:site_name" content="${huge}">
+      <meta name="author" content="${huge}"><meta property="article:published_time" content="${huge}">
+      <meta property="og:type" content="${huge}">
+      <meta property="og:image" content="https://cdn.example/${huge}.jpg"><meta property="og:image" content="/ok.jpg">
+      <meta property="og:video" content="https://cdn.example/${huge}.mp4">
+      <link rel="canonical" href="https://example.com/${huge}"></head></html>`;
+    const meta = extractMetadata(hostile, 'https://example.com/page');
+    for (const value of [meta.title, meta.documentTitle, meta.siteName, meta.author, meta.publishedAt, meta.type]) {
+      expect(value?.length).toBe(500);
+      expect(value?.endsWith('…')).toBe(true);
+    }
+    expect(meta.lang).toBeUndefined();
+    expect(meta.canonicalUrl).toBeUndefined();
+    expect(meta.images).toEqual(['https://example.com/ok.jpg']);
+    expect(meta.videos).toEqual([]);
+  });
 });
 
 describe('JSON-LD', () => {
@@ -100,6 +120,17 @@ describe('JSON-LD', () => {
 
   it('returns undefined without an article-like node', () => {
     expect(findJsonLdArticle([{ '@type': 'Organization', name: 'X' }])).toBeUndefined();
+  });
+
+  it("bounds a hostile article's headline, author, type and date (the body is capped by its reader)", () => {
+    const huge = 'y'.repeat(100_000);
+    const article = findJsonLdArticle([
+      { '@type': [huge, 'Article'], headline: huge, author: { name: huge }, datePublished: huge, articleBody: huge },
+    ]);
+    for (const value of [article?.type, article?.headline, article?.author, article?.datePublished]) {
+      expect(value?.length).toBe(500);
+    }
+    expect(article?.body).toHaveLength(100_000);
   });
 });
 
@@ -129,6 +160,38 @@ describe('extractReadableText', () => {
 
   it('survives an unclosed script without swallowing everything before it', () => {
     expect(extractReadableText('<body><p>visible</p><script>never closed')).toBe('visible');
+  });
+
+  it('turns cells into spaces, drops unknown tags and keeps a stray < with no > after it as text', () => {
+    expect(extractReadableText('<table><tr><td>a</td><th>b</th></tr></table><b>bold</b> 1 < 2')).toBe('a b\n\nbold 1 < 2');
+    expect(extractReadableText('<nav>menu<p>kept: an unclosed nav is just a tag</p>')).toContain('kept');
+  });
+
+  // Hostile pages (up to LINK_READER_MAX_BYTES, 2 MB by default) must not block the event loop: these
+  // took seconds at this size (and most of an hour at 2 MB) when every unclosed tag rescanned the page.
+  it.each([
+    ['unclosed chrome tags', '<nav>'.repeat(80_000)],
+    ['stray < with no >', `<p>${'<'.repeat(400_000)}`],
+    ['block tags with no >', '<p '.repeat(130_000)],
+    ['list items with no >', '<li '.repeat(100_000)],
+  ])('stays linear on %s', (_label, html) => {
+    const started = performance.now();
+    extractReadableText(html);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});
+
+describe('JSON-LD on hostile pages', () => {
+  it('stays linear on many unclosed ld+json scripts, and reads none nested in another script', () => {
+    const started = performance.now();
+    expect(extractJsonLd('<script type="application/ld+json">'.repeat(40_000))).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    // A browser ends the outer script at the first </script>: the inner one is never a tag.
+    const nested = '<script>document.write(\'<script type="application/ld+json">{"a":1}</script>\')</script>';
+    expect(extractJsonLd(nested)).toEqual([]);
+    expect(extractJsonLd('<script>var a = 1;</script><script type="application/ld+json">{"a":1}</script>')).toEqual([
+      { a: 1 },
+    ]);
   });
 });
 

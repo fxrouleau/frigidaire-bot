@@ -1,6 +1,8 @@
 import { ChannelType, Collection, type Message } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LinkReader, setLinkReaderForTesting } from '../ai/linkReader/reader';
+import { TRANSCRIPT_HEADER } from '../ai/media/autoTranscribe';
+import { rememberTranscriptReply } from '../ai/media/store';
 import { recordRelay } from '../relay';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { type FakeMessageOptions, createFakeMessage } from '../test-support/fakeDiscord';
@@ -105,6 +107,42 @@ describe('intakeSkipReason', () => {
     const botMessage = message({ messageId: '999', authorId: 'bot-1', authorIsBot: true, content: 'answer' });
     const reply = message({ referencedMessageId: '999', content: 'ok', cached: [botMessage] });
     expect(intakeSkipReason(reply, SETTINGS)).toBe('replies to the bot');
+  });
+
+  it("accepts a (pinging) reply to the bot's transcript of a voice message: it answers the voice message", () => {
+    rememberTranscriptReply('transcript-1', 'voice-1');
+    const stored = message({
+      referencedMessageId: 'transcript-1',
+      repliedUserId: 'bot-1',
+      replyPinged: true,
+      content: 'lmao he really said that',
+    });
+    expect(intakeSkipReason(stored, SETTINGS)).toBeUndefined();
+    const transcript = message({
+      messageId: 'old-transcript',
+      authorId: 'bot-1',
+      authorIsBot: true,
+      content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?`,
+    });
+    const pruned = message({
+      referencedMessageId: 'old-transcript',
+      repliedUserId: 'bot-1',
+      replyPinged: true,
+      content: 'lmao he really said that',
+      cached: [transcript],
+    });
+    expect(intakeSkipReason(pruned, SETTINGS)).toBeUndefined();
+  });
+
+  it('still skips a pinging reply that also mentions the bot in its text', () => {
+    rememberTranscriptReply('transcript-2', 'voice-2');
+    const reply = message({
+      referencedMessageId: 'transcript-2',
+      repliedUserId: 'bot-1',
+      replyPinged: true,
+      content: '<@bot-1> what did he say',
+    });
+    expect(intakeSkipReason(reply, SETTINGS)).toBe('mentions the bot');
   });
 
   it('accepts short posts that carry something (an attachment, a link preview, a forward), and 4+ characters', () => {
