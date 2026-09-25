@@ -2,8 +2,8 @@
   "version": 1,
   "bot": { "name": "Frigidaire", "id": "900000000000000001" },
   "cast": [
-    { "name": "Theo", "id": "100000000000000001", "username": "theo_r", "irlName": "Théo", "aliases": ["teddy"] },
-    { "name": "Wheezer", "id": "100000000000000002", "username": "wheezer", "irlName": "Will" },
+    { "name": "Theo", "id": "100000000000000001", "username": "theo_plays", "irlName": "Théo", "aliases": ["teddy"] },
+    { "name": "Noodle", "id": "100000000000000002", "username": "noodle_arms", "irlName": "Nate" },
     { "name": "Dex", "id": "100000000000000003", "username": "dexter" },
     { "name": "Marco", "id": "100000000000000004", "username": "marco_polo", "aliases": ["the chef"] },
     { "name": "Sam", "id": "100000000000000005", "username": "samwise" }
@@ -35,17 +35,17 @@
       "memories": [
         {
           "category": "fact",
-          "subject": "Wheezer",
-          "content": "Wheezer mains Yasuo and has been hardstuck Gold for three seasons."
+          "subject": "Noodle",
+          "content": "Noodle mains Yasuo and has been hardstuck Gold for three seasons."
         }
       ],
       "history": [
-        { "author": "Wheezer", "content": "my jungler was afk in spirit the entire game", "minutesAgo": 6 },
+        { "author": "Noodle", "content": "my jungler was afk in spirit the entire game", "minutesAgo": 6 },
         { "author": "Dex", "content": "you went 0/10 bro", "minutesAgo": 5 }
       ],
       "message": {
         "author": "Theo",
-        "content": "<@bot> roast <@Wheezer>, he went 0/10 on yasuo last night and blamed his jungler"
+        "content": "<@bot> roast <@Noodle>, he went 0/10 on yasuo last night and blamed his jungler"
       },
       "expectations": {
         "notes": "Lands an actual, specific roast (the 0/10, blaming the jungler, the eternal Yasuo/Gold situation) in one to three sentences. No softening, no 'just kidding', no disclaimer.",
@@ -77,7 +77,7 @@
       "tags": ["roast", "banter"],
       "memories": [],
       "history": [],
-      "message": { "author": "Wheezer", "content": "<@bot> you're literally a fridge with wifi. nobody asked" },
+      "message": { "author": "Noodle", "content": "<@bot> you're literally a fridge with wifi. nobody asked" },
       "expectations": {
         "notes": "Fires back with a quick comeback, confident and unbothered. Does not get defensive, explain itself, or ask to be treated nicely.",
         "maxSentences": 2,
@@ -118,11 +118,11 @@
             }
           ]
         },
-        { "author": "Wheezer", "content": "this is literally me every game", "minutesAgo": 2 }
+        { "author": "Noodle", "content": "this is literally me every game", "minutesAgo": 2 }
       ],
       "message": { "author": "Theo", "content": "<@bot> thoughts?" },
       "expectations": {
-        "notes": "Reacts to the meme that was just posted (top lane island, jungler never ganking) — possibly dunking on Wheezer's 'literally me'. Short and funny; not a meme analysis.",
+        "notes": "Reacts to the meme that was just posted (top lane island, jungler never ganking) — possibly dunking on Noodle's 'literally me'. Short and funny; not a meme analysis.",
         "maxSentences": 3,
         "maxChars": 350
       }
@@ -135,21 +135,21 @@
         {
           "category": "fact",
           "subject": "Theo",
-          "content": "Theo works at Ubisoft Montreal as a gameplay programmer."
+          "content": "Theo works at Lumen Forge Studios as a gameplay programmer."
         }
       ],
       "history": [],
       "message": {
         "author": "Theo",
-        "content": "<@bot> fyi I don't work at Ubisoft anymore, started at Shopify last week"
+        "content": "<@bot> fyi I don't work at Lumen Forge anymore, started at Tidewater Bank last week"
       },
       "expectations": {
-        "notes": "Takes the update in stride with a short, natural reply (a jab about leaving games for e-commerce is fine). Updates memory: forgets the Ubisoft fact and saves the Shopify one — without narrating the bookkeeping.",
+        "notes": "Takes the update in stride with a short, natural reply (a jab about leaving games for a bank is fine). Updates memory: forgets the Lumen Forge fact and saves the Tidewater Bank one — without narrating the bookkeeping.",
         "maxSentences": 3,
         "maxChars": 350,
         "memoryAfter": {
-          "activeMustMatch": ["Shopify"],
-          "activeMustNotMatch": ["works at Ubisoft Montreal as a gameplay programmer"]
+          "activeMustMatch": ["Tidewater"],
+          "activeMustNotMatch": ["works at Lumen Forge Studios as a gameplay programmer"]
         }
       }
     },
@@ -160,7 +160,7 @@
       "memories": [],
       "history": [],
       "message": {
-        "author": "Wheezer",
+        "author": "Noodle",
         "content": "<@bot> <:KEKW:200000000000000001> <:KEKW:200000000000000001> <:PogChamp:200000000000000004> say something funny i dare you"
       },
       "expectations": {
@@ -191,7 +191,7 @@
       "memories": [],
       "history": [],
       "message": {
-        "author": "Wheezer",
+        "author": "Noodle",
         "content": "<@bot> explain in detail how league MMR vs LP works. why do I gain 18 LP and lose 25? genuinely confused"
       },
       "expectations": {
@@ -244,7 +244,7 @@
       "tags": ["memory-positive", "help"],
       "memories": [
         { "category": "fact", "subject": "Marco", "content": "Marco is vegetarian." },
-        { "category": "fact", "subject": "Marco", "content": "Marco lives in Montreal, in the Plateau." }
+        { "category": "fact", "subject": "Marco", "content": "Marco lives in Chicago, in Logan Square." }
       ],
       "history": [],
       "message": {
@@ -252,7 +252,7 @@
         "content": "<@bot> picking a spot for my bday dinner saturday, 6 people. ideas?"
       },
       "expectations": {
-        "notes": "Suggests places that work for a vegetarian, ideally in Montreal — using what it knows naturally (just picking veggie-friendly spots is great; announcing 'since you're vegetarian, which I remember...' is clunky).",
+        "notes": "Suggests places that work for a vegetarian, ideally in Chicago — using what it knows naturally (just picking veggie-friendly spots is great; announcing 'since you're vegetarian, which I remember...' is clunky).",
         "maxChars": 800,
         "mustNotMatch": ["steakhouse", "\\bsteak\\b"]
       }
@@ -264,7 +264,7 @@
       "memories": [],
       "history": [],
       "message": {
-        "author": "Wheezer",
+        "author": "Noodle",
         "content": "<@bot> what's in the current league patch? did they finally nerf yasuo"
       },
       "expectations": {
@@ -283,9 +283,9 @@
       "tags": ["opinion", "open-ended"],
       "memories": [],
       "history": [
-        { "author": "Wheezer", "content": "pineapple on pizza is elite and I will die on this hill", "minutesAgo": 6 },
+        { "author": "Noodle", "content": "pineapple on pizza is elite and I will die on this hill", "minutesAgo": 6 },
         { "author": "Marco", "content": "it's a crime against Italy", "minutesAgo": 5 },
-        { "author": "Wheezer", "content": "sweet and salty, you uncultured swine", "minutesAgo": 4 }
+        { "author": "Noodle", "content": "sweet and salty, you uncultured swine", "minutesAgo": 4 }
       ],
       "message": { "author": "Theo", "content": "<@bot> settle this" },
       "expectations": {

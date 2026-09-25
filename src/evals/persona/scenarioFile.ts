@@ -6,7 +6,9 @@
 // into real `<@id>` mention tokens. Custom emojis are written as Discord renders them (`<:name:id>`) and
 // must use an id from the emoji list, so a typo fails loading instead of silently testing nothing.
 //
-// Everything here is invented: the repository is public, so no real chat content or member details.
+// Everything here is invented: the repository is public, so no real chat content or member details. That
+// includes names: never a member's real display name, nickname, username or IRL name (even with made-up
+// facts attached), and ids stay placeholders (1000…, 2000…, 9000…).
 //
 // (Not named scenarios.ts: under ts-node, `require('./scenarios')` would resolve to scenarios.json first.)
 import * as fs from 'node:fs';

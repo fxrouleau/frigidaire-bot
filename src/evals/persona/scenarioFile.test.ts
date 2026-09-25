@@ -75,6 +75,12 @@ describe('the committed scenarios.json', () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).not.toContain(file.bot.id);
   });
+
+  it('uses placeholder ids only, never a real Discord id (the repo is public)', () => {
+    const placeholder = /^[1-9]0{12,}\d{1,3}$/;
+    const ids = [file.bot.id, ...file.cast.map((c) => c.id), ...file.emojis.map((e) => e.id)];
+    for (const id of ids) expect(id).toMatch(placeholder);
+  });
 });
 
 describe('parseScenarioFile', () => {
