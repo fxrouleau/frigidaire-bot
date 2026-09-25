@@ -37,7 +37,7 @@ describe('config.gate', () => {
     expect(config.gate.names).toEqual(['fridge', 'frigidaire', 'frigi', 'bot', 'clanker']);
     expect(config.gate.followupSeconds).toBe(120);
     expect(config.gate.maxPer10Min).toBe(30);
-    expect(config.gate.maxColdPer10Min).toBe(6);
+    expect(config.gate.maxColdPer10Min).toBe(3);
     expect(config.gate.threshold).toBe(0.7);
     expect(config.gate.model).toBe('typesafe/jev-1.13');
   });
@@ -62,7 +62,7 @@ describe('config.gate', () => {
     expect(config.gate.names).toEqual(['fridge', 'toaster']);
     expect(config.gate.followupSeconds).toBe(0);
     expect(config.gate.maxPer10Min).toBe(30);
-    expect(config.gate.maxColdPer10Min).toBe(6);
+    expect(config.gate.maxColdPer10Min).toBe(3);
     expect(config.gate.threshold).toBe(0.7);
 
     vi.stubEnv('GATE_MAX_PER_10MIN', '0');

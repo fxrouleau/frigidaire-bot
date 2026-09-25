@@ -635,9 +635,12 @@ export const config = {
     get maxPer10Min(): number {
       return envInt('GATE_MAX_PER_10MIN', 30, { min: 0 });
     },
-    /** Cold interjections (a name-drop with no active exchange) per channel per rolling 10 minutes. */
+    /**
+     * Cold interjections (a name-drop with no active exchange) per channel per rolling 10 minutes. Small:
+     * with GATE_FOLLOWUP_SECONDS of 120 s, a burst of name-drops mostly lands inside one exchange anyway.
+     */
     get maxColdPer10Min(): number {
-      return envInt('GATE_MAX_COLD_PER_10MIN', 6, { min: 0 });
+      return envInt('GATE_MAX_COLD_PER_10MIN', 3, { min: 0 });
     },
     /** Probability at/above which the decision model's "addressed to the bot" counts as yes. */
     get threshold(): number {
