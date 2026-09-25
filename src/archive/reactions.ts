@@ -92,18 +92,30 @@ function isEnabled(): boolean {
   return config.archive.enabled;
 }
 
+/**
+ * The store, or a getter for it: the shared store is only opened once the archive is known to be
+ * enabled (opening creates ./data/archive.db), and inside the caller's try so a failure is logged.
+ */
+type StoreSource = ArchiveStore | (() => ArchiveStore);
+
+function storeOf(source: StoreSource): ArchiveStore {
+  return typeof source === 'function' ? source() : source;
+}
+
 /** MessageReactionAdd / MessageReactionRemove. Returns true when the archive changed. Never throws. */
 export function archiveReactionChange(
   reaction: ReactionEventLike,
   user: { id: string },
   delta: 1 | -1,
-  store: ArchiveStore = getArchiveStore(),
+  store: StoreSource = getArchiveStore,
 ): boolean {
   if (!isEnabled()) return false;
   const message = reaction.message;
   try {
     const byBot = user.id === reaction.client?.user?.id;
-    return store.updateReactions(message.id, (current) => applyReactionDelta(current, reaction.emoji, delta, byBot));
+    return storeOf(store).updateReactions(message.id, (current) =>
+      applyReactionDelta(current, reaction.emoji, delta, byBot),
+    );
   } catch (error) {
     logger.warn(`archive: failed to update reactions of message ${message.id}:`, error);
     return false;
@@ -113,11 +125,11 @@ export function archiveReactionChange(
 /** MessageReactionRemoveAll: every reaction is gone. */
 export function archiveReactionsCleared(
   message: Pick<ReactionMessageLike, 'id'>,
-  store: ArchiveStore = getArchiveStore(),
+  store: StoreSource = getArchiveStore,
 ): boolean {
   if (!isEnabled()) return false;
   try {
-    return store.updateReactions(message.id, []);
+    return storeOf(store).updateReactions(message.id, []);
   } catch (error) {
     logger.warn(`archive: failed to clear reactions of message ${message.id}:`, error);
     return false;
@@ -127,13 +139,15 @@ export function archiveReactionsCleared(
 /** MessageReactionRemoveEmoji: one emoji's reactions are gone (a moderator removed them all). */
 export function archiveReactionEmojiCleared(
   reaction: Pick<ReactionEventLike, 'emoji' | 'message'>,
-  store: ArchiveStore = getArchiveStore(),
+  store: StoreSource = getArchiveStore,
 ): boolean {
   if (!isEnabled()) return false;
   const key = reaction.emoji.id ?? reaction.emoji.name;
   if (!key) return false;
   try {
-    return store.updateReactions(reaction.message.id, (current) => current.filter((r) => reactionKey(r) !== key));
+    return storeOf(store).updateReactions(reaction.message.id, (current) =>
+      current.filter((r) => reactionKey(r) !== key),
+    );
   } catch (error) {
     logger.warn(`archive: failed to clear an emoji's reactions on message ${reaction.message.id}:`, error);
     return false;
@@ -150,11 +164,11 @@ const EMPTY_PROFILE: ReactionProfile = { messages: 0, reactedMessages: 0, baseRa
  */
 export function getReactionProfile(
   opts: ReactionProfileOptions = {},
-  store: ArchiveStore | (() => ArchiveStore) = getArchiveStore,
+  store: StoreSource = getArchiveStore,
 ): ReactionProfile {
   if (!isEnabled()) return EMPTY_PROFILE;
   try {
-    return (typeof store === 'function' ? store() : store).reactionProfile(opts);
+    return storeOf(store).reactionProfile(opts);
   } catch (error) {
     logger.warn('archive: reaction profile query failed:', error);
     return EMPTY_PROFILE;

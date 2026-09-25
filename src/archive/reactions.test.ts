@@ -207,6 +207,26 @@ describe('reaction events', () => {
     expect(store.getReactions(id)).toHaveLength(1);
   });
 
+  it('never opens the archive when it is disabled, and logs (not throws) when it cannot be opened', () => {
+    const id = seed();
+    const event = reactionEvent(id, { id: null, name: '😂' }, { partial: true });
+    vi.stubEnv('ARCHIVE_ENABLED', 'false');
+    // Opening the shared store creates ./data/archive.db: a disabled archive must not get that far.
+    const open = vi.fn(() => store);
+    expect(archiveReactionChange(event, MEMBER, 1, open)).toBe(false);
+    expect(archiveReactionsCleared({ id }, open)).toBe(false);
+    expect(archiveReactionEmojiCleared(event, open)).toBe(false);
+    expect(open).not.toHaveBeenCalled();
+
+    vi.stubEnv('ARCHIVE_ENABLED', 'true');
+    const unopenable = () => {
+      throw new Error('SQLITE_CANTOPEN');
+    };
+    expect(archiveReactionChange(event, MEMBER, 1, unopenable)).toBe(false);
+    expect(archiveReactionsCleared({ id }, unopenable)).toBe(false);
+    expect(archiveReactionEmojiCleared(event, unopenable)).toBe(false);
+  });
+
   it('never throws on a storage failure', () => {
     const id = seed();
     store.close();
