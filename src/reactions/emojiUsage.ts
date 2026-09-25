@@ -7,7 +7,7 @@
 // numeric id, so the id is a precise, indexed key (a LIKE scan over every message would read the whole
 // table per emoji). Like the Wrapped stats, this reads the archive's tables directly.
 import type { ArchivedMessage, ArchiveStore } from '../archive/archiveStore';
-import { getArchiveStore } from '../archive/archiveStore';
+import { getArchiveStore, notIgnoredChannelsFilter } from '../archive/archiveStore';
 import { getReactionProfile } from '../archive/reactions';
 import { config } from '../config';
 import { logger } from '../logger';
@@ -45,15 +45,17 @@ function clip(text: string): string {
 
 type TypedRow = { id: string; content: string; reply_to_id: string | null };
 
-/** Member messages (newest first) that contain the custom emoji `id`. */
+/** Member messages (newest first, ARCHIVE_IGNORE_CHANNELS left out) that contain the custom emoji `id`. */
 function typedUses(store: ArchiveStore, id: string): TypedRow[] {
+  const notIgnored = notIgnoredChannelsFilter('m');
   const rows = store.db
     .prepare(
       `SELECT m.id, m.content, m.reply_to_id FROM messages_fts JOIN messages m ON m.seq = messages_fts.rowid
        WHERE messages_fts MATCH @match AND m.deleted_at IS NULL AND m.source IN ('human', 'relay')
+         ${notIgnored ? `AND ${notIgnored.sql}` : ''}
        ORDER BY m.created_at DESC`,
     )
-    .all({ match: `content : "${id}"` }) as TypedRow[];
+    .all({ match: `content : "${id}"`, ...notIgnored?.params }) as TypedRow[];
   // The index matches the id as a word anywhere in the text; only an actual emoji token counts.
   const token = new RegExp(`<a?:\\w+:${id}>`);
   return rows.filter((row) => token.test(row.content));

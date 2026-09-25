@@ -352,6 +352,21 @@ describe('getReactionProfile', () => {
     expect(limited.emojis[0].samples).toEqual([]);
   });
 
+  it('leaves out ARCHIVE_IGNORE_CHANNELS (a parent covers its threads), rows archived before the ignore included', () => {
+    seedProfile();
+    vi.stubEnv('ARCHIVE_IGNORE_CHANNELS', OTHER_CHANNEL);
+    const withoutOther = getReactionProfile({}, store);
+    expect(withoutOther.messages).toBe(7);
+    expect(withoutOther.emojis.find((e) => e.key === '😂')?.uses).toBe(1 + 2);
+    expect(withoutOther.emojis.flatMap((e) => e.samples).some((s) => s.channelId === OTHER_CHANNEL)).toBe(false);
+
+    vi.stubEnv('ARCHIVE_IGNORE_CHANNELS', CHANNEL);
+    const onlyOther = getReactionProfile({}, store);
+    expect(onlyOther.messages).toBe(1);
+    expect(onlyOther.emojis.map((e) => [e.key, e.uses])).toEqual([['😂', 1]]);
+    expect(getReactionProfile({ channelId: CHANNEL }, store).messages).toBe(0);
+  });
+
   it('is empty (not an error) for an empty archive, a disabled archive, or a broken store', () => {
     expect(getReactionProfile({}, store)).toEqual({ messages: 0, reactedMessages: 0, baseRate: 0, emojis: [] });
     seedProfile();

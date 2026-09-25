@@ -455,6 +455,24 @@ function toBackfillState(row: BackfillRow): BackfillState {
   };
 }
 
+/**
+ * A condition leaving out messages (table alias `alias`) of ARCHIVE_IGNORE_CHANNELS, a parent channel
+ * covering its threads, with the parameter it binds; undefined when nothing is ignored. Rows archived
+ * before a channel was ignored stay in the table, so every query that is not already limited to allowed
+ * channels (the search tools and Wrapped are) needs it.
+ */
+export function notIgnoredChannelsFilter(
+  alias = 'm',
+): { sql: string; params: { ignoredChannels: string } } | undefined {
+  const ignored = config.archive.ignoredChannels;
+  if (ignored.length === 0) return undefined;
+  const list = '(SELECT value FROM json_each(@ignoredChannels))';
+  return {
+    sql: `${alias}.channel_id NOT IN ${list} AND (${alias}.parent_channel_id IS NULL OR ${alias}.parent_channel_id NOT IN ${list})`,
+    params: { ignoredChannels: JSON.stringify(ignored) },
+  };
+}
+
 /** Orders two snowflakes numerically (they outgrow 2^53, so compare as BigInt). */
 export function compareSnowflakes(a: string, b: string): number {
   const x = BigInt(a);
@@ -670,12 +688,18 @@ export class ArchiveStore {
   }
 
   /**
-   * How members react (see ReactionProfile): member messages (human + relay, not deleted) in scope, each
-   * emoji's uses without the bot's own reaction, and the most-reacted examples per emoji.
+   * How members react (see ReactionProfile): member messages (human + relay, not deleted, outside
+   * ARCHIVE_IGNORE_CHANNELS) in scope, each emoji's uses without the bot's own reaction, and the
+   * most-reacted examples per emoji.
    */
   reactionProfile(opts: ReactionProfileOptions = {}): ReactionProfile {
     const params: Record<string, string | number> = {};
     const scope = ["m.source IN ('human', 'relay')", 'm.deleted_at IS NULL'];
+    const notIgnored = notIgnoredChannelsFilter('m');
+    if (notIgnored) {
+      Object.assign(params, notIgnored.params);
+      scope.push(notIgnored.sql);
+    }
     if (opts.channelId) {
       params.channelId = opts.channelId;
       scope.push('(m.channel_id = @channelId OR m.parent_channel_id = @channelId)');
