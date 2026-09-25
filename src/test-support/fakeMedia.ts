@@ -116,8 +116,10 @@ export function createFileFetch(files: Record<string, FakeFile>): typeof globalT
 export function createFileSafeFetch(
   files: Record<string, FakeFile>,
   opts: { privateHosts?: string[] } = {},
-): SafeFetch & { urls: string[] } {
+): SafeFetch & { urls: string[]; bodies: string[] } {
   const urls: string[] = [];
+  // The URLs whose bodies were downloaded (a refused body is never read).
+  const bodies: string[] = [];
   const resolver: Resolver = async (hostname) => [
     { address: opts.privateHosts?.includes(hostname) ? '10.0.0.7' : '93.184.215.14', family: 4 },
   ];
@@ -130,11 +132,12 @@ export function createFileSafeFetch(
     for (const [name, value] of Object.entries(file.headers ?? {})) headers[name.toLowerCase()] = value;
     if (file.contentType) headers['content-type'] = file.contentType;
     const status = file.status ?? 200;
-    if (!request.wantBody(status, headers['content-type'] ?? '')) return { status, headers, truncated: false };
+    if (!request.wantBody(status, headers['content-type'] ?? '', headers)) return { status, headers, truncated: false };
+    bodies.push(url);
     const truncated = file.body.byteLength > request.maxBytes;
     return { status, headers, body: truncated ? file.body.subarray(0, request.maxBytes) : file.body, truncated };
   };
-  return Object.assign(createSafeFetch({ resolver, transport }), { urls });
+  return Object.assign(createSafeFetch({ resolver, transport }), { urls, bodies });
 }
 
 /** The text parts and media parts of the user message in a captured media request. */

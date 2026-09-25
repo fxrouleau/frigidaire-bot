@@ -41,7 +41,7 @@ export type TransportRequest = {
   signal: AbortSignal;
   maxBytes: number;
   /** Decides, from the status line and headers, whether the body is worth downloading at all. */
-  wantBody: (status: number, contentType: string) => boolean;
+  wantBody: (status: number, contentType: string, headers: Record<string, string>) => boolean;
 };
 
 export type TransportResponse = {
@@ -115,7 +115,7 @@ export const nodeTransport: HttpTransport = (request) =>
     req.on('response', (res) => {
       const status = res.statusCode ?? 0;
       const headers = flattenHeaders(res.headers);
-      if (!request.wantBody(status, headers['content-type'] ?? '')) {
+      if (!request.wantBody(status, headers['content-type'] ?? '', headers)) {
         res.destroy();
         settle(() => resolve({ status, headers, truncated: false }));
         return;
@@ -181,6 +181,11 @@ export type FetchOptions = {
   userAgent?: string;
   headers?: Record<string, string>;
   maxBytes?: number;
+  /**
+   * Leave the body undownloaded when Content-Length declares more than maxBytes, for callers that have
+   * no use for a truncated body (a media file). Default: read up to the cap (a page's head is still useful).
+   */
+  skipOversizedBody?: boolean;
   /** Deadline for the whole request, redirects and body included. */
   timeoutMs?: number;
   /** 'manual' returns the first redirect (with `location`) instead of following it. */
@@ -281,8 +286,10 @@ export function createSafeFetch(deps: SafeFetchDeps = {}): SafeFetch {
           headers,
           signal,
           maxBytes,
-          wantBody: (status, contentType) =>
-            !REDIRECT_STATUSES.has(status) && mimeMatches(parseContentType(contentType).mime, options.accept),
+          wantBody: (status, contentType, responseHeaders) =>
+            !REDIRECT_STATUSES.has(status) &&
+            mimeMatches(parseContentType(contentType).mime, options.accept) &&
+            !(options.skipOversizedBody && Number(responseHeaders['content-length']) > maxBytes),
         });
       } catch (error) {
         if (error instanceof BlockedUrlError || error instanceof FetchFailedError) throw error;

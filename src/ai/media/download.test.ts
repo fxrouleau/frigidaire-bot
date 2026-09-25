@@ -219,6 +219,21 @@ describe('downloadMedia from any other host (the guarded fetch)', () => {
     });
   });
 
+  it('refuses a declared Content-Length over the cap without downloading the body', async () => {
+    const safeFetch = createFileSafeFetch({
+      'https://site.example/huge.mp4': {
+        body: Buffer.alloc(150),
+        contentType: 'video/mp4',
+        headers: { 'content-length': '150' },
+      },
+    });
+    expect(await downloadMedia('https://site.example/huge.mp4', { ...OPTS, safeFetch })).toEqual({
+      ok: false,
+      reason: 'too_large',
+    });
+    expect(safeFetch.bodies).toEqual([]);
+  });
+
   it('reports HTTP errors', async () => {
     const safeFetch = createFileSafeFetch({});
     expect(await downloadMedia('https://site.example/missing.mp4', { ...OPTS, safeFetch })).toEqual({
