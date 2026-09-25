@@ -41,22 +41,31 @@ async function previewParts(
   url: string,
   role: EnrichmentRole,
   reader: LinkReader,
+  budgetMs: number,
 ): Promise<{ text?: string; images: string[] }> {
   if (role === 'history') {
     const cached = reader.peek(url);
     return cached?.ok ? { text: formatLinkPreview(url, cached), images: [] } : { images: [] };
   }
 
-  const result = await withBudget(reader.read(url), PREVIEW_BUDGET_MS);
+  const result = await withBudget(reader.read(url), budgetMs);
   if (!result) return { text: `[link: ${url} — the site is slow; read_link can still open it]`, images: [] };
   if (!result.ok || discordShowsImageFor(message, reader.keyFor(url), reader)) {
     return { text: formatLinkPreview(url, result), images: [] };
   }
-  const images = await withBudget(reader.previewImages(result.content, MAX_IMAGES_PER_LINK), PREVIEW_BUDGET_MS);
+  const images = await withBudget(reader.previewImages(result.content, MAX_IMAGES_PER_LINK), budgetMs);
   return { text: formatLinkPreview(url, result), images: images ?? [] };
 }
 
-export function createLinkEnricher(readerFor: () => LinkReader = getLinkReader): ContentEnricher {
+export type LinkEnricherOptions = {
+  /** The reader to use (resolved per call, so tests can swap the shared instance). */
+  reader?: () => LinkReader;
+  budgetMs?: number;
+};
+
+export function createLinkEnricher(options: LinkEnricherOptions = {}): ContentEnricher {
+  const readerFor = options.reader ?? getLinkReader;
+  const budgetMs = options.budgetMs ?? PREVIEW_BUDGET_MS;
   return {
     name: 'links',
     async enrich(message, role) {
@@ -65,7 +74,7 @@ export function createLinkEnricher(readerFor: () => LinkReader = getLinkReader):
       if (links.length === 0) return [];
 
       const reader = readerFor();
-      const previews = await Promise.all(links.map((url) => previewParts(message, url, role, reader)));
+      const previews = await Promise.all(links.map((url) => previewParts(message, url, role, reader, budgetMs)));
 
       const parts: NormalizedContentPart[] = [];
       let imageCount = 0;
