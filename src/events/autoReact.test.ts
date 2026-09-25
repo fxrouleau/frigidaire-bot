@@ -7,7 +7,10 @@ import { AutoReactLedger } from '../reactions/ledger';
 import { BotDb } from '../storage/botDb';
 import { type EventMessage, type FakeMessageOptions, createFakeBotMessage, createFakeMessage } from '../test-support/fakeDiscord';
 import autoReactEvent from './autoReact';
+import autoReactBulkDeleteEvent from './autoReactBulkDelete';
 import autoReactDeleteEvent from './autoReactDelete';
+
+type BulkArgs = Parameters<typeof autoReactBulkDeleteEvent.execute>;
 
 function withReactionCache(message: EventMessage): EventMessage {
   (message as unknown as Record<string, unknown>).reactions = { cache: new Collection() };
@@ -118,5 +121,24 @@ describe('autoReact event', () => {
     await autoReactEvent.execute(post());
     await autoReactDeleteEvent.execute(post());
     expect(reactor.pendingCount).toBe(0);
+  });
+
+  it('purged posts (a bulk delete) are dropped too, and never judged', async () => {
+    await autoReactEvent.execute(post({ messageId: '1' }));
+    await autoReactEvent.execute(post({ messageId: '2' }));
+    await autoReactEvent.execute(post({ messageId: '3' }));
+    expect(reactor.pendingCount).toBe(3);
+    const survivor = post({ messageId: '3' });
+    const purged = new Collection([
+      ['1', post({ messageId: '1' })],
+      ['2', post({ messageId: '2' })],
+    ]) as unknown as BulkArgs[0];
+    await autoReactBulkDeleteEvent.execute(purged, survivor.channel as unknown as BulkArgs[1]);
+    expect(reactor.pendingCount).toBe(1);
+
+    // Once the delay passes, only the post that survived the purge is judged.
+    for (const fire of timers.splice(0)) fire();
+    await reactor.idle();
+    expect(judge).toHaveBeenCalledTimes(1);
   });
 });
