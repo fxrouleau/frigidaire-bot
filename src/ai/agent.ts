@@ -407,7 +407,10 @@ export class AgentOrchestrator {
 
       const budget = await budgetPromise;
       if (estimateTokens(workingEntries) > budget.contextTokens * PREFLIGHT_CONTEXT_RATIO) {
-        workingEntries = this.trimWindow(workingEntries, budget, channelId, 'preflight').entries;
+        const preflight = this.trimWindow(workingEntries, budget, channelId, 'preflight');
+        workingEntries = preflight.entries;
+        // Dropped entries take their memories with them: those may be injected again later in the window.
+        if (preflight.dropped > 0) injectedMemoryIds = collectMemoryIds(workingEntries);
       }
 
       const served = new Set<string>();
@@ -451,7 +454,13 @@ export class AgentOrchestrator {
         logger.info(`Error capture written to ${capturePath}`);
       }
       stopTyping();
-      await this.sendErrorReply(message);
+      // Like an empty answer: nobody pinged on an unprompted turn, so a failure isn't announced either
+      // (an outage would otherwise have the bot butt in with "hit me again" on every routed follow-up).
+      if (opts.unprompted) {
+        logger.info(`Unprompted turn for message ${message.id} in #${channelId} failed; nothing posted.`);
+      } else {
+        await this.sendErrorReply(message);
+      }
     } finally {
       stopTyping();
     }
@@ -526,8 +535,16 @@ export class AgentOrchestrator {
     let response = await chat('auto');
     let invocations = 0;
     for (let round = 0; ; round++) {
+      if (response.toolCalls.length === 0) break;
       const calls = hostHandled(response.toolCalls);
-      if (calls.length === 0) break;
+      // A call to a tool that isn't offered (a gated one the prompt names, an invented name) still earns
+      // a round: the next chat() answers it "not available" and the model gets to reply in text, instead
+      // of the turn ending on a bare call with nothing to post. Never executed, even if a handler exists.
+      for (const call of response.toolCalls) {
+        if (calls.includes(call)) continue;
+        logger.warn(`Tool "${call.name}" was called in channel ${channelId} but is not offered this turn.`);
+        logFailure('capability_gap', `Tool "${call.name}" requested but not offered`);
+      }
 
       if (invocations + calls.length > this.maxToolInvocations) {
         logger.warn(

@@ -851,6 +851,41 @@ describe('history budget', () => {
     expect(info.mock.calls.some(([line]) => /history_trim .*phase=preflight budget=3000/.test(String(line)))).toBe(true);
   });
 
+  it('lets a memory come back once a preflight trim dropped the entry that carried it', async () => {
+    await getMemoryStore().save({ category: 'fact', subject: 'Alice', content: 'mains jungle', subject_user_id: ALICE });
+    const info = vi.spyOn(logger, 'info');
+    const provider = new FakeProvider([textResponse('one'), textResponse('two'), textResponse('three')]);
+    // A 6k-token model: budget 3k, preflight past 5.4k. The persist trim then has nothing left to drop.
+    const agent = makeAgent(provider, { contextLengths: { get: async () => 6000 } });
+    const catchUp = Array.from({ length: 25 }, (_, i) =>
+      chat(String(8101 + i), `${i} ${'x'.repeat(1400)}`, { authorId: BOB, authorDisplayName: 'Bob' }),
+    );
+    const dynamicTexts = (entries: ConversationEntry[]) =>
+      messageEntries(entries)
+        .filter((e) => e.role === 'developer' && textOf(e).startsWith('Current time:'))
+        .map(textOf);
+
+    await agent.handleMention(
+      createFakeMessage({ ...BASE, messageId: '8100', content: 'yo', channelMessages: [] }).message,
+    );
+    expect(dynamicEntryText(provider.calls[0].messages)).toContain('- mains jungle');
+    // A busy stretch between pings: the catch-up overflows the context, so turn 2 is cut before its call.
+    await agent.handleMention(
+      createFakeMessage({ ...BASE, messageId: '8150', content: 'yo', channelMessages: catchUp }).message,
+    );
+    const trims = info.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('history_trim'));
+    expect(trims.some((line) => line.includes('phase=preflight'))).toBe(true);
+    expect(trims.some((line) => line.includes('phase=persist'))).toBe(false);
+    await agent.handleMention(
+      createFakeMessage({ ...BASE, messageId: '8200', content: 'yo again', channelMessages: [] }).message,
+    );
+
+    // Turn 1's context entry is gone from the window, so turn 3 brings the memory back (once).
+    const third = provider.calls[2].messages;
+    expect(countText(third, 'mains jungle')).toBe(1);
+    expect(dynamicTexts(third).at(-1)).toContain('- mains jungle');
+  });
+
   it('sizes the budget from the smallest context among the fallback models, capped at 500k', async () => {
     const info = vi.spyOn(logger, 'info');
     const provider = new FakeProvider([textResponse('one')]);
@@ -959,6 +994,66 @@ describe('tool limits and dangling calls', () => {
     expect(provider.calls[1].toolChoice).toBe('none');
     const t2 = results(provider.calls[2].messages).find((r) => r.id === 't2');
     expect(t2?.content).toBe('not executed: that tool is not available');
+  });
+
+  it('answers a call to a tool it does not offer and asks again, instead of ending the turn blank', async () => {
+    // run_code has a handler but is gated off (no sandbox), so the provider only offers echo_tool.
+    const gated: ToolDefinition = {
+      name: 'run_code',
+      description: 'gated',
+      parameters: { type: 'object', properties: {} },
+      handler: async () => {
+        executed.push('run_code');
+        return 'ran';
+      },
+    };
+    const provider = new FakeProvider([
+      toolCallResponse([{ id: 'r1', name: 'run_code', arguments: { code: 'print(137.5 * 1.18 / 4)' } }]),
+      textResponse('40.56 each'),
+    ]);
+    const agent = makeAgent(provider, { tools: [echo, gated] });
+    const ping = createFakeMessage({ ...BASE, content: 'split 137.50 four ways with 18% tip', channelMessages: [] });
+
+    await agent.handleMention(ping.message);
+
+    expect(executed).toEqual([]);
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1].toolChoice).toBe('auto');
+    expect(results(provider.calls[1].messages).map((r) => [r.id, r.content])).toEqual([
+      ['r1', 'not executed: that tool is not available'],
+    ]);
+    expect(ping.recorders.reply.calls).toEqual([['40.56 each']]);
+    expect(getMemoryStore().getByCategory('capability_gap').map((m) => m.content)).toEqual([
+      'Tool "run_code" requested but not offered',
+    ]);
+  });
+
+  it('runs the offered calls of a mixed round and answers the rest as not available', async () => {
+    const provider = new FakeProvider([
+      toolCallResponse([call('t1'), { id: 'w1', name: 'web_search', arguments: { query: 'score' } }]),
+      textResponse('done'),
+    ]);
+    const agent = makeAgent(provider, { tools: [echo] });
+
+    await agent.handleMention(createFakeMessage({ ...BASE, content: 'go', channelMessages: [] }).message);
+
+    expect(executed).toEqual(['t1']);
+    expect(results(provider.calls[1].messages).map((r) => [r.id, r.content])).toEqual([
+      ['t1', 'echo t1'],
+      ['w1', 'not executed: that tool is not available'],
+    ]);
+  });
+
+  it('bounds a model that keeps calling a tool it does not offer by the round limit', async () => {
+    const unoffered = (id: string) => toolCallResponse([{ id, name: 'run_code', arguments: {} }]);
+    const provider = new FakeProvider([unoffered('r1'), unoffered('r2'), textResponse('fine, by hand')]);
+    const agent = makeAgent(provider, { tools: [echo], maxToolRounds: 1 });
+    const ping = createFakeMessage({ ...BASE, content: 'go', channelMessages: [] });
+
+    await agent.handleMention(ping.message);
+
+    expect(provider.calls.map((c) => c.toolChoice)).toEqual(['auto', 'auto', 'none']);
+    expect(ping.recorders.reply.calls).toEqual([['fine, by hand']]);
   });
 
   it('defaults are generous: 25 rounds and 200 invocations', async () => {
