@@ -2,6 +2,8 @@
 // client that replays fixtures while capturing each request's body AND headers (the feature tag rides
 // in a header), and a fetch that serves in-memory files by URL.
 import OpenAI from 'openai';
+import type { Resolver } from '../ai/linkReader/netGuard';
+import { type HttpTransport, type SafeFetch, createSafeFetch } from '../ai/linkReader/safeFetch';
 import type { MediaTranscoder, ProbeResult, VideoSample } from '../ai/media/transcoder';
 import type { EndpointCoverage, ModelCatalog, ModelInfo } from '../ai/modelCatalog';
 import type { OpenRouterFixture } from './openRouterFetch';
@@ -104,6 +106,35 @@ export function createFileFetch(files: Record<string, FakeFile>): typeof globalT
     return new Response(new Uint8Array(file.body), { status: file.status ?? 200, headers });
   };
   return Object.assign(fetchImpl as typeof globalThis.fetch, { urls });
+}
+
+/**
+ * The real SSRF-guarded fetch (createSafeFetch) over an in-memory transport serving `files` by exact URL
+ * (404 otherwise). Every hostname resolves to a public address except `privateHosts` (10.0.0.7), so the
+ * guard's redirect, byte-cap and content-type rules run for real without DNS or sockets.
+ */
+export function createFileSafeFetch(
+  files: Record<string, FakeFile>,
+  opts: { privateHosts?: string[] } = {},
+): SafeFetch & { urls: string[] } {
+  const urls: string[] = [];
+  const resolver: Resolver = async (hostname) => [
+    { address: opts.privateHosts?.includes(hostname) ? '10.0.0.7' : '93.184.215.14', family: 4 },
+  ];
+  const transport: HttpTransport = async (request) => {
+    const url = request.url.toString();
+    urls.push(url);
+    const file = files[url];
+    if (!file) return { status: 404, headers: {}, truncated: false };
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(file.headers ?? {})) headers[name.toLowerCase()] = value;
+    if (file.contentType) headers['content-type'] = file.contentType;
+    const status = file.status ?? 200;
+    if (!request.wantBody(status, headers['content-type'] ?? '')) return { status, headers, truncated: false };
+    const truncated = file.body.byteLength > request.maxBytes;
+    return { status, headers, body: truncated ? file.body.subarray(0, request.maxBytes) : file.body, truncated };
+  };
+  return Object.assign(createSafeFetch({ resolver, transport }), { urls });
 }
 
 /** The text parts and media parts of the user message in a captured media request. */

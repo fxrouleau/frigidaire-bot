@@ -15,6 +15,7 @@
 import type OpenAI from 'openai';
 import { config } from '../../config';
 import { logger } from '../../logger';
+import type { SafeFetch } from '../linkReader/safeFetch';
 import { type EndpointCoverage, type ModelCatalog, type ModelInfo, getModelCatalog } from '../modelCatalog';
 import { getOpenRouterClient } from '../openRouterClient';
 import { downloadMedia, redact } from './download';
@@ -87,6 +88,8 @@ export type TranscriptionRoute =
 export type AudioTranscriberOptions = {
   client?: () => OpenAI | undefined;
   fetch?: typeof globalThis.fetch;
+  /** The guarded fetch for non-Discord URLs (default: the shared createSafeFetch()). */
+  safeFetch?: SafeFetch;
   transcoder: MediaTranscoder;
   model?: () => string;
   fallbackModel?: () => string;
@@ -108,6 +111,7 @@ function hostList(endpoints: EndpointCoverage['endpoints']): string {
 export class AudioTranscriber {
   private readonly client: () => OpenAI | undefined;
   private readonly fetchImpl?: typeof globalThis.fetch;
+  private readonly safeFetch?: SafeFetch;
   private readonly transcoder: MediaTranscoder;
   private readonly model: () => string;
   private readonly fallbackModel: () => string;
@@ -124,6 +128,7 @@ export class AudioTranscriber {
   constructor(opts: AudioTranscriberOptions) {
     this.client = opts.client ?? getOpenRouterClient;
     this.fetchImpl = opts.fetch;
+    this.safeFetch = opts.safeFetch;
     this.transcoder = opts.transcoder;
     this.model = opts.model ?? (() => config.media.transcriptionModel);
     this.fallbackModel = opts.fallbackModel ?? (() => config.media.transcriptionFallbackModel);
@@ -254,6 +259,7 @@ export class AudioTranscriber {
       maxBytes: AUDIO_MAX_BYTES,
       timeoutMs: DOWNLOAD_TIMEOUT_MS,
       fetch: this.fetchImpl,
+      safeFetch: this.safeFetch,
     });
     if (!download.ok) {
       if (download.reason === 'too_large') {

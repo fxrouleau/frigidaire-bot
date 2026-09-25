@@ -9,6 +9,7 @@ import {
   createFakeCatalog,
   createFakeTranscoder,
   createFileFetch,
+  createFileSafeFetch,
 } from '../../test-support/fakeMedia';
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import {
@@ -28,13 +29,13 @@ const TRANSCRIPT = 'salut tout le monde, on se fait une game ce soir?\nEnglish: 
 
 function install(fixtures: OpenRouterFixture[] = []) {
   const { client, requests } = createCapturingClient(fixtures);
-  const fetch = createFileFetch({
-    [VOICE_URL]: { body: OGG_BYTES, contentType: 'audio/ogg' },
-    [CLIP_URL]: { body: MP4_BYTES, contentType: 'video/mp4' },
-  });
+  const fetch = createFileFetch({ [VOICE_URL]: { body: OGG_BYTES, contentType: 'audio/ogg' } });
+  // The clip is on a third-party host: it comes through the SSRF-guarded fetch.
+  const safeFetch = createFileSafeFetch({ [CLIP_URL]: { body: MP4_BYTES, contentType: 'video/mp4' } });
   const common = {
     client: () => client,
     fetch,
+    safeFetch,
     transcoder: createFakeTranscoder({ probe: { durationSecs: 20, hasAudio: true, hasVideo: true } }),
     catalog: createFakeCatalog(CATALOG_MODELS),
     model: () => 'google/gemini-3.5-flash-lite',

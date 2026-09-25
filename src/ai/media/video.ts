@@ -15,6 +15,7 @@
 import type OpenAI from 'openai';
 import { config } from '../../config';
 import { logger } from '../../logger';
+import type { SafeFetch } from '../linkReader/safeFetch';
 import { type ModelCatalog, type ModelInfo, getModelCatalog } from '../modelCatalog';
 import { getOpenRouterClient } from '../openRouterClient';
 import { downloadMedia, redact } from './download';
@@ -68,6 +69,8 @@ export function cleanDescription(raw: string): string | undefined {
 export type VideoDescriberOptions = {
   client?: () => OpenAI | undefined;
   fetch?: typeof globalThis.fetch;
+  /** The guarded fetch for non-Discord URLs (default: the shared createSafeFetch()). */
+  safeFetch?: SafeFetch;
   transcoder: MediaTranscoder;
   /** Transcribes the audio track for models that can't hear it (and on the frames path). */
   transcriber: Pick<AudioTranscriber, 'transcribeBuffer'>;
@@ -93,6 +96,7 @@ type Attempt = {
 export class VideoDescriber {
   private readonly client: () => OpenAI | undefined;
   private readonly fetchImpl?: typeof globalThis.fetch;
+  private readonly safeFetch?: SafeFetch;
   private readonly transcoder: MediaTranscoder;
   private readonly transcriber: Pick<AudioTranscriber, 'transcribeBuffer'>;
   private readonly model: () => string;
@@ -108,6 +112,7 @@ export class VideoDescriber {
   constructor(opts: VideoDescriberOptions) {
     this.client = opts.client ?? getOpenRouterClient;
     this.fetchImpl = opts.fetch;
+    this.safeFetch = opts.safeFetch;
     this.transcoder = opts.transcoder;
     this.transcriber = opts.transcriber;
     this.model = opts.model ?? (() => config.media.videoModel);
@@ -158,6 +163,7 @@ export class VideoDescriber {
       maxBytes: Math.max(maxBytes, VIDEO_DOWNLOAD_MAX_BYTES),
       timeoutMs: DOWNLOAD_TIMEOUT_MS,
       fetch: this.fetchImpl,
+      safeFetch: this.safeFetch,
     });
     if (!download.ok) {
       if (download.reason === 'too_large') {

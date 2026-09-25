@@ -7,10 +7,10 @@
 //     de-duplicates concurrent reads of the same link
 //   - on request (read_link only), hands the first video to video understanding (describeVideo, the
 //     media feature) and caches the description with the content
-//   - vets every image/video URL it hands onward (previewImages, describeVideo): the chat provider and
-//     the media feature download those with plain fetch(), so a page's og:image pointing at an internal
-//     address — or at a public host that redirects to one — must be refused here, with every redirect
-//     hop checked and the final, redirect-free URL passed on
+//   - vets every image/video URL it hands onward (previewImages, describeVideo): only live, media-typed,
+//     redirect-free URLs reach the chat provider and the media feature (which fetch any non-Discord URL
+//     through this same guarded fetch again, so a page's og:image pointing at an internal address is
+//     refused twice over)
 import { config } from '../../config';
 import { logger } from '../../logger';
 import { type VideoInput, describeVideo as defaultDescribeVideo } from '../media';

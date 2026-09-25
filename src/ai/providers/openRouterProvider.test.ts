@@ -3,6 +3,7 @@ import sharp from 'sharp';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { serializeError } from '../debugCapture';
 import { createReplayClient, loadFixture } from '../../test-support/openRouterFetch';
+import { createFileSafeFetch } from '../../test-support/fakeMedia';
 import type { ConversationEntry, ProviderToolDefinition } from '../types';
 import { FEATURE_HEADER } from '../usage';
 import { OpenRouterProvider, extractToolCalls, parseOpenRouterResponse } from './openRouterProvider';
@@ -389,7 +390,7 @@ describe('OpenRouterProvider image pipeline', () => {
     );
 
     const { provider, requests } = imageProvider();
-    await provider.chat({ messages: [userWithImage('https://example.com/a.png')], tools: [] });
+    await provider.chat({ messages: [userWithImage('https://cdn.discordapp.com/attachments/1/2/a.png')], tools: [] });
 
     const body = requests[0] as { messages?: Array<{ content?: unknown }> };
     const content = body.messages?.[0]?.content;
@@ -408,7 +409,7 @@ describe('OpenRouterProvider image pipeline', () => {
     vi.mocked(globalThis.fetch).mockResolvedValue(new Response('not found', { status: 404 }));
 
     const { provider, requests } = imageProvider();
-    await provider.chat({ messages: [userWithImage('https://example.com/missing.png')], tools: [] });
+    await provider.chat({ messages: [userWithImage('https://cdn.discordapp.com/attachments/1/2/missing.png')], tools: [] });
 
     const body = requests[0] as { messages?: Array<{ content?: unknown }> };
     const content = body.messages?.[0]?.content;
@@ -426,7 +427,7 @@ describe('OpenRouterProvider image pipeline', () => {
     );
 
     const { provider, requests } = imageProvider();
-    await provider.chat({ messages: [userWithImage('https://example.com/huge.png')], tools: [] });
+    await provider.chat({ messages: [userWithImage('https://cdn.discordapp.com/attachments/1/2/huge.png')], tools: [] });
 
     const body = requests[0] as { messages?: Array<{ content?: unknown }> };
     expect(body.messages?.[0]?.content).toBe('look at this');
@@ -456,7 +457,7 @@ describe('OpenRouterProvider image pipeline', () => {
     );
 
     const { provider, requests } = imageProvider();
-    await provider.chat({ messages: [userWithImage('https://example.com/big.png')], tools: [] });
+    await provider.chat({ messages: [userWithImage('https://cdn.discordapp.com/attachments/1/2/big.png')], tools: [] });
 
     const body = requests[0] as { messages?: Array<{ content?: unknown }> };
     const content = body.messages?.[0]?.content as Array<{ type: string; image_url?: { url: string } }>;
@@ -467,6 +468,64 @@ describe('OpenRouterProvider image pipeline', () => {
     const decoded = Buffer.from(base64, 'base64');
     const meta = await sharp(decoded).metadata();
     expect(Math.max(meta.width ?? 0, meta.height ?? 0)).toBe(1568);
+  });
+});
+
+describe('OpenRouterProvider image pipeline: non-Discord hosts', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function chatWithImage(url: string, safeFetch: ReturnType<typeof createFileSafeFetch>) {
+    const requests: unknown[] = [];
+    const provider = new OpenRouterProvider({
+      client: createReplayClient(loadFixture('text-response'), (body) => requests.push(body)),
+      model: 'test-model',
+      safeFetch,
+    });
+    await provider.chat({
+      messages: [{ kind: 'message', role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', url }] }],
+      tools: [],
+    });
+    return (requests[0] as { messages?: Array<{ content?: unknown }> }).messages?.[0]?.content;
+  }
+
+  it('downloads a link-preview image through the SSRF-guarded fetch, never the plain one', async () => {
+    const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 1, g: 2, b: 3 } } })
+      .png()
+      .toBuffer();
+    const safeFetch = createFileSafeFetch({ 'https://pbs.example/og.png': { body: png, contentType: 'image/png' } });
+
+    const content = await chatWithImage('https://pbs.example/og.png', safeFetch);
+
+    expect(content).toEqual(
+      expect.arrayContaining([
+        { type: 'image_url', image_url: { url: expect.stringMatching(/^data:image\/png;base64,/), detail: 'auto' } },
+      ]),
+    );
+    expect(safeFetch.urls).toEqual(['https://pbs.example/og.png']);
+    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+  });
+
+  it('drops an image on a host that resolves into the private network', async () => {
+    const safeFetch = createFileSafeFetch(
+      { 'https://internal.example/a.png': { body: Buffer.from('x'), contentType: 'image/png' } },
+      { privateHosts: ['internal.example'] },
+    );
+    expect(await chatWithImage('https://internal.example/a.png', safeFetch)).toBe('look');
+    expect(safeFetch.urls).toEqual([]);
+  });
+
+  it('drops a non-image response and SVGs', async () => {
+    const safeFetch = createFileSafeFetch({
+      'https://site.example/page': { body: Buffer.from('<html>'), contentType: 'text/html' },
+      'https://site.example/logo.svg': { body: Buffer.from('<svg/>'), contentType: 'image/svg+xml' },
+    });
+    expect(await chatWithImage('https://site.example/page', safeFetch)).toBe('look');
+    expect(await chatWithImage('https://site.example/logo.svg', safeFetch)).toBe('look');
   });
 });
 
@@ -499,7 +558,7 @@ describe('OpenRouterProvider image cache', () => {
       role: 'user',
       content: [
         { type: 'text', text: 'same image twice' },
-        { type: 'image', url: 'https://example.com/cached.png' },
+        { type: 'image', url: 'https://cdn.discordapp.com/attachments/1/2/cached.png' },
       ],
     };
 
