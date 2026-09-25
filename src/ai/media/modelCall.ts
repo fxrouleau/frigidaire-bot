@@ -51,10 +51,11 @@ export async function completeMedia(req: MediaCompletionRequest): Promise<string
     provider: { zdr: true },
   };
 
-  const response = await req.client.chat.completions.create(
-    body as unknown as ChatCompletionCreateParamsNonStreaming,
-    { ...featureRequestOptions(req.feature), timeout: req.timeoutMs, maxRetries: 1 },
-  );
+  const response = await req.client.chat.completions.create(body as unknown as ChatCompletionCreateParamsNonStreaming, {
+    ...featureRequestOptions(req.feature),
+    timeout: req.timeoutMs,
+    maxRetries: 1,
+  });
 
   const choice = response.choices?.[0];
   if (!choice) throw new Error(`${req.model} returned no choices`);

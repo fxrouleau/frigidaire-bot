@@ -40,7 +40,13 @@ export type FakeMessageOptions = {
   applicationId?: string | null;
   createdAt?: Date;
   // `duration` (seconds) is set by Discord on voice-message attachments; `id` defaults to `att-<index>`.
-  attachments?: Array<{ url: string; contentType: string | null; name?: string; id?: string; duration?: number | null }>;
+  attachments?: Array<{
+    url: string;
+    contentType: string | null;
+    name?: string;
+    id?: string;
+    duration?: number | null;
+  }>;
   // Raw MessageFlags bits, e.g. MessageFlags.IsVoiceMessage.
   flags?: number;
   embeds?: Array<{

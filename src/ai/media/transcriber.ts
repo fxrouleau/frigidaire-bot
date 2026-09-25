@@ -15,7 +15,7 @@ import { getOpenRouterClient } from '../openRouterClient';
 import { downloadMedia, redact } from './download';
 import { type AudioFormat, detectAudioFormat, nativeAudioFormats } from './formats';
 import { completeMedia, describeError, isInputRejection } from './modelCall';
-import { getStoredTranscript, storeTranscript, mediaCacheKey } from './store';
+import { getStoredTranscript, mediaCacheKey, storeTranscript } from './store';
 import type { MediaTranscoder } from './transcoder';
 import type { AudioInput, TranscriptionOutcome } from './types';
 
@@ -174,7 +174,9 @@ export class AudioTranscriber {
           logger.warn(`transcription: ${model} failed on ${label}: ${describeError(error)}`);
           return { status: 'failed' };
         }
-        logger.warn(`transcription: ${model} refused ${format} for ${label} (${describeError(error)}); retrying as MP3`);
+        logger.warn(
+          `transcription: ${model} refused ${format} for ${label} (${describeError(error)}); retrying as MP3`,
+        );
       }
     }
 

@@ -29,7 +29,10 @@ export interface MediaTranscoder {
    */
   toMp3(input: Buffer, maxSeconds: number): Promise<{ data: Buffer; durationSecs?: number } | undefined>;
   /** Evenly spaced keyframes (≤ maxDimension px on the long side) plus the audio track. */
-  sampleVideo(input: Buffer, opts: { frames: number; maxDimension: number; maxAudioSeconds: number }): Promise<VideoSample>;
+  sampleVideo(
+    input: Buffer,
+    opts: { frames: number; maxDimension: number; maxAudioSeconds: number },
+  ): Promise<VideoSample>;
 }
 
 type RunResult = { stdout: Buffer; stderr: string };
@@ -189,7 +192,20 @@ export class FfmpegTranscoder implements MediaTranscoder {
       const at = ((durationSecs * (i + 0.5)) / count).toFixed(2);
       const out = path.join(dir, `frame-${i}.jpg`);
       try {
-        await this.run(this.ffmpeg, [...common, '-ss', at, '-i', file, '-frames:v', '1', '-vf', scale, '-q:v', '4', out]);
+        await this.run(this.ffmpeg, [
+          ...common,
+          '-ss',
+          at,
+          '-i',
+          file,
+          '-frames:v',
+          '1',
+          '-vf',
+          scale,
+          '-q:v',
+          '4',
+          out,
+        ]);
         frames.push(await fs.readFile(out));
       } catch (error) {
         // A seek past the last keyframe yields no frame; the others are still worth sending.

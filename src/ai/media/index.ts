@@ -1,3 +1,4 @@
+import { FfmpegTranscoder, type MediaTranscoder } from './transcoder';
 // Media understanding: audio transcription (Discord voice messages, audio files) and video description
 // (uploaded clips, videos behind shared links). These are the stable entry points the rest of the bot
 // calls — the chat agent (through the media enricher), the learner, summaries, the link reader and the
@@ -6,7 +7,6 @@
 // Results are cached in bot.db (transcripts by message id, descriptions by URL), so whichever feature
 // pays for a recording first, every later reader gets it for free.
 import { AudioTranscriber } from './transcriber';
-import { FfmpegTranscoder, type MediaTranscoder } from './transcoder';
 import type { AudioInput, VideoInput } from './types';
 import { VideoDescriber } from './video';
 

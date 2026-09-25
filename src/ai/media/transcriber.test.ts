@@ -7,6 +7,7 @@ import {
   createCapturingClient,
   createFakeTranscoder,
   createFileFetch,
+  type FakeTranscoder,
   createMissingTranscoder,
   userContent,
 } from '../../test-support/fakeMedia';
@@ -30,7 +31,9 @@ const files = createFileFetch({
   [MP3_URL]: { body: MP3_BYTES, contentType: 'audio/mpeg' },
 });
 
-function setup(fixtures: OpenRouterFixture[], overrides: Partial<AudioTranscriberOptions> = {}) {
+type SetupOverrides = Partial<Omit<AudioTranscriberOptions, 'transcoder'>> & { transcoder?: FakeTranscoder };
+
+function setup(fixtures: OpenRouterFixture[], overrides: SetupOverrides = {}) {
   const { client, requests } = createCapturingClient(fixtures);
   const transcoder = overrides.transcoder ?? createFakeTranscoder();
   let now = 1_000_000;

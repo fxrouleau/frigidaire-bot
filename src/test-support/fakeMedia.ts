@@ -10,7 +10,11 @@ export const OGG_BYTES = Buffer.concat([Buffer.from('OggS'), Buffer.alloc(60, 1)
 export const MP3_BYTES = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(61, 2)]);
 export const TRANSCODED_MP3 = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(29, 7)]);
 export const MP4_BYTES = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(52, 3)]);
-export const MKV_BYTES = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from('matroska'), Buffer.alloc(52)]);
+export const MKV_BYTES = Buffer.concat([
+  Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+  Buffer.from('matroska'),
+  Buffer.alloc(52),
+]);
 
 type Scripted<T> = T | Error | (() => T | Error);
 

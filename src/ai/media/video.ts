@@ -17,8 +17,8 @@ import { downloadMedia, redact } from './download';
 import { acceptsVideoInput, detectVideoMime } from './formats';
 import { type MediaContentPart, completeMedia, describeError } from './modelCall';
 import { getStoredVideoDescription, mediaCacheKey, storeVideoDescription } from './store';
-import type { AudioTranscriber } from './transcriber';
 import type { MediaTranscoder } from './transcoder';
+import type { AudioTranscriber } from './transcriber';
 import type { VideoInput, VideoOutcome } from './types';
 import { formatClock } from './voice';
 
