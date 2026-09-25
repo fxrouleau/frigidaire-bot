@@ -1,6 +1,6 @@
 // The Discord client's construction options, kept out of app.ts (which logs in on import) so the
 // partials contract can be tested.
-import { Client, type ClientOptions, GatewayIntentBits, Partials } from 'discord.js';
+import { Client, type ClientOptions, GatewayIntentBits, type MessageMentionOptions, Partials } from 'discord.js';
 
 export const DISCORD_INTENTS: readonly GatewayIntentBits[] = [
   GatewayIntentBits.Guilds,
@@ -26,8 +26,17 @@ export const DISCORD_PARTIALS: readonly Partials[] = [
   Partials.User,
 ];
 
+// What a bot post may ping when the send itself doesn't say: the users written into it (and the author
+// of the message it replies to), never @everyone/@here or a role. Without a client default, Discord
+// parses every mention in the content, so a chat reply echoing "@everyone" (a member's dare, a quoted
+// message, a page the bot read) would ping the whole server. Sends that pass their own allowedMentions
+// (webhook relays, reminders, polls, …) keep theirs.
+function defaultAllowedMentions(): MessageMentionOptions {
+  return { parse: ['users'], repliedUser: true };
+}
+
 export function discordClientOptions(): ClientOptions {
-  return { intents: [...DISCORD_INTENTS], partials: [...DISCORD_PARTIALS] };
+  return { intents: [...DISCORD_INTENTS], partials: [...DISCORD_PARTIALS], allowedMentions: defaultAllowedMentions() };
 }
 
 export function createDiscordClient(): Client {
