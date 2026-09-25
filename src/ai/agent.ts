@@ -1,4 +1,4 @@
-import { type Message, StickerFormatType } from 'discord.js';
+import { type Message, type MessageReplyOptions, StickerFormatType } from 'discord.js';
 import { config } from '../config';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
@@ -6,6 +6,7 @@ import type { ConversationPersistence } from './conversationPersistence';
 import { ConversationStore } from './conversationStore';
 import { writeErrorCapture } from './debugCapture';
 import { applyEmojiPolicy, hasCustomEmoji } from './emojiPolicy';
+import { type ContentEnricher, type EnrichmentRole, defaultEnrichers, runEnrichers } from './enrichers';
 import { logFailure } from './failureLogger';
 import { getMemoryStore } from './memory';
 import type { EmojiRow, Identity, Memory, MemoryStore } from './memory/memoryStore';
@@ -20,7 +21,9 @@ import type {
   ProviderToolCall,
   ProviderToolDefinition,
   ToolDefinition,
+  TurnEffects,
 } from './types';
+import { createTurnEffects } from './types';
 import { formatCurrentTimeET, formatRelativeAge, formatTimestampET } from './utils';
 
 // `<@123>` / `<@!123>` user mentions (the legacy `!` is the old nickname form). Role (`<@&>`) and
@@ -58,6 +61,8 @@ export type AgentOrchestratorOptions = {
   // When provided, conversation state is mirrored to disk so it survives a restart within the timeout
   // window. Default (undefined) keeps the store pure in-memory — existing tests stay hermetic.
   persistence?: ConversationPersistence;
+  // Content enrichers run over every rendered user message (voice transcripts, link previews, …).
+  enrichers?: ContentEnricher[];
 };
 
 export class AgentOrchestrator {
@@ -66,6 +71,7 @@ export class AgentOrchestrator {
   private readonly tools: ToolDefinition[];
   private readonly maxToolRounds: number;
   private readonly maxToolInvocations: number;
+  private readonly enrichers: ContentEnricher[];
   // One in-flight turn per channel: two mentions in the same channel run back to back, so the second
   // sees the first's reply in its history instead of both reading the same stale state and the last
   // writer silently dropping the other turn.
@@ -77,6 +83,7 @@ export class AgentOrchestrator {
     this.tools = opts.tools ?? toolDefinitions;
     this.maxToolRounds = opts.maxToolRounds ?? config.agent.maxToolRounds;
     this.maxToolInvocations = opts.maxToolInvocations ?? config.agent.maxToolInvocations;
+    this.enrichers = opts.enrichers ?? defaultEnrichers;
   }
 
   handleMention(message: Message): Promise<void> {
@@ -96,6 +103,7 @@ export class AgentOrchestrator {
     const stopTyping = this.startTypingLoop(message);
     let provider: AiProvider | undefined;
     let workingEntries: ConversationEntry[] = [];
+    const turn = createTurnEffects();
 
     try {
       provider = this.resolveProvider();
@@ -108,7 +116,7 @@ export class AgentOrchestrator {
         this.store.set(channelId, state);
       }
 
-      const userEntry = this.buildUserEntry(message);
+      const userEntry = await this.buildUserEntry(message, 'current');
 
       // Per-turn memory refresh: rebuild the dynamic context (speaker bucket + contextual search +
       // mentioned-subject pulls) once per mention, before chat() and outside the tool loop, so topic
@@ -123,11 +131,11 @@ export class AgentOrchestrator {
 
       workingEntries = dynamic.entry ? [...state.entries, dynamic.entry, userEntry] : [...state.entries, userEntry];
 
-      const finalResponse = await this.runToolLoop(provider, workingEntries, message, channelId);
+      const finalResponse = await this.runToolLoop(provider, workingEntries, message, channelId, turn);
       const reply = this.applyReplyPolicy(finalResponse.text, message, workingEntries, provider.defaultModel);
 
       stopTyping();
-      await this.sendReply(reply, message);
+      await this.sendReply(reply, message, turn);
 
       this.store.set(channelId, { entries: workingEntries, injectedMemoryIds, timestamp: Date.now() });
     } catch (error) {
@@ -163,6 +171,7 @@ export class AgentOrchestrator {
     workingEntries: ConversationEntry[],
     message: Message,
     channelId: string,
+    turn: TurnEffects,
   ): Promise<ProviderChatResponse> {
     const providerTools = provider.supportedTools;
     const hostHandled = (calls: ProviderToolCall[]) =>
@@ -176,7 +185,7 @@ export class AgentOrchestrator {
     const firstCalls = hostHandled(firstResponse.toolCalls);
     if (firstCalls.length === 0) return firstResponse;
 
-    workingEntries.push(...(await this.executeToolCalls(firstCalls, message, provider, channelId)));
+    workingEntries.push(...(await this.executeToolCalls(firstCalls, message, provider, channelId, turn)));
     let totalInvocations = firstCalls.length;
 
     for (let round = 0; round < this.maxToolRounds; round++) {
@@ -194,7 +203,7 @@ export class AgentOrchestrator {
         return this.forceTextResponse(chat, workingEntries);
       }
 
-      workingEntries.push(...(await this.executeToolCalls(roundCalls, message, provider, channelId)));
+      workingEntries.push(...(await this.executeToolCalls(roundCalls, message, provider, channelId, turn)));
 
       // Last allowed round — force a text-only response
       if (round === this.maxToolRounds - 1) {
@@ -272,6 +281,7 @@ export class AgentOrchestrator {
     message: Message,
     provider: AiProvider,
     channelId: string,
+    turn: TurnEffects,
   ): Promise<ConversationEntry[]> {
     const results: ConversationEntry[] = [];
     for (const call of calls) {
@@ -290,7 +300,7 @@ export class AgentOrchestrator {
 
       try {
         logger.info(`Executing host tool "${call.name}" in channel ${channelId}.`);
-        const toolOutput = await toolDefinition.handler({ message, provider, channelId }, call.arguments);
+        const toolOutput = await toolDefinition.handler({ message, provider, channelId, turn }, call.arguments);
         results.push({ kind: 'tool_result', id: call.id, name: call.name, content: toolOutput });
       } catch (error) {
         logger.error(`Error while executing tool ${call.name}:`, error);
@@ -323,32 +333,36 @@ export class AgentOrchestrator {
     ];
 
     const recentMessages = await message.channel.messages.fetch({ limit: 25, before: message.id });
-    const historicalContext: ConversationEntry[] = [...recentMessages.values()]
-      .reverse()
-      .filter((msg) => !msg.author.bot || msg.author.id === message.client.user.id || msg.webhookId !== null)
-      .map((msg) => {
-        const isAssistant = msg.author.id === message.client.user.id;
+    const historicalContext: ConversationEntry[] = await Promise.all(
+      [...recentMessages.values()]
+        .reverse()
+        .filter((msg) => !msg.author.bot || msg.author.id === message.client.user.id || msg.webhookId !== null)
+        .map(async (msg): Promise<ConversationEntry> => {
+          const isAssistant = msg.author.id === message.client.user.id;
 
-        if (isAssistant) {
-          return {
-            kind: 'message',
-            role: 'assistant',
-            content: [{ type: 'text', text: msg.content }],
-          } satisfies ConversationEntry;
-        }
+          if (isAssistant) {
+            return {
+              kind: 'message',
+              role: 'assistant',
+              content: [{ type: 'text', text: msg.content }],
+            };
+          }
 
-        return this.buildUserEntry(msg);
-      });
+          return this.buildUserEntry(msg, 'history');
+        }),
+    );
 
     entries.push(...historicalContext);
     return { entries, injectedMemoryIds: injectedIds };
   }
 
-  private buildUserEntry(message: Message): ConversationEntry {
+  /** A user entry: the message's own text/images plus whatever the content enrichers add for its role. */
+  private async buildUserEntry(message: Message, role: EnrichmentRole): Promise<ConversationEntry> {
+    const enriched = await runEnrichers(message, role, this.enrichers);
     return {
       kind: 'message',
       role: 'user',
-      content: this.buildUserContentParts(message),
+      content: [...this.buildUserContentParts(message), ...enriched],
     };
   }
 
@@ -414,7 +428,7 @@ How you behave:
 - Emojis: you basically don't use them. Plain text is your default and you go many messages without one. A custom server emoji is only for a one-word reaction or a punchline that would otherwise need explaining — never decoration on a normal sentence, and never just because someone else used one. To post one, look it up with get_emoji first; the glossary below is for reading, not a menu.
 - Never say "I'm just an AI" or "as a language model" — you're ${botName}, period.
 
-You can search the web natively. Use it SPARINGLY — only when you genuinely need current, real-time information you couldn't possibly know (live scores, recent news, release dates, etc). Don't search for things you already know. Don't follow links people share.
+You can search the web natively. Use it SPARINGLY — only when you genuinely need current, real-time information you couldn't possibly know (live scores, recent news, release dates, etc). Don't search for things you already know. When someone shares a link and what's behind it matters to the conversation, look at what it actually contains instead of guessing from the URL.
 ${identitiesSection}${emojisSection}${personalitySection}
 These memories are background knowledge — things you know from hanging out in this server. Do NOT force references to inside jokes, show off what you know, or try to reference multiple memories in one response. Let things come up naturally, the way you'd reference a friend's hobby only when it's actually relevant to the conversation. If nothing from your memories is relevant to what's being discussed, just don't mention them. Each memory is tagged with how long ago it was last confirmed; treat months-old current-state claims — what someone "still" does, owns, or plays — as possibly outdated, so hedge or ask instead of asserting them as current fact.
 
@@ -643,8 +657,14 @@ ${lines.join('\n')}
     return parts.length > 0 ? parts : [{ type: 'text', text: '' }];
   }
 
-  private async sendReply(content: string | undefined, message: Message) {
+  private async sendReply(content: string | undefined, message: Message, turn: TurnEffects) {
     if (!content) {
+      // A turn whose output is a reaction or a file needs no text.
+      if (turn.files.length > 0) {
+        await this.safeSend(message, { files: turn.files });
+        return;
+      }
+      if (turn.reactions.length > 0) return;
       const authorName = message.member?.displayName || message.author.username;
       logFailure('parse_failure', `Empty LLM response for message from ${authorName}`);
       await this.safeSend(message, "I've processed the information, but I don't have anything further to add.");
@@ -652,8 +672,12 @@ ${lines.join('\n')}
     }
 
     const chunks = splitMessage(content);
-    for (const chunk of chunks) {
-      await this.safeSend(message, chunk);
+    for (const [index, chunk] of chunks.entries()) {
+      // Files produced this turn ride on the first chunk of the reply.
+      await this.safeSend(
+        message,
+        index === 0 && turn.files.length > 0 ? { content: chunk, files: turn.files } : chunk,
+      );
     }
   }
 
@@ -672,7 +696,7 @@ ${lines.join('\n')}
     }
   }
 
-  private async safeSend(message: Message, content: string): Promise<void> {
+  private async safeSend(message: Message, content: string | MessageReplyOptions): Promise<void> {
     try {
       await message.reply(content);
     } catch (error: unknown) {

@@ -11,6 +11,7 @@ import type { Message, PartialMessage } from 'discord.js';
 import { type MessageJudge, createEdgyJudge } from './ai/messageJudge';
 import { type DeleteRepostMode, config } from './config';
 import { logger } from './logger';
+import { recordRelay } from './relay';
 import { type WebhookIdentity, isWebhookCapableChannel, sendViaWebhook } from './utils';
 
 const MAX_SNAPSHOTS = 100;
@@ -153,10 +154,19 @@ export class DeletedMessageReposter {
     if (snapshot.content.length === 0 && attachments.length === 0) return 'empty';
 
     logger.info(`deletedMessages: reposting ${snapshot.id} by ${snapshot.identity.name} (deleted after ${age}ms)`);
-    await this.send(channel, snapshot.identity, {
+    const repost = await this.send(channel, snapshot.identity, {
       content: snapshot.content.length > 0 ? snapshot.content : undefined,
       files: attachments.map((a) => ({ attachment: a.data, name: a.name })),
     });
+    if (repost?.id) {
+      recordRelay({
+        messageId: repost.id,
+        channelId: channel.id,
+        authorId: snapshot.authorId,
+        authorName: snapshot.identity.name,
+        kind: 'regret',
+      });
+    }
     return 'reposted';
   }
 

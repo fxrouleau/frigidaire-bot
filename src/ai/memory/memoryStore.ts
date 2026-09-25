@@ -612,6 +612,22 @@ export class MemoryStore {
     ) as Memory[];
   }
 
+  /**
+   * A person's memories, matched by their stable Discord id OR any of their names (current display name,
+   * first-seen name, aliases). Display names change and subject_user_id doesn't, but rows saved before
+   * the id column existed, and by remember_fact, only carry a name.
+   */
+  getForPerson(person: { userId?: string; names: string[] }, limit = 20): Memory[] {
+    const names = [...new Set(person.names.map((n) => n.trim()).filter((n) => n.length > 0))];
+    if (!person.userId && names.length === 0) return [];
+    return this.stmt(
+      `SELECT * FROM memories
+       WHERE active = 1
+         AND (subject_user_id = ? OR subject IN (SELECT value FROM json_each(?)))
+       ORDER BY updated_at DESC LIMIT ?`,
+    ).all(person.userId ?? null, JSON.stringify(names), limit) as Memory[];
+  }
+
   getByCategory(category: string, limit = 20): Memory[] {
     return this.stmt('SELECT * FROM memories WHERE category = ? AND active = 1 ORDER BY updated_at DESC LIMIT ?').all(
       category,

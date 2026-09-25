@@ -262,6 +262,49 @@ export const config = {
     },
   },
 
+  /** The server's layout, shared by every feature that posts on its own (reminders, birthdays, Wrapped, …). */
+  server: {
+    /** The channel the group actually talks in; proactive posts default here. Unset ⇒ proactive posts off. */
+    get mainChannelId(): string | undefined {
+      return envString('MAIN_CHANNEL_ID');
+    },
+  },
+
+  // ---- Feature sections. Each feature adds its getters inside its own section only. ----
+
+  /** Reminders and polls (src/scheduling/, src/ai/tools/reminders.ts). */
+  reminders: {},
+
+  /** Birthday announcements (src/scheduling/, src/ai/tools/birthdays.ts). */
+  birthdays: {},
+
+  /** Local message archive, search and Wrapped (src/archive/). */
+  archive: {},
+
+  /** Voice-message transcription and video understanding (src/ai/media/). */
+  media: {},
+
+  /** Reading shared links (src/ai/linkReader/). */
+  linkReader: {},
+
+  /** Replying without an explicit @-mention, judged by a decision model (src/gate/). */
+  gate: {},
+
+  /** Redirecting long rambles to their own channel (src/gate/). */
+  ramble: {},
+
+  /** The code-execution sidecar (sandbox/, src/ai/tools/sandbox.ts). */
+  sandbox: {},
+
+  /** Filing member feature requests as GitHub issues (src/ai/tools/featureRequest.ts). */
+  featureRequests: {},
+
+  /** OpenRouter usage/cost accounting (src/ai/usage.ts). */
+  costs: {},
+
+  /** Discord application commands: right-click message/user menu entries (src/commands/). */
+  commands: {},
+
   /** True inside the Vitest runner — the structural test-hermeticity guard. */
   get isTest(): boolean {
     return Boolean(process.env.VITEST);

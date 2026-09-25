@@ -7,6 +7,7 @@ import {
   type WebhookMessageCreateOptions,
 } from 'discord.js';
 import { logger } from './logger';
+import { recordRelay } from './relay';
 
 /** A guild channel that can own a webhook: regular text channels and announcement channels. */
 export type WebhookCapableChannel = TextChannel | NewsChannel;
@@ -83,11 +84,11 @@ export async function sendViaWebhook(
   channel: WebhookCapableChannel,
   identity: WebhookIdentity,
   payload: string | WebhookMessageCreateOptions,
-): Promise<void> {
+): Promise<Message> {
   const webhook = await channel.createWebhook({ name: identity.name, avatar: identity.avatar });
   logger.info(`Created webhook ${webhook.id} in #${channel.id}.`);
   try {
-    await webhook.send(payload);
+    return await webhook.send(payload);
   } finally {
     try {
       await webhook.delete();
@@ -109,6 +110,14 @@ export async function repostMessage(message: Message, newContent: string): Promi
   if (!isWebhookCapableChannel(channel)) {
     throw new Error(`Channel ${channel.id} (type ${channel.type}) cannot own a webhook.`);
   }
-  await sendViaWebhook(channel, identityOf(message), newContent);
+  const identity = identityOf(message);
+  const repost = await sendViaWebhook(channel, identity, newContent);
+  recordRelay({
+    messageId: repost.id,
+    channelId: channel.id,
+    authorId: message.author.id,
+    authorName: identity.name,
+    kind: 'link_fix',
+  });
   await message.delete();
 }

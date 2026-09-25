@@ -818,3 +818,83 @@ describe('AgentOrchestrator emoji guardrail', () => {
     expect(thirdTurnAssistantTexts).not.toContain(`sure ${TROLLE}`);
   });
 });
+
+describe('AgentOrchestrator turn effects and enrichers', () => {
+  const fileTool: ToolDefinition = {
+    name: 'make_file',
+    description: 'Attaches a file',
+    parameters: { type: 'object', properties: {} },
+    handler: async (ctx) => {
+      ctx.turn.files.push({ attachment: Buffer.from('png'), name: 'chart.png' });
+      return 'attached';
+    },
+  };
+  const reactTool: ToolDefinition = {
+    name: 'react',
+    description: 'Reacts',
+    parameters: { type: 'object', properties: {} },
+    handler: async (ctx) => {
+      ctx.turn.reactions.push('👍');
+      return 'reacted';
+    },
+  };
+
+  it('attaches files produced by tools to the first reply chunk', async () => {
+    const provider = new FakeProvider(
+      [toolCallResponse([{ id: 'c1', name: 'make_file', arguments: {} }]), textResponse('here you go')],
+      { supportedTools: [{ name: 'make_file', type: 'function', hostHandled: true }] },
+    );
+    const orchestrator = makeOrchestrator(provider, { tools: [fileTool] });
+    const fake = createFakeMessage({ content: 'chart please' });
+
+    await orchestrator.handleMention(fake.message);
+
+    expect(fake.recorders.reply.calls).toHaveLength(1);
+    const [payload] = fake.recorders.reply.calls[0] as [{ content: string; files: Array<{ name: string }> }];
+    expect(payload.content).toBe('here you go');
+    expect(payload.files.map((f) => f.name)).toEqual(['chart.png']);
+  });
+
+  it('sends nothing when a turn ends with only a reaction', async () => {
+    const provider = new FakeProvider(
+      [toolCallResponse([{ id: 'c1', name: 'react', arguments: {} }]), textResponse('')],
+      { supportedTools: [{ name: 'react', type: 'function', hostHandled: true }] },
+    );
+    const orchestrator = makeOrchestrator(provider, { tools: [reactTool] });
+    const fake = createFakeMessage({ content: 'thanks fridge' });
+
+    await orchestrator.handleMention(fake.message);
+
+    expect(fake.recorders.reply.calls).toHaveLength(0);
+    expect(fake.recorders.send.calls).toHaveLength(0);
+  });
+
+  it('adds enricher output to the current message with the "current" role', async () => {
+    const roles: string[] = [];
+    const provider = new FakeProvider([textResponse('ok')]);
+    const orchestrator = new AgentOrchestrator({
+      resolveProvider: () => provider,
+      tools: [],
+      timeoutMs: 60_000,
+      enrichers: [
+        {
+          name: 'test',
+          enrich: async (msg, role) => {
+            roles.push(`${msg.id}:${role}`);
+            return [{ type: 'text', text: `[transcript of ${msg.id}]` }];
+          },
+        },
+      ],
+    });
+    const history = createFakeMessage({ messageId: 'h1', content: 'older' }).message;
+    const fake = createFakeMessage({ messageId: 'm1', content: 'what did he say?', historyMessages: [history] });
+
+    await orchestrator.handleMention(fake.message);
+
+    expect(roles.sort()).toEqual(['h1:history', 'm1:current']);
+    const last = provider.calls[0].messages.at(-1);
+    expect(last?.kind === 'message' && last.content.some((p) => p.type === 'text' && p.text === '[transcript of m1]')).toBe(
+      true,
+    );
+  });
+});

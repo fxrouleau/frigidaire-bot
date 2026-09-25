@@ -32,6 +32,9 @@ export type FakeMessageOptions = {
   channelType?: ChannelType;
   messageId?: string;
   webhookId?: string | null;
+  // Discord stamps the owning application's id on messages from application-owned webhooks (the bot's
+  // own relays) and on interaction responses.
+  applicationId?: string | null;
   createdAt?: Date;
   attachments?: Array<{ url: string; contentType: string | null; name?: string }>;
   embeds?: Array<{
@@ -74,9 +77,14 @@ export type FakeMessage = {
   webhooks: FakeWebhook[];
 };
 
+let fakeWebhookMessageCounter = 0;
+
 function createFakeWebhook(sendImpl?: (content: unknown) => Promise<unknown>): FakeWebhook {
   return {
-    send: createRecorder(async (content: unknown) => (sendImpl ? sendImpl(content) : ({} as unknown))),
+    // Like discord.js, send() resolves to the posted message (only its id matters to callers).
+    send: createRecorder(async (content: unknown) =>
+      sendImpl ? sendImpl(content) : ({ id: `webhook-message-${++fakeWebhookMessageCounter}` } as unknown),
+    ),
     delete: createRecorder(async () => ({}) as unknown),
   };
 }
@@ -86,7 +94,8 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
   const authorId = opts.authorId ?? 'user-1';
   const authorUsername = opts.authorUsername ?? 'testuser';
   const authorDisplayName = opts.authorDisplayName ?? 'Test User';
-  const authorIsBot = opts.authorIsBot ?? false;
+  // Discord marks every webhook message's author as a bot, so a webhook fake defaults to bot-authored.
+  const authorIsBot = opts.authorIsBot ?? (opts.webhookId !== undefined && opts.webhookId !== null);
   const botUserId = opts.botUserId ?? 'bot-1';
   const botDisplayName = opts.botDisplayName ?? 'Frigidaire';
   const channelId = opts.channelId ?? 'channel-1';
@@ -174,6 +183,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     createdTimestamp: createdAt.getTime(),
     partial: false,
     webhookId,
+    applicationId: opts.applicationId ?? null,
     author: {
       id: authorId,
       username: authorUsername,
