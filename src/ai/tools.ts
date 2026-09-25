@@ -1,5 +1,14 @@
+import type { Message } from 'discord.js';
+import { logger } from '../logger';
 import { getMemoryStore } from './memory';
-import { type Memory, SELF_DIAGNOSIS_CATEGORIES } from './memory/memoryStore';
+import {
+  type Memory,
+  type MemoryStore,
+  NON_PERSON_SUBJECTS,
+  SELF_DIAGNOSIS_CATEGORIES,
+  nameKey,
+} from './memory/memoryStore';
+import { type ResolvedPerson, cleanSubject, namesOf, resolvePerson } from './people';
 import { emojiSyntax } from './promptSections';
 import { birthdayTools } from './tools/birthdays';
 import { costTools } from './tools/costs';
@@ -9,6 +18,7 @@ import { messageSearchTools } from './tools/messageSearch';
 import { reactTools } from './tools/react';
 import { reminderTools } from './tools/reminders';
 import { sandboxTools } from './tools/sandbox';
+import { runSummaryTool } from './tools/summary';
 import type { ToolDefinition, ToolHandlerContext } from './types';
 
 // The categories the chat model may write. Everything the model sends is untrusted text: a
@@ -48,35 +58,173 @@ function formatMemoryLine(m: Memory): string {
   return `[id:${m.id}] [${m.category}] ${m.subject}: ${m.content} (saved: ${m.created_at}, updated: ${m.updated_at})`;
 }
 
+/**
+ * The member a tool's subject refers to (see resolvePerson). Tool contexts in tests may carry no
+ * message; a store failure only costs the resolution, never the tool call.
+ */
+function resolveSubject(store: MemoryStore, subject: string, message: Message | undefined): ResolvedPerson | undefined {
+  try {
+    return resolvePerson(store, subject, message);
+  } catch (error) {
+    logger.warn(`Resolving memory subject "${subject}" failed:`, error);
+    return undefined;
+  }
+}
+
+/** A person's memories under every name they have had, or the rows filed under a plain subject. */
+function memoriesAbout(
+  store: MemoryStore,
+  person: ResolvedPerson | undefined,
+  subject: string,
+  limit: number,
+): Memory[] {
+  return person
+    ? store.getForPerson({ userId: person.userId, names: person.names }, limit)
+    : store.getBySubject(subject, limit);
+}
+
 const summarizeTool: ToolDefinition = {
   name: 'summarize_messages',
   description:
-    "Summarize the messages in the channel within a given timeframe. The user's current time is an ISO 8601 string. The maximum timeframe to summarize is one week.",
+    'Summarize what was said in this channel over a stretch of time ("catch me up", "what did I miss", "tldr of last night"). Times are Eastern wall-clock (America/New_York) written as \'YYYY-MM-DD HH:MM\'; work them out from the current Eastern time in your context. Vague phrases: "last night" ≈ 18:00 yesterday, "this morning" ≈ 06:00 today, "today" = since 00:00 today, "the last hour" = one hour before now. For "what did I miss" / "since I left", set since_my_last_message instead of guessing a time. Covers at most the last 7 days. The result ends with the people in that stretch.',
   parameters: {
     type: 'object',
     properties: {
       start_time: {
         type: 'string',
-        format: 'date-time',
-        description: 'The start of the time range for the summary, in ISO 8601 format. E.g., "2025-10-03T03:00:00Z".',
+        description:
+          "Start of the range, Eastern wall-clock 'YYYY-MM-DD HH:MM' (e.g. '2026-09-24 18:00'). Required unless since_my_last_message is true.",
       },
       end_time: {
         type: 'string',
-        format: 'date-time',
+        description: 'End of the range, Eastern wall-clock \'YYYY-MM-DD HH:MM\'. Omit for "until now".',
+      },
+      since_my_last_message: {
+        type: 'boolean',
         description:
-          'The end of the time range for the summary, in ISO 8601 format. If the user asks for "today", this should be the current time.',
+          'True to start from when the person asking was last active in this channel before now (their messages from the last few minutes do not count). start_time is then ignored.',
       },
     },
-    required: ['start_time', 'end_time'],
+    required: [],
+    additionalProperties: false,
+  },
+  handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => runSummaryTool(ctx.message, args),
+};
+
+// A real name or nickname the model passes to set_member_info: one short line of plain text.
+const MAX_MEMBER_NAME_LENGTH = 48;
+
+/** A name for set_member_info, or 'invalid' for anything that is not one (markup, mass pings, an essay). */
+function parseMemberName(raw: unknown): string | undefined | 'invalid' {
+  const value = optionalString(raw);
+  if (!value) return undefined;
+  if (/[<>\n]|@(everyone|here)\b|https?:/i.test(value)) return 'invalid';
+  const name = cleanSubject(value).replace(/\s+/g, ' ');
+  if (!name || name.length > MAX_MEMBER_NAME_LENGTH) return 'invalid';
+  return name;
+}
+
+/**
+ * Whether a nickname may be added to a member: not a word that names the group, not one of their own
+ * names already, and not another member's display name, handle or first-seen name (lookups rank those
+ * above nicknames, so it would never find this member anyway). Returns the refusal, or a note when the
+ * nickname is also someone else's real name or nickname, or undefined when it is fine.
+ */
+function checkNickname(
+  store: MemoryStore,
+  userId: string,
+  displayName: string,
+  nickname: string,
+): { refusal?: string; note?: string } {
+  const key = nameKey(nickname);
+  if (NON_PERSON_SUBJECTS.has(key) || ['me', 'i', 'myself'].includes(key)) {
+    return { refusal: `"${nickname}" can't be a nickname.` };
+  }
+  const identities = store.getAllIdentities().filter((i) => i.active !== 0);
+  const own = identities.find((i) => i.discord_user_id === userId);
+  if (namesOf(own, [displayName]).some((n) => nameKey(n) === key)) {
+    return { refusal: `${displayName} already goes by "${nickname}".` };
+  }
+  const others = identities.filter((i) => i.discord_user_id !== userId);
+  const owner = others.find((i) => [i.display_name, i.username, i.canonical_name].some((n) => nameKey(n) === key));
+  if (owner) {
+    return {
+      refusal: `"${nickname}" is ${owner.display_name}'s own name, so it can't also be ${displayName}'s nickname.`,
+    };
+  }
+  const sharer = others.find((i) => [i.irl_name, ...i.aliases].some((n) => nameKey(n) === key));
+  return sharer
+    ? { note: `${sharer.display_name} also goes by "${nickname}", so that name alone won't tell them apart.` }
+    : {};
+}
+
+const setMemberInfoTool: ToolDefinition = {
+  name: 'set_member_info',
+  description:
+    'Record a member\'s real name or a nickname the group uses for them, when someone tells you ("fridge, Yi\'s real name is Yi", "we call Derrick D"). This is how you recognize people by every name they go by. Display names and Discord handles update on their own: never use this for those, for jokes, or for one-off insults.',
+  parameters: {
+    type: 'object',
+    properties: {
+      person: {
+        type: 'string',
+        description: 'Who: any name they go by (display name, handle, real name, nickname), an @mention, or "me".',
+      },
+      real_name: { type: 'string', description: 'Their real-life name. Replaces the one on record.' },
+      add_nickname: { type: 'string', description: 'A nickname the group uses for them, added to the ones on record.' },
+    },
+    required: ['person'],
     additionalProperties: false,
   },
   handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
-    if (!ctx.provider.summarizeMessages) {
-      return 'This provider does not support summarizing messages.';
+    const rawPerson = optionalString(args.person);
+    if (!rawPerson) return 'Say who: person was empty.';
+    const realName = parseMemberName(args.real_name);
+    const nickname = parseMemberName(args.add_nickname);
+    if (realName === 'invalid' || nickname === 'invalid') {
+      return `Names must be plain text up to ${MAX_MEMBER_NAME_LENGTH} characters (no mentions, links or line breaks).`;
     }
-    const startTime = String(args.start_time ?? '');
-    const endTime = String(args.end_time ?? '');
-    return ctx.provider.summarizeMessages(ctx.message, startTime, endTime);
+    if (!realName && !nickname) return 'Nothing to update: give real_name and/or add_nickname.';
+
+    const store = getMemoryStore();
+    const person = resolveSubject(store, rawPerson, ctx.message);
+    if (!person) {
+      return `I don't know who "${rawPerson}" is. Use a name they go by or @mention them.`;
+    }
+
+    // A member @-mentioned before they ever posted has no identity row yet.
+    if (!store.getIdentityById(person.userId)) store.upsertIdentity(person.userId, person.displayName);
+    const before = store.getIdentityById(person.userId);
+
+    const results: string[] = [];
+    const notes: string[] = [];
+    let aliasToAdd: string | undefined;
+    if (nickname) {
+      const check = checkNickname(store, person.userId, person.displayName, nickname);
+      if (check.refusal) notes.push(check.refusal);
+      else aliasToAdd = nickname;
+      if (check.note) notes.push(check.note);
+    }
+
+    const changed = store.updateIdentityMeta(person.userId, {
+      irl_name: realName,
+      aliases_add: aliasToAdd ? [aliasToAdd] : [],
+    });
+    if (realName) {
+      results.push(
+        before?.irl_name === realName
+          ? `real name was already ${realName}`
+          : `real name is now ${realName}${before?.irl_name ? ` (was ${before.irl_name})` : ''}`,
+      );
+    }
+    if (aliasToAdd) results.push(`added nickname "${aliasToAdd}"`);
+
+    // Identity edits change how every later lookup resolves names: leave an audit line.
+    if (changed) logger.info(`set_member_info: ${person.displayName} (${person.userId}): ${results.join(', ')}`);
+    const summary =
+      results.length > 0
+        ? `${person.displayName}: ${results.join('; ')}.`
+        : `Nothing changed for ${person.displayName}.`;
+    return [summary, ...notes].join(' ');
   },
 };
 
@@ -123,13 +271,17 @@ const rememberFactTool: ToolDefinition = {
     type: 'object',
     properties: {
       category: { type: 'string', enum: [...CHAT_MEMORY_CATEGORIES] },
-      subject: { type: 'string', description: 'Who/what this is about. Use Discord display name or "server".' },
+      subject: {
+        type: 'string',
+        description:
+          'Who/what this is about: the person\'s display name (a nickname, real name, or "me" for whoever is talking also works — it is matched to the member), or "server" for the group.',
+      },
       content: { type: 'string', description: 'What to remember. Be concise.' },
     },
     required: ['category', 'subject', 'content'],
     additionalProperties: false,
   },
-  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+  handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const category = parseCategory(args.category);
     if (!category) {
       return `Invalid category "${String(args.category)}". Use one of: ${CHAT_MEMORY_CATEGORIES.join(', ')}.`;
@@ -138,11 +290,23 @@ const rememberFactTool: ToolDefinition = {
     if (!content) {
       return 'Nothing to remember: content was empty.';
     }
-    const subject = optionalString(args.subject) ?? 'general';
+    const rawSubject = optionalString(args.subject) ?? 'general';
 
     const store = getMemoryStore();
-    const id = await store.save({ category, subject, content, source: 'conversation' });
-    return `Saved to memory (id: ${id}).`;
+    // A person's memories are keyed by their Discord id and filed under their CURRENT display name, so
+    // "Derrick", "@Wheezer" and "me" all land on the same member and survive renames. Anything else
+    // ('server', a topic, someone the bot has never seen) is kept as written.
+    const person = resolveSubject(store, rawSubject, ctx.message);
+    const cleaned = cleanSubject(rawSubject) || rawSubject;
+    const subject = person?.displayName ?? (NON_PERSON_SUBJECTS.has(nameKey(cleaned)) ? nameKey(cleaned) : cleaned);
+    const id = await store.save({
+      category,
+      subject,
+      content,
+      source: 'conversation',
+      subject_user_id: person?.userId,
+    });
+    return person ? `Saved to memory (id: ${id}) about ${person.displayName}.` : `Saved to memory (id: ${id}).`;
   },
 };
 
@@ -154,7 +318,10 @@ const recallMemoriesTool: ToolDefinition = {
     type: 'object',
     properties: {
       query: { type: 'string', description: "What to search for — a person's name, a topic, an event, etc." },
-      subject: { type: 'string', description: 'Optional: filter by person display name or "server".' },
+      subject: {
+        type: 'string',
+        description: 'Optional: filter by person (any name they go by, or "me") or "server".',
+      },
       category: {
         type: 'string',
         enum: [...CHAT_MEMORY_CATEGORIES, 'all'],
@@ -164,7 +331,7 @@ const recallMemoriesTool: ToolDefinition = {
     required: ['query'],
     additionalProperties: false,
   },
-  handler: async (_ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+  handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const store = getMemoryStore();
     const query = optionalString(args.query) ?? '';
     const subject = optionalString(args.subject);
@@ -181,16 +348,18 @@ const recallMemoriesTool: ToolDefinition = {
       }
     };
 
-    // 1. Subject-keyed rows first: an explicit subject filter, then the query itself read as a name.
-    if (subject) add(store.getBySubject(subject, 20));
-    if (query) add(store.getBySubject(query, 20));
+    // 1. Person-keyed rows first: an explicit subject filter, then the query itself read as a name. A
+    //    name that resolves to a member pulls their memories by id and under every name they've had.
+    if (subject) add(memoriesAbout(store, resolveSubject(store, subject, ctx.message), subject, 20));
+    if (query) add(memoriesAbout(store, resolveSubject(store, query, ctx.message), query, 20));
 
     // 2. Hybrid (semantic + keyword) search for topic matches.
     if (query) {
       try {
         add(await store.search(query, 20));
-      } catch {
+      } catch (error) {
         // Search may fail (e.g. embeddings and FTS both unavailable); fall back to subject-only results.
+        logger.warn('recall_memories: search failed, returning subject matches only:', error);
       }
     }
 
@@ -316,6 +485,7 @@ export const toolDefinitions: ToolDefinition[] = [
   rememberFactTool,
   recallMemoriesTool,
   forgetMemoryTool,
+  setMemberInfoTool,
   querySelfDiagnosisTool,
   getEmojiTool,
   ...reactTools,

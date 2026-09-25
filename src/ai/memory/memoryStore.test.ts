@@ -1,3 +1,7 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeEmbeddingProvider } from '../../test-support/fakeEmbeddings';
 import type { EmbeddingKind } from './embeddingProvider';
@@ -593,6 +597,57 @@ describe('identities', () => {
 
     const [identity] = store.getAllIdentities();
     expect(identity.aliases).toEqual(['Annie', 'A']);
+  });
+
+  it('upsertIdentity() records the Discord handle, keeps it when a caller has none, and follows a change', () => {
+    store.upsertIdentity('123', 'Jason');
+    expect(store.getIdentityById('123')?.username).toBeNull();
+
+    store.upsertIdentity('123', 'Jason', 'cigalefourmi');
+    expect(store.getIdentityById('123')?.username).toBe('cigalefourmi');
+
+    // Fetched history / relays only know a name: the handle survives.
+    store.upsertIdentity('123', 'Jay', '  ');
+    store.upsertIdentity('123', 'Jay');
+    expect(store.getIdentityById('123')).toMatchObject({ display_name: 'Jay', username: 'cigalefourmi' });
+
+    store.upsertIdentity('123', 'Jay', 'cigale2');
+    expect(store.getIdentityById('123')?.username).toBe('cigale2');
+  });
+
+  it('upsertIdentity() bumps updated_at when only the handle changes', () => {
+    store.upsertIdentity('123', 'Jason', 'old_handle');
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE identities SET updated_at = datetime('now', '-1 day') WHERE discord_user_id = '123'").run();
+    const before = store.getIdentityById('123')?.updated_at;
+
+    store.upsertIdentity('123', 'Jason', 'old_handle');
+    expect(store.getIdentityById('123')?.updated_at).toBe(before);
+
+    store.upsertIdentity('123', 'Jason', 'new_handle');
+    expect(store.getIdentityById('123')?.updated_at).not.toBe(before);
+  });
+
+  it('adds the username column to an existing identities table (additive migration)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-migration-'));
+    const file = path.join(dir, 'memory.db');
+    try {
+      const legacy = new Database(file);
+      legacy.exec(`CREATE TABLE identities (
+        discord_user_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, canonical_name TEXT NOT NULL, irl_name TEXT,
+        aliases TEXT NOT NULL DEFAULT '[]', first_seen_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')), active INTEGER DEFAULT 1)`);
+      legacy.prepare("INSERT INTO identities (discord_user_id, display_name, canonical_name) VALUES ('1', 'Jason', 'Jason')").run();
+      legacy.close();
+
+      const migrated = new MemoryStore(file);
+      expect(migrated.getIdentityById('1')).toMatchObject({ display_name: 'Jason', username: null });
+      migrated.upsertIdentity('1', 'Jason', 'cigalefourmi');
+      expect(migrated.getIdentityById('1')?.username).toBe('cigalefourmi');
+      migrated.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1756,5 +1811,152 @@ describe('deactivate() idempotence and FTS index integrity', () => {
     store.compact();
 
     expect((await store.search('arcade')).map((m) => m.id)).toEqual([id]);
+  });
+});
+
+describe('stampSubjectUserIds() (startup link of name-only memories to member ids)', () => {
+  function rowOf(id: number) {
+    // @ts-expect-error accessing private db for verification
+    return store.db.prepare('SELECT subject, subject_user_id, updated_at, active FROM memories WHERE id = ?').get(id) as {
+      subject: string;
+      subject_user_id: string | null;
+      updated_at: string;
+      active: number;
+    };
+  }
+
+  beforeEach(() => {
+    store.upsertIdentity('111', 'OldNick');
+    store.upsertIdentity('111', 'Wheezer'); // display Wheezer, canonical OldNick
+    store.upsertIdentity('222', 'Jason');
+  });
+
+  it('stamps rows whose subject is a member’s current or first-seen name, case-insensitively', async () => {
+    const a = await store.save({ category: 'fact', subject: 'Wheezer', content: 'Owns a husky' });
+    const b = await store.save({ category: 'fact', subject: 'oldnick', content: 'Plays bass guitar' });
+    const c = await store.save({ category: 'fact', subject: 'JASON', content: 'Works nights at the depot' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 3, names: 3, ambiguous: 0 });
+    expect(rowOf(a).subject_user_id).toBe('111');
+    expect(rowOf(b).subject_user_id).toBe('111');
+    expect(rowOf(c).subject_user_id).toBe('222');
+    // Subjects are left as written (the FTS index covers them); getForPerson now finds every row by id.
+    expect(rowOf(b).subject).toBe('oldnick');
+    expect(store.getForPerson({ userId: '111', names: [] }).map((m) => m.id).sort()).toEqual([a, b].sort());
+  });
+
+  it('also stamps Discord handles, IRL names and nicknames that only one member goes by', async () => {
+    store.upsertIdentity('222', 'Jason', 'cigalefourmi');
+    store.updateIdentityMeta('111', { irl_name: 'Derrick', aliases_add: ['Wheez'] });
+    const handle = await store.save({ category: 'fact', subject: 'cigalefourmi', content: 'Mains Jhin in ranked' });
+    const irl = await store.save({ category: 'fact', subject: 'Derrick', content: 'Works as an electrician' });
+    const alias = await store.save({ category: 'preference', subject: 'wheez', content: 'Hates cilantro' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 3, names: 3, ambiguous: 0 });
+    expect(rowOf(handle).subject_user_id).toBe('222');
+    expect(rowOf(irl).subject_user_id).toBe('111');
+    expect(rowOf(alias).subject_user_id).toBe('111');
+  });
+
+  it('treats a name two members go by in any form as ambiguous (a display name does not outrank a nickname here)', async () => {
+    store.updateIdentityMeta('111', { aliases_add: ['Jason'] });
+    const row = await store.save({ category: 'fact', subject: 'Jason', content: 'Drives a red Miata' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, names: 0, ambiguous: 1 });
+    expect(rowOf(row).subject_user_id).toBeNull();
+  });
+
+  it('is idempotent and never overwrites an existing id', async () => {
+    const mismatched = await store.save({ category: 'fact', subject: 'Jason', subject_user_id: '999', content: 'Has a twin' });
+    await store.save({ category: 'fact', subject: 'Jason', content: 'Drives a red Miata' });
+
+    expect(store.stampSubjectUserIds().stamped).toBe(1);
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, names: 0, ambiguous: 0 });
+    expect(rowOf(mismatched).subject_user_id).toBe('999');
+  });
+
+  it('skips names shared by two members, server-wide subjects, unknown names and inactive rows', async () => {
+    // Someone else was first seen as "Wheezer" too: the name is ambiguous.
+    store.upsertIdentity('333', 'Wheezer');
+    store.upsertIdentity('333', 'Simon');
+    const ambiguous = await store.save({ category: 'fact', subject: 'Wheezer', content: 'Likes cats a lot' });
+    const server = await store.save({ category: 'vibe', subject: 'server', content: 'Movie night on Fridays' });
+    const unknown = await store.save({ category: 'fact', subject: 'Stranger', content: 'Nobody knows them' });
+    const inactive = await store.save({ category: 'fact', subject: 'Jason', content: 'Used to skate' });
+    store.deactivate(inactive);
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, names: 0, ambiguous: 1 });
+    for (const id of [ambiguous, server, unknown, inactive]) expect(rowOf(id).subject_user_id).toBeNull();
+  });
+
+  it('does not refresh updated_at (the TTL clock) or disturb search', async () => {
+    const id = await store.save({ category: 'event', subject: 'Jason', content: 'Moving apartments next week' });
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE memories SET updated_at = datetime('now', '-3 days') WHERE id = ?").run(id);
+    const before = rowOf(id).updated_at;
+
+    store.stampSubjectUserIds();
+
+    expect(rowOf(id).updated_at).toBe(before);
+    expect((await store.search('apartments')).map((m) => m.id)).toEqual([id]);
+  });
+});
+
+describe('save-time dedup never merges two different people who share a name', () => {
+  it('lexical dedup skips a row with another member id, and a merge adopts the incoming id', async () => {
+    const first = await store.save({ category: 'fact', subject: 'Alex', subject_user_id: '111', content: 'Likes cats and dogs very much' });
+    const other = await store.save({ category: 'fact', subject: 'Alex', subject_user_id: '222', content: 'Likes cats and dogs very much indeed' });
+    expect(other).not.toBe(first);
+
+    const nameOnly = await store.save({ category: 'fact', subject: 'Sam', content: 'Plays the drums every weekend' });
+    const merged = await store.save({ category: 'fact', subject: 'Sam', subject_user_id: '333', content: 'Plays the drums every weekend now' });
+    expect(merged).toBe(nameOnly);
+    expect(store.getAllActive().find((m) => m.id === nameOnly)?.subject_user_id).toBe('333');
+  });
+
+  it('semantic dedup skips a near-duplicate that belongs to another member id', async () => {
+    const { store: semStore } = makeSemanticStore({ dedupThreshold: 0.65 });
+    // Word overlap 0.5714 (≤ 0.6, lexical keeps both) but cosine ≈ 0.80 (≥ 0.65, semantic would merge).
+    const a = await semStore.save({ category: 'fact', subject: 'Alex', subject_user_id: '111', content: 'Alex loves eating pizza with extra cheese on top' });
+    const b = await semStore.save({ category: 'fact', subject: 'Alex', subject_user_id: '222', content: 'Alex loves eating pizza with mushrooms' });
+    expect(b).not.toBe(a);
+    expect(semStore.getAllActive()).toHaveLength(2);
+
+    const c = await semStore.save({ category: 'fact', subject: 'Alex', subject_user_id: '111', content: 'Alex loves eating pizza with mushrooms' });
+    expect(c).toBe(a);
+  });
+});
+
+describe('compact() dedup groups by person (subject_user_id, else subject)', () => {
+  it('deduplicates one person’s memories filed under two different names', async () => {
+    const older = await store.save({ category: 'fact', subject: 'OldNick', subject_user_id: '111', content: 'Likes cats and dogs very much' });
+    const newer = await store.save({ category: 'fact', subject: 'Wheezer', subject_user_id: '111', content: 'Likes cats and dogs very much indeed' });
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE memories SET updated_at = datetime('now', '-1 hour') WHERE id = ?").run(older);
+
+    const result = store.compact();
+
+    expect(result.removed).toBe(1);
+    expect(store.getAllActive().map((m) => m.id)).toEqual([newer]);
+    // The FTS index stays consistent: the survivor is searchable, the duplicate is gone.
+    expect((await store.search('cats dogs')).map((m) => m.id)).toEqual([newer]);
+  });
+
+  it('keeps two different people apart even when they share a display name', async () => {
+    await store.save({ category: 'fact', subject: 'Alex', subject_user_id: '111', content: 'Likes cats and dogs very much' });
+    await store.save({ category: 'fact', subject: 'Alex', subject_user_id: '222', content: 'Likes cats and dogs very much indeed' });
+
+    expect(store.compact().removed).toBe(0);
+    expect(store.getAllActive()).toHaveLength(2);
+  });
+
+  it('still groups name-only rows by subject', async () => {
+    const a = await store.save({ category: 'fact', subject: 'server', content: 'Likes cats and dogs very much' });
+    const b = await store.save({ category: 'fact', subject: 'server', content: 'Enjoys swimming every weekend morning' });
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE memories SET content = 'Likes cats and dogs very much indeed', updated_at = datetime('now', '-1 hour') WHERE id = ?").run(b);
+
+    expect(store.compact().removed).toBe(1);
+    expect(store.getAllActive().map((m) => m.id)).toEqual([a]);
   });
 });

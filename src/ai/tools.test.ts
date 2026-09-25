@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createFakeMessage, type FakeMessageOptions } from '../test-support/fakeDiscord';
 import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
 import { getMemoryStore, setMemoryStoreForTesting } from './memory';
 import { MemoryStore } from './memory/memoryStore';
@@ -344,6 +345,217 @@ describe('remember_fact + recall_memories round trip', () => {
     });
     expect(recallResult).toContain('harmonicas');
     expect(recallResult).toMatch(/\[id:\d+\]/);
+  });
+});
+
+describe('memories keyed by stable member id', () => {
+  /** A tool context whose triggering message is from Jason (id 222…) unless overridden. */
+  function ctxFor(opts: FakeMessageOptions = {}): ToolHandlerContext {
+    const { message } = createFakeMessage({ authorId: '222222222222222222', authorDisplayName: 'Jason', ...opts });
+    return { message } as ToolHandlerContext;
+  }
+
+  beforeEach(() => {
+    const store = getMemoryStore();
+    store.upsertIdentity('111111111111111111', 'OldNick');
+    store.upsertIdentity('111111111111111111', 'Wheezer');
+    store.updateIdentityMeta('111111111111111111', { irl_name: 'Derrick', aliases_add: ['Wheez'] });
+    store.upsertIdentity('222222222222222222', 'Jason');
+  });
+
+  it('remember_fact files a memory about "me" under the speaker’s id and current display name', async () => {
+    const result = await rememberFactTool!.handler(ctxFor(), { category: 'fact', subject: 'me', content: 'Works nights' });
+    expect(result).toMatch(/^Saved to memory \(id: \d+\) about Jason\.$/);
+    const [row] = getMemoryStore().getAllActive();
+    expect(row.subject).toBe('Jason');
+    expect(row.subject_user_id).toBe('222222222222222222');
+  });
+
+  it('remember_fact resolves a real name, nickname or old name to the member', async () => {
+    const store = getMemoryStore();
+    const facts: Record<string, string> = {
+      Derrick: 'Owns a husky named Moose',
+      wheez: 'Works as an electrician downtown',
+      OldNick: 'Grew up in Sherbrooke',
+      '@Wheezer': 'Plays bass in a cover band',
+    };
+    for (const [subject, content] of Object.entries(facts)) {
+      await rememberFactTool!.handler(ctxFor(), { category: 'fact', subject, content });
+    }
+    const rows = store.getAllActive();
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.subject).toBe('Wheezer');
+      expect(row.subject_user_id).toBe('111111111111111111');
+    }
+  });
+
+  it('remember_fact resolves an @-mentioned member the bot has no identity row for', async () => {
+    const ctx = ctxFor({
+      content: '<@1> remember <@444444444444444444> hates cilantro',
+      mentionedUsers: [{ id: '444444444444444444', displayName: 'NewGuy' }],
+    });
+    const result = await rememberFactTool!.handler(ctx, { category: 'preference', subject: 'NewGuy', content: 'Hates cilantro' });
+    expect(result).toContain('about NewGuy');
+    expect(getMemoryStore().getAllActive()[0].subject_user_id).toBe('444444444444444444');
+  });
+
+  it('remember_fact keeps "server" and unknown subjects as written, without an id', async () => {
+    await rememberFactTool!.handler(ctxFor(), { category: 'vibe', subject: 'Server', content: 'Movie night Fridays' });
+    await rememberFactTool!.handler(ctxFor(), { category: 'fact', subject: 'Costco', content: 'Hot dog is still 1.50' });
+    const rows = getMemoryStore().getAllActive();
+    expect(rows.map((r) => [r.subject, r.subject_user_id]).sort()).toEqual([
+      ['Costco', null],
+      ['server', null],
+    ]);
+  });
+
+  it('recall_memories finds a renamed member’s memories under every name, by subject or by query', async () => {
+    const store = getMemoryStore();
+    const byId = await store.save({ category: 'fact', subject: 'OldNick', subject_user_id: '111111111111111111', content: 'Plays bass' });
+    const byIrlName = await store.save({ category: 'fact', subject: 'Derrick', content: 'Owns a husky named Moose' });
+    await store.save({ category: 'fact', subject: 'Jason', subject_user_id: '222222222222222222', content: 'Drives a Miata' });
+
+    const bySubject = await recallMemoriesTool!.handler(ctxFor(), { query: 'anything', subject: 'Wheezer' });
+    expect(bySubject).toContain(`[id:${byId}]`);
+    expect(bySubject).toContain(`[id:${byIrlName}]`);
+    expect(bySubject).not.toContain('Miata');
+
+    const byQuery = await recallMemoriesTool!.handler(ctxFor(), { query: 'wheez' });
+    expect(byQuery).toContain(`[id:${byId}]`);
+    expect(byQuery).toContain(`[id:${byIrlName}]`);
+
+    const aboutMe = await recallMemoriesTool!.handler(ctxFor(), { query: 'me' });
+    expect(aboutMe).toContain('Miata');
+  });
+
+  it('resolves a Discord handle in remember_fact and recall_memories (rows filed under it included)', async () => {
+    const store = getMemoryStore();
+    store.upsertIdentity('222222222222222222', 'Jason', 'cigalefourmi');
+    // What the learner used to do: file a memory under the handle, without an id.
+    const underHandle = await store.save({ category: 'fact', subject: 'cigalefourmi', content: 'Mains Jhin in ranked' });
+
+    await rememberFactTool!.handler(ctxFor({ authorId: '111111111111111111', authorDisplayName: 'Wheezer' }), {
+      category: 'fact',
+      subject: 'cigalefourmi',
+      content: 'Works nights at the depot',
+    });
+    const saved = store.getAllActive().find((m) => m.content === 'Works nights at the depot');
+    expect(saved).toMatchObject({ subject: 'Jason', subject_user_id: '222222222222222222' });
+
+    const recalled = await recallMemoriesTool!.handler(ctxFor(), { query: 'something', subject: 'Jason' });
+    expect(recalled).toContain(`[id:${underHandle}]`);
+    expect(recalled).toContain('Works nights at the depot');
+  });
+});
+
+describe('set_member_info tool', () => {
+  const setMemberInfoTool = toolDefinitions.find((t) => t.name === 'set_member_info');
+
+  function ctxFor(opts: FakeMessageOptions = {}): ToolHandlerContext {
+    const { message } = createFakeMessage({ authorId: '222222222222222222', authorDisplayName: 'Jason', ...opts });
+    return { message } as ToolHandlerContext;
+  }
+
+  beforeEach(() => {
+    const store = getMemoryStore();
+    store.upsertIdentity('111111111111111111', 'Wheezer', 'wheezy_d');
+    store.upsertIdentity('222222222222222222', 'Jason', 'cigalefourmi');
+    store.updateIdentityMeta('222222222222222222', { irl_name: 'Alex' });
+  });
+
+  it('is offered to the model with a person and optional real_name / add_nickname', () => {
+    const params = setMemberInfoTool!.parameters as { properties: Record<string, unknown>; required: string[] };
+    expect(Object.keys(params.properties).sort()).toEqual(['add_nickname', 'person', 'real_name']);
+    expect(params.required).toEqual(['person']);
+  });
+
+  it('"fridge, Yi\'s real name is Yi": sets the real name of an @-mentioned member, even one never seen before', async () => {
+    const ctx = ctxFor({
+      content: "<@1> <@333333333333333333>'s real name is Yi",
+      mentionedUsers: [{ id: '333333333333333333', displayName: 'yiyi_gamer' }],
+    });
+
+    const result = await setMemberInfoTool!.handler(ctx, { person: 'yiyi_gamer', real_name: 'Yi' });
+
+    expect(result).toBe('yiyi_gamer: real name is now Yi.');
+    expect(getMemoryStore().getIdentityById('333333333333333333')).toMatchObject({ display_name: 'yiyi_gamer', irl_name: 'Yi' });
+  });
+
+  it('replaces a real name and adds a nickname, which every later lookup then understands', async () => {
+    const result = await setMemberInfoTool!.handler(ctxFor(), { person: 'me', real_name: 'Alexandre', add_nickname: 'Big J' });
+
+    expect(result).toBe('Jason: real name is now Alexandre (was Alex); added nickname "Big J".');
+    expect(getMemoryStore().getIdentityById('222222222222222222')).toMatchObject({ irl_name: 'Alexandre', aliases: ['Big J'] });
+
+    await rememberFactTool!.handler(ctxFor({ authorId: '111111111111111111', authorDisplayName: 'Wheezer' }), {
+      category: 'fact',
+      subject: 'big j',
+      content: 'Drives a red Miata',
+    });
+    expect(getMemoryStore().getAllActive()[0]).toMatchObject({ subject: 'Jason', subject_user_id: '222222222222222222' });
+  });
+
+  it('resolves the person by any name they go by, and reports a no-op honestly', async () => {
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'wheezy_d', real_name: 'Derrick' })).toBe(
+      'Wheezer: real name is now Derrick.',
+    );
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Derrick', real_name: 'Derrick' })).toBe(
+      'Wheezer: real name was already Derrick.',
+    );
+  });
+
+  it("refuses a nickname that is another member's own name or already theirs, and notes a shared one", async () => {
+    const store = getMemoryStore();
+    store.updateIdentityMeta('111111111111111111', { aliases_add: ['Boss'] });
+
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Wheezer', add_nickname: 'cigalefourmi' })).toBe(
+      'Nothing changed for Wheezer. "cigalefourmi" is Jason\'s own name, so it can\'t also be Wheezer\'s nickname.',
+    );
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Wheezer', add_nickname: 'boss' })).toBe(
+      'Nothing changed for Wheezer. Wheezer already goes by "boss".',
+    );
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Wheezer', add_nickname: 'server' })).toMatch(
+      /"server" can't be a nickname/,
+    );
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason', add_nickname: 'Boss' })).toBe(
+      'Jason: added nickname "Boss". Wheezer also goes by "Boss", so that name alone won\'t tell them apart.',
+    );
+    expect(store.getIdentityById('111111111111111111')?.aliases).toEqual(['Boss']);
+  });
+
+  it('rejects unknown people, empty updates and anything that is not a plain name', async () => {
+    const store = getMemoryStore();
+    const before = store.getAllIdentities();
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Nobody', real_name: 'Bob' })).toMatch(/I don't know who "Nobody" is/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason' })).toMatch(/Nothing to update/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason', add_nickname: '@everyone' })).toMatch(/plain text/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason', real_name: 'x'.repeat(60) })).toMatch(/plain text/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason', add_nickname: 'see https://x.com' })).toMatch(/plain text/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: ' ', real_name: 'Bob' })).toMatch(/person was empty/);
+    expect(store.getAllIdentities()).toEqual(before);
+  });
+});
+
+describe('summarize_messages tool', () => {
+  const summarizeTool = toolDefinitions.find((t) => t.name === 'summarize_messages');
+
+  it('takes Eastern wall-clock times and "since my last message", and explains vague phrases', () => {
+    const params = summarizeTool!.parameters as { properties: Record<string, unknown>; required: string[] };
+    expect(Object.keys(params.properties).sort()).toEqual(['end_time', 'since_my_last_message', 'start_time']);
+    expect(params.required).toEqual([]);
+    expect(summarizeTool!.description).toContain('Eastern');
+    expect(summarizeTool!.description).toContain('"last night" ≈ 18:00 yesterday');
+    expect(summarizeTool!.description).toContain('"this morning" ≈ 06:00 today');
+    expect(summarizeTool!.description).toContain('"today" = since 00:00 today');
+    expect(summarizeTool!.description).toContain('7 days');
+  });
+
+  it('answers bad arguments without touching Discord or OpenRouter', async () => {
+    const fake = createFakeMessage();
+    const ctx = { message: fake.message } as ToolHandlerContext;
+    expect(await summarizeTool!.handler(ctx, { start_time: 'yesterday-ish' })).toMatch(/Invalid start_time/);
+    expect(fake.recorders.messagesFetch.calls).toHaveLength(0);
   });
 });
 
