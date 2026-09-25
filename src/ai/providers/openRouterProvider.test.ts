@@ -6,7 +6,13 @@ import { createReplayClient, loadFixture } from '../../test-support/openRouterFe
 import { createFileSafeFetch } from '../../test-support/fakeMedia';
 import type { ConversationEntry, ProviderToolDefinition } from '../types';
 import { FEATURE_HEADER } from '../usage';
-import { OpenRouterProvider, extractToolCalls, parseOpenRouterResponse } from './openRouterProvider';
+import {
+  MAX_IMAGES_PER_REQUEST,
+  OpenRouterProvider,
+  extractToolCalls,
+  imagesToHide,
+  parseOpenRouterResponse,
+} from './openRouterProvider';
 
 // The replay client serves a recorded fixture body instead of hitting the network. parse helpers
 // take the fixture's `response` field (an OpenAI ChatCompletion shape) directly.
@@ -566,5 +572,130 @@ describe('OpenRouterProvider image cache', () => {
     await provider.chat({ messages: [entry, entry], tools: [] });
 
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
+  });
+
+  const pngBytes = () =>
+    sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 0, g: 0, b: 255 } } })
+      .png()
+      .toBuffer();
+
+  /** Serves the same small PNG for every URL and records which URLs were downloaded. */
+  async function stubImageFetch(delayMs = 0): Promise<{ urls: string[]; maxInFlight: () => number }> {
+    const png = await pngBytes();
+    const urls: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      urls.push(String(input instanceof Request ? input.url : input));
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      inFlight--;
+      return new Response(png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer, {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      });
+    });
+    return { urls, maxInFlight: () => maxInFlight };
+  }
+
+  const imageUrl = (n: number | string) => `https://cdn.discordapp.com/attachments/1/${n}/img.png`;
+  const withImages = (...urls: string[]): ConversationEntry => ({
+    kind: 'message',
+    role: 'user',
+    content: [{ type: 'text', text: 'pic' }, ...urls.map((url) => ({ type: 'image' as const, url }))],
+  });
+
+  function cachingProvider(requests: unknown[] = [], imageCacheMaxBytes?: number): OpenRouterProvider {
+    return new OpenRouterProvider({
+      client: createReplayClient(loadFixture('text-response'), (body) => requests.push(body)),
+      model: 'test-model',
+      fallbackModels: [],
+      imageCacheMaxBytes,
+    });
+  }
+
+  it('sends only the newest images of a long window, and every later round is served from the cache', async () => {
+    const fetched = await stubImageFetch();
+    const requests: unknown[] = [];
+    const provider = cachingProvider(requests);
+    const window = Array.from({ length: 150 }, (_, i) => withImages(imageUrl(i)));
+
+    await provider.chat({ messages: window, tools: [] });
+    await provider.chat({ messages: window, tools: [] });
+
+    // The newest 40 are downloaded once; the second call (the next tool round) downloads nothing.
+    expect(fetched.urls).toHaveLength(MAX_IMAGES_PER_REQUEST);
+    expect(new Set(fetched.urls)).toEqual(new Set(Array.from({ length: 40 }, (_, i) => imageUrl(110 + i))));
+    const body = requests[1] as RequestBody;
+    type Part = { type: string; text?: string };
+    const parts = (body.messages ?? []).flatMap((m): Part[] => (Array.isArray(m.content) ? (m.content as Part[]) : []));
+    expect(parts.filter((p) => p.type === 'image_url')).toHaveLength(40);
+    expect(parts.filter((p) => p.type === 'text' && p.text === '[image]')).toHaveLength(110);
+  });
+
+  it('moves the image cut in steps, so the request prefix stays stable while new images arrive', () => {
+    expect(imagesToHide(0)).toBe(0);
+    expect(imagesToHide(40)).toBe(0);
+    expect(imagesToHide(41)).toBe(10);
+    expect(imagesToHide(50)).toBe(10);
+    expect(imagesToHide(51)).toBe(20);
+    expect(imagesToHide(150)).toBe(110);
+  });
+
+  it('keeps an image that is still in use cached while many newer ones pass through (LRU)', async () => {
+    const fetched = await stubImageFetch();
+    const provider = cachingProvider();
+    const pinned = imageUrl('pinned');
+
+    await provider.chat({ messages: [withImages(pinned)], tools: [] });
+    for (let batch = 0; batch < 6; batch++) {
+      const fresh = Array.from({ length: 30 }, (_, i) => imageUrl(`b${batch}-${i}`));
+      await provider.chat({ messages: [withImages(pinned, ...fresh)], tools: [] });
+    }
+
+    expect(fetched.urls.filter((url) => url === pinned)).toHaveLength(1);
+    expect(fetched.urls).toHaveLength(1 + 6 * 30);
+  });
+
+  it('restarts an image TTL on every use', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const fetched = await stubImageFetch();
+      const provider = cachingProvider();
+      const start = new Date('2026-09-25T12:00:00Z').getTime();
+      for (const minutes of [0, 10, 20, 30]) {
+        vi.setSystemTime(start + minutes * 60_000);
+        await provider.chat({ messages: [withImages(imageUrl('kept'))], tools: [] });
+      }
+      expect(fetched.urls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds the cache by size as well as count, evicting the least recently used image', async () => {
+    const fetched = await stubImageFetch();
+    const dataUriLength = `data:image/png;base64,${(await pngBytes()).toString('base64')}`.length;
+    // Room for one image, not two.
+    const provider = cachingProvider([], Math.floor(dataUriLength * 1.5));
+
+    for (const url of [imageUrl('a'), imageUrl('b'), imageUrl('b'), imageUrl('a')]) {
+      await provider.chat({ messages: [withImages(url)], tools: [] });
+    }
+
+    expect(fetched.urls).toEqual([imageUrl('a'), imageUrl('b'), imageUrl('a')]);
+  });
+
+  it("downloads a request's images a few at a time", async () => {
+    const fetched = await stubImageFetch(20);
+    const provider = cachingProvider();
+    const urls = Array.from({ length: 12 }, (_, i) => imageUrl(`p${i}`));
+
+    await provider.chat({ messages: [withImages(...urls)], tools: [] });
+
+    expect(fetched.urls).toHaveLength(12);
+    expect(fetched.maxInFlight()).toBeGreaterThan(1);
+    expect(fetched.maxInFlight()).toBeLessThanOrEqual(4);
   });
 });
