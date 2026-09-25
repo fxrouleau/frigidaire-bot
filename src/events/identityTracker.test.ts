@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getMemoryStore, setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
 import { createFakeMessage } from '../test-support/fakeDiscord';
@@ -41,5 +41,22 @@ describe('identityTracker event', () => {
     identityTracker.execute(createFakeMessage({ authorId: 'b1', authorIsBot: true }).message);
     identityTracker.execute(createFakeMessage({ authorId: 'w1', webhookId: 'wh' }).message);
     expect(getMemoryStore().getAllIdentities()).toEqual([]);
+  });
+
+  it("records a linked side account's own row and leaves the main account's alone (LINKED_ACCOUNTS)", () => {
+    vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
+    try {
+      const store = getMemoryStore();
+      store.upsertIdentity('100000000000000001', 'Tony', 'tony_main');
+      identityTracker.execute(
+        createFakeMessage({ authorId: '100000000000000002', authorDisplayName: 'Ptoughneigh', authorUsername: 'triceclone' })
+          .message,
+      );
+
+      expect(store.getIdentityById('100000000000000002')).toMatchObject({ display_name: 'Ptoughneigh', username: 'triceclone' });
+      expect(store.getIdentityById('100000000000000001')).toMatchObject({ display_name: 'Tony', username: 'tony_main' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

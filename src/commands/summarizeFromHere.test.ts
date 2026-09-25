@@ -20,6 +20,24 @@ afterEach(() => {
 const HOUR = 60 * 60 * 1000;
 
 describe('Summarize from here', () => {
+  it('asks as the main account when invoked from a linked side account (LINKED_ACCOUNTS)', async () => {
+    vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
+    try {
+      const target = createFakeTargetMessage({ createdAt: new Date(FAKE_NOW.getTime() - HOUR) });
+      const { interaction } = createFakeMessageCommandInteraction(target.message, {
+        commandName: 'Summarize from here',
+        invokerId: '100000000000000002',
+      });
+      const { deps, recorders } = createFakeCommandDeps({ summarize: async () => ({ ok: true, text: 'stuff' }) });
+
+      await handleContextMenuCommand(interaction, deps);
+
+      expect(recorders.summarize.calls[0][0].requesterId).toBe('100000000000000001');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('summarizes from the target to now and posts it publicly as a reply to the target', async () => {
     const createdAt = new Date(FAKE_NOW.getTime() - 3 * HOUR);
     const target = createFakeTargetMessage({ createdAt });

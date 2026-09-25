@@ -77,6 +77,26 @@ describe('What does Fridge know?', () => {
     expect(text).toContain('Mains Thresh.');
   });
 
+  it("shows a linked side account's member: the main account's name and memories (LINKED_ACCOUNTS)", async () => {
+    vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
+    store.upsertIdentity('100000000000000001', 'Tony', 'tony_main');
+    store.upsertIdentity('100000000000000002', 'Ptoughneigh', 'triceclone');
+    await store.save({ category: 'fact', subject: 'Tony', content: 'Owns a canoe.', subject_user_id: '100000000000000001' });
+    await store.save({ category: 'fact', subject: 'Ptoughneigh', content: 'Lives in Laval.' });
+
+    const { interaction, responses } = createFakeUserCommandInteraction(
+      { id: '100000000000000002', username: 'triceclone', memberDisplayName: 'Ptoughneigh' },
+      { commandName: 'What does Fridge know?' },
+    );
+    await handleContextMenuCommand(interaction, createFakeCommandDeps({ store, now: new Date() }).deps);
+
+    const text = responses[0].content ?? '';
+    expect(text.split('\n')[0]).toBe('**What I know about Tony** (2)');
+    expect(text).toContain('Owns a canoe.');
+    expect(text).toContain('Lives in Laval.');
+    vi.unstubAllEnvs();
+  });
+
   it('says so when it knows nothing', async () => {
     const { interaction, responses } = createFakeUserCommandInteraction(
       { id: 'user-9', username: 'newguy', memberDisplayName: null },
