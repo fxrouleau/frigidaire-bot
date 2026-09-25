@@ -111,7 +111,11 @@ export function trimHistory(entries: ConversationEntry[], budget: number): TrimR
     };
   });
 
-  const noteEntry: ConversationEntry = { kind: 'message', role: 'developer', content: [{ type: 'text', text: TRIMMED_NOTE }] };
+  const noteEntry: ConversationEntry = {
+    kind: 'message',
+    role: 'developer',
+    content: [{ type: 'text', text: TRIMMED_NOTE }],
+  };
   const assemble = (kept: ConversationEntry[], withNote: boolean) =>
     withNote ? [staticPrompt, noteEntry, ...kept] : [staticPrompt, ...kept];
 

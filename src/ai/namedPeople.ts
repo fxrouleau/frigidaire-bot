@@ -70,7 +70,11 @@ export type FindNamedPeopleOptions = {
  * The members `text` refers to by name, in order of first appearance (a longer name wins a tie, so
  * "Big Mike" beats "Mike" at the same spot). Inactive identities are skipped.
  */
-export function findNamedPeople(text: string, identities: Identity[], opts: FindNamedPeopleOptions = {}): NamedPerson[] {
+export function findNamedPeople(
+  text: string,
+  identities: Identity[],
+  opts: FindNamedPeopleOptions = {},
+): NamedPerson[] {
   const prose = text.replace(NON_PROSE_TOKENS, ' ');
   if (prose.trim().length < MIN_NAME_LENGTH) return [];
 
@@ -94,7 +98,5 @@ export function findNamedPeople(text: string, identities: Identity[], opts: Find
     if (best) matches.push(best);
   }
 
-  return matches
-    .sort((a, b) => a.index - b.index || b.name.length - a.name.length)
-    .slice(0, Math.max(0, max));
+  return matches.sort((a, b) => a.index - b.index || b.name.length - a.name.length).slice(0, Math.max(0, max));
 }

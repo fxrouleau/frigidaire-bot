@@ -1,7 +1,7 @@
 import {
   type Message,
-  type MessageReplyOptions,
   MessageReferenceType,
+  type MessageReplyOptions,
   RESTJSONErrorCodes,
   StickerFormatType,
 } from 'discord.js';
@@ -675,9 +675,12 @@ export class AgentOrchestrator {
     since: string,
   ): Promise<{ messages: Message[]; skipped: number; skippedIsLowerBound: boolean }> {
     const newerThanSince = (msgs: Iterable<Message>) => [...msgs].filter((m) => compareSnowflakes(m.id, since) > 0);
-    const oldestId = (msgs: Message[]) => msgs.reduce((min, m) => (compareSnowflakes(m.id, min) < 0 ? m.id : min), msgs[0].id);
+    const oldestId = (msgs: Message[]) =>
+      msgs.reduce((min, m) => (compareSnowflakes(m.id, min) < 0 ? m.id : min), msgs[0].id);
 
-    const page = [...(await message.channel.messages.fetch({ limit: MAX_INTERVENING_MESSAGES, before: message.id })).values()];
+    const page = [
+      ...(await message.channel.messages.fetch({ limit: MAX_INTERVENING_MESSAGES, before: message.id })).values(),
+    ];
     const unseen = newerThanSince(page).sort((a, b) => compareSnowflakes(a.id, b.id));
     let skipped = 0;
     let skippedIsLowerBound = false;
@@ -868,7 +871,10 @@ export class AgentOrchestrator {
       const title = embed.title ?? embed.author?.name;
       if (title) extras.push(`[embed: ${title}]`);
     }
-    return [text, ...extras].filter((s) => s.length > 0).join(' ').replace(/\s+/g, ' ');
+    return [text, ...extras]
+      .filter((s) => s.length > 0)
+      .join(' ')
+      .replace(/\s+/g, ' ');
   }
 
   /** A user entry: the message's own text/images plus whatever the content enrichers add for its role. */
@@ -978,10 +984,9 @@ Right before each new message you get a context note with the current time (East
     store: MemoryStore | undefined,
     alreadyInjectedIds: number[],
   ): Promise<{ entry: ConversationEntry; injectedIds: number[] }> {
-    const header = [
-      `Current time: ${describeNowET()} (America/New_York).`,
-      ...this.describeChannel(message),
-    ].join('\n');
+    const header = [`Current time: ${describeNowET()} (America/New_York).`, ...this.describeChannel(message)].join(
+      '\n',
+    );
 
     const sections = store ? await this.buildMemorySections(message, store, alreadyInjectedIds) : undefined;
     const text = sections?.text ? `${header}\n\n${sections.text}` : header;
@@ -1003,7 +1008,8 @@ Right before each new message you get a context note with the current time (East
     if (channel.isDMBased()) return ['Channel: a direct message'];
 
     const lines: string[] = [];
-    const topic = 'topic' in channel && typeof channel.topic === 'string' ? channel.topic.trim().replace(/\s+/g, ' ') : '';
+    const topic =
+      'topic' in channel && typeof channel.topic === 'string' ? channel.topic.trim().replace(/\s+/g, ' ') : '';
     if (channel.isThread()) {
       const parent = channel.parent?.name;
       lines.push(`Channel: thread "${channel.name}"${parent ? ` in #${parent}` : ''}`);
@@ -1368,7 +1374,11 @@ ${lines.join('\n')}
    * Sends files (with optional text). When Discord rejects the upload itself (too large), the text still
    * goes out on its own with a short note, so a failed attachment never costs the whole reply.
    */
-  private async sendWithFiles(message: Message, text: string | undefined, files: TurnFile[]): Promise<Message | undefined> {
+  private async sendWithFiles(
+    message: Message,
+    text: string | undefined,
+    files: TurnFile[],
+  ): Promise<Message | undefined> {
     try {
       return await this.safeSend(message, text ? { content: text, files } : { files });
     } catch (error) {
