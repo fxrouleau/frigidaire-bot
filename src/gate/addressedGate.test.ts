@@ -351,7 +351,7 @@ describe('AddressedGate rate limit', () => {
   it('does not count skipped decisions against the budget', async () => {
     const { gate } = harness({ maxPer10Min: 1 }, 0.2);
     for (let i = 0; i < 3; i++) {
-      expect((await gate.evaluate(human(`the fridge is empty ${i}`).message)).reason).toBe('below_threshold');
+      expect(await gate.evaluate(human(`the fridge is empty ${i}`).message)).toMatchObject({ reason: 'below_threshold' });
     }
   });
 
@@ -367,7 +367,7 @@ describe('AddressedGate rate limit', () => {
 
   it('never replies unprompted with a limit of 0', async () => {
     const { gate, classify } = harness({ maxPer10Min: 0 });
-    expect((await gate.evaluate(human('fridge hi').message)).reason).toBe('rate_limited');
+    expect(await gate.evaluate(human('fridge hi').message)).toMatchObject({ reason: 'rate_limited' });
     expect(classify).not.toHaveBeenCalled();
   });
 
