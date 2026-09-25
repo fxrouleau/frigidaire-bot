@@ -494,10 +494,82 @@ export const config = {
   },
 
   /** Replying without an explicit @-mention, judged by a decision model (src/gate/). */
-  gate: {},
+  gate: {
+    get enabled(): boolean {
+      return envBool('GATE_ENABLED', true);
+    },
+    /** Channels where the bot may answer unprompted. Defaults to MAIN_CHANNEL_ID; empty ⇒ gate off. */
+    get channelIds(): string[] {
+      const fromEnv = envCsv('GATE_CHANNELS');
+      if (fromEnv.length > 0) return fromEnv;
+      const main = config.server.mainChannelId;
+      return main ? [main] : [];
+    },
+    /** Words that make a message a candidate (whole words, case-insensitive). */
+    get names(): string[] {
+      const fromEnv = envCsv('GATE_NAMES');
+      return (fromEnv.length > 0 ? fromEnv : ['fridge', 'frigidaire', 'frigi', 'bot', 'clanker']).map((name) =>
+        name.toLowerCase(),
+      );
+    },
+    /** A message from whoever the bot was just talking to is a candidate for this long; 0 disables. */
+    get followupSeconds(): number {
+      return envInt('GATE_FOLLOWUP_SECONDS', 120, { min: 0 });
+    },
+    /** Unsolicited replies per channel per 10 minutes; 0 ⇒ never reply unprompted. */
+    get maxPer10Min(): number {
+      return envInt('GATE_MAX_PER_10MIN', 4, { min: 0 });
+    },
+    /** Probability at/above which the decision model's "addressed to the bot" counts as yes. */
+    get threshold(): number {
+      return envNumber('GATE_THRESHOLD', 0.7, { min: 0, max: 1 });
+    },
+    /**
+     * TypeSafe decision model for the gate and the ramble check. Pinned rather than `~typesafe/jev-latest`
+     * because the thresholds are tuned against one model version. Only decision models are served by the
+     * decisions endpoint, so anything else (a chat model id) ⇒ the default.
+     */
+    get model(): string {
+      const fromEnv = envString('GATE_MODEL');
+      return fromEnv && /^~?typesafe\//.test(fromEnv) ? fromEnv : 'typesafe/jev-1.13';
+    },
+  },
 
   /** Redirecting long rambles to their own channel (src/gate/). */
-  ramble: {},
+  ramble: {
+    /** Members whose rambles get redirected. Empty ⇒ feature off. */
+    get userIds(): string[] {
+      return envCsv('RAMBLE_USER_IDS');
+    },
+    /** Where rambles belong. Unset ⇒ feature off (there is nowhere to point). */
+    get channelId(): string | undefined {
+      return envString('RAMBLE_CHANNEL_ID');
+    },
+    /** Channels watched for rambles; defaults to MAIN_CHANNEL_ID. The ramble channel itself never is. */
+    get watchChannelIds(): string[] {
+      const fromEnv = envCsv('RAMBLE_WATCH_CHANNELS');
+      if (fromEnv.length > 0) return fromEnv;
+      const main = config.server.mainChannelId;
+      return main ? [main] : [];
+    },
+    get minMessages(): number {
+      return envInt('RAMBLE_MIN_MESSAGES', 4, { min: 1 });
+    },
+    get minChars(): number {
+      return envInt('RAMBLE_MIN_CHARS', 800, { min: 1 });
+    },
+    get windowSeconds(): number {
+      return envInt('RAMBLE_WINDOW_SECONDS', 300, { min: 1 });
+    },
+    /** Minimum time between two nudges for the same member. */
+    get cooldownMinutes(): number {
+      return envNumber('RAMBLE_COOLDOWN_MINUTES', 120, { min: 0 });
+    },
+    /** Probability at/above which the decision model's "this is a ramble" counts as yes. */
+    get threshold(): number {
+      return envNumber('RAMBLE_THRESHOLD', 0.7, { min: 0, max: 1 });
+    },
+  },
 
   /** The code-execution sidecar (sandbox/, src/ai/tools/sandbox.ts). */
   sandbox: {},

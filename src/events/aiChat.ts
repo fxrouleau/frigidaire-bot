@@ -1,6 +1,7 @@
 import { Events, type Message } from 'discord.js';
 import { agent } from '../ai/agentInstance';
 import { defineEvent } from '../eventModule';
+import { addressedGate } from '../gate';
 import { logger } from '../logger';
 
 async function isReplyToBot(message: Message): Promise<boolean> {
@@ -17,17 +18,40 @@ async function isReplyToBot(message: Message): Promise<boolean> {
   }
 }
 
+/** Runs one agent turn; the gate learns when it ends (see AddressedGate.noteTurnDone). */
+async function routeToAgent(message: Message): Promise<void> {
+  try {
+    await agent.handleMention(message);
+  } finally {
+    addressedGate.noteTurnDone(message);
+  }
+}
+
 export default defineEvent(Events.MessageCreate, {
   async execute(message) {
+    // The bot's own messages tell the gate who it is talking to (and when it last spoke) per channel.
+    if (message.author.id === message.client.user.id && !message.webhookId) {
+      addressedGate.noteBotMessage(message);
+      return;
+    }
     if (message.author.bot) return;
 
+    const author = message.member?.displayName || message.author.username;
     const explicitMention = message.mentions.users.has(message.client.user.id);
     const replyToBot = await isReplyToBot(message);
 
     if (explicitMention || replyToBot) {
-      const author = message.member?.displayName || message.author.username;
       logger.info(`Bot was ${replyToBot ? 'replied to' : 'mentioned'} by ${author}, routing to AI agent.`);
-      await agent.handleMention(message);
+      addressedGate.noteRouted(message);
+      await routeToAgent(message);
+      return;
+    }
+
+    // No mention and no reply: the gate decides whether the message is still meant for the bot.
+    const verdict = await addressedGate.evaluate(message);
+    if (verdict.respond) {
+      logger.info(`Bot was addressed without a mention by ${author} (${verdict.trigger}), routing to AI agent.`);
+      await routeToAgent(message);
     }
   },
 });
