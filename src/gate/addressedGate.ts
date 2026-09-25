@@ -7,9 +7,10 @@
 // The decision fails closed: no answer, or a probability under GATE_THRESHOLD, means no reply.
 //
 // Who the bot is talking to comes from watching its own messages here: Discord stamps a reply's target
-// on `mentions.repliedUser`, and a routed turn whose reply had to fall back to a plain send is covered by
-// the author recorded when the turn was routed. This state is in memory: after a restart the first
-// candidate reads the same facts off the fetched history instead.
+// on `mentions.repliedUser`, and a routed turn whose reply had to fall back to a plain send (the message
+// was deleted meanwhile, e.g. replaced by a link-fix repost) is covered by the author recorded when the
+// turn was routed, until shortly after that turn finishes. This state is in memory: after a restart the
+// first candidate reads the same facts off the fetched history instead.
 import type { Message } from 'discord.js';
 import { getMemoryStore } from '../ai/memory';
 import { config } from '../config';
@@ -20,9 +21,11 @@ import { createNameMatcher, isFollowup, readableMarkup, truncate } from './text'
 
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_CONTEXT_SIZE = 6;
-// A routed turn's author stands in for the reply target only this long (a turn with tools can take a
-// while, but a stale route must not make some later unrelated bot post look like a conversation).
+// A routed turn's author stands in for the reply target while the turn runs (at most this long: a turn
+// with tools can take a while) and for a short grace after it ends (its own posts can reach the gateway
+// after the send resolved). Past that, a plain bot post (a reminder, a digest) answers nobody.
 const PENDING_PARTNER_TTL_MS = 5 * 60 * 1000;
+const PENDING_PARTNER_GRACE_MS = 15 * 1000;
 const LOG_EXCERPT_CHARS = 80;
 
 export type GateSettings = {
@@ -67,8 +70,8 @@ type ChannelActivity = {
   botSpokeAt?: number;
   /** Who that message was answering. */
   partnerId?: string;
-  /** The author of the last turn routed to the agent here, until its reply shows up. */
-  pending?: { userId: string; at: number };
+  /** The last turn routed to the agent here: its author stands in for a plain-send reply's target. */
+  pending?: { messageId: string; userId: string; at: number; doneAt?: number };
   /** When the gate routed unsolicited replies here (for the rate limit). */
   unsolicitedAt: number[];
 };
@@ -102,14 +105,19 @@ export class AddressedGate {
     if (!this.settings().channelIds.includes(message.channel.id)) return;
     const activity = this.activity(message.channel.id);
     activity.botSpokeAt = message.createdTimestamp;
-    const pending = activity.pending && this.now() - activity.pending.at <= PENDING_PARTNER_TTL_MS;
-    activity.partnerId = message.mentions?.repliedUser?.id ?? (pending ? activity.pending?.userId : undefined);
+    activity.partnerId = message.mentions?.repliedUser?.id ?? this.pendingPartner(activity);
   }
 
   /** A turn was routed to the agent (explicit mention/reply, or the gate): its author is who the bot answers next. */
   noteRouted(message: Message): void {
     if (!this.settings().channelIds.includes(message.channel.id)) return;
-    this.activity(message.channel.id).pending = { userId: message.author.id, at: this.now() };
+    this.activity(message.channel.id).pending = { messageId: message.id, userId: message.author.id, at: this.now() };
+  }
+
+  /** The routed turn for `message` finished: its author stops standing in for plain bot posts after a short grace. */
+  noteTurnDone(message: Message): void {
+    const pending = this.channels.get(message.channel.id)?.pending;
+    if (pending?.messageId === message.id) pending.doneAt = this.now();
   }
 
   /** Decides whether a message that neither mentions nor replies to the bot should still get an answer. */
@@ -173,6 +181,17 @@ export class AddressedGate {
     this.activity(channelId).unsolicitedAt.push(this.now());
     this.noteRouted(message);
     return { respond: true, trigger, probability };
+  }
+
+  private pendingPartner(activity: ChannelActivity): string | undefined {
+    const pending = activity.pending;
+    if (!pending) return undefined;
+    const now = this.now();
+    const live =
+      pending.doneAt === undefined
+        ? now - pending.at <= PENDING_PARTNER_TTL_MS
+        : now - pending.doneAt <= PENDING_PARTNER_GRACE_MS;
+    return live ? pending.userId : undefined;
   }
 
   private activity(channelId: string): ChannelActivity {

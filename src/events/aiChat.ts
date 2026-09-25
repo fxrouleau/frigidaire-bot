@@ -18,6 +18,15 @@ async function isReplyToBot(message: Message): Promise<boolean> {
   }
 }
 
+/** Runs one agent turn; the gate learns when it ends (see AddressedGate.noteTurnDone). */
+async function routeToAgent(message: Message): Promise<void> {
+  try {
+    await agent.handleMention(message);
+  } finally {
+    addressedGate.noteTurnDone(message);
+  }
+}
+
 export default defineEvent(Events.MessageCreate, {
   async execute(message) {
     // The bot's own messages tell the gate who it is talking to (and when it last spoke) per channel.
@@ -34,7 +43,7 @@ export default defineEvent(Events.MessageCreate, {
     if (explicitMention || replyToBot) {
       logger.info(`Bot was ${replyToBot ? 'replied to' : 'mentioned'} by ${author}, routing to AI agent.`);
       addressedGate.noteRouted(message);
-      await agent.handleMention(message);
+      await routeToAgent(message);
       return;
     }
 
@@ -42,7 +51,7 @@ export default defineEvent(Events.MessageCreate, {
     const verdict = await addressedGate.evaluate(message);
     if (verdict.respond) {
       logger.info(`Bot was addressed without a mention by ${author} (${verdict.trigger}), routing to AI agent.`);
-      await agent.handleMention(message);
+      await routeToAgent(message);
     }
   },
 });
