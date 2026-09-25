@@ -17,6 +17,7 @@ import { getBotDb } from './storage/botDb';
 dotenv.config({ quiet: true });
 
 logger.info(`Effective config: ${describeEffectiveConfig()}`);
+for (const problem of config.server.linkedAccountProblems) logger.warn(problem);
 
 // A rejected promise nobody awaited must never take the process down (Node turns it into an
 // uncaught exception by default). Event handlers are already dispatched behind a catch below; this

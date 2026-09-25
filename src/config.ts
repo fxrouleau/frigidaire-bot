@@ -130,16 +130,61 @@ export function parseChannelNotes(raw: string | undefined): { notes: Record<stri
 
 const SNOWFLAKE = /^\d{15,21}$/;
 
-/** Parses `sideId:mainId` pairs into side → main. Malformed entries and self-links are dropped. */
-export function parseLinkedAccounts(entries: string[]): Map<string, string> {
-  const links = new Map<string, string>();
+export type LinkedAccountsParse = {
+  /** Every side account → the person's final main account. */
+  links: Map<string, string>;
+  /** Pairs that were ignored because they can't be resolved, one line each (logged at startup). */
+  problems: string[];
+};
+
+/**
+ * Parses `sideId:mainId` pairs into side → main. Malformed entries and self-links are dropped. A chain
+ * (A:B,B:C — a third account linked to a side, or a main re-linked later) resolves every account to
+ * the end of the chain, so all three are one person. A side linked to two different mains, and every
+ * account whose chain loops (A:B,B:A), can't be resolved: those pairs are dropped and reported in
+ * `problems` rather than guessed at (a wrong link merges two people's memories).
+ */
+export function inspectLinkedAccounts(entries: string[]): LinkedAccountsParse {
+  const mainsOf = new Map<string, string[]>();
   for (const entry of entries) {
     const [side, main, ...rest] = entry.split(':').map((part) => part.trim());
     if (rest.length > 0 || !side || !main || side === main) continue;
     if (!SNOWFLAKE.test(side) || !SNOWFLAKE.test(main)) continue;
-    links.set(side, main);
+    const mains = mainsOf.get(side) ?? [];
+    if (!mains.includes(main)) mains.push(main);
+    mainsOf.set(side, mains);
   }
-  return links;
+
+  const problems: string[] = [];
+  const direct = new Map<string, string>();
+  for (const [side, mains] of mainsOf) {
+    if (mains.length === 1) direct.set(side, mains[0]);
+    else problems.push(`LINKED_ACCOUNTS links ${side} to several main accounts (${mains.join(', ')}); ignored`);
+  }
+
+  const links = new Map<string, string>();
+  const looping: string[] = [];
+  for (const [side, first] of direct) {
+    const chain = new Set([side]);
+    let main = first;
+    let next = direct.get(main);
+    while (next !== undefined && !chain.has(main)) {
+      chain.add(main);
+      main = next;
+      next = direct.get(main);
+    }
+    if (chain.has(main)) looping.push(side);
+    else links.set(side, main);
+  }
+  if (looping.length > 0) {
+    problems.push(`LINKED_ACCOUNTS links ${looping.join(', ')} in a loop with no main account; ignored`);
+  }
+  return { links, problems };
+}
+
+/** Side account → final main account (see inspectLinkedAccounts). */
+export function parseLinkedAccounts(entries: string[]): Map<string, string> {
+  return inspectLinkedAccounts(entries).links;
 }
 
 export const config = {
@@ -444,10 +489,15 @@ export const config = {
     },
     /**
      * Side accounts that belong to the same person as a main account, as `sideId:mainId` pairs
-     * (LINKED_ACCOUNTS, csv). Malformed pairs and self-links are ignored. See src/linkedAccounts.ts.
+     * (LINKED_ACCOUNTS, csv). Chains resolve to their final main; malformed pairs, self-links, a side
+     * linked to two mains and loops are ignored. See src/linkedAccounts.ts.
      */
     get linkedAccounts(): Map<string, string> {
       return parseLinkedAccounts(envCsv('LINKED_ACCOUNTS'));
+    },
+    /** LINKED_ACCOUNTS pairs that were ignored (a side with two mains, a loop), one line each. */
+    get linkedAccountProblems(): string[] {
+      return inspectLinkedAccounts(envCsv('LINKED_ACCOUNTS')).problems;
     },
   },
 
@@ -917,7 +967,7 @@ export function describeEffectiveConfig(): string {
     `logDebug=${onOff(config.logging.debug)}`,
     // Server layout
     `mainChannel=${server.mainChannelId ? 'set' : 'off'}`,
-    `linkedAccounts=${server.linkedAccounts.size}`,
+    `linkedAccounts=${server.linkedAccounts.size}${server.linkedAccountProblems.length > 0 ? `,ignored:${server.linkedAccountProblems.length}` : ''}`,
     report.channelId
       ? `reportChannel=set(digest:${onOff(report.digestEnabled)}@${formatDuration(report.digestPeriodMs)},deploy:${deployAnnounce})`
       : 'reportChannel=off',
