@@ -64,6 +64,25 @@ describe.skipIf(!RUN_LIVE)('OpenRouter live smoke tests (paid, opt-in)', () => {
   );
 
   it(
+    'accepts a fallback models list (CHAT_FALLBACK_MODELS) and reports which model served',
+    async () => {
+      // `model` + `models` together, primary first, with the ZDR provider preferences — the exact shape
+      // the bot sends when CHAT_FALLBACK_MODELS is set. A 400 here means OpenRouter rejects that shape.
+      const provider = new OpenRouterProvider({ fallbackModels: ['deepseek/deepseek-v3.2'] });
+      const messages: ConversationEntry[] = [
+        { kind: 'message', role: 'user', content: [{ type: 'text', text: 'Reply with a single word: hello.' }] },
+      ];
+
+      const response = await provider.chat({ messages, tools: [] });
+
+      expect(response.text).toBeTruthy();
+      expect(response.servedBy).toBeTruthy();
+      console.log(`FALLBACK served_by=${response.servedBy} chain=${provider.chatModels.join(',')}`);
+    },
+    LIVE_TIMEOUT,
+  );
+
+  it(
     'parses a response from a backend-pinned model',
     async () => {
       // Provider slug per OpenRouter docs; adjust the model id / provider slug if OpenRouter renames them.
