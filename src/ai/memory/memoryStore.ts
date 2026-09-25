@@ -451,11 +451,7 @@ export class MemoryStore {
       const current = this.stmt('SELECT content, active FROM memories WHERE id = ?').get(phase1.id) as
         | Pick<Memory, 'content' | 'active'>
         | undefined;
-      if (
-        !current ||
-        current.active !== 1 ||
-        buildEmbeddingInput({ ...memory, content: current.content }) !== inputText
-      ) {
+      if (current?.active !== 1 || buildEmbeddingInput({ ...memory, content: current.content }) !== inputText) {
         return phase1.id;
       }
 
@@ -663,7 +659,7 @@ export class MemoryStore {
 
   /** The distinct searchable terms of a query: FTS5 operators/punctuation stripped, single characters dropped. */
   private ftsTerms(query: string): string[] {
-    const stripped = query.replace(/["',()\{\}\*:^~@!#$%&+\-]/g, ' ');
+    const stripped = query.replace(/["',(){}*:^~@!#$%&+-]/g, ' ');
     return [...new Set(stripped.split(/\s+/).filter((t) => t.length > 1))];
   }
 
@@ -737,7 +733,7 @@ export class MemoryStore {
       const row = this.stmt('SELECT content, subject, category, active FROM memories WHERE id = ?').get(id) as
         | Pick<Memory, 'content' | 'subject' | 'category' | 'active'>
         | undefined;
-      if (!row || row.active !== 1) return false;
+      if (row?.active !== 1) return false;
 
       this.stmt('UPDATE memories SET active = 0 WHERE id = ?').run(id);
       this.stmt(
@@ -1082,7 +1078,7 @@ export class MemoryStore {
               const current = this.stmt('SELECT category, subject, content, active FROM memories WHERE id = ?').get(
                 row.id,
               ) as Pick<Memory, 'category' | 'subject' | 'content' | 'active'> | undefined;
-              if (!current || current.active !== 1) continue;
+              if (current?.active !== 1) continue;
               if (buildEmbeddingInput(current) !== inputs[j]) continue;
 
               this.upsertVector(row.id, embeddings.model, inputs[j], vectors[j], {

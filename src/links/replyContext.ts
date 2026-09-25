@@ -1,6 +1,6 @@
 // Webhooks can't create replies, so a reposted reply would lose what it was answering. The repost
 // carries a Discord subtext line instead: `-# ↪ replying to <Name> · <jump link>`.
-import { type Message, MessageReferenceType, escapeMarkdown, messageLink } from 'discord.js';
+import { escapeMarkdown, type Message, MessageReferenceType, messageLink } from 'discord.js';
 import { logger } from '../logger';
 
 const REFERENCE_FETCH_TIMEOUT_MS = 2000;

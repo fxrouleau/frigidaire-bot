@@ -28,16 +28,16 @@ import { config } from '../config';
 import { logger } from '../logger';
 import { getBotDb } from '../storage/botDb';
 import { splitMessage } from '../utils';
-import { type ArchiveStore, type ArchivedChannel, getArchiveStore } from './archiveStore';
+import { type ArchivedChannel, type ArchiveStore, getArchiveStore } from './archiveStore';
 import { getActiveArchiveSync } from './backfill';
 import { isThreadType, reconcileRelays } from './ingest';
-import { type GuildLike, type PermissionedChannel, allowedChannelIds, jumpLink, makeAudienceAccess } from './search';
+import { allowedChannelIds, type GuildLike, jumpLink, makeAudienceAccess, type PermissionedChannel } from './search';
 import {
   type AuthorCount,
+  computeWrappedStats,
   type LinkPlatform,
   type MostReactedMessage,
   type WrappedStats,
-  computeWrappedStats,
 } from './stats';
 
 export type WrappedPeriod = {
@@ -258,7 +258,9 @@ export function renderWrapped(period: WrappedPeriod, stats: WrappedStats, opts: 
   );
   if (stats.topMembers.length > 0) {
     lines.push('🏆 **Top yappers**');
-    stats.topMembers.forEach((m, i) => lines.push(`${i + 1}. ${opts.person(m)} — ${n(m.count)}`));
+    stats.topMembers.forEach((m, i) => {
+      lines.push(`${i + 1}. ${opts.person(m)} — ${n(m.count)}`);
+    });
   }
 
   const when: string[] = [];

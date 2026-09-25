@@ -1,11 +1,11 @@
 // "What does Fridge know?": the bot's memories about a person, newest first, with ids (what
 // forget_memory takes) and ages — shown only to the invoker. Memories are matched by the person's stable
 // Discord id or any of their known names, since older rows only carry a name.
-import { type APIInteractionGuildMember, ApplicationCommandType, type GuildMember, escapeMarkdown } from 'discord.js';
+import { type APIInteractionGuildMember, ApplicationCommandType, escapeMarkdown, type GuildMember } from 'discord.js';
 import { type Memory, SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { currentName, memoryKeyFor } from '../ai/people';
 import { formatRelativeAge } from '../ai/utils';
-import { DISCORD_MESSAGE_LIMIT, answerPrivately } from './respond';
+import { answerPrivately, DISCORD_MESSAGE_LIMIT } from './respond';
 import type { UserCommand } from './types';
 
 export const MAX_LISTED_MEMORIES = 25;

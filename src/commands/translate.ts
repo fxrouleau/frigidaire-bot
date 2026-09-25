@@ -1,7 +1,7 @@
 // "Translate": an English translation of the target message, shown only to the invoker. Covers the
 // message text, its voice message (via the transcript) and the text of embedded posts (a fixed-up tweet
 // in another language), in one chat-model call.
-import { ApplicationCommandType, type Message, escapeMarkdown } from 'discord.js';
+import { ApplicationCommandType, escapeMarkdown, type Message } from 'discord.js';
 import { answerPrivately, blockQuote, deferPrivately } from './respond';
 import { ensureTargetChannel, mediaAttachments, readableText, resolveTargetAuthor, voiceTranscriptOf } from './targets';
 import { type CommandDeps, CommandError, type MessageCommand } from './types';

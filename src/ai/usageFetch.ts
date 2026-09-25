@@ -7,7 +7,7 @@
 // propagate untouched — the SDK's retry logic depends on seeing them.
 import { config } from '../config';
 import { logger } from '../logger';
-import { FEATURE_HEADER, type TaggedUsageEntry, normalizeFeature, recordTaggedUsage } from './usage';
+import { FEATURE_HEADER, normalizeFeature, recordTaggedUsage, type TaggedUsageEntry } from './usage';
 
 export type Fetch = typeof globalThis.fetch;
 

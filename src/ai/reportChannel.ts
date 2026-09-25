@@ -25,7 +25,7 @@ export async function sendToReportChannel(client: Client, text: string): Promise
 
   try {
     const channel = await client.channels.fetch(id);
-    if (!channel || !channel.isTextBased() || !('send' in channel)) {
+    if (!channel?.isTextBased() || !('send' in channel)) {
       logger.warn(`Report channel ${id} is missing or not text-based; skipping send.`);
       return false;
     }

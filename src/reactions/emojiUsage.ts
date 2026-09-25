@@ -6,7 +6,7 @@
 // Typed uses are found through the archive's FTS index: `<:name:id>` tokenizes into the name and the
 // numeric id, so the id is a precise, indexed key (a LIKE scan over every message would read the whole
 // table per emoji). Like the Wrapped stats, this reads the archive's tables directly.
-import type { ArchiveStore, ArchivedMessage } from '../archive/archiveStore';
+import type { ArchivedMessage, ArchiveStore } from '../archive/archiveStore';
 import { getArchiveStore } from '../archive/archiveStore';
 import { getReactionProfile } from '../archive/reactions';
 import { config } from '../config';

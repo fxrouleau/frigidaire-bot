@@ -10,17 +10,17 @@
 // messages are reposted as that account.
 import type { Message, PartialMessage, WebhookMessageCreateOptions } from 'discord.js';
 import sharp from 'sharp';
-import { type MessageJudge, createEdgyJudge } from './ai/messageJudge';
-import { type DeleteRepostMode, config } from './config';
+import { createEdgyJudge, type MessageJudge } from './ai/messageJudge';
+import { config, type DeleteRepostMode } from './config';
 import { isSamePerson } from './linkedAccounts';
 import { logger } from './logger';
 import { recordRelay } from './relay';
 import {
-  MAX_WEBHOOK_CONTENT,
-  type WebhookIdentity,
   isWebhookCapableChannel,
+  MAX_WEBHOOK_CONTENT,
   sendViaWebhook,
   splitMessage,
+  type WebhookIdentity,
 } from './utils';
 
 const MAX_SNAPSHOTS = 100;

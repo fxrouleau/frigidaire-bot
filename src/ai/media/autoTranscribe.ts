@@ -6,7 +6,7 @@
 // Only real voice messages: an uploaded audio file (a song, a podcast clip) is not something the group
 // wants lyrics posted for; the media enricher still transcribes those when the bot is asked about one.
 // A voice message over VOICE_MAX_SECONDS gets a one-line "too long" note instead of silence.
-import { ChannelType, type Message, MessageFlags, escapeMarkdown } from 'discord.js';
+import { ChannelType, escapeMarkdown, type Message, MessageFlags } from 'discord.js';
 import { config } from '../../config';
 import { logger } from '../../logger';
 import { splitMessage } from '../../utils';

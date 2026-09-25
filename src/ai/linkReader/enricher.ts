@@ -12,7 +12,7 @@ import { config } from '../../config';
 import type { ContentEnricher, EnrichmentRole } from '../enrichers';
 import type { NormalizedContentPart } from '../types';
 import { formatLinkPreview } from './format';
-import { type LinkReader, getLinkReader } from './reader';
+import { getLinkReader, type LinkReader } from './reader';
 import { findLinks } from './targets';
 
 const MAX_LINKS = 3;

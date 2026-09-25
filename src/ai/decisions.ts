@@ -11,7 +11,7 @@
 // current caller fails closed.
 import { config } from '../config';
 import { logger } from '../logger';
-import { type UsageEntry, type UsageFeature, recordUsage } from './usage';
+import { recordUsage, type UsageEntry, type UsageFeature } from './usage';
 
 export const DECISIONS_ENDPOINT = 'https://openrouter.ai/api/alpha/decisions';
 export const DECISIONS_TIMEOUT_MS = 6000;

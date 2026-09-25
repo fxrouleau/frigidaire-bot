@@ -467,7 +467,7 @@ export function compareSnowflakes(a: string, b: string): number {
  * memory store strips), single characters and pure-punctuation leftovers dropped.
  */
 export function ftsTerms(query: string): string[] {
-  const stripped = query.replace(/["',()\{\}\*:^~@!#$%&+\-]/g, ' ');
+  const stripped = query.replace(/["',(){}*:^~@!#$%&+-]/g, ' ');
   const terms = stripped.split(/\s+/).filter((t) => t.length > 1 && /[\p{L}\p{N}]/u.test(t));
   return [...new Set(terms.map((t) => t.toLowerCase()))];
 }

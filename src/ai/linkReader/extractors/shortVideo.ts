@@ -10,14 +10,14 @@
 import { config } from '../../../config';
 import { canonicalPath, needsResolution } from '../../../links/embedFixers';
 import { logger } from '../../../logger';
-import { type PageMetadata, extractMetadata } from '../html';
+import { extractMetadata, type PageMetadata } from '../html';
 import { BlockedUrlError, DISCORD_CRAWLER_UA } from '../safeFetch';
 import type { LinkContent, LinkMedia } from '../types';
 import {
-  ExtractError,
-  type ExtractorContext,
   asRecord,
   capText,
+  ExtractError,
+  type ExtractorContext,
   fetchHtml,
   fetchJson,
   num,

@@ -1,7 +1,7 @@
 // query_costs: report OpenRouter spend per feature from the usage ledger (src/ai/usage.ts).
 import { config } from '../../config';
 import type { ToolDefinition } from '../types';
-import { type UsageSummary, getUsageSummary, startOfEasternDay } from '../usage';
+import { getUsageSummary, startOfEasternDay, type UsageSummary } from '../usage';
 import { describeSpend } from '../usageFormat';
 
 export const COST_PERIODS = ['today', 'week', 'month'] as const;

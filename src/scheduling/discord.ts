@@ -45,7 +45,7 @@ export class UnpostableChannelError extends Error {
 /** Fetches a channel and checks that it can take a message; throws (a Discord or Unpostable error) otherwise. */
 export async function fetchPostableChannel(client: Client, channelId: string): Promise<PostableChannel> {
   const channel = await client.channels.fetch(channelId);
-  if (!channel || !channel.isTextBased() || !('send' in channel)) {
+  if (!channel?.isTextBased() || !('send' in channel)) {
     throw new UnpostableChannelError(`Channel ${channelId} is missing or not text-based.`);
   }
   return channel as unknown as PostableChannel;

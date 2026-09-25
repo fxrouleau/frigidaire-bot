@@ -5,18 +5,18 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { type Client, Events } from 'discord.js';
 import {
+  buildDigest,
   type CaptureMeta,
   type DigestFailure,
   type DigestSignal,
   FAILURE_CATEGORIES,
   SIGNAL_CATEGORIES,
-  buildDigest,
   summarizeErrorCaptures,
 } from '../ai/digest';
 import { getMemoryStore } from '../ai/memory';
 import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { getReportChannelId, sendToReportChannel } from '../ai/reportChannel';
-import { type UsageSummary, getUsageSummary, startOfEasternDay } from '../ai/usage';
+import { getUsageSummary, startOfEasternDay, type UsageSummary } from '../ai/usage';
 import { config } from '../config';
 import { defineEvent } from '../eventModule';
 import { logger } from '../logger';

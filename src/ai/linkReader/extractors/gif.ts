@@ -15,7 +15,7 @@ import { extractJsonLd, extractMetadata, findTags } from '../html';
 import { DISCORD_CRAWLER_UA } from '../safeFetch';
 import type { KlipySection } from '../targets';
 import type { LinkContent, LinkKind, LinkMedia } from '../types';
-import { ExtractError, type ExtractorContext, type Json, asRecord, capText, fetchHtml, parseDate, str } from './common';
+import { asRecord, capText, ExtractError, type ExtractorContext, fetchHtml, type Json, parseDate, str } from './common';
 
 const PAGE_MAX_BYTES = 1024 * 1024;
 // Keywords every GIF page carries; they say nothing about this one.

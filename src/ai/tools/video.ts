@@ -150,7 +150,7 @@ async function fetchLinked(ctx: ToolHandlerContext, guildId: string, channelId: 
   if (!guild || guildId !== guild.id) return 'That message is outside this server.';
   try {
     const channel = guild.channels.cache.get(channelId) ?? (await guild.channels.fetch(channelId));
-    if (!channel || !channel.isTextBased()) return "I can't open that channel.";
+    if (!channel?.isTextBased()) return "I can't open that channel.";
     const access = replyAccessFor(asker);
     const row = { ...channelInfoOf(channel), guildId: guild.id, updatedAt: 0 };
     if (!access.asker(row)) return "That message is in a channel you can't read, so I won't watch it.";

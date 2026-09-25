@@ -15,7 +15,7 @@ import { easternParts } from '../ai/utils';
 import { config } from '../config';
 import { logger } from '../logger';
 import { type Birthday, claimAnnouncement, isBirthdayOn, listBirthdays, releaseAnnouncement } from './birthdayStore';
-import { type PostableChannel, describeError, discordErrorCode, fetchPostableChannel } from './discord';
+import { describeError, discordErrorCode, fetchPostableChannel, type PostableChannel } from './discord';
 
 const MINUTE_MS = 60_000;
 const MEMORY_CONTEXT_LIMIT = 5;

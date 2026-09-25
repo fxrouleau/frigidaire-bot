@@ -17,9 +17,9 @@ import * as zlib from 'node:zlib';
 import { config } from '../../config';
 import {
   BlockedUrlError,
+  checkUrlShape,
   type ResolvedAddress,
   type Resolver,
-  checkUrlShape,
   resolvePublicAddresses,
   systemResolver,
 } from './netGuard';

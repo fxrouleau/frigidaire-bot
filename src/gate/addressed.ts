@@ -7,7 +7,7 @@
 // Question design follows TypeSafe's jev-1.13 guidance: the state carries only what the decision needs
 // (the latest message, a few messages of context, who the bot was talking to), time arrives as words
 // rather than numbers, fields are referenced by name, and the boundary cases live in the criteria.
-import { type DecisionsOptions, type NoulQuestion, askNoul } from '../ai/decisions';
+import { askNoul, type DecisionsOptions, type NoulQuestion } from '../ai/decisions';
 import type { UsageFeature } from '../ai/usage';
 import { config } from '../config';
 import { describeBotLastSpoke, truncate } from './text';

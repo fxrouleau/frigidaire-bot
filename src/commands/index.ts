@@ -25,7 +25,7 @@ import { logger } from '../logger';
 import { askFridge } from './askFridge';
 import { createCompletion } from './completion';
 import { rememberThis } from './rememberThis';
-import { LINES, discordErrorCode, failPrivately } from './respond';
+import { discordErrorCode, failPrivately, LINES } from './respond';
 import { summarizeFromHere } from './summarizeFromHere';
 import { summarizeFromMessage } from './summary';
 import { transcribe } from './transcribe';

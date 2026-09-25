@@ -8,7 +8,7 @@
 // cost to the feature that made it (src/ai/usageFetch.ts).
 import OpenAI from 'openai';
 import { config } from '../config';
-import { type Fetch, createUsageTrackingFetch } from './usageFetch';
+import { createUsageTrackingFetch, type Fetch } from './usageFetch';
 
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 export const OPENROUTER_DEFAULT_HEADERS = { 'X-Title': 'Frigidaire Bot' } as const;

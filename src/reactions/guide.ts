@@ -8,7 +8,7 @@ import type { EmojiRow } from '../ai/memory/memoryStore';
 // Only emojis the bot can actually use make it in: unicode ones, and custom ones still on the server
 // (active rows of the emoji table). A deleted server emoji can't be reacted with, so teaching it would
 // only produce rejected answers.
-import { type ReactionProfile, type ReactionProfileEntry, getReactionProfile } from '../archive';
+import { getReactionProfile, type ReactionProfile, type ReactionProfileEntry } from '../archive';
 
 /** Emojis shown in the guide. */
 export const GUIDE_EMOJIS = 25;

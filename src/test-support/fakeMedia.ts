@@ -3,7 +3,7 @@
 // in a header), and a fetch that serves in-memory files by URL.
 import OpenAI from 'openai';
 import type { Resolver } from '../ai/linkReader/netGuard';
-import { type HttpTransport, type SafeFetch, createSafeFetch } from '../ai/linkReader/safeFetch';
+import { createSafeFetch, type HttpTransport, type SafeFetch } from '../ai/linkReader/safeFetch';
 import type { MediaTranscoder, ProbeResult, VideoSample } from '../ai/media/transcoder';
 import type { EndpointCoverage, ModelCatalog, ModelInfo } from '../ai/modelCatalog';
 import type { OpenRouterFixture } from './openRouterFetch';

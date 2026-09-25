@@ -4,7 +4,7 @@
 import OpenAI from 'openai';
 import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 import { logger } from '../../logger';
-import { type UsageFeature, featureRequestOptions } from '../usage';
+import { featureRequestOptions, type UsageFeature } from '../usage';
 import type { AudioFormat } from './formats';
 
 export type MediaContentPart =

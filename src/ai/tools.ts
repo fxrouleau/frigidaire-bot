@@ -5,15 +5,15 @@ import {
   type Memory,
   type MemoryStore,
   NON_PERSON_SUBJECTS,
-  SELF_DIAGNOSIS_CATEGORIES,
   nameKey,
+  SELF_DIAGNOSIS_CATEGORIES,
 } from './memory/memoryStore';
 import {
-  MAX_MEMBER_NAME_LENGTH,
-  type ResolvedPerson,
   checkNickname,
   cleanSubject,
+  MAX_MEMBER_NAME_LENGTH,
   parseMemberName,
+  type ResolvedPerson,
   resolvePerson,
 } from './people';
 import { emojiSyntax } from './promptSections';

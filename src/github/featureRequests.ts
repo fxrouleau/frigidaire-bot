@@ -26,9 +26,9 @@ import { type BotDb, getBotDb } from '../storage/botDb';
 import { GitHubApiError, type GitHubErrorKind, type GitHubIssue, type GitHubIssuesApi, type LabelSpec } from './client';
 import {
   type ClosedResolution,
+  closedResolution,
   FEATURE_REQUEST_LABEL,
   type IssueCandidate,
-  closedResolution,
   isFeatureRequestIssue,
   matchIssues,
   searchTerms,

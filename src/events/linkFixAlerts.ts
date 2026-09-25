@@ -4,7 +4,7 @@ import { Events } from 'discord.js';
 import { getReportChannelId, sendToReportChannel } from '../ai/reportChannel';
 import { config } from '../config';
 import { defineEvent } from '../eventModule';
-import { FixerAlerter, botDbAlertStore } from '../links/fixerAlerts';
+import { botDbAlertStore, FixerAlerter } from '../links/fixerAlerts';
 import { onPlatformHealthChange, platformHealth } from '../links/fixerHealth';
 
 export default defineEvent(Events.ClientReady, {

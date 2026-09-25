@@ -10,9 +10,9 @@ import { config } from '../config';
 import { logger } from '../logger';
 import { answerPrivately, blockQuote, deferPrivately, postPublicReply, subtext } from './respond';
 import {
-  type MediaAttachment,
   ensureTargetChannel,
   invokerName,
+  type MediaAttachment,
   mediaAttachments,
   readableText,
   resolveTargetAuthor,

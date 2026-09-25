@@ -14,11 +14,11 @@
 import { config } from '../config';
 import { logger } from '../logger';
 import {
-  type ArchiveStore,
   type ArchivedReaction,
+  type ArchiveStore,
+  getArchiveStore,
   type ReactionProfile,
   type ReactionProfileOptions,
-  getArchiveStore,
   reactionKey,
 } from './archiveStore';
 

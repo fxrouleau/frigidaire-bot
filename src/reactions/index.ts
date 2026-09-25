@@ -8,14 +8,14 @@ import { sendToReportChannel } from '../ai/reportChannel';
 import { config } from '../config';
 import { addressedGate } from '../gate';
 import { logger } from '../logger';
-import { type AutoReactSettings, AutoReactor } from './autoReactor';
-import { ReactionGuideCache, buildGuideFromArchive } from './guide';
+import { AutoReactor, type AutoReactSettings } from './autoReactor';
+import { buildGuideFromArchive, ReactionGuideCache } from './guide';
 import { loadImages } from './images';
 import { createAutoReactJudge } from './judge';
 import { AutoReactLedger } from './ledger';
 
-export { AutoReactor } from './autoReactor';
 export type { AutoReactSettings, Candidate, CandidateSnapshot, EvaluationOutcome } from './autoReactor';
+export { AutoReactor } from './autoReactor';
 
 function usableEmojis(): EmojiRow[] {
   try {

@@ -9,7 +9,7 @@ import { formatTimestampET } from '../ai/utils';
 import { config } from '../config';
 import { accountIdsFor, canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
-import type { ArchiveStore, ArchivedChannel, ArchivedMessage, ArchivedReaction } from './archiveStore';
+import type { ArchivedChannel, ArchivedMessage, ArchivedReaction, ArchiveStore } from './archiveStore';
 import { isIgnoredChannel, isThreadType } from './ingest';
 
 /** The permission view of a guild channel search needs; a discord.js GuildChannel/ThreadChannel fits. */

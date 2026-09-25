@@ -11,7 +11,7 @@ import {
   MessageReferenceType,
   type OmitPartialGroupDMChannel,
 } from 'discord.js';
-import { type Recorder, createRecorder } from './recorder';
+import { createRecorder, type Recorder } from './recorder';
 
 // The exact type discord.js hands to a MessageCreate listener (a Message whose channel is never a
 // partial group DM), so fakes can be passed straight to event handlers as well as to the agent.

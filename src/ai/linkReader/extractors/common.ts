@@ -1,6 +1,6 @@
 import { sniffCharset } from '../html';
 // Shared plumbing for the per-platform extractors.
-import { type FetchOptions, type FetchResult, type SafeFetch, decodeText, parseJsonBody } from '../safeFetch';
+import { decodeText, type FetchOptions, type FetchResult, parseJsonBody, type SafeFetch } from '../safeFetch';
 
 export type ExtractorContext = {
   fetch: SafeFetch;

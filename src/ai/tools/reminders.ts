@@ -5,14 +5,14 @@ import { logger } from '../../logger';
 import { isVisibleToEveryone, jumpLink } from '../../scheduling/discord';
 import { buildPoll, postPoll } from '../../scheduling/polls';
 import {
-  type Reminder,
   cancelReminder,
   countOpenByRequester,
   insertReminder,
   listPendingInChannel,
+  type Reminder,
 } from '../../scheduling/reminderStore';
 import { describeEt, parseReminderTime, relativeTo } from '../../scheduling/time';
-import { type ResolvedPerson, buildPeopleDirectory, currentName, requesterOf, resolvePeopleRefs } from '../people';
+import { buildPeopleDirectory, currentName, type ResolvedPerson, requesterOf, resolvePeopleRefs } from '../people';
 import type { ToolDefinition, ToolHandlerContext } from '../types';
 
 const MINUTE_MS = 60_000;

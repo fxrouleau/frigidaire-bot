@@ -19,12 +19,12 @@ import { logger } from '../logger';
 import { getBotDb } from '../storage/botDb';
 import { renderMessageText } from './addressedGate';
 import {
+  createArchiveRambleExamples,
   type RambleExampleRequest,
   type RambleExampleSource,
   type RambleExamples,
-  createArchiveRambleExamples,
 } from './rambleExamples';
-import { type RambleJudge, type RambleJudgeInput, type RambleLine, createChatRambleJudge } from './rambleJudge';
+import { createChatRambleJudge, type RambleJudge, type RambleJudgeInput, type RambleLine } from './rambleJudge';
 import { stripMarkup } from './text';
 
 // In character: a friend telling another friend to take it elsewhere. `{channel}` becomes the channel link.

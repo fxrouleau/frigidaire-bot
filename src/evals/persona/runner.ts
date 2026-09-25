@@ -21,11 +21,11 @@ import type { EvalReport, ScenarioRun } from './report';
 import { summarizeRuns } from './report';
 import {
   BOT_AUTHOR,
+  castMember,
   type Scenario,
   type ScenarioFile,
   type ScenarioMessage,
   type SeedEmbed,
-  castMember,
 } from './scenarioFile';
 
 /**

@@ -10,14 +10,14 @@
 // nothing: an emoji is only re-grounded when it has never been, when its caption was replaced since (a
 // rename re-captions it from the image, EMOJI_FORCE_RECAPTION clears everything), or when its uses grew
 // by half since. That keeps the Opus-priced caption model to a handful of calls a week.
-import { type UsagePhraseInput, composeCaption, describeEmojiUsage, splitCaption } from '../ai/emojiCaptioner';
+import { composeCaption, describeEmojiUsage, splitCaption, type UsagePhraseInput } from '../ai/emojiCaptioner';
 import { getMemoryStore } from '../ai/memory';
 import type { EmojiRow, MemoryStore } from '../ai/memory/memoryStore';
 import { type ArchiveStore, getArchiveStore } from '../archive/archiveStore';
 import { config } from '../config';
 import { logger } from '../logger';
 import { type BotDb, getBotDb } from '../storage/botDb';
-import { type EmojiUsage, collectEmojiUsage, formatUsageSample } from './emojiUsage';
+import { collectEmojiUsage, type EmojiUsage, formatUsageSample } from './emojiUsage';
 
 /** Uses (reactions + messages) an emoji needs before its usage says anything. */
 export const MIN_USES = 5;

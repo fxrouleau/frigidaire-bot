@@ -91,7 +91,9 @@ export function archivableMessage(opts: ArchivableMessageOptions = {}): Message 
     });
   });
   const stickers = new Collection<string, unknown>();
-  (opts.stickers ?? []).forEach((name, i) => stickers.set(`st-${i}`, { name }));
+  (opts.stickers ?? []).forEach((name, i) => {
+    stickers.set(`st-${i}`, { name });
+  });
   const reactions = new Collection<string, unknown>();
   for (const r of opts.reactions ?? []) {
     reactions.set(r.id ?? r.name, {

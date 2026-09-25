@@ -8,9 +8,9 @@ import { attributeMessage } from '../relay';
 import { getCachedTranscript } from './media';
 import { type Identity, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
 import { getOpenRouterClient } from './openRouterClient';
-import { type Member, checkNickname, foldMembers, matchMemberByName, memoryKeyFor, parseMemberName } from './people';
+import { checkNickname, foldMembers, type Member, matchMemberByName, memoryKeyFor, parseMemberName } from './people';
 import { formatEmojiLines, formatIdentityLines } from './promptSections';
-import { type UsageFeature, featureRequestOptions } from './usage';
+import { featureRequestOptions, type UsageFeature } from './usage';
 import { formatTimestampET } from './utils';
 
 // Single source of truth for valid categories — a runtime value (not just a type) because the TTL

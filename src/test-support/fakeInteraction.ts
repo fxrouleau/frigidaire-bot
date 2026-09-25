@@ -17,8 +17,8 @@ import {
 import type { AudioInput, VideoInput, VideoOutcome } from '../ai/media';
 import type { MemoryStore } from '../ai/memory/memoryStore';
 import type { ChannelSummary, CommandDeps, CompletionRequest, SummarizeRequest } from '../commands/types';
-import { type FakeMessageOptions, createFakeMessage } from './fakeDiscord';
-import { type Recorder, createRecorder } from './recorder';
+import { createFakeMessage, type FakeMessageOptions } from './fakeDiscord';
+import { createRecorder, type Recorder } from './recorder';
 
 export type InteractionResponseMethod = 'deferReply' | 'reply' | 'editReply' | 'followUp' | 'deleteReply';
 

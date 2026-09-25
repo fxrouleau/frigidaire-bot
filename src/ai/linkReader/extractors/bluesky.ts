@@ -13,13 +13,13 @@
 //     accounts) — a direct mp4 that video understanding can use
 import type { LinkContent, LinkMedia, LinkQuote } from '../types';
 import {
-  ExtractError,
-  type ExtractorContext,
-  type Json,
   asArray,
   asRecord,
   capText,
+  ExtractError,
+  type ExtractorContext,
   fetchJson,
+  type Json,
   num,
   parseDate,
   str,

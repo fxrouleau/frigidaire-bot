@@ -1,6 +1,6 @@
 // Aggregation and rendering of persona eval results: per-model means of the judge's rubric scores, the
 // deterministic metrics and the hard checks, as a comparison table plus a per-scenario grid.
-import { type JudgeVerdict, RUBRIC_DIMENSIONS, type RubricDimension, overallScore } from './judge';
+import { type JudgeVerdict, overallScore, RUBRIC_DIMENSIONS, type RubricDimension } from './judge';
 import type { CheckResult, ReplyMetrics } from './metrics';
 
 export type ScenarioRun = {

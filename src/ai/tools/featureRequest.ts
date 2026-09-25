@@ -22,19 +22,19 @@ import {
   FeatureRequestService,
   type SupportResult,
 } from '../../github/featureRequests';
-import { type ClosedResolution, type IssueCandidate, closedResolution } from '../../github/issueMatching';
+import { type ClosedResolution, closedResolution, type IssueCandidate } from '../../github/issueMatching';
 import {
   CRITERIA_MAX_ITEMS,
   CRITERION_MAX_CHARS,
   DESCRIPTION_MAX_CHARS,
   type IssueDraft,
-  SUPPORT_DETAILS_MAX_CHARS,
-  WHY_MAX_CHARS,
   issueSummary,
+  SUPPORT_DETAILS_MAX_CHARS,
   sanitizeInline,
   sanitizeMarkdown,
   sanitizeTitle,
   titleTokens,
+  WHY_MAX_CHARS,
 } from '../../github/issueText';
 import { canonicalUserId } from '../../linkedAccounts';
 import { logger } from '../../logger';

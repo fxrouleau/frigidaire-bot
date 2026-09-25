@@ -3,7 +3,7 @@
 // ready client that fetches those channels. Guild members can be attached for the birthday
 // announcer's membership check.
 import { ChannelType, type Client, type MessageCreateOptions } from 'discord.js';
-import { type Recorder, createRecorder } from './recorder';
+import { createRecorder, type Recorder } from './recorder';
 
 export type FakeGuildMember = { id: string; displayName: string };
 

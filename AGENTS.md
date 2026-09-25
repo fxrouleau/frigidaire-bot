@@ -18,7 +18,7 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 - **AI**: OpenRouter through the `openai` SDK (chat completions + embeddings) and its `/api/alpha/decisions` endpoint (TypeSafe "System One" decision models, used by the message judge)
 - **Storage**: `better-sqlite3` — `./data/memory.db` (memories, FTS5, vectors, identities, emojis, learner/bot state) and `./data/conversations.db` (per-channel conversation cache)
 - **Images**: `sharp`
-- **Lint/format**: Biome (120 cols, 2 spaces, single quotes, trailing commas; `noUnusedImports`/`noUnusedVariables` are errors)
+- **Lint/format**: Biome 2 (120 cols, 2 spaces, single quotes, trailing commas; `noUnusedImports`/`noUnusedVariables` are errors; `check` also sorts imports through the organizeImports assist)
 - **Tests**: Vitest 5 (with `vite` as an explicit dev dependency: Yarn does not install peers), ~590 tests colocated as `src/**/*.test.ts`
 - **Deployment**: one Docker image; dev/test toolchain fully containerized (host needs only Docker)
 

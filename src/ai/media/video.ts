@@ -21,12 +21,12 @@ import type OpenAI from 'openai';
 import { config } from '../../config';
 import { logger } from '../../logger';
 import type { SafeFetch } from '../linkReader/safeFetch';
-import { type ModelCatalog, type ModelInfo, getModelCatalog } from '../modelCatalog';
+import { getModelCatalog, type ModelCatalog, type ModelInfo } from '../modelCatalog';
 import { getOpenRouterClient } from '../openRouterClient';
 import { ClipCache } from './clipCache';
 import { downloadMedia, redact } from './download';
 import { detectVideoMime } from './formats';
-import { type MediaContentPart, completeMedia, describeError } from './modelCall';
+import { completeMedia, describeError, type MediaContentPart } from './modelCall';
 import {
   getStoredVideoAnswer,
   getStoredVideoDescription,

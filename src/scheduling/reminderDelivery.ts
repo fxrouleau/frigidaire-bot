@@ -4,8 +4,8 @@ import type { Client } from 'discord.js';
 import { currentName } from '../ai/people';
 import { accountIdsFor } from '../linkedAccounts';
 import { logger } from '../logger';
-import { type PostableChannel, describeError, fetchPostableChannel, isPermanentChannelError } from './discord';
-import { type Reminder, claimDueReminders, markFailed, markRetry, markSent, releaseStaleClaims } from './reminderStore';
+import { describeError, fetchPostableChannel, isPermanentChannelError, type PostableChannel } from './discord';
+import { claimDueReminders, markFailed, markRetry, markSent, type Reminder, releaseStaleClaims } from './reminderStore';
 import { clockEt, describeEt } from './time';
 
 const MINUTE_MS = 60_000;

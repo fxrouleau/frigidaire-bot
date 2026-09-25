@@ -198,7 +198,7 @@ async function contextFromDiscord(
   const channelId = ref.channelId ?? asker.channelId;
   try {
     const channel = guild.channels.cache.get(channelId) ?? (await guild.channels.fetch(channelId));
-    if (!channel || !channel.isTextBased() || !isArchivableChannel(channel)) return undefined;
+    if (!channel?.isTextBased() || !isArchivableChannel(channel)) return undefined;
     const row = { ...channelInfoOf(channel), guildId: guild.id, updatedAt: 0 };
     const access = replyAccessFor(asker);
     if (!access.asker(row)) return UNREADABLE;

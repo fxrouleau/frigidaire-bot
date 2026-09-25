@@ -3,11 +3,11 @@
 // attachments are audio/video, and the text a model should see.
 import {
   type APIInteractionGuildMember,
+  escapeMarkdown,
   type Guild,
   type GuildMember,
   type Message,
   MessageFlags,
-  escapeMarkdown,
 } from 'discord.js';
 import { logger } from '../logger';
 import { attributeMessage } from '../relay';

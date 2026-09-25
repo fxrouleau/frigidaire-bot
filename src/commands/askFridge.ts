@@ -4,7 +4,7 @@
 // on it — and the agent's own error handling covers failures from there on.
 import { ApplicationCommandType, type Message, type MessageContextMenuCommandInteraction } from 'discord.js';
 import { logger } from '../logger';
-import { LINES, answerPrivately, failPrivately } from './respond';
+import { answerPrivately, failPrivately, LINES } from './respond';
 import { ensureTargetChannel, liveDisplayName } from './targets';
 import { type CommandDeps, CommandError, type MessageCommand } from './types';
 

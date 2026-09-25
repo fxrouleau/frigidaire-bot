@@ -16,7 +16,7 @@
 // stranger, and candidates are shown to the chat model: an injection surface, and never a request a
 // member could be +1-ing anyway.
 import type { GitHubIssue } from './client';
-import { DUPLICATE_THRESHOLD, contentWords, issueSummary, titleSimilarity, titleTokens } from './issueText';
+import { contentWords, DUPLICATE_THRESHOLD, issueSummary, titleSimilarity, titleTokens } from './issueText';
 
 export const FEATURE_REQUEST_LABEL = 'feature-request';
 /** `author_association` values of people with a say in the repo: the owner, org members, collaborators. */

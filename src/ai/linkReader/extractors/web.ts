@@ -13,7 +13,7 @@
 import { extractJsonLd, extractMetadata, extractReadableText, findJsonLdArticle, sniffCharset } from '../html';
 import { decodeText } from '../safeFetch';
 import type { LinkContent, LinkKind } from '../types';
-import { ExtractError, type ExtractorContext, capText, num, parseDate } from './common';
+import { capText, ExtractError, type ExtractorContext, num, parseDate } from './common';
 
 const PAGE_TYPES = ['text/html', 'application/xhtml+xml'];
 const TEXT_TYPES = ['text/plain', 'text/markdown'];

@@ -14,8 +14,8 @@ export type {
   ReactionSample,
 } from './archiveStore';
 export { getReactionProfile } from './reactions';
-export { computeWrappedStats, messageCountsByAuthor } from './stats';
 export type { AuthorCount, StatsScope, WrappedStats } from './stats';
+export { computeWrappedStats, messageCountsByAuthor } from './stats';
 
 /**
  * A channel's archived messages in [startMs, endMs), oldest first — every source, so callers decide:

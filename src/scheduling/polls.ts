@@ -4,7 +4,7 @@
 // limit is checked here with an error the model can act on instead of a raw 400 from Discord.
 import { type PollData, RESTJSONErrorCodes } from 'discord.js';
 import { logger } from '../logger';
-import { type PostableChannel, describeError, discordErrorCode } from './discord';
+import { describeError, discordErrorCode, type PostableChannel } from './discord';
 
 export const POLL_LIMITS = {
   questionChars: 300,

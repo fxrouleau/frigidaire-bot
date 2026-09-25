@@ -11,14 +11,14 @@ import { extractMetadata } from '../html';
 import { DISCORD_CRAWLER_UA } from '../safeFetch';
 import type { LinkComment, LinkContent, LinkMedia } from '../types';
 import {
-  ExtractError,
-  type ExtractorContext,
-  type Json,
   asArray,
   asRecord,
   capText,
+  ExtractError,
+  type ExtractorContext,
   fetchHtml,
   fetchJson,
+  type Json,
   num,
   resolveRedirect,
   str,

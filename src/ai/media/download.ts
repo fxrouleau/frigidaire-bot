@@ -8,7 +8,7 @@
 // bot buffer a 2 GB file — and one timeout covering the whole transfer.
 import { config } from '../../config';
 import { logger } from '../../logger';
-import { BlockedUrlError, FetchFailedError, type SafeFetch, createSafeFetch } from '../linkReader/safeFetch';
+import { BlockedUrlError, createSafeFetch, FetchFailedError, type SafeFetch } from '../linkReader/safeFetch';
 
 export type DownloadResult =
   | { ok: true; data: Buffer; contentType?: string }

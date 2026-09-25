@@ -14,10 +14,10 @@
 //     refused twice over)
 import { config } from '../../config';
 import { logger } from '../../logger';
-import { type VideoInput, type VideoOutcome, watchVideo as defaultWatchVideo, videoOutcomeNote } from '../media';
+import { watchVideo as defaultWatchVideo, type VideoInput, type VideoOutcome, videoOutcomeNote } from '../media';
 import { TtlCache } from './cache';
 import { readBluesky } from './extractors/bluesky';
-import { ExtractError, type ExtractorContext, capText } from './extractors/common';
+import { capText, ExtractError, type ExtractorContext } from './extractors/common';
 import { readGif } from './extractors/gif';
 import { readReddit } from './extractors/reddit';
 import { readInstagram, readTikTok } from './extractors/shortVideo';
@@ -25,8 +25,8 @@ import { readTweet } from './extractors/twitter';
 import { readWebPage } from './extractors/web';
 import { readYouTube } from './extractors/youtube';
 import { checkUrlShape } from './netGuard';
-import { BlockedUrlError, FetchFailedError, type SafeFetch, createSafeFetch } from './safeFetch';
-import { type LinkTarget, identifyLink } from './targets';
+import { BlockedUrlError, createSafeFetch, FetchFailedError, type SafeFetch } from './safeFetch';
+import { identifyLink, type LinkTarget } from './targets';
 import type { LinkContent, LinkReadResult, LinkVideo } from './types';
 
 const CACHE_ENTRIES = 200;
