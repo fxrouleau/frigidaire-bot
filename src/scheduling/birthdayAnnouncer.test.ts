@@ -189,6 +189,27 @@ describe('BirthdayAnnouncer.run', () => {
     expect(inputs[0].memories.join(' ')).not.toContain('cat gif');
   });
 
+  it("finds memories filed under any name they go by: Discord handle, and a linked side account's names", async () => {
+    const SIDE = '400000000000000003';
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${ALICE}`);
+    try {
+      memory.upsertIdentity(ALICE, 'Alice', 'alice_handle');
+      memory.upsertIdentity(SIDE, 'AliceAlt', 'alice_alt');
+      await memory.save({ category: 'fact', subject: 'alice_handle', content: 'works night shifts as an ER nurse' });
+      await memory.save({ category: 'fact', subject: 'AliceAlt', content: 'owns two greyhounds' });
+      await memory.save({ category: 'fact', subject: 'Bob', content: 'mains Thresh in League' });
+      birthday(ALICE, 9, 25);
+      const { writer, inputs } = writerSaying('🎂 hbd');
+      const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice' }] });
+
+      await announcer.run(SEPT25_1500);
+
+      expect([...inputs[0].memories].sort()).toEqual(['owns two greyhounds', 'works night shifts as an ER nurse']);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('skips (and settles for the year) someone who left the server', async () => {
     birthday(ALICE, 9, 25);
     const { target, announcer } = setup({ members: [{ id: BOB, displayName: 'Bob' }] });

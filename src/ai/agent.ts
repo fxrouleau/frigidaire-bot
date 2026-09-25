@@ -6,6 +6,7 @@ import {
   StickerFormatType,
 } from 'discord.js';
 import { config } from '../config';
+import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
 import { type MessageAttribution, attributeMessage } from '../relay';
 import { splitMessage } from '../utils';
@@ -19,7 +20,7 @@ import { estimateTokens, historyBudgetFor, trimHistory } from './historyBudget';
 import { getMemoryStore } from './memory';
 import type { EmojiRow, Identity, Memory, MemoryStore } from './memory/memoryStore';
 import { type ModelContextLengths, getModelContextLengths } from './modelInfo';
-import { findNamedPeople, identityNames } from './namedPeople';
+import { currentName, findPeopleInText, memoryKeyFor, namesOf } from './people';
 import { emojiCdnUrl, findCustomEmojis, formatIdentityLines } from './promptSections';
 import { getProvider } from './providerRegistry';
 import { toolDefinitions } from './tools';
@@ -1046,7 +1047,7 @@ Right before each new message you get a context note with the current time (East
     let userSpecificMemories: Memory[] = [];
     try {
       userSpecificMemories = store
-        .getForPerson(this.personLookup(message.author.id, currentSpeaker, store), 5)
+        .getForPerson(memoryKeyFor(store, message.author.id, [currentSpeaker]), 5)
         .filter((m) => !existingIds.has(m.id));
     } catch (error) {
       logger.warn('Failed to fetch speaker memories:', error);
@@ -1101,32 +1102,10 @@ Right before each new message you get a context note with the current time (East
     return { text: `${userSection}${mentionedSection}${contextualSection}`.trim(), injectedIds };
   }
 
-  /**
-   * Who a person is for memory lookup: their stable Discord id plus every name their memories may be
-   * filed under — the current display name and the identity's display, first-seen (canonical) and IRL
-   * names, aliases and username — so a nickname change doesn't orphan anyone's memories.
-   */
-  private personLookup(userId: string, currentName: string | undefined, store: MemoryStore) {
-    let identity: Identity | undefined;
-    try {
-      identity = store.getIdentityById(userId);
-    } catch {
-      identity = undefined;
-    }
-    const names = [currentName, ...(identity ? identityNames(identity) : [])].filter(
-      (n): n is string => typeof n === 'string' && n.trim().length > 0,
-    );
-    return { userId, names };
-  }
-
   /** A memory's subject as the model should read it: the person's current display name when the row is id-anchored. */
   private memorySubjectLabel(memory: Memory, store: MemoryStore): string {
     if (!memory.subject_user_id) return memory.subject;
-    try {
-      return store.getIdentityById(memory.subject_user_id)?.display_name ?? memory.subject;
-    } catch {
-      return memory.subject;
-    }
+    return currentName(memory.subject_user_id, memory.subject, store);
   }
 
   /**
@@ -1149,7 +1128,8 @@ Right before each new message you get a context note with the current time (East
 
   /**
    * Collects memories for the (non-bot, non-speaker) users @-mentioned in the message, by stable id and
-   * every known name. Caps the number of distinct users and dedups against `alreadyInjected`.
+   * every known name. A side account's mention counts as its member (LINKED_ACCOUNTS). Caps the number
+   * of distinct people and dedups against `alreadyInjected`.
    */
   private collectMentionedSubjectMemories(
     message: Message,
@@ -1157,21 +1137,22 @@ Right before each new message you get a context note with the current time (East
     alreadyInjected: Set<number>,
   ): Memory[] {
     const botUserId = message.client.user.id;
-    const speakerId = message.author.id;
+    const speakerId = canonicalUserId(message.author.id);
     const seenIds = new Set<string>();
     const collected: Memory[] = [];
     let resolvedUsers = 0;
 
     for (const match of message.content.matchAll(USER_MENTION_REGEX)) {
       const id = match[1];
-      if (id === botUserId || id === speakerId || seenIds.has(id)) continue;
-      seenIds.add(id);
+      const personId = canonicalUserId(id);
+      if (id === botUserId || personId === speakerId || seenIds.has(personId)) continue;
+      seenIds.add(personId);
 
       const displayName = this.resolveMentionDisplayName(id, message, store);
       if (!displayName) continue;
 
       try {
-        for (const mem of store.getForPerson(this.personLookup(id, displayName, store), 3)) {
+        for (const mem of store.getForPerson(memoryKeyFor(store, id, [displayName]), 3)) {
           if (alreadyInjected.has(mem.id)) continue;
           alreadyInjected.add(mem.id);
           collected.push(mem);
@@ -1188,48 +1169,39 @@ Right before each new message you get a context note with the current time (East
   }
 
   /**
-   * Memories for members the message names in plain text (display/canonical/IRL name, alias, username;
-   * see namedPeople.ts), excluding the bot, the speaker and anyone @-mentioned (those have their own
-   * pulls). At most MAX_NAMED_PEOPLE people, 3 memories each, deduped against `alreadyInjected`.
+   * Memories for members the message names in plain text (any name they go by, on any of their
+   * accounts; see findPeopleInText in people.ts), excluding the bot, the speaker and anyone @-mentioned
+   * (those have their own pulls). At most MAX_NAMED_PEOPLE people, most named first, 3 memories each,
+   * deduped against `alreadyInjected`.
    */
   private collectNamedPeopleMemories(message: Message, store: MemoryStore, alreadyInjected: Set<number>): Memory[] {
     const botUser = message.client.user;
     const mentionedIds = [...(message.content ?? '').matchAll(USER_MENTION_REGEX)].map((m) => m[1]);
 
-    let identities: Identity[];
+    let named: ReturnType<typeof findPeopleInText>;
     try {
-      identities = store.getAllIdentities();
+      // Never the bot's own names: "fridge, what do you think" is the bot being addressed, not discussed.
+      const botIdentity = store.getIdentityById(botUser.id);
+      const botNames = [botUser.displayName, botUser.username, message.guild?.members.me?.displayName];
+      named = findPeopleInText(store, message.content ?? '', {
+        excludeUserIds: [botUser.id, message.author.id, ...mentionedIds],
+        excludeNames: [...botNames, ...namesOf(botIdentity)],
+      }).slice(0, MAX_NAMED_PEOPLE);
     } catch (error) {
-      logger.warn('Failed to read identities for name matching:', error);
+      logger.warn('Failed to match people named in the message:', error);
       return [];
     }
 
-    // Never the bot's own names: "fridge, what do you think" is the bot being addressed, not discussed.
-    const botIdentity = identities.find((i) => i.discord_user_id === botUser.id);
-    const botNames = [
-      botUser.displayName,
-      botUser.username,
-      message.guild?.members.me?.displayName,
-      ...(botIdentity ? identityNames(botIdentity) : []),
-    ].filter((n): n is string => typeof n === 'string' && n.length > 0);
-
-    const named = findNamedPeople(message.content ?? '', identities, {
-      excludeUserIds: [botUser.id, message.author.id, ...mentionedIds],
-      excludeNames: botNames,
-      max: MAX_NAMED_PEOPLE,
-    });
-
     const collected: Memory[] = [];
-    for (const { identity } of named) {
+    for (const person of named) {
       try {
-        const lookup = this.personLookup(identity.discord_user_id, identity.display_name, store);
-        for (const mem of store.getForPerson(lookup, 3)) {
+        for (const mem of store.getForPerson(memoryKeyFor(store, person.userId, [person.displayName]), 3)) {
           if (alreadyInjected.has(mem.id)) continue;
           alreadyInjected.add(mem.id);
           collected.push(mem);
         }
       } catch (error) {
-        logger.warn(`Failed to fetch memories for named member ${identity.discord_user_id}:`, error);
+        logger.warn(`Failed to fetch memories for named member ${person.userId}:`, error);
       }
     }
     return collected;

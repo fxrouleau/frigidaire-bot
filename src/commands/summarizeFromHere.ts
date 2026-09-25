@@ -2,6 +2,7 @@
 // everyone as a reply to that message. The range is capped at 7 days (the summary pipeline's limit);
 // an older target summarizes the last week and says so.
 import { ApplicationCommandType } from 'discord.js';
+import { canonicalUserId } from '../linkedAccounts';
 import { answerPrivately, deferPrivately, postPublicReply, subtext } from './respond';
 import { ensureTargetChannel, invokerName } from './targets';
 import { CommandError, type MessageCommand } from './types';
@@ -22,7 +23,9 @@ export const summarizeFromHere: MessageCommand = {
     const capped = target.createdAt < earliest;
     const start = capped ? earliest : target.createdAt;
 
-    const summary = await deps.summarize({ message: target, start, end, requesterId: interaction.user.id });
+    // The requester as a member: a linked side account asks as its main account (LINKED_ACCOUNTS).
+    const requesterId = canonicalUserId(interaction.user.id);
+    const summary = await deps.summarize({ message: target, start, end, requesterId });
     if (!summary.ok) throw new CommandError(summary.reason);
 
     const scope = capped

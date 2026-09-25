@@ -3,7 +3,6 @@
 import { config } from '../../config';
 import { logger } from '../../logger';
 import { jumpLink } from '../../scheduling/discord';
-import { type Person, buildDirectory, currentName, requesterOf, resolvePeople } from '../../scheduling/people';
 import { buildPoll, postPoll } from '../../scheduling/polls';
 import {
   type Reminder,
@@ -13,6 +12,7 @@ import {
   listPendingInChannel,
 } from '../../scheduling/reminderStore';
 import { describeEt, parseReminderTime, relativeTo } from '../../scheduling/time';
+import { type ResolvedPerson, buildPeopleDirectory, currentName, requesterOf, resolvePeopleRefs } from '../people';
 import type { ToolDefinition, ToolHandlerContext } from '../types';
 
 const MINUTE_MS = 60_000;
@@ -130,12 +130,12 @@ const setReminderTool: ToolDefinition = {
     const due = resolveDueTime(args.at, args.in_minutes, now);
     if (!due.ok) return due.error;
 
-    const directory = buildDirectory(ctx.message);
-    const requester = directory.requester;
+    const directory = buildPeopleDirectory(ctx.message);
+    const requester = directory.requester ?? requesterOf(ctx.message);
     const refs = targetRefs(args.for);
-    let targets: Person[] = [requester];
+    let targets: ResolvedPerson[] = [requester];
     if (refs.length > 0) {
-      const resolved = resolvePeople(refs, directory);
+      const resolved = resolvePeopleRefs(refs, directory);
       if (!resolved.ok) return `No reminder set. ${resolved.error}`;
       targets = resolved.people;
     }
@@ -143,14 +143,14 @@ const setReminderTool: ToolDefinition = {
 
     const cap = config.reminders.maxPerUser;
     if (countOpenByRequester(requester.userId) >= cap) {
-      return `No reminder set: ${requester.name} already has ${cap} pending reminders (the limit). Cancel some first.`;
+      return `No reminder set: ${requester.displayName} already has ${cap} pending reminders (the limit). Cancel some first.`;
     }
 
     const id = insertReminder({
       guildId: ctx.message.guildId ?? null,
       channelId: ctx.channelId,
       requesterId: requester.userId,
-      requesterName: requester.name,
+      requesterName: requester.displayName,
       targetIds: targets.map((t) => t.userId),
       text,
       dueAt: due.dueAt.getTime(),
@@ -160,7 +160,7 @@ const setReminderTool: ToolDefinition = {
     logger.info(
       `reminders: #${id} set by ${requester.userId} for ${targets.length} target(s), due ${due.dueAt.toISOString()}.`,
     );
-    return `Reminder #${id} set for ${targets.map((t) => t.name).join(', ')}: ${describeEt(due.dueAt)} (${relativeTo(due.dueAt, now)}). It will be posted in this channel.`;
+    return `Reminder #${id} set for ${targets.map((t) => t.displayName).join(', ')}: ${describeEt(due.dueAt)} (${relativeTo(due.dueAt, now)}). It will be posted in this channel.`;
   },
 };
 
@@ -198,7 +198,7 @@ const cancelReminderTool: ToolDefinition = {
       case 'not_found':
         return `There's no reminder #${raw}.`;
       case 'forbidden':
-        return `${actor.name} can't cancel reminder #${raw}: only the person who set it (${currentName(result.reminder.requesterId, result.reminder.requesterName)}) or someone it's for can.`;
+        return `${actor.displayName} can't cancel reminder #${raw}: only the person who set it (${currentName(result.reminder.requesterId, result.reminder.requesterName)}) or someone it's for can.`;
       case 'not_pending':
         return `Reminder #${raw} isn't pending anymore (${result.reminder.status === 'cancelled' ? 'already cancelled' : 'it already went off'}).`;
       case 'cancelled':

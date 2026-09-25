@@ -4,8 +4,10 @@
 import { ChannelType, PermissionFlagsBits } from 'discord.js';
 import { getMemoryStore } from '../ai/memory';
 import type { Identity } from '../ai/memory/memoryStore';
+import { foldMembers } from '../ai/people';
 import { formatTimestampET } from '../ai/utils';
 import { config } from '../config';
+import { accountIdsFor, canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
 import type { ArchiveStore, ArchivedChannel, ArchivedMessage, ArchivedReaction } from './archiveStore';
 import { isIgnoredChannel, isThreadType } from './ingest';
@@ -92,12 +94,6 @@ function normalizeName(name: string): string {
   return name.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/^@+/, '').trim();
 }
 
-function identityNames(identity: Identity): string[] {
-  return [identity.display_name, identity.canonical_name, identity.irl_name ?? '', ...identity.aliases].filter(
-    (n) => n.trim().length > 0,
-  );
-}
-
 function safeIdentities(): Identity[] {
   try {
     return getMemoryStore().getAllIdentities();
@@ -109,7 +105,8 @@ function safeIdentities(): Identity[] {
 
 /**
  * Resolves an "author" argument: an @-mention or raw id, "me", the bot itself, or any name a member
- * goes by (display name, first-seen name, IRL name, alias) — exact matches first, then partial ones
+ * goes by (display name, Discord handle, first-seen name, IRL name, alias, on any of their linked
+ * accounts) — exact matches first, then partial ones
  * (so "felix" finds "Felix R." and an IRL name "Félix Rouleau"). Falls back to author names seen in
  * the archive for people the identity table doesn't know. Undefined when nobody matches.
  */
@@ -119,31 +116,39 @@ export function resolveAuthor(
 ): ResolvedAuthor | undefined {
   const raw = text.trim();
   if (!raw) return undefined;
-  const identities = safeIdentities();
-  const nameOf = (id: string) => identities.find((i) => i.discord_user_id === id)?.display_name;
+  // Members, not accounts: a linked side account's names find its member, and a member's messages are
+  // searched under every account id (the archive stores the main id; older rows may carry a side id).
+  const members = foldMembers(safeIdentities());
+  const nameOf = (id: string) => members.find((m) => m.userId === canonicalUserId(id))?.displayName;
 
   const mention = raw.match(/^<@!?(\d{15,21})>$/) ?? raw.match(/^(\d{15,21})$/);
   if (mention) {
     const id = mention[1];
     if (id === ctx.botUserId) return { ids: [], names: [], botOnly: true, label: 'you (the bot)' };
-    return { ids: [id], names: [], botOnly: false, label: nameOf(id) ?? `user ${id}` };
+    return { ids: accountIdsFor(id), names: [], botOnly: false, label: nameOf(id) ?? `user ${id}` };
   }
 
   const needle = normalizeName(raw);
   if (SELF_WORDS.has(needle) && ctx.requesterId) {
-    return { ids: [ctx.requesterId], names: [], botOnly: false, label: nameOf(ctx.requesterId) ?? 'the asker' };
+    return {
+      ids: accountIdsFor(ctx.requesterId),
+      names: [],
+      botOnly: false,
+      label: nameOf(ctx.requesterId) ?? 'the asker',
+    };
   }
   const botNames = (ctx.botNames ?? []).map(normalizeName);
   if (BOT_WORDS.has(needle) || botNames.includes(needle)) {
     return { ids: [], names: [], botOnly: true, label: 'you (the bot)' };
   }
 
-  const exact = identities.filter((i) => identityNames(i).some((n) => normalizeName(n) === needle));
+  // Every name a member goes by (display name, @handle, first-seen, IRL name, nicknames), all accounts.
+  const exact = members.filter((m) => m.names.some((n) => normalizeName(n) === needle));
   const partial =
     exact.length > 0 || needle.length < 3
       ? []
-      : identities.filter((i) =>
-          identityNames(i).some((n) => {
+      : members.filter((m) =>
+          m.names.some((n) => {
             const name = normalizeName(n);
             return name.includes(needle) || name.split(/\s+/).includes(needle);
           }),
@@ -151,10 +156,10 @@ export function resolveAuthor(
   const matched = exact.length > 0 ? exact : partial;
   if (matched.length > 0) {
     return {
-      ids: matched.map((i) => i.discord_user_id),
+      ids: [...new Set(matched.flatMap((m) => accountIdsFor(m.userId)))],
       names: [],
       botOnly: false,
-      label: matched.map((i) => i.display_name).join(', '),
+      label: matched.map((m) => m.displayName).join(', '),
     };
   }
 

@@ -261,10 +261,47 @@ describe('PersonalityLearner observation cycle', () => {
     expect(store.getIdentityById('100000000000000001')?.username).toBe('cigalefourmi');
     // A relay's author is the webhook: its "username" is a display name and must never be recorded.
     expect(store.getIdentityById('100000000000000002')?.username).toBe('wheezy_d');
-    expect(textOf(requests[0])).toContain('Discord handle: cigalefourmi');
+    expect(textOf(requests[0])).toContain('- Jason @cigalefourmi (id:100000000000000001)');
     expect(store.getAllActive().map((m) => [m.subject, m.subject_user_id, m.content])).toEqual([
       ['Jason', '100000000000000001', 'Mains Jhin'],
     ]);
+  });
+
+  it("files a linked side account's messages, names and id under the main account (LINKED_ACCOUNTS)", async () => {
+    const SIDE = '100000000000000003';
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:100000000000000001`);
+    store.upsertIdentity(SIDE, 'JayAlt', 'jay_alt');
+    const output = JSON.stringify({
+      observations: [
+        { category: 'fact', subject: 'JayAlt', content: 'Works nights at the depot' },
+        { category: 'preference', subject: 'Whoever', subject_user_id: SIDE, content: 'Hates cilantro' },
+      ],
+      identity_updates: [{ discord_user_id: SIDE, irl_name: 'Jason' }],
+    });
+    const { client } = channelServing([
+      message({ authorId: SIDE, authorDisplayName: 'JayAlt', authorUsername: 'jay_alt', content: 'posting from my alt' }),
+      wheezer('lol ok'),
+      jason('yeah that was me'),
+    ]);
+    const { learner, requests } = learnerWith([{ body: chatCompletionBody(output) }]);
+
+    await learner.observeOnce(client);
+
+    const text = textOf(requests[0]);
+    // The side account's message is attributed to the main account, and the side account is folded
+    // into the main account's identities line instead of being listed as another person.
+    expect(text).toContain('[Jason (id:100000000000000001)] posting from my alt');
+    expect(text).toContain('- Jason @testuser (id:100000000000000001) — also posts as JayAlt @jay_alt (id:100000000000000003)');
+    expect(text).not.toContain('\n- JayAlt');
+    expect(store.getAllActive().map((m) => [m.subject, m.subject_user_id, m.content])).toEqual([
+      ['Jason', '100000000000000001', 'Works nights at the depot'],
+      ['Jason', '100000000000000001', 'Hates cilantro'],
+    ]);
+    // Real names belong to the person: the update lands on the main account's row.
+    expect(store.getIdentityById('100000000000000001')?.irl_name).toBe('Jason');
+    expect(store.getIdentityById(SIDE)?.irl_name).toBeNull();
+    // The side account keeps its own row (display name and handle), refreshed from its message.
+    expect(store.getIdentityById(SIDE)?.username).toBe('jay_alt');
   });
 
   it('never overwrites a known nickname with the global name of a member-less fetched message', async () => {

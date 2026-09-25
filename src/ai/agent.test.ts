@@ -363,7 +363,7 @@ function lastQuery(embeddings: FakeEmbeddingProvider): string {
 // Discord ids are numeric snowflakes; the mention regex matches `\d+` only (as the original strip
 // regex did), so tests must use numeric ids.
 const BOT_ID = '900000000000000001';
-const WHEEZER_ID = '137738554762592257';
+const WHEEZER_ID = '100000000000000042';
 const SPEAKER_ID = '111111111111111111';
 const STRANGER_ID = '222222222222222222';
 

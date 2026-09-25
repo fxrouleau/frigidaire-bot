@@ -1,9 +1,9 @@
 // Posts due reminders. Called by the scheduler on every tick; everything it needs (client, clock,
 // process start time, fallback channel) comes in through the options so tests drive it directly.
 import type { Client } from 'discord.js';
+import { currentName } from '../ai/people';
 import { logger } from '../logger';
 import { type PostableChannel, describeError, fetchPostableChannel, isPermanentChannelError } from './discord';
-import { currentName } from './people';
 import { type Reminder, claimDueReminders, markFailed, markRetry, markSent, releaseStaleClaims } from './reminderStore';
 import { clockEt, describeEt } from './time';
 

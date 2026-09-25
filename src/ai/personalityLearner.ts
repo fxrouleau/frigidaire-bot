@@ -2,12 +2,13 @@ import { ChannelType, type Client, type Collection, type Message, type TextChann
 import type OpenAI from 'openai';
 import type { ChatCompletionContentPart } from 'openai/resources/chat/completions';
 import { config } from '../config';
+import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
 import { attributeMessage } from '../relay';
 import { getCachedTranscript } from './media';
 import { type Identity, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
 import { getOpenRouterClient } from './openRouterClient';
-import { matchIdentityByName, namesOf } from './people';
+import { type Member, foldMembers, matchMemberByName, memoryKeyFor } from './people';
 import { formatEmojiLines, formatIdentityLines } from './promptSections';
 import { type UsageFeature, featureRequestOptions } from './usage';
 import { formatTimestampET } from './utils';
@@ -137,10 +138,11 @@ OUTPUT RULES (the most important part):
 4. Skip if already known (see existing memories below). "Already known" means the same fact with different wording,
    examples, or emojis. If you'd write a 5th version of "Jason uses racially charged humor", DON'T. Save a
    personality memory only for a NEW trait or a clear CHANGE in a known one.
-5. Subject normalization: "subject" MUST be the person's CURRENT display name — when an identities entry below
-   reads "oldname (now: CurrentName)", use CurrentName; otherwise use the name as shown. Never use nicknames,
-   in-game names, or old usernames. "subject_user_id" MUST be their Discord ID — it is the stable identity anchor
-   even when display names change. For server-wide observations use subject "server" with no subject_user_id.
+5. Subject normalization: "subject" MUST be the person's CURRENT display name — the name their identities entry
+   below starts with (never the "formerly" name). Never use nicknames, in-game names, @handles or old usernames.
+   "subject_user_id" MUST be their Discord ID (the id on that line, never an "also posts as" account's) — it is the
+   stable identity anchor even when display names change. For server-wide observations use subject "server" with
+   no subject_user_id.
 
 CATEGORIES (pick the right one — some expire automatically):
 - "fact": durable facts — jobs, locations, hobbies, relationships, possessions, skills, goals
@@ -382,7 +384,7 @@ export class PersonalityLearner {
     }
   }
 
-  private buildRelevantMemoriesSummary(observed: ObservedMessage[], identitiesById: Map<string, Identity>): string {
+  private buildRelevantMemoriesSummary(observed: ObservedMessage[]): string {
     // Fetch memories keyed on who actually participated in this batch, plus server-wide
     // and bot-subject context. Avoids dumping all ~1000 memories into every prompt. A participant's
     // memories are looked up by their Discord id and every name they have had, so rows filed under an
@@ -398,12 +400,16 @@ export class PersonalityLearner {
       }
     };
 
+    // authorId is already the main account (attributeMessage), and memoryKeyFor adds the names of
+    // every linked account.
     const participants = new Map<string, { userId?: string; names: string[] }>();
     for (const o of observed) {
       const key = o.authorId ?? `name:${o.authorName}`;
       if (participants.has(key)) continue;
-      const identity = o.authorId ? identitiesById.get(o.authorId) : undefined;
-      participants.set(key, { userId: o.authorId, names: namesOf(identity, [o.authorName]) });
+      participants.set(
+        key,
+        o.authorId ? memoryKeyFor(this.store, o.authorId, [o.authorName]) : { names: [o.authorName] },
+      );
     }
 
     for (const participant of participants.values()) {
@@ -418,14 +424,11 @@ export class PersonalityLearner {
   private formatLearnerIdentitiesSection(identities: Identity[]): string {
     if (identities.length === 0) return '';
 
-    // The shared identity lines plus each member's Discord handle: people (and the model) sometimes name
-    // a member by it — memories once got filed under "cigalefourmi", a handle, instead of the member.
-    const lines = formatIdentityLines(identities).map((line, index) => {
-      const handle = identities[index].username;
-      const shown = [identities[index].display_name, identities[index].canonical_name].map(nameKey);
-      return handle && !shown.includes(nameKey(handle)) ? `${line}. Discord handle: ${handle}` : line;
-    });
-    return `\nKnown server identities (Discord ID → canonical name). A Discord handle is never a subject: use the current display name. Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${lines.join('\n')}\n`;
+    // The shared SERVER PEOPLE lines: each starts with the member's current display name (the subject to
+    // use), then their @handle and id. The handle is spelled out because the model once filed memories
+    // under "cigalefourmi", a handle, instead of the member. Side accounts are folded into their member.
+    const lines = formatIdentityLines(identities);
+    return `\nKnown server identities (each line starts with the member's CURRENT display name, then their @Discord handle and Discord ID). A Discord handle, a "formerly" name or an "also posts as" account is never a subject: use the name the line starts with and its id. Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${lines.join('\n')}\n`;
   }
 
   private formatLearnerEmojisSection(): string {
@@ -520,21 +523,23 @@ export class PersonalityLearner {
   /**
    * Files an observation under the member it is about: a valid subject_user_id wins and its member's
    * current display name becomes the subject (the model sometimes writes a nickname); a name without
-   * an id is matched against the identities; 'server'/'bot' (lowercased) never carry an id.
+   * an id is matched against every name the members go by; 'server'/'bot' (lowercased) never carry an
+   * id. The id is always the member's MAIN account (a side account's id or name counts as its member).
    */
-  private normalizeSubject(obs: Observation, identities: Identity[]): { subject: string; subjectUserId?: string } {
+  private normalizeSubject(obs: Observation, members: Member[]): { subject: string; subjectUserId?: string } {
     const subject = obs.subject.trim();
     if (NON_PERSON_SUBJECTS.has(nameKey(subject))) return { subject: nameKey(subject) };
 
     // A JSON number cannot hold a snowflake exactly (18+ digits exceed 2^53), so only strings count.
     const rawId = typeof obs.subject_user_id === 'string' ? obs.subject_user_id.trim() : '';
     if (/^\d+$/.test(rawId)) {
-      const identity = identities.find((i) => i.discord_user_id === rawId);
-      return { subject: identity?.display_name ?? subject, subjectUserId: rawId };
+      const userId = canonicalUserId(rawId);
+      const member = members.find((m) => m.userId === userId);
+      return { subject: member?.displayName ?? subject, subjectUserId: userId };
     }
 
-    const match = matchIdentityByName(identities, subject);
-    return match ? { subject: match.display_name, subjectUserId: match.discord_user_id } : { subject };
+    const match = matchMemberByName(members, subject);
+    return match ? { subject: match.displayName, subjectUserId: match.userId } : { subject };
   }
 
   /**
@@ -573,7 +578,7 @@ export class PersonalityLearner {
       return { observations: 0, identityUpdates: 0 };
     }
 
-    const identities = this.store.getAllIdentities().filter((i) => i.active !== 0);
+    const members = foldMembers(this.store.getAllIdentities());
     let observations = 0;
     for (const obs of parsed.observations) {
       if (!obs.category || typeof obs.subject !== 'string' || !obs.subject.trim() || !obs.content) continue;
@@ -586,7 +591,7 @@ export class PersonalityLearner {
         continue;
       }
 
-      const { subject, subjectUserId } = this.normalizeSubject(obs, identities);
+      const { subject, subjectUserId } = this.normalizeSubject(obs, members);
       await this.store.save({
         category,
         subject,
@@ -600,7 +605,11 @@ export class PersonalityLearner {
     let identityUpdates = 0;
     for (const update of parsed.identity_updates ?? []) {
       if (!update.discord_user_id) continue;
-      const changed = this.store.updateIdentityMeta(update.discord_user_id, {
+      // Real names and nicknames belong to the person: a side account's update goes on the main
+      // account's row (the side row keeps only its own display name and handle), when there is one.
+      const mainId = canonicalUserId(String(update.discord_user_id));
+      const target = this.store.getIdentityById(mainId) ? mainId : String(update.discord_user_id);
+      const changed = this.store.updateIdentityMeta(target, {
         irl_name: update.irl_name,
         aliases_add: update.aliases_add,
       });
@@ -687,7 +696,7 @@ export class PersonalityLearner {
     const personalityPrompt = buildPersonalityPrompt({
       identitiesSection: this.formatLearnerIdentitiesSection(activeIdentities),
       emojisSection: this.formatLearnerEmojisSection(),
-      existingMemoriesSummary: this.buildRelevantMemoriesSummary(observed, identitiesById),
+      existingMemoriesSummary: this.buildRelevantMemoriesSummary(observed),
     });
 
     const personalityResult = await this.analyzeAndSave(

@@ -222,6 +222,37 @@ describe('summarizeChannel', () => {
     expect(result.split('\n').at(-1)).toBe('People in this stretch: Jason, Simon; mentioned without talking: Felix (Félix R), Wheezer.');
   });
 
+  it("counts a linked side account's messages and names as its member (LINKED_ACCOUNTS)", async () => {
+    const MAIN = '120000000000000001';
+    const SIDE = '120000000000000002';
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${MAIN}`);
+    try {
+      store.upsertIdentity(MAIN, 'Tony', 'tony_main');
+      store.upsertIdentity(SIDE, 'Ptoughneigh', 'triceclone');
+      await store.save({ category: 'fact', subject: 'Tony', subject_user_id: MAIN, content: 'Owns a canoe' });
+      // Filed under the side account's name, without an id: still his.
+      await store.save({ category: 'fact', subject: 'Ptoughneigh', content: 'Lives in Laval' });
+      const { trigger } = channelWith([
+        msgAt(30, { authorId: MAIN, authorDisplayName: 'Tony', content: 'on my main now' }),
+        msgAt(25, { authorId: SIDE, authorDisplayName: 'Ptoughneigh', content: 'and now on my alt' }),
+        said(20, 'simon', 'ptoughneigh is the same guy lol'),
+      ]);
+      const { client, requests } = okClient();
+
+      const result = await summarizeChannel({ message: trigger, start: new Date(NOW.getTime() - HOUR), client, now });
+
+      const prompt = userPrompt(requests[0]);
+      expect(prompt).toContain('] Tony: and now on my alt');
+      expect(prompt).toContain('- Tony (@tony_main) [2 messages]');
+      expect(prompt).toMatch(/background: .*Owns a canoe/);
+      expect(prompt).toMatch(/background: .*Lives in Laval/);
+      expect(prompt).not.toContain('- Ptoughneigh');
+      expect(result.split('\n').at(-1)).toBe('People in this stretch: Tony, Simon.');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('caps background at the 8 most active people and 4 memories each, and never throws on a memory failure', async () => {
     const history: Message[] = [];
     for (let p = 0; p < 10; p++) {

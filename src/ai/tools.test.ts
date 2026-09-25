@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeMessage, type FakeMessageOptions } from '../test-support/fakeDiscord';
 import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
 import { getMemoryStore, setMemoryStoreForTesting } from './memory';
@@ -446,6 +446,64 @@ describe('memories keyed by stable member id', () => {
     const recalled = await recallMemoriesTool!.handler(ctxFor(), { query: 'something', subject: 'Jason' });
     expect(recalled).toContain(`[id:${underHandle}]`);
     expect(recalled).toContain('Works nights at the depot');
+  });
+});
+
+describe('memory tools with linked side accounts (LINKED_ACCOUNTS)', () => {
+  const MAIN = '120000000000000001';
+  const SIDE = '120000000000000002';
+
+  function ctxFrom(authorId: string, authorDisplayName: string): ToolHandlerContext {
+    return { message: createFakeMessage({ authorId, authorDisplayName }).message } as ToolHandlerContext;
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${MAIN}`);
+    const store = getMemoryStore();
+    store.upsertIdentity(MAIN, 'Tony', 'tony_main');
+    store.upsertIdentity(SIDE, 'Ptoughneigh', 'triceclone');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("remember_fact files a side account's name, handle or \"me\" under the main account", async () => {
+    const store = getMemoryStore();
+    await rememberFactTool!.handler(ctxFrom(MAIN, 'Tony'), { category: 'fact', subject: 'Ptoughneigh', content: 'Owns a canoe' });
+    await rememberFactTool!.handler(ctxFrom(MAIN, 'Tony'), { category: 'fact', subject: '@triceclone', content: 'Lives in Laval' });
+    await rememberFactTool!.handler(ctxFrom(SIDE, 'Ptoughneigh'), { category: 'fact', subject: 'me', content: 'Hates snow' });
+
+    expect(store.getAllActive().map((m) => [m.subject, m.subject_user_id])).toEqual([
+      ['Tony', MAIN],
+      ['Tony', MAIN],
+      ['Tony', MAIN],
+    ]);
+  });
+
+  it('recall_memories from the side account finds the main account’s memories, including rows under side names', async () => {
+    const store = getMemoryStore();
+    const byMain = await store.save({ category: 'fact', subject: 'Tony', subject_user_id: MAIN, content: 'Owns a canoe' });
+    const bySideName = await store.save({ category: 'fact', subject: 'Ptoughneigh', content: 'Lives in Laval' });
+
+    const recalled = await recallMemoriesTool!.handler(ctxFrom(SIDE, 'Ptoughneigh'), { query: 'me' });
+
+    expect(recalled).toContain(`[id:${byMain}]`);
+    expect(recalled).toContain(`[id:${bySideName}]`);
+  });
+
+  it("set_member_info puts real names and nicknames on the main account's row", async () => {
+    const setMemberInfoTool = toolDefinitions.find((t) => t.name === 'set_member_info');
+    const result = await setMemberInfoTool!.handler(ctxFrom(SIDE, 'Ptoughneigh'), {
+      person: 'triceclone',
+      real_name: 'Anthony',
+      add_nickname: 'Ptoughneigh',
+    });
+
+    // The side account's display name is already one of his names: not added as a nickname.
+    expect(result).toBe('Tony: real name is now Anthony. Tony already goes by "Ptoughneigh".');
+    expect(getMemoryStore().getIdentityById(MAIN)?.irl_name).toBe('Anthony');
+    expect(getMemoryStore().getIdentityById(SIDE)?.irl_name).toBeNull();
   });
 });
 

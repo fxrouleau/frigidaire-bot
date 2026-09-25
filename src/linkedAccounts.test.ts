@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseLinkedAccounts } from './config';
 import { accountIdsFor, canonicalUserId, isSamePerson } from './linkedAccounts';
 
-const MAIN = '173143385719177217';
-const SIDE = '275040740151787522';
-const OTHER = '120682004491534336';
+const MAIN = '100000000000000001';
+const SIDE = '100000000000000002';
+const OTHER = '100000000000000003';
 
 afterEach(() => {
   vi.unstubAllEnvs();

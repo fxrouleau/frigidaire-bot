@@ -205,6 +205,29 @@ describe('search_messages', () => {
     expect(await search({ query: 'cheese', author: 'Nobody' })).toContain(`I don't know anyone called "Nobody"`);
   });
 
+  it("finds a member's messages by a linked side account's names or handle, under every account id (LINKED_ACCOUNTS)", async () => {
+    const SIDE = '200000000000000009';
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
+    memory.upsertIdentity(JASON, 'Jason', 'cigalefourmi');
+    memory.upsertIdentity(SIDE, 'JayAlt', 'jay_alt');
+    seedChannels();
+    store.upsertMessages([
+      at(0, { content: 'cheese one', authorId: JASON, authorName: 'Jason' }),
+      // Archived before LINKED_ACCOUNTS was set: still under the side account's own id.
+      at(1, { content: 'cheese two', authorId: SIDE, authorName: 'JayAlt' }),
+      at(2, { content: 'cheese three', authorId: FELIX, authorName: 'Felix' }),
+    ]);
+    const contentsBy = async (author: string) =>
+      (await search({ query: 'cheese', author }))
+        .split('\n')
+        .slice(1)
+        .map((l) => l.match(/: (cheese \w+)/)?.[1]);
+
+    for (const author of ['Jason', 'jay_alt', 'JayAlt', 'cigalefourmi', `<@${SIDE}>`]) {
+      expect((await contentsBy(author)).sort()).toEqual(['cheese one', 'cheese two']);
+    }
+  });
+
   it('falls back to author names the archive has seen (people the identity table lacks)', async () => {
     seedChannels();
     store.upsertMessage(at(0, { content: 'old relay', authorId: null, authorName: 'Ghosty', source: 'relay' }));

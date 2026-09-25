@@ -6,6 +6,7 @@ import * as dotenv from 'dotenv';
 import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
 import { getMemoryStore } from './ai/memory';
+import { runStartupMemoryMaintenance } from './ai/memory/startupMaintenance';
 import { closeArchiveStore } from './archive/archiveStore';
 import { config, describeEffectiveConfig } from './config';
 import { createDiscordClient } from './discordClient';
@@ -54,22 +55,11 @@ for (const file of eventFiles) {
   }
 }
 
-// Run memory compaction on startup
+// Link memories to member ids, THEN compact, so newly linked rows dedup on this start (see the module).
 try {
-  const store = getMemoryStore();
-  const result = store.compact();
-  if (result.removed > 0) {
-    logger.info(`Memory compaction on startup: removed ${result.removed} duplicate memories.`);
-  }
+  runStartupMemoryMaintenance(getMemoryStore());
 } catch (error) {
-  logger.warn('Memory compaction on startup failed:', error);
-}
-
-// Link name-only memories to member ids (idempotent; logs its own counts).
-try {
-  getMemoryStore().stampSubjectUserIds();
-} catch (error) {
-  logger.warn('Memory subject-id stamp on startup failed:', error);
+  logger.warn('Memory maintenance on startup failed:', error);
 }
 
 // Embedding backfill: once at startup, then periodically. The periodic re-run is the self-heal for

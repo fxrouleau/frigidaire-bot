@@ -161,6 +161,37 @@ describe('Remember this', () => {
     expect(store.getAllActive()[0]).toMatchObject({ subject: 'Simon B', subject_user_id: 'user-8', source: 'command' });
   });
 
+  it("files a linked side account's message under the main account (LINKED_ACCOUNTS)", async () => {
+    vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
+    try {
+      store.upsertIdentity('100000000000000001', 'Tony', 'tony_main');
+      store.upsertIdentity('100000000000000002', 'Ptoughneigh', 'triceclone');
+      // Already known, filed under the side account's name: shown to the model as known.
+      await store.save({ category: 'fact', subject: 'Ptoughneigh', content: 'Owns a canoe.' });
+      const { guild } = createFakeGuild({ members: { '100000000000000001': 'Tony' } });
+      const target = createFakeTargetMessage({
+        authorId: '100000000000000002',
+        authorDisplayName: 'Ptoughneigh',
+        authorUsername: 'triceclone',
+        guild,
+        content: 'just moved to laval',
+      });
+      const { interaction } = createFakeMessageCommandInteraction(target.message, { commandName: 'Remember this' });
+      const { deps, recorders } = createFakeCommandDeps({ store, complete: async () => '{"fact": "Lives in Laval."}' });
+
+      await handleContextMenuCommand(interaction, deps);
+
+      expect(recorders.complete.calls[0][0].user).toContain('- Owns a canoe.');
+      expect(store.getAllActive().find((m) => m.source === 'command')).toMatchObject({
+        subject: 'Tony',
+        subject_user_id: '100000000000000001',
+        content: 'Lives in Laval.',
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('uses the voice message transcript', async () => {
     const target = jasonSays('', {
       voiceMessage: true,

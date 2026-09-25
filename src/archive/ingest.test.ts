@@ -121,6 +121,21 @@ describe('toArchiveInput — what is archived and as whom', () => {
     expect(input).toMatchObject({ source: 'relay', authorId: JASON, relayKind: null });
   });
 
+  it("stores a linked side account's messages and relays under the main account id (LINKED_ACCOUNTS)", () => {
+    const SIDE = '200000000000000009';
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
+    memory.upsertIdentity(JASON, 'Jason');
+    const direct = toArchiveInput(archivableMessage({ authorId: SIDE, authorName: 'JayAlt', content: 'from my alt' }));
+    expect(direct).toMatchObject({ source: 'human', authorId: JASON, authorName: 'Jason' });
+
+    const id = snowflake(T0, 4);
+    recordRelay({ messageId: id, channelId: CHANNEL, authorId: SIDE, authorName: 'JayAlt', kind: 'link_fix' });
+    const relayed = toArchiveInput(
+      archivableMessage({ id, webhookId: '555', applicationId: BOT_USER_ID, authorName: 'JayAlt', content: 'a link' }),
+    );
+    expect(relayed).toMatchObject({ source: 'relay', authorId: JASON });
+  });
+
   it('records the parent of a thread message and honors ARCHIVE_IGNORE_CHANNELS for channels and their threads', () => {
     const inThread = archivableMessage({ channelId: THREAD, channelType: ChannelType.PublicThread, parentId: CHANNEL });
     expect(toArchiveInput(inThread)).toMatchObject({ channelId: THREAD, parentChannelId: CHANNEL });
@@ -238,6 +253,16 @@ describe('relay reconciliation and transcripts', () => {
     expect(reconcileRelays(store, { sinceMs: T0 - 1 })).toBe(1);
     expect(store.getMessage(relay.id)).toMatchObject({ authorId: JASON, relayKind: 'link_fix' });
     expect(reconcileRelays(store, { sinceMs: T0 - 1 })).toBe(0);
+  });
+
+  it("reconciles a side account's relay to the main account id (LINKED_ACCOUNTS)", () => {
+    const SIDE = '200000000000000009';
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
+    const relay = archiveInput({ source: 'relay', authorId: null, authorName: 'JayAlt', relayKind: null });
+    store.upsertMessage(relay);
+    recordRelay({ messageId: relay.id, channelId: CHANNEL, authorId: SIDE, authorName: 'JayAlt', kind: 'link_fix' });
+    expect(reconcileRelays(store, { sinceMs: T0 - 1 })).toBe(1);
+    expect(store.getMessage(relay.id)).toMatchObject({ authorId: JASON, relayKind: 'link_fix' });
   });
 
   it('re-checks a relay archived before its registry row a few seconds later', () => {
