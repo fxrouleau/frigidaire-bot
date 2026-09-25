@@ -17,7 +17,7 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26",
     "@typescript/typescript6": "^6.0.2",
-    "lefthook": "^1.13.6",
+    "lefthook": "^2.1.14",
     "nodemon": "^3.1.14",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
