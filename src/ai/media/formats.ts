@@ -161,11 +161,6 @@ export function nativeAudioFormats(model: string): ReadonlySet<AudioFormat> {
   return isGemini(model) ? GEMINI_AUDIO_FORMATS : BASELINE_AUDIO_FORMATS;
 }
 
-/** Models known to take a `video_url` part; 'auto' mode samples keyframes for everything else. */
-export function acceptsVideoInput(model: string): boolean {
-  return isGemini(model);
-}
-
 function isGemini(model: string): boolean {
   return model.toLowerCase().startsWith('google/gemini');
 }

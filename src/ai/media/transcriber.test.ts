@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import {
+  CATALOG_MODELS,
   MP3_BYTES,
   OGG_BYTES,
   TRANSCODED_MP3,
   createCapturingClient,
+  createFakeCatalog,
   createFakeTranscoder,
   createFileFetch,
   type FakeTranscoder,
@@ -14,7 +16,7 @@ import {
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import { FEATURE_HEADER } from '../usage';
 import { getStoredTranscript } from './store';
-import { AudioTranscriber, type AudioTranscriberOptions, cleanTranscript } from './transcriber';
+import { AudioTranscriber, type AudioTranscriberOptions, INLINE_AUDIO_MAX_BYTES, cleanTranscript } from './transcriber';
 
 const VOICE_URL = 'https://cdn.discordapp.com/attachments/1/2/voice-message.ogg?ex=1&hm=sig';
 const MP3_URL = 'https://cdn.discordapp.com/attachments/1/3/memo.mp3';
@@ -43,6 +45,7 @@ function setup(fixtures: OpenRouterFixture[], overrides: SetupOverrides = {}) {
     model: () => MODEL,
     maxSeconds: () => 600,
     now: () => now,
+    catalog: createFakeCatalog(CATALOG_MODELS),
     ...overrides,
     transcoder,
   });
@@ -84,6 +87,8 @@ describe('AudioTranscriber', () => {
     expect(request.body.model).toBe(MODEL);
     expect(request.body.provider).toEqual({ zdr: true });
     expect(request.body.temperature).toBeUndefined();
+    // Flash-Lite's lowest effort, from the catalog: a verbatim transcript needs no thinking.
+    expect(request.body.reasoning).toEqual({ effort: 'minimal' });
     expect(request.headers[FEATURE_HEADER.toLowerCase()]).toBe('transcription');
     const [audio, prompt] = userContent(request);
     expect(audio).toEqual({
@@ -249,6 +254,43 @@ describe('AudioTranscriber', () => {
     const { transcriber, requests } = setup([success], { fetch });
     expect(await transcriber.transcribe({ url: huge, messageId: 'm' })).toEqual({ status: 'too_large' });
     expect(requests).toHaveLength(0);
+  });
+
+  it('sends no reasoning override when the catalog has none for the model', async () => {
+    const { transcriber, requests } = setup([success], { model: () => 'openai/gpt-audio-mini' });
+    await transcriber.transcribe({ url: MP3_URL, messageId: 'm', durationSecs: 5 });
+    expect(requests[0].body.reasoning).toBeUndefined();
+  });
+
+  it('turns itself off, before downloading, when TRANSCRIPTION_MODEL cannot hear', async () => {
+    const { transcriber, requests } = setup([success], { model: () => 'z-ai/glm-5.3-flash' });
+    expect(await transcriber.transcribe({ url: VOICE_URL, messageId: 'm' })).toEqual({ status: 'unavailable' });
+    expect(await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip')).toEqual({ status: 'unavailable' });
+    expect(files.urls).toEqual([]);
+    expect(requests).toHaveLength(0);
+  });
+
+  it('still tries a model the catalog does not know', async () => {
+    const { transcriber, requests } = setup([success], { model: () => 'acme/brand-new-audio-model' });
+    expect((await transcriber.transcribe({ url: MP3_URL, messageId: 'm', durationSecs: 5 })).status).toBe('ok');
+    expect(requests).toHaveLength(1);
+  });
+
+  it('re-encodes native-format files too big to send inline', async () => {
+    const bigUrl = 'https://cdn.discordapp.com/attachments/1/7/long.wav';
+    const wav = Buffer.concat([
+      Buffer.from('RIFF'),
+      Buffer.alloc(4),
+      Buffer.from('WAVE'),
+      Buffer.alloc(INLINE_AUDIO_MAX_BYTES),
+    ]);
+    const fetch = createFileFetch({ [bigUrl]: { body: wav, contentType: 'audio/wav' } });
+    const { transcriber, requests, transcoder } = setup([success], { fetch });
+
+    expect((await transcriber.transcribe({ url: bigUrl, messageId: 'm', durationSecs: 500 })).status).toBe('ok');
+
+    expect(transcoder.calls.toMp3).toHaveLength(1);
+    expect((userContent(requests[0])[0].input_audio as { format: string }).format).toBe('mp3');
   });
 
   it('transcribes in-memory audio (a video track) without caching', async () => {

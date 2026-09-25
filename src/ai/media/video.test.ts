@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import {
+  CATALOG_MODELS,
   MKV_BYTES,
   MP4_BYTES,
   TRANSCODED_MP3,
   createCapturingClient,
+  createFakeCatalog,
   createFakeTranscoder,
   createFileFetch,
   createMissingTranscoder,
@@ -46,6 +48,7 @@ function setup(fixtures: OpenRouterFixture[], overrides: Partial<VideoDescriberO
     maxSeconds: () => 300,
     inputMode: () => 'auto',
     maxAudioSeconds: () => 600,
+    catalog: createFakeCatalog(CATALOG_MODELS),
     ...overrides,
   });
   return { describer, requests, fetch, transcribed };
@@ -75,6 +78,63 @@ describe('VideoDescriber', () => {
       video_url: { url: `data:video/mp4;base64,${MP4_BYTES.toString('base64')}` },
     });
     expect(String(prompt.text)).toContain('Context from the chat: Posted by Wheezer.');
+    // Gemini hears the soundtrack itself: no separate transcript, and the catalog's lowest effort.
+    expect(String(prompt.text)).not.toContain('not hear it');
+    expect(request.body.reasoning).toEqual({ effort: 'minimal' });
+  });
+
+  it('gives a model that watches but cannot hear (GLM) the soundtrack transcript', async () => {
+    const transcoder = createFakeTranscoder({ probe: { durationSecs: 30, hasAudio: true, hasVideo: true } });
+    const { describer, requests, transcribed } = setup([described], { model: () => 'z-ai/glm-5.3-flash', transcoder });
+
+    expect((await describer.describe({ url: CLIP_URL })).status).toBe('ok');
+
+    expect(transcoder.calls.toMp3).toEqual([{ input: MP4_BYTES, maxSeconds: 600 }]);
+    expect(transcribed).toEqual([TRANSCODED_MP3]);
+    const [video, prompt] = userContent(requests[0]);
+    expect(video.type).toBe('video_url');
+    expect(String(prompt.text)).toContain(
+      'You can see this video but not hear it. Transcript of its audio:\nno way, NO WAY',
+    );
+    expect(requests[0].body.model).toBe('z-ai/glm-5.3-flash');
+    expect(requests[0].body.reasoning).toEqual({ effort: 'low' });
+    expect(requests[0].body.provider).toEqual({ zdr: true });
+  });
+
+  it('pays for the soundtrack once when the native call fails and keyframes take over', async () => {
+    const transcoder = createFakeTranscoder({
+      probe: { durationSecs: 30, hasAudio: true, hasVideo: true },
+      sampleVideo: { durationSecs: 30, frames: [FRAME], audio: TRANSCODED_MP3 },
+    });
+    const { describer, requests, transcribed } = setup([serverError, serverError, described], {
+      model: () => 'z-ai/glm-5.3-flash',
+      transcoder,
+    });
+
+    expect((await describer.describe({ url: CLIP_URL })).status).toBe('ok');
+
+    expect(transcribed).toHaveLength(1);
+    expect(userContent(requests[2])[0].type).toBe('image_url');
+    expect(String(userContent(requests[2]).at(-1)?.text)).toContain('Transcript of its audio:\nno way, NO WAY');
+  });
+
+  it('tells a non-hearing model the audio is unavailable when ffmpeg is missing', async () => {
+    const { describer, requests } = setup([described], {
+      model: () => 'z-ai/glm-5.3-flash',
+      transcoder: createMissingTranscoder(),
+    });
+    expect((await describer.describe({ url: CLIP_URL })).status).toBe('ok');
+    expect(String(userContent(requests[0])[1].text)).toContain(
+      "You can see this video but not hear it. Its audio couldn't be transcribed.",
+    );
+  });
+
+  it('says so when the clip has no audio track at all', async () => {
+    const transcoder = createFakeTranscoder({ toMp3: undefined });
+    const { describer, requests, transcribed } = setup([described], { model: () => 'z-ai/glm-5.3-flash', transcoder });
+    await describer.describe({ url: CLIP_URL, durationSecs: 12 });
+    expect(transcribed).toHaveLength(0);
+    expect(String(userContent(requests[0])[1].text)).toContain('It has no audio track.');
   });
 
   it('caches per file: a re-signed Discord URL for the same attachment is free', async () => {

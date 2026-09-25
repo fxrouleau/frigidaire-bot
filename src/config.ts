@@ -283,9 +283,10 @@ export const config = {
 
   /** Voice-message transcription and video understanding (src/ai/media/). */
   media: {
-    // Default model for both: Gemini Flash-Lite hears audio and watches video natively (32 tokens per
-    // second of audio, ~100 per second of video), is served with zero data retention on Google Vertex,
-    // and costs roughly $0.0015 per minute of voice message.
+    // Default model for both: Gemini 3.5 Flash-Lite hears audio and watches video (soundtrack included)
+    // natively — 32 tokens per second of audio, ~100 per second of video — and every one of its Google
+    // Vertex endpoints is zero-data-retention and takes base64 video. About $0.001 per minute of voice
+    // message; see the media notes in AGENTS.md for the GLM-5.3-Flash comparison.
     /** Audio-input chat model that transcribes voice messages and audio files (ZDR endpoints required). */
     get transcriptionModel(): string {
       return envString('TRANSCRIPTION_MODEL') ?? 'google/gemini-3.5-flash-lite';
@@ -306,17 +307,20 @@ export const config = {
     get voiceMaxSeconds(): number {
       return envInt('VOICE_MAX_SECONDS', 600, { min: 1 });
     },
-    /** Largest clip sent to the video model as-is; bigger ones go through keyframe sampling. */
+    /**
+     * Largest clip sent to the video model as-is; bigger ones go through keyframe sampling. Gemini caps a
+     * request with inline media at 20 MB and base64 adds a third, hence 14 MB.
+     */
     get videoMaxBytes(): number {
-      return envInt('VIDEO_MAX_BYTES', 20 * 1024 * 1024, { min: 1024 });
+      return envInt('VIDEO_MAX_BYTES', 14 * 1024 * 1024, { min: 1024 });
     },
     /** Longest clip sent to the video model as-is; longer ones go through keyframe sampling. */
     get videoMaxSeconds(): number {
       return envInt('VIDEO_MAX_SECONDS', 300, { min: 1 });
     },
     /**
-     * 'auto' sends whole clips to models known to take video input (Gemini) and keyframes to anything
-     * else; 'native' / 'frames' force one path.
+     * 'auto' sends whole clips to models whose OpenRouter catalog entry lists video input and keyframes to
+     * anything else; 'native' / 'frames' force one path.
      */
     get videoInputMode(): 'auto' | 'native' | 'frames' {
       return envEnum('VIDEO_INPUT_MODE', ['auto', 'native', 'frames'] as const, 'auto');

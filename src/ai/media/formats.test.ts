@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MKV_BYTES, MP3_BYTES, MP4_BYTES, OGG_BYTES } from '../../test-support/fakeMedia';
 import {
-  acceptsVideoInput,
   detectAudioFormat,
   detectVideoMime,
   isAudioContentType,
@@ -75,11 +74,6 @@ describe('model capabilities', () => {
 
   it('gives unknown models only wav/mp3', () => {
     expect([...nativeAudioFormats('openai/gpt-audio-mini')].sort()).toEqual(['mp3', 'wav']);
-  });
-
-  it('knows Gemini takes video input', () => {
-    expect(acceptsVideoInput('google/gemini-3.8-flash')).toBe(true);
-    expect(acceptsVideoInput('qwen/qwen3-vl-235b-a22b-instruct')).toBe(false);
   });
 
   it('classifies content types', () => {

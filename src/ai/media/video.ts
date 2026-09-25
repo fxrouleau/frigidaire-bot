@@ -2,20 +2,24 @@
 // uploaded clip or a video behind a shared link.
 //
 // Two paths:
-//   - native: the whole clip goes to a video-input model as a base64 data URL. Gemini is served with
-//     zero data retention only on Google Vertex, which fetches no arbitrary URLs (AI Studio's YouTube
-//     links don't apply there), so the bot downloads the clip itself. Bounded by VIDEO_MAX_BYTES and
-//     VIDEO_MAX_SECONDS.
+//   - native: the whole clip goes to a video-input model as a base64 data URL. Zero-data-retention
+//     endpoints fetch no arbitrary URLs (Gemini on Vertex takes none; AI Studio's YouTube links don't
+//     apply there), so the bot downloads the clip itself. Bounded by VIDEO_MAX_BYTES and
+//     VIDEO_MAX_SECONDS. A model that watches but can't hear (GLM, most Qwen) gets the audio track's
+//     transcript alongside, so "what's said" still makes it into the description.
 //   - frames: for clips over those bounds, containers the endpoint doesn't take, models without video
 //     input, or a failed native call — ffmpeg samples up to 8 keyframes plus the audio track, the track
 //     is transcribed, and a vision model describes the frames with the transcript alongside.
+//
+// What the model takes (video? audio?) comes from OpenRouter's model catalog (modelCatalog.ts).
 import type OpenAI from 'openai';
 import { config } from '../../config';
 import { logger } from '../../logger';
 import { getOpenRouterClient } from '../openRouterClient';
 import { downloadMedia, redact } from './download';
-import { acceptsVideoInput, detectVideoMime } from './formats';
+import { detectVideoMime } from './formats';
 import { type MediaContentPart, completeMedia, describeError } from './modelCall';
+import { type ModelCatalog, type ModelInfo, getModelCatalog } from './modelCatalog';
 import { getStoredVideoDescription, mediaCacheKey, storeVideoDescription } from './store';
 import type { MediaTranscoder } from './transcoder';
 import type { AudioTranscriber } from './transcriber';
@@ -42,6 +46,8 @@ On-screen text: <captions, subtitles or other text that matters, verbatim>
 Said: <what's spoken or sung, close to verbatim in the original language; add an English translation in parentheses if it isn't English>
 No preamble, no markdown headings, under 120 words.`;
 
+const DESCRIBE_ASK = "Describe the video so someone who can't watch it knows what's in it.";
+
 function contextLine(context: string | undefined): string {
   const trimmed = context?.trim();
   if (!trimmed) return '';
@@ -63,7 +69,7 @@ export type VideoDescriberOptions = {
   client?: () => OpenAI | undefined;
   fetch?: typeof globalThis.fetch;
   transcoder: MediaTranscoder;
-  /** Transcribes the audio track on the frames path. */
+  /** Transcribes the audio track for models that can't hear it (and on the frames path). */
   transcriber: Pick<AudioTranscriber, 'transcribeBuffer'>;
   model?: () => string;
   maxBytes?: () => number;
@@ -71,6 +77,17 @@ export type VideoDescriberOptions = {
   inputMode?: () => 'auto' | 'native' | 'frames';
   maxAudioSeconds?: () => number;
   now?: () => number;
+  catalog?: Pick<ModelCatalog, 'info'>;
+};
+
+type Attempt = {
+  client: OpenAI;
+  model: string;
+  info: ModelInfo;
+  input: VideoInput;
+  data: Buffer;
+  /** The soundtrack line once transcribed, so a native call that fails doesn't pay for it twice. */
+  heard?: string;
 };
 
 export class VideoDescriber {
@@ -84,6 +101,7 @@ export class VideoDescriber {
   private readonly inputMode: () => 'auto' | 'native' | 'frames';
   private readonly maxAudioSeconds: () => number;
   private readonly now: () => number;
+  private readonly catalog: Pick<ModelCatalog, 'info'>;
   private readonly inFlight = new Map<string, Promise<VideoOutcome>>();
   private readonly cooldownUntil = new Map<string, number>();
 
@@ -98,6 +116,7 @@ export class VideoDescriber {
     this.inputMode = opts.inputMode ?? (() => config.media.videoInputMode);
     this.maxAudioSeconds = opts.maxAudioSeconds ?? (() => config.media.voiceMaxSeconds);
     this.now = opts.now ?? (() => Date.now());
+    this.catalog = opts.catalog ?? getModelCatalog();
   }
 
   /** A stored description for this URL, without any paid work. */
@@ -119,6 +138,14 @@ export class VideoDescriber {
     return run;
   }
 
+  private setCooldown(key: string): void {
+    const now = this.now();
+    if (this.cooldownUntil.size > 500) {
+      for (const [k, until] of this.cooldownUntil) if (until <= now) this.cooldownUntil.delete(k);
+    }
+    this.cooldownUntil.set(key, now + FAILURE_COOLDOWN_MS);
+  }
+
   private async run(input: VideoInput, key: string): Promise<VideoOutcome> {
     const client = this.client();
     if (!client) {
@@ -137,17 +164,16 @@ export class VideoDescriber {
         logger.info(`video: ${redact(input.url)} is too large to download; skipping`);
         return { status: 'too_large' };
       }
-      this.cooldownUntil.set(key, this.now() + FAILURE_COOLDOWN_MS);
+      this.setCooldown(key);
       return { status: 'failed' };
     }
 
     const model = this.model();
-    const text =
-      (await this.tryNative(client, model, input, download.data, download.contentType)) ??
-      (await this.tryFrames(client, model, input, download.data));
+    const attempt: Attempt = { client, model, info: await this.catalog.info(model), input, data: download.data };
+    const text = (await this.tryNative(attempt, download.contentType)) ?? (await this.tryFrames(attempt));
 
     if (text === undefined) {
-      this.cooldownUntil.set(key, this.now() + FAILURE_COOLDOWN_MS);
+      this.setCooldown(key);
       return { status: 'failed' };
     }
     storeVideoDescription(key, text, model, this.now());
@@ -155,15 +181,10 @@ export class VideoDescriber {
   }
 
   /** The whole clip as a data URL, when the model, container, size and length all allow it. */
-  private async tryNative(
-    client: OpenAI,
-    model: string,
-    input: VideoInput,
-    data: Buffer,
-    downloadedType: string | undefined,
-  ): Promise<string | undefined> {
+  private async tryNative(attempt: Attempt, downloadedType: string | undefined): Promise<string | undefined> {
+    const { client, model, info, input, data } = attempt;
     const mode = this.inputMode();
-    if (mode === 'frames' || (mode === 'auto' && !acceptsVideoInput(model))) return undefined;
+    if (mode === 'frames' || (mode === 'auto' && !info.inputModalities.has('video'))) return undefined;
     const mime = detectVideoMime(data, input.contentType ?? downloadedType, input.url);
     if (!mime) return undefined;
     if (data.byteLength > this.maxBytes()) return undefined;
@@ -172,6 +193,11 @@ export class VideoDescriber {
     if (durationSecs !== undefined && durationSecs > this.maxSeconds()) return undefined;
 
     const started = this.now();
+    // A model that can't hear the soundtrack is told what's said instead (and that it can't hear it,
+    // so it doesn't make speech up).
+    const heard = info.inputModalities.has('audio')
+      ? ''
+      : `\nYou can see this video but not hear it. ${await this.soundtrackTranscript(attempt)}`;
     try {
       const raw = await completeMedia({
         client,
@@ -180,13 +206,11 @@ export class VideoDescriber {
         system: SYSTEM_PROMPT,
         content: [
           { type: 'video_url', video_url: { url: `data:${mime};base64,${data.toString('base64')}` } },
-          {
-            type: 'text',
-            text: `Describe this video so someone who can't watch it knows what's in it.${contextLine(input.context)}\n${ANSWER_SHAPE}`,
-          },
+          { type: 'text', text: `${DESCRIBE_ASK}${heard}${contextLine(input.context)}\n${ANSWER_SHAPE}` },
         ],
         maxTokens: MAX_OUTPUT_TOKENS,
         timeoutMs: DESCRIBE_TIMEOUT_MS,
+        reasoningEffort: info.lowestEffort,
       });
       const text = cleanDescription(raw);
       if (text === undefined) throw new Error(`${model} returned an empty description`);
@@ -201,7 +225,8 @@ export class VideoDescriber {
   }
 
   /** Keyframes + the audio track's transcript, for a vision model. */
-  private async tryFrames(client: OpenAI, model: string, input: VideoInput, data: Buffer): Promise<string | undefined> {
+  private async tryFrames(attempt: Attempt): Promise<string | undefined> {
+    const { client, model, info, input, data } = attempt;
     const started = this.now();
     let sample: Awaited<ReturnType<MediaTranscoder['sampleVideo']>>;
     try {
@@ -219,16 +244,8 @@ export class VideoDescriber {
       return undefined;
     }
 
-    let heard = 'It has no audio track.';
-    if (sample.audio) {
-      const transcript = await this.transcriber.transcribeBuffer(sample.audio, 'mp3', `video ${redact(input.url)}`);
-      if (transcript.status === 'ok') {
-        heard = transcript.text ? `Transcript of its audio:\n${transcript.text}` : 'Its audio has no speech.';
-      } else {
-        heard = "Its audio couldn't be transcribed.";
-      }
-    }
-
+    const heard =
+      attempt.heard ?? (sample.audio ? await this.transcriptLine(sample.audio, input.url) : 'It has no audio track.');
     const length = sample.durationSecs ? `${formatClock(sample.durationSecs)} ` : '';
     const intro =
       sample.frames.length > 0
@@ -241,10 +258,7 @@ export class VideoDescriber {
           image_url: { url: `data:image/jpeg;base64,${frame.toString('base64')}` },
         }),
       ),
-      {
-        type: 'text',
-        text: `${intro}\n${heard}\nDescribe the video so someone who can't watch it knows what's in it.${contextLine(input.context)}\n${ANSWER_SHAPE}`,
-      },
+      { type: 'text', text: `${intro}\n${heard}\n${DESCRIBE_ASK}${contextLine(input.context)}\n${ANSWER_SHAPE}` },
     ];
 
     try {
@@ -256,6 +270,7 @@ export class VideoDescriber {
         content,
         maxTokens: MAX_OUTPUT_TOKENS,
         timeoutMs: DESCRIBE_TIMEOUT_MS,
+        reasoningEffort: info.lowestEffort,
       });
       const text = cleanDescription(raw);
       if (text === undefined) throw new Error(`${model} returned an empty description`);
@@ -267,6 +282,26 @@ export class VideoDescriber {
       logger.warn(`video: keyframe description via ${model} failed: ${describeError(error)}`);
       return undefined;
     }
+  }
+
+  /** The clip's soundtrack as a prompt line, for a native call to a model that can't hear. */
+  private async soundtrackTranscript(attempt: Attempt): Promise<string> {
+    let track: { data: Buffer } | undefined;
+    try {
+      track = await this.transcoder.toMp3(attempt.data, this.maxAudioSeconds());
+    } catch (error) {
+      // No ffmpeg or a broken track: say so rather than cache it, so the frames path may still try.
+      logger.warn(`video: could not extract the audio track of ${redact(attempt.input.url)}:`, error);
+      return "Its audio couldn't be transcribed.";
+    }
+    attempt.heard = track ? await this.transcriptLine(track.data, attempt.input.url) : 'It has no audio track.';
+    return attempt.heard;
+  }
+
+  private async transcriptLine(audio: Buffer, url: string): Promise<string> {
+    const transcript = await this.transcriber.transcribeBuffer(audio, 'mp3', `video ${redact(url)}`);
+    if (transcript.status !== 'ok') return "Its audio couldn't be transcribed.";
+    return transcript.text ? `Transcript of its audio:\n${transcript.text}` : 'Its audio has no speech.';
   }
 
   private async probeDuration(data: Buffer): Promise<number | undefined> {

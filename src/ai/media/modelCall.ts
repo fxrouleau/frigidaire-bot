@@ -21,12 +21,15 @@ export type MediaCompletionRequest = {
   content: MediaContentPart[];
   maxTokens: number;
   timeoutMs: number;
+  /** `reasoning.effort` to send (see modelCatalog.ts); omitted ⇒ the model's own default. */
+  reasoningEffort?: string;
 };
 
 type OpenRouterMediaBody = {
   model: string;
   max_tokens: number;
   messages: Array<{ role: 'system'; content: string } | { role: 'user'; content: MediaContentPart[] }>;
+  reasoning?: { effort: string };
   provider: { zdr: true };
 };
 
@@ -37,7 +40,9 @@ type OpenRouterMediaBody = {
  * refused" apart from transient failures.
  *
  * No temperature is sent: Gemini 3 models are documented to loop and degrade below their default of
- * 1.0, so every model runs at its provider default.
+ * 1.0, so every model runs at its provider default. Reasoning effort is the caller's choice: the
+ * media features ask for the lowest the model accepts, since writing down what was said or shown
+ * needs little thought and reasoning is billed as output.
  */
 export async function completeMedia(req: MediaCompletionRequest): Promise<string> {
   const body: OpenRouterMediaBody = {
@@ -47,6 +52,7 @@ export async function completeMedia(req: MediaCompletionRequest): Promise<string
       { role: 'system', content: req.system },
       { role: 'user', content: req.content },
     ],
+    ...(req.reasoningEffort ? { reasoning: { effort: req.reasoningEffort } } : {}),
     // Zero data retention is non-negotiable here: this is members' voices and private clips.
     provider: { zdr: true },
   };

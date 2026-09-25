@@ -2,6 +2,7 @@
 // client that replays fixtures while capturing each request's body AND headers (the feature tag rides
 // in a header), and a fetch that serves in-memory files by URL.
 import OpenAI from 'openai';
+import type { ModelCatalog, ModelInfo } from '../ai/media/modelCatalog';
 import type { MediaTranscoder, ProbeResult, VideoSample } from '../ai/media/transcoder';
 import type { OpenRouterFixture } from './openRouterFetch';
 
@@ -111,3 +112,36 @@ export function userContent(request: CapturedRequest): Array<Record<string, unkn
   const user = messages.find((m) => m.role === 'user');
   return Array.isArray(user?.content) ? (user.content as Array<Record<string, unknown>>) : [];
 }
+
+export type FakeCatalog = Pick<ModelCatalog, 'info' | 'catalogInfo'>;
+
+/**
+ * A model catalog answering from a fixed table. Models missing from it are "unknown to the catalog":
+ * catalogInfo() says undefined and info() falls back to Gemini-style defaults for google/gemini ids.
+ */
+export function createFakeCatalog(models: Record<string, { modalities: string[]; effort?: string }> = {}): FakeCatalog {
+  const lookup = (model: string): ModelInfo | undefined => {
+    const entry = models[model];
+    return entry ? { inputModalities: new Set(entry.modalities), lowestEffort: entry.effort } : undefined;
+  };
+  return {
+    async catalogInfo(model) {
+      return lookup(model);
+    },
+    async info(model) {
+      const known = lookup(model);
+      if (known) return known;
+      return model.startsWith('google/gemini')
+        ? { inputModalities: new Set(['text', 'image', 'audio', 'video']) }
+        : { inputModalities: new Set(['text']) };
+    },
+  };
+}
+
+/** Catalog entries matching OpenRouter's metadata for the models the media tests use (2026-09-25). */
+export const CATALOG_MODELS = {
+  'google/gemini-3.5-flash-lite': { modalities: ['text', 'image', 'video', 'file', 'audio'], effort: 'minimal' },
+  'z-ai/glm-5.3-flash': { modalities: ['text', 'image', 'video'], effort: 'low' },
+  'z-ai/glm-5.3': { modalities: ['text'], effort: 'low' },
+  'qwen/qwen3-vl-235b-a22b-instruct': { modalities: ['text', 'image'] },
+};

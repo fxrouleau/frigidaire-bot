@@ -15,12 +15,16 @@ import { getOpenRouterClient } from '../openRouterClient';
 import { downloadMedia, redact } from './download';
 import { type AudioFormat, detectAudioFormat, nativeAudioFormats } from './formats';
 import { completeMedia, describeError, isInputRejection } from './modelCall';
+import { type ModelCatalog, getModelCatalog } from './modelCatalog';
 import { getStoredTranscript, mediaCacheKey, storeTranscript } from './store';
 import type { MediaTranscoder } from './transcoder';
 import type { AudioInput, TranscriptionOutcome } from './types';
 
 /** Discord's own upload ceiling for free accounts is far below this; it bounds link-borne audio. */
 export const AUDIO_MAX_BYTES = 25 * 1024 * 1024;
+// Gemini caps a request with inline media at 20 MB in total, and base64 adds a third: anything bigger
+// is re-encoded to compact MP3 first (10 minutes of speech ≈ 3.6 MB) instead of being sent as-is.
+export const INLINE_AUDIO_MAX_BYTES = 14 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const TRANSCRIBE_TIMEOUT_MS = 120_000;
 // A failed recording is not retried on every chat turn that renders it; it gets another chance later.
@@ -64,7 +68,10 @@ export type AudioTranscriberOptions = {
   model?: () => string;
   maxSeconds?: () => number;
   now?: () => number;
+  catalog?: Pick<ModelCatalog, 'info' | 'catalogInfo'>;
 };
+
+type ModelPlan = { usable: true; effort?: string } | { usable: false };
 
 export class AudioTranscriber {
   private readonly client: () => OpenAI | undefined;
@@ -73,6 +80,8 @@ export class AudioTranscriber {
   private readonly model: () => string;
   private readonly maxSeconds: () => number;
   private readonly now: () => number;
+  private readonly catalog: Pick<ModelCatalog, 'info' | 'catalogInfo'>;
+  private readonly warnedModels = new Set<string>();
   // The auto-transcript reply and the chat agent often ask for the same voice message at once.
   private readonly inFlight = new Map<string, Promise<TranscriptionOutcome>>();
   private readonly cooldownUntil = new Map<string, number>();
@@ -84,6 +93,7 @@ export class AudioTranscriber {
     this.model = opts.model ?? (() => config.media.transcriptionModel);
     this.maxSeconds = opts.maxSeconds ?? (() => config.media.voiceMaxSeconds);
     this.now = opts.now ?? (() => Date.now());
+    this.catalog = opts.catalog ?? getModelCatalog();
   }
 
   /** The stored transcript for a cache key (a message id), without any paid work. */
@@ -116,7 +126,35 @@ export class AudioTranscriber {
   async transcribeBuffer(data: Buffer, format: AudioFormat | undefined, label: string): Promise<TranscriptionOutcome> {
     const client = this.client();
     if (!client) return { status: 'unavailable' };
-    return this.transcribeData(client, data, format, undefined, label);
+    const plan = await this.plan();
+    if (!plan.usable) return { status: 'unavailable' };
+    return this.transcribeData(client, data, format, undefined, label, plan.effort);
+  }
+
+  /**
+   * Whether the configured model can hear audio at all (a misconfigured TRANSCRIPTION_MODEL would
+   * otherwise fail every voice message with an opaque routing error), and the reasoning effort to ask for.
+   */
+  private async plan(): Promise<ModelPlan> {
+    const model = this.model();
+    const known = await this.catalog.catalogInfo(model);
+    if (known && !known.inputModalities.has('audio')) {
+      if (!this.warnedModels.has(model)) {
+        this.warnedModels.add(model);
+        logger.warn(`transcription: TRANSCRIPTION_MODEL ${model} does not take audio input; transcription is off`);
+      }
+      return { usable: false };
+    }
+    return { usable: true, effort: (known ?? (await this.catalog.info(model))).lowestEffort };
+  }
+
+  private setCooldown(key: string): void {
+    const now = this.now();
+    // Bounded: expired entries are swept whenever the map grows past a few hundred failures.
+    if (this.cooldownUntil.size > 500) {
+      for (const [k, until] of this.cooldownUntil) if (until <= now) this.cooldownUntil.delete(k);
+    }
+    this.cooldownUntil.set(key, now + FAILURE_COOLDOWN_MS);
   }
 
   private async run(input: AudioInput, key: string): Promise<TranscriptionOutcome> {
@@ -125,6 +163,8 @@ export class AudioTranscriber {
       logger.warn('transcription: no OPENROUTER_API_KEY; skipping');
       return { status: 'unavailable' };
     }
+    const plan = await this.plan();
+    if (!plan.usable) return { status: 'unavailable' };
 
     const download = await downloadMedia(input.url, {
       maxBytes: AUDIO_MAX_BYTES,
@@ -136,17 +176,24 @@ export class AudioTranscriber {
         logger.info(`transcription: ${redact(input.url)} is over ${AUDIO_MAX_BYTES} bytes; skipping`);
         return { status: 'too_large' };
       }
-      this.cooldownUntil.set(key, this.now() + FAILURE_COOLDOWN_MS);
+      this.setCooldown(key);
       return { status: 'failed' };
     }
 
     const format = detectAudioFormat(download.data, input.contentType ?? download.contentType, input.url);
-    const outcome = await this.transcribeData(client, download.data, format, input.durationSecs ?? undefined, key);
+    const outcome = await this.transcribeData(
+      client,
+      download.data,
+      format,
+      input.durationSecs ?? undefined,
+      key,
+      plan.effort,
+    );
 
     if (outcome.status === 'ok' && input.messageId) {
       storeTranscript(key, outcome.text, this.model(), this.now());
     } else if (outcome.status === 'failed') {
-      this.cooldownUntil.set(key, this.now() + FAILURE_COOLDOWN_MS);
+      this.setCooldown(key);
     }
     return outcome;
   }
@@ -157,10 +204,12 @@ export class AudioTranscriber {
     format: AudioFormat | undefined,
     knownDurationSecs: number | undefined,
     label: string,
+    effort: string | undefined,
   ): Promise<TranscriptionOutcome> {
     const model = this.model();
     const maxSeconds = this.maxSeconds();
-    const native = format !== undefined && nativeAudioFormats(model).has(format);
+    const fitsInline = data.byteLength <= INLINE_AUDIO_MAX_BYTES;
+    const native = format !== undefined && nativeAudioFormats(model).has(format) && fitsInline;
 
     if (native && format) {
       if (knownDurationSecs === undefined) {
@@ -168,7 +217,7 @@ export class AudioTranscriber {
         if (probed !== undefined && probed > maxSeconds) return { status: 'too_long', durationSecs: probed };
       }
       try {
-        return await this.callModel(client, model, data, format, label);
+        return await this.callModel(client, model, data, format, label, effort);
       } catch (error) {
         if (!isInputRejection(error)) {
           logger.warn(`transcription: ${model} failed on ${label}: ${describeError(error)}`);
@@ -186,9 +235,9 @@ export class AudioTranscriber {
     } catch (error) {
       logger.warn(`transcription: could not transcode ${label} (${format ?? 'unknown format'}):`, error);
       // Without a working transcoder, a format OpenRouter documents is still worth one attempt as-is.
-      if (!native && format) {
+      if (!native && format && fitsInline) {
         try {
-          return await this.callModel(client, model, data, format, label);
+          return await this.callModel(client, model, data, format, label, effort);
         } catch (sendError) {
           logger.warn(`transcription: ${model} failed on ${label}: ${describeError(sendError)}`);
         }
@@ -202,7 +251,7 @@ export class AudioTranscriber {
       return { status: 'too_long', durationSecs: mp3.durationSecs };
     }
     try {
-      return await this.callModel(client, model, mp3.data, 'mp3', label);
+      return await this.callModel(client, model, mp3.data, 'mp3', label, effort);
     } catch (error) {
       logger.warn(`transcription: ${model} failed on ${label} (as MP3): ${describeError(error)}`);
       return { status: 'failed' };
@@ -225,6 +274,7 @@ export class AudioTranscriber {
     data: Buffer,
     format: AudioFormat,
     label: string,
+    effort: string | undefined,
   ): Promise<TranscriptionOutcome> {
     const started = this.now();
     const raw = await completeMedia({
@@ -239,6 +289,7 @@ export class AudioTranscriber {
       ],
       maxTokens: MAX_OUTPUT_TOKENS,
       timeoutMs: TRANSCRIBE_TIMEOUT_MS,
+      reasoningEffort: effort,
     });
     const text = cleanTranscript(raw);
     if (text === undefined) throw new Error(`${model} returned an empty transcript`);
