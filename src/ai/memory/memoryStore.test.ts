@@ -1911,6 +1911,31 @@ describe('stampSubjectUserIds() (startup link of name-only memories to member id
     expect(store.stampSubjectUserIds().stamped).toBe(0);
   });
 
+  it("keeps a real account's id that has no identities row (remember_fact, Remember this), whatever the subject", async () => {
+    // A lurker who never posted: remember_fact resolved them through the message's @-mention, and
+    // "Remember this" saved under an old message's author. Neither creates an identities row, and
+    // their display name "Alex" happens to be Jasper's real name.
+    const LURKER = '300000000000000003';
+    store.updateIdentityMeta('222', { irl_name: 'Alex' });
+    const fromChat = await store.save({ category: 'preference', subject: 'Alex', subject_user_id: LURKER, content: 'Hates cilantro', source: 'conversation' });
+    const fromCommand = await store.save({ category: 'fact', subject: 'Alex', subject_user_id: LURKER, content: 'Works at the airport', source: 'command' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, relinked: 0, names: 0, ambiguous: 0 });
+    expect(rowOf(fromChat).subject_user_id).toBe(LURKER);
+    expect(rowOf(fromCommand).subject_user_id).toBe(LURKER);
+    expect(store.getForPerson({ userId: LURKER, names: [] }).map((m) => m.id).sort()).toEqual([fromChat, fromCommand].sort());
+    expect(store.getForPerson({ userId: '222', names: [] })).toEqual([]);
+  });
+
+  it('treats a snowflake no member has as no id on rows the old learner wrote (a garbled copy of a member id)', async () => {
+    const garbled = await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: '300000000000000009', content: 'Still plays on PS4', source: 'observation' });
+    const selfImprovement = await store.save({ category: 'feature_request', subject: 'Jasper', subject_user_id: '300000000000000009', content: 'Wants a trivia game', source: 'self-improvement' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 2, relinked: 0, names: 1, ambiguous: 0 });
+    expect(rowOf(garbled).subject_user_id).toBe('222');
+    expect(rowOf(selfImprovement).subject_user_id).toBe('222');
+  });
+
   it('skips names shared by two members, server-wide subjects, unknown names and inactive rows', async () => {
     // Someone else was first seen as "Wheelie" too: the name is ambiguous.
     store.upsertIdentity('333', 'Wheelie');

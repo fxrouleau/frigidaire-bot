@@ -444,6 +444,48 @@ describe('PersonalityLearner output is untrusted', () => {
     expect(store.getIdentityById(WHEELIE)?.irl_name).toBe('Dorian');
   });
 
+  it("never takes another member's name for a real name (a joke, or the model mixing people up)", async () => {
+    const SILAS = '100000000000000003';
+    store.upsertIdentity(SILAS, 'Silas');
+    const output = JSON.stringify({
+      observations: [],
+      identity_updates: [
+        // Jasper's display name, then Wheelie's first-seen name.
+        { discord_user_id: WHEELIE, irl_name: 'Jasper' },
+        { discord_user_id: JASPER, irl_name: 'oldnick' },
+        // A real name that is also the member's own display name is fine.
+        { discord_user_id: SILAS, irl_name: 'Silas' },
+      ],
+    });
+    const { client } = channelServing([jasper('his real name is actually Jasper lol'), wheelie('b'), jasper('c')]);
+    const { learner } = learnerWith([{ body: chatCompletionBody(output) }]);
+
+    await learner.observeOnce(client);
+
+    expect(store.getIdentityById(WHEELIE)?.irl_name).toBeNull();
+    expect(store.getIdentityById(JASPER)?.irl_name).toBeNull();
+    expect(store.getIdentityById(SILAS)?.irl_name).toBe('Silas');
+    // "Jasper" still names one member, so the startup stamp can still link Jasper's name-only rows.
+    const row = await store.save({ category: 'fact', subject: 'Jasper', content: 'Works nights at the depot' });
+    store.stampSubjectUserIds();
+    expect(store.getAllActive().find((m) => m.id === row)?.subject_user_id).toBe(JASPER);
+  });
+
+  it("leaves a real name another member already goes by to set_member_info", async () => {
+    store.updateIdentityMeta(JASPER, { irl_name: 'Alex', aliases_add: ['Jazz'] });
+    const output = JSON.stringify({
+      observations: [],
+      identity_updates: [{ discord_user_id: WHEELIE, irl_name: 'alex' }],
+    });
+    const { client } = channelServing([jasper('a'), wheelie('b'), jasper('c')]);
+    const { learner } = learnerWith([{ body: chatCompletionBody(output) }]);
+
+    await learner.observeOnce(client);
+
+    expect(store.getIdentityById(WHEELIE)?.irl_name).toBeNull();
+    expect(store.getIdentityById(JASPER)?.irl_name).toBe('Alex');
+  });
+
   it("adds only nicknames that set_member_info would and that no other member goes by", async () => {
     store.updateIdentityMeta(JASPER, { irl_name: 'Alex', aliases_add: ['Jazz'] });
     const output = JSON.stringify({

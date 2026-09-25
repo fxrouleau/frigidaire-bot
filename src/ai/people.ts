@@ -569,19 +569,53 @@ export function checkNickname(
   if ([displayName, ...(own?.names ?? [])].some((n) => nameKey(n) === key)) {
     return { refusal: `${displayName} already goes by "${nickname}".`, alreadyKnown: true };
   }
-  const others = members.filter((m) => m.userId !== userId);
-  const goesBy = (member: Member, names: (i: Identity) => (string | null | undefined)[]) =>
-    member.rows.some((row) => names(row).some((n) => nameKey(n) === key));
-  const owner = others.find((m) => goesBy(m, (i) => [i.display_name, i.username, i.canonical_name]));
+  const { owner, sharer } = othersGoingBy(members, userId, key);
   if (owner) {
     return {
       refusal: `"${nickname}" is ${owner.displayName}'s own name, so it can't also be ${displayName}'s nickname.`,
     };
   }
-  const sharer = others.find((m) => goesBy(m, (i) => [i.irl_name, ...i.aliases]));
   return sharer
     ? { note: `${sharer.displayName} also goes by "${nickname}", so that name alone won't tell them apart.` }
     : {};
+}
+
+/**
+ * Whether `realName` can be recorded as a member's real name (`userId` is their main account id) without
+ * clashing with someone else: refused when it is another member's display name, handle or first-seen
+ * name, noted when it is another member's real name or nickname. One of their own names is fine (a real
+ * name often is the display name). The learner, a background guesser, skips both; set_member_info does
+ * not ask (a person said so).
+ */
+export function checkRealName(
+  store: MemoryStore,
+  userId: string,
+  displayName: string,
+  realName: string,
+): { refusal?: string; note?: string } {
+  const { owner, sharer } = othersGoingBy(foldMembers(store.getAllIdentities()), userId, nameKey(realName));
+  if (owner) {
+    return {
+      refusal: `"${realName}" is ${owner.displayName}'s own name, so it can't also be ${displayName}'s real name.`,
+    };
+  }
+  return sharer
+    ? { note: `${sharer.displayName} also goes by "${realName}", so that name alone won't tell them apart.` }
+    : {};
+}
+
+/**
+ * The first member other than `userId` who goes by a name (`key`, a nameKey()): `owner` when it is their
+ * own name (display name, handle, first-seen name: lookups rank those first), else `sharer` when it is
+ * their real name or a nickname.
+ */
+function othersGoingBy(members: Member[], userId: string, key: string): { owner?: Member; sharer?: Member } {
+  const others = members.filter((m) => m.userId !== userId);
+  const goesBy = (member: Member, names: (i: Identity) => (string | null | undefined)[]) =>
+    member.rows.some((row) => names(row).some((n) => nameKey(n) === key));
+  const owner = others.find((m) => goesBy(m, (i) => [i.display_name, i.username, i.canonical_name]));
+  if (owner) return { owner };
+  return { sharer: others.find((m) => goesBy(m, (i) => [i.irl_name, ...i.aliases])) };
 }
 
 // ---------------------------------------------------------------------------------------------------

@@ -122,7 +122,7 @@ const summarizeTool: ToolDefinition = {
 const setMemberInfoTool: ToolDefinition = {
   name: 'set_member_info',
   description:
-    'Record a member\'s real name or a nickname the group uses for them, when someone tells you ("fridge, Yi\'s real name is Yi", "we call Derrick D"). This is how you recognize people by every name they go by. Display names and Discord handles update on their own: never use this for those, for jokes, or for one-off insults.',
+    'Record a member\'s real name or a nickname the group uses for them, when someone tells you ("fridge, Wheelie\'s real name is Dorian", "we call Dorian D"). This is how you recognize people by every name they go by. Display names and Discord handles update on their own: never use this for those, for jokes, or for one-off insults.',
   parameters: {
     type: 'object',
     properties: {
