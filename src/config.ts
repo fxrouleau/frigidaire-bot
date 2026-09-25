@@ -584,13 +584,24 @@ export const config = {
         name.toLowerCase(),
       );
     },
-    /** A message from whoever the bot was just talking to is a candidate for this long; 0 disables. */
+    /**
+     * A channel has an active exchange while the bot answered someone there within this many seconds
+     * (sliding: every answer extends it). During one, messages from anyone the bot has exchanged with
+     * are candidates even without a name. 0 disables follow-ups (every name-drop is then cold).
+     */
     get followupSeconds(): number {
       return envInt('GATE_FOLLOWUP_SECONDS', 120, { min: 0 });
     },
-    /** Unsolicited replies per channel per 10 minutes; 0 ⇒ never reply unprompted. */
+    /**
+     * Runaway guard: unprompted replies per channel per rolling 10 minutes, all kinds together. High on
+     * purpose — conversations come in bursts and must not be cut off mid-exchange. 0 ⇒ never unprompted.
+     */
     get maxPer10Min(): number {
-      return envInt('GATE_MAX_PER_10MIN', 4, { min: 0 });
+      return envInt('GATE_MAX_PER_10MIN', 30, { min: 0 });
+    },
+    /** Cold interjections (a name-drop with no active exchange) per channel per rolling 10 minutes. */
+    get maxColdPer10Min(): number {
+      return envInt('GATE_MAX_COLD_PER_10MIN', 6, { min: 0 });
     },
     /** Probability at/above which the decision model's "addressed to the bot" counts as yes. */
     get threshold(): number {

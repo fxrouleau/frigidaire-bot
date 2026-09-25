@@ -1,39 +1,50 @@
 // Replying without an @-mention: decides whether a message nobody pinged the bot in is still meant for
 // it ("fridge who wins worlds", or "why tho" right after the bot answered that person).
 //
-// Order matters for cost: every check up to the rate limit is free and runs on every message in the
-// gate's channels; only a candidate (its text names the bot, or its author is who the bot was just
-// talking to) costs a REST fetch of a few messages of context plus one decision-model call (~$0.00001).
-// The decision fails closed: no answer, or a probability under GATE_THRESHOLD, means no reply.
+// Order matters for cost: every check up to the caps is free and runs on every message in the gate's
+// channels; only a candidate costs a REST fetch of a few messages of context plus one decision-model
+// call (~$0.00001). The decision fails closed: no answer, or a probability under GATE_THRESHOLD, means
+// no reply.
 //
-// Who the bot is talking to comes from watching its own messages here: Discord stamps a reply's target
-// on `mentions.repliedUser`, and a routed turn whose reply had to fall back to a plain send (the message
-// was deleted meanwhile, e.g. replaced by a link-fix repost) is covered by the author recorded when the
-// turn was routed, until shortly after that turn finishes. This state is in memory: after a restart the
-// first candidate reads the same facts off the fetched history instead.
+// Conversations come in bursts, so the gate thinks in *exchanges*, not single replies. A channel has an
+// active exchange while the bot answered someone there within GATE_FOLLOWUP_SECONDS (sliding: every
+// answer extends it, and a turn still being answered keeps it open). Everyone the bot has exchanged with
+// since the exchange began is a partner, and a partner's message is a candidate without naming the bot.
+// During an exchange only the high runaway guard (GATE_MAX_PER_10MIN) applies; a *cold* interjection (a
+// name-drop with no active exchange) has its own small cap (GATE_MAX_COLD_PER_10MIN). Explicit
+// @-mentions and replies never reach the gate, so they are never capped.
+//
+// Exchanges come from routed turns only (aiChat reports every turn it hands to the agent, and when it
+// ends), never from the bot's own posts: a ramble nudge, a voice-message transcript or a reminder
+// replies to someone without being a conversation with them. Partners compare through isSamePerson(),
+// so a member's side account continues their main account's exchange. This state is in memory: after
+// a restart, follow-ups without a name work again once the bot has answered someone.
 import type { Message } from 'discord.js';
 import { getMemoryStore } from '../ai/memory';
 import { config } from '../config';
+import { canonicalUserId, isSamePerson } from '../linkedAccounts';
 import { logger } from '../logger';
 import { attributeMessage } from '../relay';
 import { type AddressedClassifier, type AddressedInput, type ChatLine, createAddressedClassifier } from './addressed';
-import { createNameMatcher, isFollowup, readableMarkup, truncate } from './text';
+import { createNameMatcher, readableMarkup, truncate } from './text';
 
-const RATE_WINDOW_MS = 10 * 60 * 1000;
+const CAP_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_CONTEXT_SIZE = 6;
-// A routed turn's author stands in for the reply target while the turn runs (at most this long: a turn
-// with tools can take a while) and for a short grace after it ends (its own posts can reach the gateway
-// after the send resolved). Past that, a plain bot post (a reminder, a digest) answers nobody.
-const PENDING_PARTNER_TTL_MS = 5 * 60 * 1000;
-const PENDING_PARTNER_GRACE_MS = 15 * 1000;
+// A routed turn keeps its channel's exchange open while it runs, but a turn that never reports back
+// (aiChat always does; this is the backstop) stops counting after this long.
+const PENDING_TURN_TTL_MS = 5 * 60 * 1000;
 const LOG_EXCERPT_CHARS = 80;
 
 export type GateSettings = {
   enabled: boolean;
   channelIds: string[];
   names: string[];
+  /** Length of an active exchange after the bot's last answer; 0 disables follow-ups. */
   followupSeconds: number;
+  /** Runaway guard: unprompted replies of every kind per channel per rolling 10 minutes. */
   maxPer10Min: number;
+  /** Cold interjections (a name-drop with no active exchange) per channel per rolling 10 minutes. */
+  maxColdPer10Min: number;
   threshold: number;
 };
 
@@ -45,6 +56,7 @@ export function gateSettingsFromConfig(): GateSettings {
     names: gate.names,
     followupSeconds: gate.followupSeconds,
     maxPer10Min: gate.maxPer10Min,
+    maxColdPer10Min: gate.maxColdPer10Min,
     threshold: gate.threshold,
   };
 }
@@ -57,24 +69,32 @@ export type GateSkipReason =
   | 'not_human'
   | 'no_trigger'
   | 'no_text'
+  /** The runaway guard (GATE_MAX_PER_10MIN). */
   | 'rate_limited'
+  /** The cold-interjection cap (GATE_MAX_COLD_PER_10MIN). */
+  | 'cold_limited'
   | 'no_answer'
   | 'below_threshold';
 
+/** `cold`: a name-drop with no active exchange in the channel (the kind with the small cap). */
 export type GateVerdict =
-  | { respond: true; trigger: GateTrigger; probability: number }
-  | { respond: false; reason: GateSkipReason; trigger?: GateTrigger; probability?: number };
+  | { respond: true; trigger: GateTrigger; probability: number; cold: boolean }
+  | { respond: false; reason: GateSkipReason; trigger?: GateTrigger; probability?: number; cold?: boolean };
 
-type ChannelActivity = {
-  /** createdTimestamp of the bot's last message in the channel. */
+type ChannelState = {
+  /** createdTimestamp of the bot's last post here (any post in words): only the decision's timing uses it. */
   botSpokeAt?: number;
-  /** Who that message was answering. */
-  partnerId?: string;
-  /** The last turn routed to the agent here: its author stands in for a plain-send reply's target. */
-  pending?: { messageId: string; userId: string; at: number; doneAt?: number };
-  /** When the gate routed unsolicited replies here (for the rate limit). */
-  unsolicitedAt: number[];
+  /** When a routed turn last finished here, i.e. the bot answered someone. Drives the active exchange. */
+  lastAnsweredAt?: number;
+  /** Everyone the bot has exchanged with since the current exchange began: canonical user id → last time. */
+  partners: Map<string, number>;
+  /** Turns handed to the agent and not finished yet, by message id: their authors are partners already. */
+  pending: Map<string, { userId: string; at: number }>;
+  /** Unprompted replies the gate routed here, for the caps. */
+  routed: Array<{ at: number; cold: boolean }>;
 };
+
+type CapReason = 'rate_limited' | 'cold_limited';
 
 export type AddressedGateOptions = {
   classify?: AddressedClassifier;
@@ -90,7 +110,7 @@ export class AddressedGate {
   private readonly settings: () => GateSettings;
   private readonly now: () => number;
   private readonly contextSize: number;
-  private readonly channels = new Map<string, ChannelActivity>();
+  private readonly channels = new Map<string, ChannelState>();
   private matcher: { key: string; match: (text: string) => string | undefined } | undefined;
 
   constructor(opts: AddressedGateOptions = {}) {
@@ -100,24 +120,34 @@ export class AddressedGate {
     this.contextSize = opts.contextSize ?? DEFAULT_CONTEXT_SIZE;
   }
 
-  /** The bot posted in a channel: remember when, and who it was answering. */
+  /**
+   * The bot posted in a channel: remember when, for the decision's "the bot spoke N seconds ago". Who it
+   * is talking to comes from routed turns instead (see the header), so a nudge never starts an exchange.
+   */
   noteBotMessage(message: Message): void {
     if (!this.settings().channelIds.includes(message.channel.id)) return;
-    const activity = this.activity(message.channel.id);
-    activity.botSpokeAt = message.createdTimestamp;
-    activity.partnerId = message.mentions?.repliedUser?.id ?? this.pendingPartner(activity);
+    this.state(message.channel.id).botSpokeAt = message.createdTimestamp;
   }
 
-  /** A turn was routed to the agent (explicit mention/reply, or the gate): its author is who the bot answers next. */
+  /** A turn was handed to the agent (explicit mention/reply, or the gate): its author joins the exchange. */
   noteRouted(message: Message): void {
-    if (!this.settings().channelIds.includes(message.channel.id)) return;
-    this.activity(message.channel.id).pending = { messageId: message.id, userId: message.author.id, at: this.now() };
+    const settings = this.settings();
+    if (!settings.channelIds.includes(message.channel.id)) return;
+    const now = this.now();
+    // Read through current(): a turn arriving after the last exchange lapsed starts a fresh one.
+    const state = this.current(message.channel.id, settings, now);
+    state.pending.set(message.id, { userId: message.author.id, at: now });
   }
 
-  /** The routed turn for `message` finished: its author stops standing in for plain bot posts after a short grace. */
+  /** The routed turn for `message` finished: the bot answered its author, which extends the exchange. */
   noteTurnDone(message: Message): void {
-    const pending = this.channels.get(message.channel.id)?.pending;
-    if (pending?.messageId === message.id) pending.doneAt = this.now();
+    const state = this.channels.get(message.channel.id);
+    const turn = state?.pending.get(message.id);
+    if (!state || !turn) return;
+    state.pending.delete(message.id);
+    const now = this.now();
+    state.lastAnsweredAt = now;
+    state.partners.set(canonicalUserId(turn.userId), now);
   }
 
   /** Decides whether a message that neither mentions nor replies to the bot should still get an answer. */
@@ -128,27 +158,30 @@ export class AddressedGate {
     if (!settings.channelIds.includes(channelId)) return { respond: false, reason: 'not_watched' };
     if (message.author.bot || message.webhookId || message.system) return { respond: false, reason: 'not_human' };
 
-    const nameHit = this.nameMatcher(settings.names, message)(message.content ?? '');
-    const activity = this.channels.get(channelId);
-    const trackedSeconds =
-      activity?.botSpokeAt !== undefined ? (message.createdTimestamp - activity.botSpokeAt) / 1000 : undefined;
-    const trackedPartner = activity?.partnerId === message.author.id;
-    const followup = isFollowup(trackedSeconds, trackedPartner, settings.followupSeconds);
-    const trigger = triggerFor(nameHit !== undefined, followup);
+    const now = this.now();
+    const state = this.current(channelId, settings, now);
+    const active = this.isActive(state, settings, now);
+    const partner = active && this.isPartner(state, message.author.id);
+    const nameHit = this.nameMatcher(settings.names, message)(message.content ?? '') !== undefined;
+    const trigger = triggerFor(nameHit, partner);
     if (!trigger) return { respond: false, reason: 'no_trigger' };
+    const cold = !active;
 
     const botId = message.client.user.id;
     const botName = botDisplayName(message);
     const text = renderMessageText(message, botId, botName);
-    const logTail = `trigger=${trigger} channel=${channelId} msg=${message.id} author=${authorName(message)} text=${JSON.stringify(truncate(text, LOG_EXCERPT_CHARS))}`;
-    if (!text) return { respond: false, reason: 'no_text', trigger };
+    const logTail = `trigger=${trigger} mode=${cold ? 'cold' : 'exchange'} channel=${channelId} msg=${message.id} author=${authorName(message)} text=${JSON.stringify(truncate(text, LOG_EXCERPT_CHARS))}`;
+    if (!text) return { respond: false, reason: 'no_text', trigger, cold };
 
-    if (this.unsolicitedCount(channelId) >= settings.maxPer10Min) {
-      logger.info(`gate: skip (rate limit: ${settings.maxPer10Min} unsolicited replies per 10 min) ${logTail}`);
-      return { respond: false, reason: 'rate_limited', trigger };
+    const capped = this.capReached(state, settings, cold, now);
+    if (capped) {
+      logger.info(`gate: skip (${describeCap(capped, settings)}) ${logTail}`);
+      return { respond: false, reason: capped, trigger, cold };
     }
 
-    const input = await this.buildInput(message, settings, text, botId, botName, trackedSeconds, trackedPartner);
+    const trackedSeconds =
+      state.botSpokeAt !== undefined ? (message.createdTimestamp - state.botSpokeAt) / 1000 : undefined;
+    const input = await this.buildInput(message, settings, text, botId, botName, trackedSeconds, partner);
     let probability: number | undefined;
     try {
       probability = await this.classify(input);
@@ -157,52 +190,68 @@ export class AddressedGate {
     }
     if (probability === undefined) {
       logger.warn(`gate: skip (no decision from the model) ${logTail}`);
-      return { respond: false, reason: 'no_answer', trigger };
+      return { respond: false, reason: 'no_answer', trigger, cold };
     }
 
     const verdict = `p=${probability.toFixed(2)} threshold=${settings.threshold}`;
     if (probability < settings.threshold) {
       logger.info(`gate: skip ${verdict} ${logTail}`);
-      return { respond: false, reason: 'below_threshold', trigger, probability };
+      return { respond: false, reason: 'below_threshold', trigger, probability, cold };
     }
-    // Checked again after the (slow) decision call: concurrent candidates must not overshoot the limit.
-    if (this.unsolicitedCount(channelId) >= settings.maxPer10Min) {
-      logger.info(`gate: skip ${verdict} (rate limit reached meanwhile) ${logTail}`);
-      return { respond: false, reason: 'rate_limited', trigger, probability };
+    // Checked again after the (slow) decision call: concurrent candidates must not overshoot a cap.
+    const cappedMeanwhile = this.capReached(state, settings, cold, this.now());
+    if (cappedMeanwhile) {
+      logger.info(`gate: skip ${verdict} (${describeCap(cappedMeanwhile, settings)}, reached meanwhile) ${logTail}`);
+      return { respond: false, reason: cappedMeanwhile, trigger, probability, cold };
     }
 
     logger.info(`gate: REPLY ${verdict} ${logTail}`);
-    this.activity(channelId).unsolicitedAt.push(this.now());
+    state.routed.push({ at: this.now(), cold });
     this.noteRouted(message);
-    return { respond: true, trigger, probability };
+    return { respond: true, trigger, probability, cold };
   }
 
-  private pendingPartner(activity: ChannelActivity): string | undefined {
-    const pending = activity.pending;
-    if (!pending) return undefined;
-    const now = this.now();
-    const live =
-      pending.doneAt === undefined
-        ? now - pending.at <= PENDING_PARTNER_TTL_MS
-        : now - pending.doneAt <= PENDING_PARTNER_GRACE_MS;
-    return live ? pending.userId : undefined;
-  }
-
-  private activity(channelId: string): ChannelActivity {
-    let activity = this.channels.get(channelId);
-    if (!activity) {
-      activity = { unsolicitedAt: [] };
-      this.channels.set(channelId, activity);
+  private state(channelId: string): ChannelState {
+    let state = this.channels.get(channelId);
+    if (!state) {
+      state = { partners: new Map(), pending: new Map(), routed: [] };
+      this.channels.set(channelId, state);
     }
-    return activity;
+    return state;
   }
 
-  private unsolicitedCount(channelId: string): number {
-    const activity = this.channels.get(channelId);
-    if (!activity) return 0;
-    const cutoff = this.now() - RATE_WINDOW_MS;
-    activity.unsolicitedAt = activity.unsolicitedAt.filter((at) => at > cutoff);
-    return activity.unsolicitedAt.length;
+  /** The channel's state with stale turns dropped, and its partners forgotten once the exchange lapsed. */
+  private current(channelId: string, settings: GateSettings, now: number): ChannelState {
+    const state = this.state(channelId);
+    for (const [messageId, turn] of state.pending) {
+      if (now - turn.at > PENDING_TURN_TTL_MS) state.pending.delete(messageId);
+    }
+    if (!this.isActive(state, settings, now)) state.partners.clear();
+    return state;
+  }
+
+  private isActive(state: ChannelState, settings: GateSettings, now: number): boolean {
+    if (settings.followupSeconds <= 0) return false;
+    if (state.pending.size > 0) return true;
+    return state.lastAnsweredAt !== undefined && now - state.lastAnsweredAt <= settings.followupSeconds * 1000;
+  }
+
+  private isPartner(state: ChannelState, userId: string): boolean {
+    for (const partnerId of state.partners.keys()) {
+      if (isSamePerson(partnerId, userId)) return true;
+    }
+    for (const turn of state.pending.values()) {
+      if (isSamePerson(turn.userId, userId)) return true;
+    }
+    return false;
+  }
+
+  /** Which cap, if any, stops another unprompted reply in this channel right now. */
+  private capReached(state: ChannelState, settings: GateSettings, cold: boolean, now: number): CapReason | undefined {
+    state.routed = state.routed.filter((entry) => now - entry.at < CAP_WINDOW_MS);
+    if (state.routed.length >= settings.maxPer10Min) return 'rate_limited';
+    if (cold && state.routed.filter((entry) => entry.cold).length >= settings.maxColdPer10Min) return 'cold_limited';
+    return undefined;
   }
 
   /** The configured names plus the bot's own current names, compiled once per distinct list. */
@@ -220,7 +269,7 @@ export class AddressedGate {
     botId: string,
     botName: string,
     trackedSeconds: number | undefined,
-    trackedPartner: boolean,
+    partner: boolean,
   ): Promise<AddressedInput> {
     const history = await this.fetchHistory(message);
     const context = history
@@ -228,13 +277,13 @@ export class AddressedGate {
       .filter((line): line is ChatLine => line !== undefined);
 
     let secondsSinceBotSpoke = trackedSeconds;
-    let authorIsBotsPartner = trackedPartner;
+    let authorIsBotsPartner = partner;
     if (secondsSinceBotSpoke === undefined) {
       // Nothing tracked (e.g. right after a restart): read the same facts off the fetched history.
       const lastOwn = history.findLast((m) => m.author.id === botId && !m.webhookId);
       if (lastOwn) {
         secondsSinceBotSpoke = (message.createdTimestamp - lastOwn.createdTimestamp) / 1000;
-        authorIsBotsPartner = lastOwn.mentions?.repliedUser?.id === message.author.id;
+        authorIsBotsPartner ||= isSamePerson(lastOwn.mentions?.repliedUser?.id, message.author.id);
       }
     }
 
@@ -263,6 +312,12 @@ function triggerFor(nameHit: boolean, followup: boolean): GateTrigger | undefine
   if (nameHit && followup) return 'name+followup';
   if (nameHit) return 'name';
   return followup ? 'followup' : undefined;
+}
+
+function describeCap(cap: CapReason, settings: GateSettings): string {
+  return cap === 'rate_limited'
+    ? `runaway guard: ${settings.maxPer10Min} unprompted replies per 10 min`
+    : `cold cap: ${settings.maxColdPer10Min} cold interjections per 10 min`;
 }
 
 function botDisplayName(message: Message): string {

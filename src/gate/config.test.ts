@@ -8,6 +8,7 @@ const GATE_VARS = [
   'GATE_NAMES',
   'GATE_FOLLOWUP_SECONDS',
   'GATE_MAX_PER_10MIN',
+  'GATE_MAX_COLD_PER_10MIN',
   'GATE_THRESHOLD',
   'GATE_MODEL',
   'RAMBLE_USER_IDS',
@@ -35,7 +36,8 @@ describe('config.gate', () => {
     expect(config.gate.channelIds).toEqual([]);
     expect(config.gate.names).toEqual(['fridge', 'frigidaire', 'frigi', 'bot', 'clanker']);
     expect(config.gate.followupSeconds).toBe(120);
-    expect(config.gate.maxPer10Min).toBe(4);
+    expect(config.gate.maxPer10Min).toBe(30);
+    expect(config.gate.maxColdPer10Min).toBe(6);
     expect(config.gate.threshold).toBe(0.7);
     expect(config.gate.model).toBe('typesafe/jev-1.13');
   });
@@ -54,12 +56,19 @@ describe('config.gate', () => {
     vi.stubEnv('GATE_NAMES', 'Fridge, Toaster');
     vi.stubEnv('GATE_FOLLOWUP_SECONDS', '0');
     vi.stubEnv('GATE_MAX_PER_10MIN', '-3');
+    vi.stubEnv('GATE_MAX_COLD_PER_10MIN', 'lots');
     vi.stubEnv('GATE_THRESHOLD', '1.5');
     expect(config.gate.enabled).toBe(false);
     expect(config.gate.names).toEqual(['fridge', 'toaster']);
     expect(config.gate.followupSeconds).toBe(0);
-    expect(config.gate.maxPer10Min).toBe(4);
+    expect(config.gate.maxPer10Min).toBe(30);
+    expect(config.gate.maxColdPer10Min).toBe(6);
     expect(config.gate.threshold).toBe(0.7);
+
+    vi.stubEnv('GATE_MAX_PER_10MIN', '0');
+    vi.stubEnv('GATE_MAX_COLD_PER_10MIN', '0');
+    expect(config.gate.maxPer10Min).toBe(0);
+    expect(config.gate.maxColdPer10Min).toBe(0);
   });
 
   it('accepts only decision models for GATE_MODEL', () => {

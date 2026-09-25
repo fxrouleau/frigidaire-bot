@@ -176,7 +176,7 @@ describe('aiChat event: replying without a mention (the gate)', () => {
   });
 
   it('routes a message the gate says is addressed to the bot, and marks the turn done even if it fails', async () => {
-    vi.spyOn(addressedGate, 'evaluate').mockResolvedValue({ respond: true, trigger: 'name', probability: 0.9 });
+    vi.spyOn(addressedGate, 'evaluate').mockResolvedValue({ respond: true, trigger: 'name', probability: 0.9, cold: true });
     const noteTurnDone = vi.spyOn(addressedGate, 'noteTurnDone');
     vi.mocked(agent.handleMention).mockRejectedValueOnce(new Error('boom'));
     const fake = createFakeMessage({ content: 'fridge who wins worlds', botUserId: BOT_ID });
