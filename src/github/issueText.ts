@@ -1,7 +1,8 @@
 // Turning a member's feature request into a public GitHub issue, and recognizing one already filed.
 //
 // Everything here is untrusted text: members write the request, the chat model rewrites it, and the
-// result lands in a PUBLIC issue that the owner may later hand to Claude to implement. So:
+// result lands in a PUBLIC issue (treated as public even if the repo goes private) that the owner may
+// later hand to Claude to implement. So:
 //   - Discord markup (user/role/channel mentions, custom emojis) never reaches GitHub; mention ids are
 //     meaningless there and a mention would point at another member
 //   - GitHub @-mentions are defused, so a request cannot ping strangers (or summon @claude)

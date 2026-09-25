@@ -1,4 +1,4 @@
-// Guards the security properties of the Claude implementation workflow. The repo is public and the
+// Guards the security properties of the Claude implementation workflow. The repo may be public and the
 // issues it acts on are written by friends and a chat model, so the workflow must only ever run for
 // the repo owner, never interpolate issue/comment text into a shell, and keep Claude's tools minimal.
 // These are checked as text (no YAML dependency) against the committed file.
@@ -103,6 +103,17 @@ describe.skipIf(!present && !inCheckout)('claude-feature-request workflow', () =
     for (const tool of allowed.filter((t) => t.startsWith('Bash'))) {
       expect(['Bash(docker build --target ci .)', 'Bash(gh pr create:*)']).toContain(tool);
     }
+  });
+
+  it("runs on the owner's subscription, with the API key only as a commented-out alternative", () => {
+    // Claude Code prefers ANTHROPIC_API_KEY over CLAUDE_CODE_OAUTH_TOKEN when both are set, so wiring
+    // both would silently bill the API key instead of the subscription.
+    const active = lines.filter((line) => !line.trimStart().startsWith('#')).join('\n');
+    expect(active).toMatch(/^ {10}claude_code_oauth_token: \$\{\{ secrets\.CLAUDE_CODE_OAUTH_TOKEN \}\}$/m);
+    expect(active).not.toMatch(/anthropic_api_key|ANTHROPIC_API_KEY/);
+    expect(text).toMatch(/^ {10}# anthropic_api_key: \$\{\{ secrets\.ANTHROPIC_API_KEY \}\}$/m);
+    // Secrets only ever reach the action's inputs, never an env block or a shell.
+    expect(active.match(/secrets\.\w+/g)).toEqual(['secrets.CLAUDE_CODE_OAUTH_TOKEN']);
   });
 
   it('runs one job per issue at a time, with a timeout', () => {

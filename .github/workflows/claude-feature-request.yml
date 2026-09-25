@@ -6,7 +6,8 @@ name: Claude implements feature requests
 # a branch, runs the CI gate and opens a pull request; the owner reviews and merges, and the normal
 # docker-push.yml deploy takes it from there.
 #
-# Issue text is UNTRUSTED (written by friends, rewritten by a chat model, public repo), so:
+# Issue text is UNTRUSTED (written by friends, rewritten by a chat model, and on a public repo anyone
+# can open or comment on issues), so:
 #   - only the repo owner can start a run: an issue author, a commenter or a bot never can (the job-level
 #     `if` below; the action additionally requires write access). The bot's own token belongs to the
 #     owner, which is why the bot never applies `claude-implement` and never comments.
@@ -34,6 +35,8 @@ jobs:
         (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude'))
       )
     runs-on: ubuntu-latest
+    # Free on a public repo; on a private one every minute (the Docker CI gate included) counts against
+    # the account's monthly Actions quota, so a stuck run is cut off well before it eats much of it.
     timeout-minutes: 60
     # One run per issue/PR at a time; a second approval queues behind the first instead of racing it.
     concurrency:
@@ -54,9 +57,12 @@ jobs:
       - name: Run Claude
         uses: anthropics/claude-code-action@v1
         with:
-          # Set ONE of these two repository secrets (Settings → Secrets and variables → Actions).
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Runs on the owner's Claude subscription: the CLAUDE_CODE_OAUTH_TOKEN repository secret holds the
+          # one-year token printed by `claude setup-token` (Settings → Secrets and variables → Actions).
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Alternative, billed per token to a Claude Console account: swap the line above for this one.
+          # Wire only ONE of the two: when both are present Claude Code uses the API key, not the subscription.
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           label_trigger: claude-implement
           # With a prompt, tag mode (branch, progress comment, commit tools) needs track_progress.
           track_progress: true

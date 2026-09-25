@@ -1,4 +1,6 @@
-// request_feature: file a member's feature request as a GitHub issue on the bot's own (PUBLIC) repo.
+// request_feature: file a member's feature request as a GitHub issue on the bot's own repo. The repo is
+// public today and the issue is written as public either way: should the owner make the repo private,
+// nothing about what goes into an issue changes.
 // The owner reviews it and, if approved, labels it `claude-implement`, which has Claude implement it in
 // a PR (see src/github/featureRequests.ts and .github/workflows/claude-feature-request.yml).
 //
@@ -37,7 +39,7 @@ const DESCRIPTION = [
   'File a feature request for this bot as a GitHub issue that the owner reviews before anything gets built.',
   'Only call it when someone explicitly asks for a bot feature or change to be filed or added',
   '("fridge, can you add…", "file a feature request for…", "make it so you can…") — never on your own initiative,',
-  'for jokes, or for idle wishes. The issue is PUBLIC on GitHub: write the title and fields as a clear,',
+  'for jokes, or for idle wishes. Treat the issue as PUBLIC on GitHub: write the title and fields as a clear,',
   'self-contained spec of the feature only. Never include chat transcripts, quotes, other members’ names or',
   'messages, or anything personal or private; the requester’s display name and a link to their message are',
   'added automatically. Returns the issue link to share, the existing issue when the same thing was already',
