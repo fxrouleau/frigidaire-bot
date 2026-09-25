@@ -106,7 +106,10 @@ jobs:
               code that fails the gate.
             - Commit and push on the branch you are on. For a new implementation, then open a pull
               request against ${{ github.event.repository.default_branch }} with
-              `gh pr create --base ${{ github.event.repository.default_branch }} --title "<title>" --body "<body>"`.
-              The body summarizes the change, lists anything the owner must configure (env vars, Discord
-              permissions) and contains `Closes #${{ github.event.issue.number }}`. Put the PR link in
-              your progress comment.
+              `gh pr create --base ${{ github.event.repository.default_branch }} --title "<title>" --body "$(cat <<'EOF'`,
+              then the body, then `EOF` and `)"` on lines of their own. Write the title yourself, short and
+              plain (no quotes, backticks, `$` or backslashes): never paste the issue title into it, because
+              the shell expands whatever is inside the double quotes. The quoted heredoc passes the body
+              (code spans included) through unexpanded. The body summarizes the change, lists anything the
+              owner must configure (env vars, Discord permissions) and contains
+              `Closes #${{ github.event.issue.number }}`. Put the PR link in your progress comment.

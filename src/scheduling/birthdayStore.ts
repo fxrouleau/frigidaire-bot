@@ -239,6 +239,8 @@ export function parseSeed(entries: string[], today: CalendarDate): { entries: Se
  * already have one (set through the tool, or seeded on an earlier boot) are left alone, so the variable
  * can stay set forever without overwriting corrections made in chat. Each user is seeded at most once,
  * ever (birthday_seed_applied): a birthday deleted with forget_birthday stays deleted on the next boot.
+ * Because an edited entry is therefore never applied either, an entry that disagrees with the saved
+ * birthday is logged (a corrected seed would otherwise be ignored without a trace).
  */
 export function applySeed(rawEntries: string[], now: Date, today: CalendarDate): { added: number; skipped: number } {
   if (rawEntries.length === 0) return { added: 0, skipped: 0 };
@@ -247,21 +249,40 @@ export function applySeed(rawEntries: string[], now: Date, today: CalendarDate):
 
   const store = db();
   let added = 0;
+  const notApplied: SeedEntry[] = [];
   store.transaction(() => {
     for (const entry of entries) {
       const firstTime =
         store
           .stmt('INSERT INTO birthday_seed_applied (user_id, applied_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING')
           .run(entry.userId, now.getTime()).changes === 1;
-      if (!firstTime) continue;
-      added += store
-        .stmt(
-          `INSERT INTO birthdays (user_id, month, day, year, set_by, updated_at, last_announced_year)
-           VALUES (?, ?, ?, ?, 'seed', ?, NULL)
-           ON CONFLICT(user_id) DO NOTHING`,
-        )
-        .run(entry.userId, entry.date.month, entry.date.day, entry.date.year, now.getTime()).changes;
+      const inserted = firstTime
+        ? store
+            .stmt(
+              `INSERT INTO birthdays (user_id, month, day, year, set_by, updated_at, last_announced_year)
+               VALUES (?, ?, ?, ?, 'seed', ?, NULL)
+               ON CONFLICT(user_id) DO NOTHING`,
+            )
+            .run(entry.userId, entry.date.month, entry.date.day, entry.date.year, now.getTime()).changes
+        : 0;
+      added += inserted;
+      if (inserted === 0) notApplied.push(entry);
     }
   });
+  for (const entry of notApplied) warnIfSeedDisagrees(entry);
   return { added, skipped: entries.length - added };
+}
+
+function warnIfSeedDisagrees(entry: SeedEntry): void {
+  const saved = getBirthday(entry.userId);
+  // No row: it was forgotten on purpose after being seeded, which the seed respects.
+  if (!saved) return;
+  // A seed without a year agrees with a saved birthday that has one.
+  const sameDay = saved.month === entry.date.month && saved.day === entry.date.day;
+  if (sameDay && (entry.date.year === null || entry.date.year === saved.year)) return;
+  logger.warn(
+    `birthdays: BIRTHDAYS_SEED has ${entry.userId} as ${formatBirthday(entry.date)} but the saved birthday is ` +
+      `${formatBirthday(saved)} (saved by ${saved.setBy === 'seed' ? 'an earlier BIRTHDAYS_SEED' : saved.setBy}). ` +
+      'The seed never overwrites a saved birthday: change it in chat with set_birthday.',
+  );
 }

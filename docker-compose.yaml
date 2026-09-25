@@ -23,9 +23,17 @@ services:
   # Code-execution sidecar for the run_code tool (sandbox/). It gets no env_file on purpose: code the model
   # writes runs in here, so nothing secret may live here. No published ports either: only the bot reaches it,
   # at http://sandbox:8080 on the compose network.
-  # Egress is open (pip install, curl, APIs). To cut it, give the sandbox only an internal network shared with
-  # the bot:   networks: { sandbox-net: { internal: true } }
-  #            sandbox: networks: [sandbox-net]      frigidaire-bot: networks: [default, sandbox-net]
+  # Egress is open (pip install, curl, APIs), and on this default bridge network "open" means more than the
+  # internet: a run can also reach whatever the Docker host listens on (through the network's gateway address:
+  # Portainer, other stacks' published ports) and, on a cloud VPS, the metadata endpoint at 169.254.169.254.
+  # Code in here is model-written and reachable by prompt injection; nothing inside the container can filter
+  # its traffic (every capability is dropped), and safeFetch's SSRF rules only cover the bot's own requests.
+  # Pick one:
+  #   - cut egress (pip/npm installs and web requests from runs stop working): an internal network shared
+  #     with the bot:  networks: { sandbox-net: { internal: true } }
+  #                    sandbox: networks: [sandbox-net]      frigidaire-bot: networks: [default, sandbox-net]
+  #   - keep it and firewall the host: drop traffic from this network's subnet to the host itself (INPUT
+  #     chain) and to 169.254.0.0/16 and the private ranges (DOCKER-USER chain).
   sandbox:
     build: ./sandbox
     restart: unless-stopped
