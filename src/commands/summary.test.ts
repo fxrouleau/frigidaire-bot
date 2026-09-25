@@ -39,7 +39,7 @@ describe('summarizeFromMessage', () => {
     });
     const result = await summarizeFromMessage({ message, start, end, requesterId: 'u-felix' }, summarize);
 
-    expect(summarize.calls).toEqual([[{ message, messageRole: 'target', start, end, requesterId: 'u-felix' }]]);
+    expect(summarize.calls).toEqual([[{ message, messageRole: 'target', start, end, requesterId: 'u-felix', audience: 'group' }]]);
     // The range header and the people footer are for the chat model, not the channel.
     expect(result).toEqual({ ok: true, text: 'they planned a BBQ' });
   });
@@ -124,6 +124,10 @@ describe('summarizeFromMessage through the real pipeline', () => {
     expect(requests).toHaveLength(1);
     expect(requests[0].body.provider).toEqual({ zdr: true });
     expect(requests[0].headers.get(FEATURE_HEADER)).toBe('summary');
+    // Posted as-is: the summarizer writes for the group, not for the bot to relay.
+    const system = (requests[0].body.messages as { role: string; content: string }[])[0].content;
+    expect(system).toContain('posted as-is, straight into the chat');
+    expect(system).not.toContain("handed to the group's bot");
     const prompt = JSON.stringify(requests[0].body.messages);
     expect(prompt).toContain('Jason: who is up for wings');
     expect(prompt).toContain('Jason: 7pm then');

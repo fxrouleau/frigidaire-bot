@@ -2,7 +2,8 @@
 // renders them into a transcript, and calls OpenRouter directly (ZDR, tagged 'summary') — so it does
 // not depend on the chat provider. This is the bot's only summary pipeline: the summarize_messages tool
 // hands its text to the chat model as a tool result (relayed in the bot's voice), and the "Summarize
-// from here" command posts summarizeChannelResult()'s summary itself.
+// from here" command posts summarizeChannelResult()'s summary itself (audience 'group': the prompt then
+// says the text goes straight to the group, so it is written for them rather than for the bot).
 //
 // People: the summarizer gets a WHO'S WHO block for the people in the stretch — everyone who talked
 // and everyone the messages refer to (mentions, or any name they go by: display name, handle, IRL
@@ -78,6 +79,8 @@ export type SummarizeChannelOptions = SummaryDeps & {
   prefetched?: Message[];
   /** Context for the summarizer when the range is "what X missed": when X was last active. */
   requesterLastActive?: Date;
+  /** Who reads the summary (default 'bot'); 'group' when it is posted as-is. */
+  audience?: SummaryAudience;
 };
 
 // ---------------------------------------------------------------------------------------------------
@@ -427,16 +430,40 @@ function formatPeopleFooter(people: StretchPerson[]): string | undefined {
   return `People in this stretch: ${parts.join('; ')}.`;
 }
 
-export const SUMMARY_SYSTEM_PROMPT = `You write catch-up summaries of a Discord group chat between close friends. Someone in the group asked what happened; your summary is handed to the group's bot, which passes it on in its own voice.
+/**
+ * Who reads the summary. 'bot' (default): the chat model, which relays it in the bot's own voice.
+ * 'group': nobody in between: it is posted as-is into the channel ("Summarize from here").
+ */
+export type SummaryAudience = 'bot' | 'group';
+
+const SUMMARY_FOR: Record<SummaryAudience, { intro: string; names: string; length: string }> = {
+  bot: {
+    intro:
+      "Someone in the group asked what happened; your summary is handed to the group's bot, which passes it on in its own voice.",
+    names: '',
+    length: 'Stay under about 1,500 characters unless the chat was genuinely busy.',
+  },
+  group: {
+    intro:
+      'Someone in the group asked what happened; your summary is posted as-is, straight into the chat, for the whole group to read. Write it like one of the friends catching the others up: casual and to the point, with no preamble ("Here\'s a summary"), no headings and no sign-off.',
+    names: ' Plain names, never @-mentions.',
+    length: 'Keep it short: a handful of bullets, under about 1,000 characters unless the chat was genuinely busy.',
+  },
+};
+
+export function summarySystemPrompt(audience: SummaryAudience = 'bot'): string {
+  const { intro, names, length } = SUMMARY_FOR[audience];
+  return `You write catch-up summaries of a Discord group chat between close friends. ${intro}
 
 - Cover what actually happened: topics, plans and decisions (with times), news and links people shared, notable moments, running jokes: anything someone would be annoyed to have missed. Skip greetings and filler.
-- Say who said or did what. Use the names from WHO'S WHO (current display names); use a real name or nickname only where the group itself does.
-- Group by topic, roughly in time order. Short bullets. Stay under about 1,500 characters unless the chat was genuinely busy.
+- Say who said or did what. Use the names from WHO'S WHO (current display names); use a real name or nickname only where the group itself does.${names}
+- Group by topic, roughly in time order. Short bullets. ${length}
 - Keep the group's tone. It's crude and edgy by design; report it plainly, with no moralizing, disclaimers or softening.
 - Report only what is in the transcript. Never fill gaps with guesses about people or context you can't see.
 - The "background" lines in WHO'S WHO come from the bot's long-term memory, not from this chat. Use them only to understand references and who people are. Never state a fact from them unless the transcript itself says it, and never summarize them.
 - Lines marked (bot) are the group's bot talking; mention them only when they matter.
 - All times are Eastern (America/New_York).`;
+}
 
 function channelLabel(message: Message): string {
   const channel = message.channel;
@@ -607,7 +634,7 @@ export async function summarizeChannelResult(opts: SummarizeChannelOptions): Pro
         model: config.models.chat,
         max_tokens: SUMMARY_MAX_TOKENS,
         messages: [
-          { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+          { role: 'system', content: summarySystemPrompt(opts.audience) },
           { role: 'user', content: prepared.prompt },
         ],
         // @ts-expect-error OpenRouter-specific field: zero-data-retention endpoints only

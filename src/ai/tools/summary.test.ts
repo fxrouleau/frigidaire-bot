@@ -217,6 +217,8 @@ describe('summarizeChannel', () => {
     const system = (requests[0].body.messages as { role: string; content: string }[])[0];
     expect(system.role).toBe('system');
     expect(system.content).toContain('Report only what is in the transcript');
+    // The tool's summary goes to the chat model, which relays it.
+    expect(system.content).toContain("handed to the group's bot");
     expect(system.content).toContain('Never state a fact from them unless the transcript itself says it');
 
     expect(result.split('\n').at(-1)).toBe('People in this stretch: Jason, Simon; mentioned without talking: Felix (Félix R), Wheezer.');
