@@ -2,9 +2,9 @@
   "version": 1,
   "bot": { "name": "Frigidaire", "id": "900000000000000001" },
   "cast": [
-    { "name": "Felix", "id": "100000000000000001", "username": "felix_r", "irlName": "Félix", "aliases": ["fefe"] },
+    { "name": "Theo", "id": "100000000000000001", "username": "theo_r", "irlName": "Théo", "aliases": ["teddy"] },
     { "name": "Wheezer", "id": "100000000000000002", "username": "wheezer", "irlName": "Will" },
-    { "name": "Jason", "id": "100000000000000003", "username": "jaysun" },
+    { "name": "Dex", "id": "100000000000000003", "username": "dexter" },
     { "name": "Marco", "id": "100000000000000004", "username": "marco_polo", "aliases": ["the chef"] },
     { "name": "Sam", "id": "100000000000000005", "username": "samwise" }
   ],
@@ -41,9 +41,9 @@
       ],
       "history": [
         { "author": "Wheezer", "content": "my jungler was afk in spirit the entire game", "minutesAgo": 6 },
-        { "author": "Jason", "content": "you went 0/10 bro", "minutesAgo": 5 }
+        { "author": "Dex", "content": "you went 0/10 bro", "minutesAgo": 5 }
       ],
-      "message": { "author": "Felix", "content": "<@bot> roast <@Wheezer>, he went 0/10 on yasuo last night and blamed his jungler" },
+      "message": { "author": "Theo", "content": "<@bot> roast <@Wheezer>, he went 0/10 on yasuo last night and blamed his jungler" },
       "expectations": {
         "notes": "Lands an actual, specific roast (the 0/10, blaming the jungler, the eternal Yasuo/Gold situation) in one to three sentences. No softening, no 'just kidding', no disclaimer.",
         "maxSentences": 3,
@@ -57,13 +57,13 @@
       "tags": ["roast"],
       "memories": [],
       "history": [
-        { "author": "Jason", "content": "ate gas station sushi for lunch, feeling brave", "minutesAgo": 40 },
+        { "author": "Dex", "content": "ate gas station sushi for lunch, feeling brave", "minutesAgo": 40 },
         { "author": "Marco", "content": "that's not brave that's a cry for help", "minutesAgo": 38 },
-        { "author": "Jason", "content": "stomach making noises rn", "minutesAgo": 3 }
+        { "author": "Dex", "content": "stomach making noises rn", "minutesAgo": 3 }
       ],
-      "message": { "author": "Jason", "content": "<@bot> go ahead, roast me. I know you want to" },
+      "message": { "author": "Dex", "content": "<@bot> go ahead, roast me. I know you want to" },
       "expectations": {
-        "notes": "Roasts Jason using what's right there (the gas station sushi and its consequences). Short and mean in a friendly way.",
+        "notes": "Roasts Dex using what's right there (the gas station sushi and its consequences). Short and mean in a friendly way.",
         "maxSentences": 3,
         "maxChars": 350
       }
@@ -117,7 +117,7 @@
         },
         { "author": "Wheezer", "content": "this is literally me every game", "minutesAgo": 2 }
       ],
-      "message": { "author": "Felix", "content": "<@bot> thoughts?" },
+      "message": { "author": "Theo", "content": "<@bot> thoughts?" },
       "expectations": {
         "notes": "Reacts to the meme that was just posted (top lane island, jungler never ganking) — possibly dunking on Wheezer's 'literally me'. Short and funny; not a meme analysis.",
         "maxSentences": 3,
@@ -131,12 +131,12 @@
       "memories": [
         {
           "category": "fact",
-          "subject": "Felix",
-          "content": "Felix works at Ubisoft Montreal as a gameplay programmer."
+          "subject": "Theo",
+          "content": "Theo works at Ubisoft Montreal as a gameplay programmer."
         }
       ],
       "history": [],
-      "message": { "author": "Felix", "content": "<@bot> fyi I don't work at Ubisoft anymore, started at Shopify last week" },
+      "message": { "author": "Theo", "content": "<@bot> fyi I don't work at Ubisoft anymore, started at Shopify last week" },
       "expectations": {
         "notes": "Takes the update in stride with a short, natural reply (a jab about leaving games for e-commerce is fine). Updates memory: forgets the Ubisoft fact and saves the Shopify one — without narrating the bookkeeping.",
         "maxSentences": 3,
@@ -220,17 +220,17 @@
       "title": "Stored facts that have nothing to do with the question",
       "tags": ["memory-negative", "help"],
       "memories": [
-        { "category": "fact", "subject": "Jason", "content": "Jason is lactose intolerant." },
-        { "category": "fact", "subject": "Jason", "content": "Jason has a corgi named Biscuit." },
-        { "category": "fact", "subject": "Jason", "content": "Jason works night shifts as a nurse." }
+        { "category": "fact", "subject": "Dex", "content": "Dex is lactose intolerant." },
+        { "category": "fact", "subject": "Dex", "content": "Dex has a corgi named Biscuit." },
+        { "category": "fact", "subject": "Dex", "content": "Dex works night shifts as a nurse." }
       ],
       "history": [],
       "message": {
-        "author": "Jason",
+        "author": "Dex",
         "content": "<@bot> 7800X3D or 9800X3D for a pure gaming build? price diff is like 150 bucks"
       },
       "expectations": {
-        "notes": "Gives a straight pick with a reason (the 9800X3D is faster; the 7800X3D is the better value for the money). None of Jason's stored facts are relevant, so none of them should appear.",
+        "notes": "Gives a straight pick with a reason (the 9800X3D is faster; the 7800X3D is the better value for the money). None of Dex's stored facts are relevant, so none of them should appear.",
         "maxSentences": 4,
         "maxChars": 500,
         "mustNotMatch": ["biscuit", "corgi", "lactose|dairy", "nurse|night shift"]
@@ -285,7 +285,7 @@
         { "author": "Marco", "content": "it's a crime against Italy", "minutesAgo": 5 },
         { "author": "Wheezer", "content": "sweet and salty, you uncultured swine", "minutesAgo": 4 }
       ],
-      "message": { "author": "Felix", "content": "<@bot> settle this" },
+      "message": { "author": "Theo", "content": "<@bot> settle this" },
       "expectations": {
         "notes": "Picks a side decisively and says why in a line. Fence-sitting ('both sides have a point', 'to each their own') is a fail.",
         "maxSentences": 3,
@@ -304,7 +304,7 @@
       "memories": [],
       "history": [
         {
-          "author": "Jason",
+          "author": "Dex",
           "content": "look at this sunset from the ferry",
           "minutesAgo": 300,
           "embeds": [{ "title": "sunset.jpg", "description": "Orange sunset over the river seen from a ferry deck" }]
@@ -324,9 +324,9 @@
       "tags": ["banter", "brevity"],
       "memories": [],
       "history": [],
-      "message": { "author": "Felix", "content": "<@bot> good morning" },
+      "message": { "author": "Theo", "content": "<@bot> good morning" },
       "expectations": {
-        "notes": "A short, natural greeting back (a little attitude is fine). Does not open by addressing Felix by name.",
+        "notes": "A short, natural greeting back (a little attitude is fine). Does not open by addressing Theo by name.",
         "maxSentences": 2,
         "maxChars": 150
       }
@@ -352,7 +352,7 @@
       "memories": [],
       "history": [],
       "message": {
-        "author": "Jason",
+        "author": "Dex",
         "content": "<@bot> quick q, can I refund a steam game I played for 3 hours? bought it 5 days ago"
       },
       "expectations": {
