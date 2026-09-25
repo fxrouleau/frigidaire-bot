@@ -1,10 +1,12 @@
 // Minimal GitHub REST client for the one thing the bot does on GitHub: filing member feature requests
-// as issues on its own repo (list open issues for duplicate detection, create labels, create issues).
+// as issues on its own repo (list/search/read issues for duplicate detection, create labels, create
+// issues, and add a member's +1 comment to an existing request).
 //
-// Plain fetch instead of an SDK: three endpoints do not justify a dependency, and an injected fetch keeps
-// the tests hermetic. The token is a fine-grained PAT scoped to this one repo with Issues read/write
-// (every endpoint here is covered by that single permission). It is only ever sent in the Authorization
-// header; error messages and logs carry GitHub's status and message, never the token.
+// Plain fetch instead of an SDK: a handful of endpoints do not justify a dependency, and an injected fetch
+// keeps the tests hermetic. The token is a fine-grained PAT scoped to this one repo with Issues read/write
+// (every repo endpoint here is covered by that single permission; issue search only needs read access to
+// the repo). It is only ever sent in the Authorization header; error messages and logs carry GitHub's
+// status and message, never the token.
 import { logger } from '../logger';
 
 const API_BASE = 'https://api.github.com';
@@ -60,6 +62,27 @@ export type GitHubIssue = {
   title: string;
   htmlUrl: string;
   labels: string[];
+  state: 'open' | 'closed';
+  /** GitHub's `state_reason`: `completed`, `not_planned`, `duplicate`, `reopened`, or undefined (null). */
+  stateReason?: string;
+  /** Epoch ms, for closed issues. */
+  closedAt?: number;
+  /** The raw markdown body ('' when there is none). Untrusted: anyone can open issues on a public repo. */
+  body: string;
+  /** A locked issue only takes comments from collaborators; the bot does not add +1s to one. */
+  locked: boolean;
+  /** The issues endpoints also return pull requests (they carry a `pull_request` key). */
+  isPullRequest: boolean;
+};
+
+export type IssueSearchType = 'lexical' | 'hybrid' | 'semantic';
+
+/** What GET /search/issues found, and which kind of search GitHub actually ran. */
+export type IssueSearchResult = {
+  issues: GitHubIssue[];
+  /** `hybrid`/`semantic` as asked, or `lexical` when GitHub fell back (see fallbackReasons). */
+  searchType?: string;
+  fallbackReasons: string[];
 };
 
 export type CreateIssueInput = { title: string; body: string; labels: string[] };
@@ -69,9 +92,16 @@ export type LabelSpec = { name: string; color: string; description: string };
 export interface GitHubIssuesApi {
   readonly repo: string;
   listOpenIssues(): Promise<GitHubIssue[]>;
+  /** Issues (never pull requests) in this repo matching `terms`, in GitHub's relevance order. */
+  searchIssues(terms: string, opts?: SearchOptions): Promise<IssueSearchResult>;
+  /** The issue or pull request with this number, or undefined when it does not exist in this repo. */
+  getIssue(issueNumber: number): Promise<GitHubIssue | undefined>;
   createIssue(input: CreateIssueInput): Promise<GitHubIssue>;
+  createComment(issueNumber: number, body: string): Promise<{ htmlUrl: string }>;
   ensureLabel(label: LabelSpec): Promise<'created' | 'exists'>;
 }
+
+export type SearchOptions = { searchType?: IssueSearchType; perPage?: number };
 
 export type GitHubClientOptions = {
   token: string;
@@ -104,32 +134,90 @@ export class GitHubClient implements GitHubIssuesApi {
   async listOpenIssues(): Promise<GitHubIssue[]> {
     const issues: GitHubIssue[] = [];
     for (let page = 1; page <= this.maxPages; page++) {
-      const rows = await this.request('GET', `/issues?state=open&per_page=${PAGE_SIZE}&page=${page}`);
+      const rows = await this.request('GET', this.repoPath(`/issues?state=open&per_page=${PAGE_SIZE}&page=${page}`));
       if (!Array.isArray(rows)) {
         throw new GitHubApiError('invalid_response', 'GitHub returned a non-array issue list');
       }
       for (const row of rows) {
-        if (isRecord(row) && row.pull_request !== undefined) continue;
         const issue = parseIssue(row);
-        if (issue) issues.push(issue);
+        if (issue && !issue.isPullRequest) issues.push(issue);
       }
       if (rows.length < PAGE_SIZE) break;
     }
     return issues;
   }
 
+  /**
+   * GET /search/issues scoped to this repo's issues. `hybrid` (semantic + lexical) also finds a request
+   * worded differently ("polls" vs "voting"); GitHub falls back to lexical by itself when it cannot run
+   * it, and says so. Hybrid/semantic searches have their own budget of 10 requests a minute (lexical: 30).
+   */
+  async searchIssues(terms: string, opts: SearchOptions = {}): Promise<IssueSearchResult> {
+    // `is:issue` keeps pull requests out, and semantic search needs it (otherwise: `non_issue_target`).
+    const params = new URLSearchParams({
+      q: `repo:${this.repo} is:issue ${terms}`,
+      per_page: String(Math.min(Math.max(opts.perPage ?? 10, 1), 100)),
+    });
+    if (opts.searchType && opts.searchType !== 'lexical') params.set('search_type', opts.searchType);
+    const response = await this.request('GET', `/search/issues?${params}`);
+    if (!isRecord(response) || !Array.isArray(response.items)) {
+      throw new GitHubApiError('invalid_response', 'GitHub returned a search result without items');
+    }
+    const fallback = response.lexical_fallback_reason;
+    return {
+      issues: response.items.flatMap((row) => {
+        const issue = parseIssue(row);
+        return issue && !issue.isPullRequest ? [issue] : [];
+      }),
+      searchType: typeof response.search_type === 'string' ? response.search_type : undefined,
+      fallbackReasons: Array.isArray(fallback)
+        ? fallback.filter((reason): reason is string => typeof reason === 'string')
+        : [],
+    };
+  }
+
+  /**
+   * One issue (or pull request) by number. undefined when there is no such issue here: 404 (it never
+   * existed), 410 (deleted), or a transfer to another repo (GitHub answers 301, fetch follows it, and the
+   * issue that comes back belongs to the other repo).
+   */
+  async getIssue(issueNumber: number): Promise<GitHubIssue | undefined> {
+    let raw: unknown;
+    try {
+      raw = await this.request('GET', this.repoPath(`/issues/${issueNumber}`));
+    } catch (error) {
+      if (error instanceof GitHubApiError && (error.status === 404 || error.status === 410)) return undefined;
+      throw error;
+    }
+    const issue = parseIssue(raw);
+    if (!issue) {
+      throw new GitHubApiError('invalid_response', `GitHub returned no number/url for issue #${issueNumber}`);
+    }
+    const repositoryUrl = isRecord(raw) && typeof raw.repository_url === 'string' ? raw.repository_url : undefined;
+    if (repositoryUrl && !repositoryUrl.toLowerCase().endsWith(`/repos/${this.repo.toLowerCase()}`)) return undefined;
+    return issue;
+  }
+
   async createIssue(input: CreateIssueInput): Promise<GitHubIssue> {
-    const created = parseIssue(await this.request('POST', '/issues', input));
+    const created = parseIssue(await this.request('POST', this.repoPath('/issues'), input));
     if (!created) {
       throw new GitHubApiError('invalid_response', 'GitHub created an issue but returned no number/url');
     }
     return created;
   }
 
+  async createComment(issueNumber: number, body: string): Promise<{ htmlUrl: string }> {
+    const created = await this.request('POST', this.repoPath(`/issues/${issueNumber}/comments`), { body });
+    if (!isRecord(created) || typeof created.html_url !== 'string') {
+      throw new GitHubApiError('invalid_response', 'GitHub created a comment but returned no url');
+    }
+    return { htmlUrl: created.html_url };
+  }
+
   /** Creates the label, or reports that it already exists (GitHub answers 422 `already_exists`). */
   async ensureLabel(label: LabelSpec): Promise<'created' | 'exists'> {
     try {
-      await this.request('POST', '/labels', label);
+      await this.request('POST', this.repoPath('/labels'), label);
       return 'created';
     } catch (error) {
       if (
@@ -143,8 +231,13 @@ export class GitHubClient implements GitHubIssuesApi {
     }
   }
 
+  private repoPath(path: string): string {
+    return `/repos/${this.repo}${path}`;
+  }
+
+  /** `path` is relative to the API root; repo endpoints build theirs with repoPath(). */
   private async request(method: 'GET' | 'POST', path: string, body?: unknown): Promise<unknown> {
-    const url = `${API_BASE}/repos/${this.repo}${path}`;
+    const url = `${API_BASE}${path}`;
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
@@ -234,8 +327,9 @@ function validationCodes(body: ErrorBody): string[] {
 
 function parseIssue(raw: unknown): GitHubIssue | undefined {
   if (!isRecord(raw)) return undefined;
-  const { number, title, html_url: htmlUrl, labels } = raw;
+  const { number, title, html_url: htmlUrl, labels, state_reason: stateReason, closed_at: closedAt, body } = raw;
   if (typeof number !== 'number' || typeof title !== 'string' || typeof htmlUrl !== 'string') return undefined;
+  const closedMs = typeof closedAt === 'string' ? Date.parse(closedAt) : Number.NaN;
   return {
     number,
     title,
@@ -245,6 +339,12 @@ function parseIssue(raw: unknown): GitHubIssue | undefined {
           typeof label === 'string' ? [label] : isRecord(label) && typeof label.name === 'string' ? [label.name] : [],
         )
       : [],
+    state: raw.state === 'closed' ? 'closed' : 'open',
+    stateReason: typeof stateReason === 'string' ? stateReason : undefined,
+    closedAt: Number.isFinite(closedMs) ? closedMs : undefined,
+    body: typeof body === 'string' ? body : '',
+    locked: raw.locked === true,
+    isPullRequest: raw.pull_request !== undefined && raw.pull_request !== null,
   };
 }
 

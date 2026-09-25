@@ -716,6 +716,17 @@ export const config = {
     get userIds(): string[] {
       return envCsv('FEATURE_REQUEST_USER_IDS');
     },
+    /**
+     * +1 comments one member may add to existing requests per rolling 24 hours. Counted separately from
+     * maxPerDay: backing an open request is cheap and is exactly what should happen instead of a new issue.
+     */
+    get maxCommentsPerDay(): number {
+      return envInt('FEATURE_REQUEST_MAX_COMMENTS_PER_DAY', 10, { min: 1, max: 100 });
+    },
+    /** How far back closed issues count as "already done / declined"; 0 ⇒ only open issues are matched. */
+    get closedLookbackDays(): number {
+      return envInt('FEATURE_REQUEST_CLOSED_LOOKBACK_DAYS', 90, { min: 0, max: 3650 });
+    },
   },
 
   /** OpenRouter usage/cost accounting (src/ai/usage.ts). */
