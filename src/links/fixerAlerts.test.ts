@@ -253,6 +253,34 @@ describe('FixerAlerter', () => {
     expect(h.sent).toHaveLength(2);
   });
 
+  it('backs off re-checks while the report channel keeps refusing posts, and starts over once one lands', async () => {
+    // A wrong REPORT_CHANNEL_ID during a long outage: every re-check fails the same way, so it must not
+    // hit Discord (and the log) every 10 minutes for as long as the platform stays down.
+    const MINUTE = 60 * 1000;
+    const h = harness();
+    h.setFailing(true);
+    await h.change('instagram', 'down');
+
+    const delays: number[] = [];
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const pending = h.timers.filter((timer) => !timer.cancelled);
+      expect(pending).toHaveLength(1);
+      delays.push(pending[0].delayMs / MINUTE);
+      await h.fireTimers();
+    }
+    expect(delays).toEqual([10, 20, 40, 80, 160, 320, 360, 360]);
+    expect(h.sent).toEqual([]);
+
+    // The channel works again: the next re-check posts, and a later failure retries soon again.
+    h.setFailing(false);
+    await h.fireTimers();
+    expect(h.sent).toEqual([downAlertText('instagram', 'a.test: down')]);
+    h.setFailing(true);
+    h.setNow(HOUR);
+    await h.change('instagram', 'up', 'kkinstagram.com');
+    expect(h.timers.filter((timer) => !timer.cancelled).map((timer) => timer.delayMs / MINUTE)).toEqual([10]);
+  });
+
   it('keeps going when a send fails', async () => {
     const sent: string[] = [];
     let fail = true;

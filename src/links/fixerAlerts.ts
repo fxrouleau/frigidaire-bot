@@ -39,8 +39,12 @@ export type FixerAlerterOptions = {
   schedule?: (callback: () => void, delayMs: number) => () => void;
 };
 
-// How long after a failed post the platform is re-checked (and the alert re-sent if still true).
+// How long after a failed post the platform is re-checked (and the alert re-sent if still true). Each
+// further consecutive failure doubles the wait, up to SEND_RETRY_MAX_MS: a Discord blip is retried
+// within minutes, while a report channel that stays unusable (a wrong REPORT_CHANNEL_ID) during a
+// months-long outage costs a few fetches (and WARN lines) a day instead of one every 10 minutes.
 const SEND_RETRY_MS = 10 * 60 * 1000;
+const SEND_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS link_fix_alerts (
@@ -145,6 +149,8 @@ export class FixerAlerter {
   private readonly schedule: (callback: () => void, delayMs: number) => () => void;
   private readonly deferred = new Map<Platform, () => void>();
   private readonly lastDetail = new Map<Platform, string>();
+  /** Consecutive posts that didn't land, per platform; sets the next re-check's backoff. */
+  private readonly failedPosts = new Map<Platform, number>();
   private queue: Promise<void> = Promise.resolve();
 
   constructor(opts: FixerAlerterOptions) {
@@ -238,7 +244,8 @@ export class FixerAlerter {
   /**
    * Sends one alert. A post that didn't land (the report channel unreachable, a Discord blip) records
    * nothing and schedules a re-check, which posts whatever is still true then: health changes only fire
-   * on transitions, so without it an outage whose alert failed would never be announced.
+   * on transitions, so without it an outage whose alert failed would never be announced. Re-checks back
+   * off while posts keep failing (see SEND_RETRY_MS).
    */
   private async post(platform: Platform, text: string): Promise<boolean> {
     let posted = false;
@@ -247,10 +254,15 @@ export class FixerAlerter {
     } catch (error) {
       logger.warn(`linkfix: posting the ${platform} alert failed:`, error);
     }
-    if (!posted) {
-      logger.warn(`linkfix: ${platform} alert not posted; re-checking in ${formatOutageDuration(SEND_RETRY_MS)}`);
-      this.defer(platform, SEND_RETRY_MS);
+    if (posted) {
+      this.failedPosts.delete(platform);
+      return true;
     }
-    return posted;
+    const failures = (this.failedPosts.get(platform) ?? 0) + 1;
+    this.failedPosts.set(platform, failures);
+    const retryMs = Math.min(SEND_RETRY_MAX_MS, SEND_RETRY_MS * 2 ** (failures - 1));
+    logger.warn(`linkfix: ${platform} alert not posted; re-checking in ${formatOutageDuration(retryMs)}`);
+    this.defer(platform, retryMs);
+    return false;
   }
 }
