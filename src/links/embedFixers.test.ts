@@ -499,6 +499,17 @@ describe('markdown safety', () => {
       'https://www.instagram.com/p/AAA/?igsh=abc_',
       'https://ig.test/p/AAA/',
     ],
+    [
+      'an underscore at the end of a query is part of the link when italics cannot span the link',
+      'hey_ https://x.com/some_user/status/1?s=46&t=abc_',
+      'hey_ https://tw.test/some_user/status/1',
+    ],
+    [
+      'an underscore that closes italics stays a closer after the rewrite',
+      'some_one https://x.com/u/status/1?s=46&t=abc_',
+      'some_one https://tw.test/u/status/1_',
+    ],
+    ['an italic phrase around the link', '_look https://x.com/u/status/1_', '_look https://tw.test/u/status/1_'],
   ])('%s', async (_label, input, expected) => {
     const result = await fixLinksInContent(input, fixAll());
     expect(result.content).toBe(expected);
