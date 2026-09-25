@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { recordRelay } from '../../relay';
-import { BotDb, setBotDbForTesting } from '../../storage/botDb';
-import { createFakeMessage } from '../../test-support/fakeDiscord';
-import { setMemoryStoreForTesting } from './index';
-import { MemoryStore } from './memoryStore';
-import { cleanSubject, matchIdentityByName, namesOf, resolvePerson } from './people';
+import { recordRelay } from '../relay';
+import { BotDb, setBotDbForTesting } from '../storage/botDb';
+import { createFakeMessage } from '../test-support/fakeDiscord';
+import { setMemoryStoreForTesting } from './memory';
+import { MemoryStore } from './memory/memoryStore';
+import { cleanSubject, createPeopleMatcher, findPeopleInText, matchIdentityByName, namesOf, resolvePerson } from './people';
 
 let store: MemoryStore;
 
@@ -14,9 +14,10 @@ beforeEach(() => {
   setMemoryStoreForTesting(store);
   // Wheezer was first seen as "OldNick", is called Derrick IRL and "D" by the group.
   store.upsertIdentity('111111111111111111', 'OldNick');
-  store.upsertIdentity('111111111111111111', 'Wheezer');
+  store.upsertIdentity('111111111111111111', 'Wheezer', 'wheezy_d');
   store.updateIdentityMeta('111111111111111111', { irl_name: 'Derrick', aliases_add: ['D', 'Wheez'] });
-  store.upsertIdentity('222222222222222222', 'Jason');
+  // Jason's Discord handle is "cigalefourmi" (the learner once filed memories under it).
+  store.upsertIdentity('222222222222222222', 'Jason', 'cigalefourmi');
   store.updateIdentityMeta('222222222222222222', { irl_name: 'Alex' });
   store.upsertIdentity('333333333333333333', 'Simon');
   store.updateIdentityMeta('333333333333333333', { irl_name: 'Alex', aliases_add: ['D'] });
@@ -39,7 +40,7 @@ describe('cleanSubject', () => {
 describe('namesOf', () => {
   it('lists every name a member may be filed under, current name first, without duplicates', () => {
     const identity = store.getIdentityById('111111111111111111');
-    expect(namesOf(identity, ['Wheezer', ' '])).toEqual(['Wheezer', 'OldNick', 'Derrick', 'D', 'Wheez']);
+    expect(namesOf(identity, ['Wheezer', ' '])).toEqual(['Wheezer', 'wheezy_d', 'OldNick', 'Derrick', 'D', 'Wheez']);
     expect(namesOf(undefined, ['Solo'])).toEqual(['Solo']);
   });
 });
@@ -47,8 +48,9 @@ describe('namesOf', () => {
 describe('matchIdentityByName', () => {
   const all = () => store.getAllIdentities();
 
-  it('matches display, first-seen and IRL names and aliases case-insensitively', () => {
+  it('matches display names, Discord handles, first-seen and IRL names and aliases case-insensitively', () => {
     expect(matchIdentityByName(all(), 'wheezer')?.discord_user_id).toBe('111111111111111111');
+    expect(matchIdentityByName(all(), 'CigaleFourmi')?.discord_user_id).toBe('222222222222222222');
     expect(matchIdentityByName(all(), 'OLDNICK')?.discord_user_id).toBe('111111111111111111');
     expect(matchIdentityByName(all(), 'derrick')?.discord_user_id).toBe('111111111111111111');
     expect(matchIdentityByName(all(), 'wheez')?.discord_user_id).toBe('111111111111111111');
@@ -64,6 +66,11 @@ describe('matchIdentityByName', () => {
     expect(matchIdentityByName(all(), 'Jason')?.discord_user_id).toBe('222222222222222222');
   });
 
+  it('prefers a display-name match over another member’s Discord handle', () => {
+    store.upsertIdentity('444444444444444444', 'cigalefourmi');
+    expect(matchIdentityByName(all(), 'cigalefourmi')?.discord_user_id).toBe('444444444444444444');
+  });
+
   it('returns undefined for unknown or empty names', () => {
     expect(matchIdentityByName(all(), 'Nobody')).toBeUndefined();
     expect(matchIdentityByName(all(), '  ')).toBeUndefined();
@@ -75,8 +82,15 @@ describe('resolvePerson', () => {
     expect(resolvePerson(store, 'Derrick')).toEqual({
       userId: '111111111111111111',
       displayName: 'Wheezer',
-      names: ['Wheezer', 'OldNick', 'Derrick', 'D', 'Wheez'],
+      names: ['Wheezer', 'wheezy_d', 'OldNick', 'Derrick', 'D', 'Wheez'],
     });
+  });
+
+  it('resolves a Discord handle to the member, whose names include it', () => {
+    const person = resolvePerson(store, '@cigalefourmi');
+    expect(person?.userId).toBe('222222222222222222');
+    expect(person?.displayName).toBe('Jason');
+    expect(person?.names).toContain('cigalefourmi');
   });
 
   it('resolves "me"/"I"/"myself" to the person talking', () => {
@@ -128,5 +142,43 @@ describe('resolvePerson', () => {
     for (const subject of ['server', 'Server', 'bot', 'general', 'pizza', '']) {
       expect(resolvePerson(store, subject)).toBeUndefined();
     }
+  });
+});
+
+describe('findPeopleInText', () => {
+  it('finds members by mention token, display name, handle, IRL name and nickname, most referenced first', () => {
+    const refs = findPeopleInText(
+      store,
+      'did <@333333333333333333> see what cigalefourmi posted? Jason is unhinged. Derrick and wheez agree, lol Jason',
+    );
+    expect(refs.map((r) => [r.displayName, r.count])).toEqual([
+      ['Jason', 3],
+      ['Wheezer', 2],
+      ['Simon', 1],
+    ]);
+    expect(refs[0].identity.username).toBe('cigalefourmi');
+    expect(refs[1].names).toContain('Derrick');
+  });
+
+  it('matches whole words only, case-insensitively, next to punctuation', () => {
+    const names = (text: string) => findPeopleInText(store, text).map((r) => r.displayName);
+    expect(names("wheezer's car")).toEqual(['Wheezer']);
+    expect(names('(@JASON)')).toEqual(['Jason']);
+    expect(names('wheezers jasonic simonsays')).toEqual([]);
+  });
+
+  it('skips shared names, one-letter nicknames, links and emoji names instead of guessing', () => {
+    const text = 'Alex said :D at https://x.com/cigalefourmi/status/1 <:jason:123456789012345678>';
+    expect(findPeopleInText(store, text)).toEqual([]);
+  });
+
+  it('ignores mention tokens of unknown users and inactive identities', () => {
+    expect(findPeopleInText(store, 'hi <@444444444444444444>')).toEqual([]);
+  });
+
+  it('builds a reusable matcher, also when nobody is known', () => {
+    const match = createPeopleMatcher(store.getAllIdentities());
+    expect([...match('Simon and Jason').keys()]).toEqual(['333333333333333333', '222222222222222222']);
+    expect(createPeopleMatcher([])('Jason <@1>').size).toBe(0);
   });
 });

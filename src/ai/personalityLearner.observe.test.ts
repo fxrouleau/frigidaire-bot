@@ -236,6 +236,37 @@ describe('PersonalityLearner observation cycle', () => {
     );
   });
 
+  it('records Discord handles and files a subject written as a handle under the member', async () => {
+    const output = JSON.stringify({
+      observations: [{ category: 'fact', subject: 'cigalefourmi', content: 'Mains Jhin' }],
+    });
+    recordRelay({ messageId: '9000', channelId: CHANNEL_ID, authorId: '100000000000000002', authorName: 'Wheezer', kind: 'link_fix' });
+    const relay = createFakeMessage({
+      messageId: '9000',
+      webhookId: 'wh-1',
+      authorUsername: 'Wheezer',
+      channelId: CHANNEL_ID,
+      createdAt: new Date(BASE),
+      content: 'https://fixvx.com/x/status/1',
+    }).message;
+    const { client } = channelServing([
+      jason('a', { authorUsername: 'cigalefourmi', memberIsNull: true }),
+      wheezer('b', { authorUsername: 'wheezy_d' }),
+      relay,
+    ]);
+    const { learner, requests } = learnerWith([{ body: chatCompletionBody(output) }]);
+
+    await learner.observeOnce(client);
+
+    expect(store.getIdentityById('100000000000000001')?.username).toBe('cigalefourmi');
+    // A relay's author is the webhook: its "username" is a display name and must never be recorded.
+    expect(store.getIdentityById('100000000000000002')?.username).toBe('wheezy_d');
+    expect(textOf(requests[0])).toContain('Discord handle: cigalefourmi');
+    expect(store.getAllActive().map((m) => [m.subject, m.subject_user_id, m.content])).toEqual([
+      ['Jason', '100000000000000001', 'Mains Jhin'],
+    ]);
+  });
+
   it('never overwrites a known nickname with the global name of a member-less fetched message', async () => {
     const { client } = channelServing([
       jason('a', { memberIsNull: true, authorDisplayName: 'jay_global' }),

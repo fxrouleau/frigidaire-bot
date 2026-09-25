@@ -6,7 +6,7 @@ import { logger } from '../logger';
 import { attributeMessage } from '../relay';
 import { getCachedTranscript } from './media';
 import { type Identity, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
-import { matchIdentityByName, namesOf } from './memory/people';
+import { matchIdentityByName, namesOf } from './people';
 import { getOpenRouterClient } from './openRouterClient';
 import { formatEmojiLines, formatIdentityLines } from './promptSections';
 import { type UsageFeature, featureRequestOptions } from './usage';
@@ -418,7 +418,14 @@ export class PersonalityLearner {
   private formatLearnerIdentitiesSection(identities: Identity[]): string {
     if (identities.length === 0) return '';
 
-    return `\nKnown server identities (Discord ID → canonical name). Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${formatIdentityLines(identities).join('\n')}\n`;
+    // The shared identity lines plus each member's Discord handle: people (and the model) sometimes name
+    // a member by it — memories once got filed under "cigalefourmi", a handle, instead of the member.
+    const lines = formatIdentityLines(identities).map((line, index) => {
+      const handle = identities[index].username;
+      const shown = [identities[index].display_name, identities[index].canonical_name].map(nameKey);
+      return handle && !shown.includes(nameKey(handle)) ? `${line}. Discord handle: ${handle}` : line;
+    });
+    return `\nKnown server identities (Discord ID → canonical name). A Discord handle is never a subject: use the current display name. Do NOT repeat this info in observations; use identity_updates for new aliases or real names:\n${lines.join('\n')}\n`;
   }
 
   private formatLearnerEmojisSection(): string {
@@ -460,15 +467,21 @@ export class PersonalityLearner {
    * Safety net for the identityTracker event (which misses messages during downtime). Fetched history
    * rarely carries member data, and without it the only names on hand are the global display name or
    * username — which must never overwrite a known server nickname, so those only seed unknown members.
+   * The Discord handle is always on the author, so it is recorded either way. Only called for human
+   * messages: a relay's author is the webhook, whose "username" is the member's display name.
    */
   private refreshIdentity(msg: Message): void {
     try {
+      const username = msg.author.username || undefined;
       const memberName = msg.member?.displayName;
+      const known = this.store.getIdentityById(msg.author.id);
       if (memberName) {
-        this.store.upsertIdentity(msg.author.id, memberName);
-      } else if (!this.store.getIdentityById(msg.author.id)) {
+        this.store.upsertIdentity(msg.author.id, memberName, username);
+      } else if (known) {
+        if (username && known.username !== username) this.store.upsertIdentity(msg.author.id, known.display_name, username);
+      } else {
         const fallback = msg.author.displayName || msg.author.username;
-        if (fallback) this.store.upsertIdentity(msg.author.id, fallback);
+        if (fallback) this.store.upsertIdentity(msg.author.id, fallback, username);
       }
     } catch (error) {
       logger.warn('PersonalityLearner: upsertIdentity failed:', error);

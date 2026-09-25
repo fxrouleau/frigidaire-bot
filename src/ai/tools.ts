@@ -8,7 +8,7 @@ import {
   SELF_DIAGNOSIS_CATEGORIES,
   nameKey,
 } from './memory/memoryStore';
-import { type ResolvedPerson, cleanSubject, resolvePerson } from './memory/people';
+import { type ResolvedPerson, cleanSubject, resolvePerson } from './people';
 import { emojiSyntax } from './promptSections';
 import { birthdayTools } from './tools/birthdays';
 import { costTools } from './tools/costs';

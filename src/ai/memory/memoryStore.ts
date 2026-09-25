@@ -34,6 +34,12 @@ export type Identity = {
   discord_user_id: string;
   display_name: string;
   canonical_name: string;
+  /**
+   * Discord handle (`user.username`, e.g. "cigalefourmi"): NULL until the member is next seen after the
+   * column was added. Optional in the type so hand-built identities (tests, fakes) need not name it;
+   * rows read from the table always carry the key.
+   */
+  username?: string | null;
   irl_name: string | null;
   aliases: string[];
   first_seen_at: string;
@@ -167,6 +173,49 @@ export function nameKey(name: string | null | undefined): string {
   return (name ?? '').trim().toLowerCase();
 }
 
+// The names a member goes by, strongest claim first: the current display name (what the group sees),
+// the Discord handle, the first-seen display name, the IRL name, then nicknames. Every name lookup
+// (memory tools, learner subjects, the startup stamp, summaries) walks these tiers in this order.
+const IDENTITY_NAME_TIERS: readonly ((identity: Identity) => (string | null | undefined)[])[] = [
+  (i) => [i.display_name],
+  (i) => [i.username],
+  (i) => [i.canonical_name],
+  (i) => [i.irl_name],
+  (i) => i.aliases,
+];
+
+/**
+ * The members a name refers to, case-insensitively: the matches of the FIRST tier that has any (see
+ * IDENTITY_NAME_TIERS). One element = a unique match; more = ambiguous (two members share that name at
+ * the same strength, e.g. two people called Alex IRL); none = nobody goes by it. A display-name match
+ * wins over another member's nickname, so adding an alias can never steal someone's own name.
+ */
+export function findIdentitiesByName(identities: Identity[], name: string): Identity[] {
+  const needle = nameKey(name);
+  if (!needle) return [];
+  for (const namesInTier of IDENTITY_NAME_TIERS) {
+    const hits = identities.filter((i) => namesInTier(i).some((n) => nameKey(n) === needle));
+    if (hits.length > 0) return hits;
+  }
+  return [];
+}
+
+/**
+ * The one identity a name refers to, or undefined when nobody or more than one member goes by it —
+ * guessing between two people would file a memory under the wrong one.
+ */
+export function matchIdentityByName(identities: Identity[], name: string): Identity | undefined {
+  const hits = findIdentitiesByName(identities, name);
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+/** Every member who goes by a name in ANY form, ignoring tier strength (the startup stamp's strict rule). */
+function everyoneGoingBy(identities: Identity[], name: string): Identity[] {
+  const needle = nameKey(name);
+  if (!needle) return [];
+  return identities.filter((i) => IDENTITY_NAME_TIERS.some((tier) => tier(i).some((n) => nameKey(n) === needle)));
+}
+
 /**
  * Whether two rows with the same subject may be merged as duplicates: only when they cannot be about
  * two different members — two people can share a display name, and their ids tell them apart.
@@ -280,6 +329,7 @@ export class MemoryStore {
 
     // Additive migrations for existing databases
     this.addColumnIfMissing('memories', 'subject_user_id', 'TEXT');
+    this.addColumnIfMissing('identities', 'username', 'TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject_user_id ON memories(subject_user_id);');
     this.addColumnIfMissing('emojis', 'use_count', 'INTEGER NOT NULL DEFAULT 0');
     this.addColumnIfMissing('emojis', 'last_used_at', 'TEXT');
@@ -789,47 +839,37 @@ export class MemoryStore {
 
   /**
    * Links name-only memories to the member they are about: every active memory without a
-   * subject_user_id whose subject equals exactly one member's current display name or first-seen
-   * (canonical) name, case-insensitively, gets that member's id. A name shared by two members is
-   * ambiguous and left alone, as are 'server'/'bot'/'general' and names nobody has.
+   * subject_user_id whose subject is a name exactly one member goes by — display name, Discord handle,
+   * first-seen name, IRL name or nickname, case-insensitively — gets that member's id. (Real case: the
+   * learner filed memories under "cigalefourmi", which is a member's handle, not his display name.)
+   *
+   * Stricter than interactive lookups (findIdentitiesByName), which let a display name outrank another
+   * member's nickname: these rows are old and their subject was whatever the name meant back then (a
+   * member's first-seen name may be someone else's display name today), and a wrong id is a silent,
+   * permanent misfiling. So a name that ANY two members go by, in any form, is ambiguous and left
+   * alone, as are 'server'/'bot'/'general' and names nobody has.
    *
    * Idempotent (it only ever fills NULLs) and cheap, so it simply runs at every startup: rows saved
-   * under a name before the id column existed, and by the old remember_fact, become reachable by id
-   * (getForPerson) and dedup with the person's other rows in compact(). Only subject_user_id changes:
-   * the FTS index does not cover it, and updated_at is deliberately untouched because the TTL sweep
-   * measures on it.
+   * under a name before the id column existed, by the old remember_fact, or under a name the member
+   * only later became known by, become reachable by id (getForPerson) and dedup with the person's
+   * other rows in compact(). Only subject_user_id changes: the FTS index does not cover it, and
+   * updated_at is deliberately untouched because the TTL sweep measures on it.
    */
   stampSubjectUserIds(): { stamped: number; names: number; ambiguous: number } {
-    const idsByName = new Map<string, Set<string>>();
-    for (const identity of this.getAllIdentities()) {
-      if (identity.active === 0) continue;
-      for (const name of [identity.display_name, identity.canonical_name]) {
-        const key = nameKey(name);
-        if (!key) continue;
-        const ids = idsByName.get(key) ?? new Set<string>();
-        ids.add(identity.discord_user_id);
-        idsByName.set(key, ids);
-      }
-    }
-
+    const identities = this.getAllIdentities().filter((i) => i.active !== 0);
     const subjects = this.stmt(
-      `SELECT subject, COUNT(*) AS n FROM memories
-       WHERE active = 1 AND subject_user_id IS NULL AND subject IS NOT NULL
-       GROUP BY subject`,
-    ).all() as { subject: string; n: number }[];
+      `SELECT DISTINCT subject FROM memories
+       WHERE active = 1 AND subject_user_id IS NULL AND subject IS NOT NULL`,
+    ).all() as { subject: string }[];
 
     let ambiguous = 0;
     const assignments: { subject: string; userId: string }[] = [];
     for (const { subject } of subjects) {
       const key = nameKey(subject);
       if (!key || NON_PERSON_SUBJECTS.has(key)) continue;
-      const ids = idsByName.get(key);
-      if (!ids) continue;
-      if (ids.size > 1) {
-        ambiguous++;
-        continue;
-      }
-      assignments.push({ subject, userId: [...ids][0] });
+      const hits = everyoneGoingBy(identities, subject);
+      if (hits.length > 1) ambiguous++;
+      if (hits.length === 1) assignments.push({ subject, userId: hits[0].discord_user_id });
     }
 
     const stamped = this.runInTransaction(() => {
@@ -1138,15 +1178,24 @@ export class MemoryStore {
 
   // ---- Identity methods ----
 
-  upsertIdentity(discordUserId: string, displayName: string): void {
-    // Insert if new (canonical_name = displayName at time of first seen); otherwise refresh display_name.
+  /**
+   * Records a member's current display name (and Discord handle, when the caller has it). Inserts with
+   * canonical_name = the first-seen display name; afterwards refreshes display_name, and the username
+   * only when one is given: callers that only know a name (fetched history, relays) never erase it.
+   */
+  upsertIdentity(discordUserId: string, displayName: string, username?: string): void {
+    const handle = username?.trim() || null;
     this.stmt(
-      `INSERT INTO identities (discord_user_id, display_name, canonical_name, first_seen_at, updated_at)
-       VALUES (?, ?, ?, datetime('now'), datetime('now'))
+      `INSERT INTO identities (discord_user_id, display_name, canonical_name, username, first_seen_at, updated_at)
+       VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
        ON CONFLICT(discord_user_id) DO UPDATE SET
          display_name = excluded.display_name,
-         updated_at = CASE WHEN identities.display_name = excluded.display_name THEN identities.updated_at ELSE datetime('now') END`,
-    ).run(discordUserId, displayName, displayName);
+         username = COALESCE(excluded.username, identities.username),
+         updated_at = CASE
+           WHEN identities.display_name = excluded.display_name
+             AND identities.username IS COALESCE(excluded.username, identities.username)
+           THEN identities.updated_at ELSE datetime('now') END`,
+    ).run(discordUserId, displayName, displayName, handle);
   }
 
   updateIdentityMeta(discordUserId: string, update: IdentityMetaUpdate): boolean {

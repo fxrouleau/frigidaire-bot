@@ -1,3 +1,7 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeEmbeddingProvider } from '../../test-support/fakeEmbeddings';
 import type { EmbeddingKind } from './embeddingProvider';
@@ -593,6 +597,57 @@ describe('identities', () => {
 
     const [identity] = store.getAllIdentities();
     expect(identity.aliases).toEqual(['Annie', 'A']);
+  });
+
+  it('upsertIdentity() records the Discord handle, keeps it when a caller has none, and follows a change', () => {
+    store.upsertIdentity('123', 'Jason');
+    expect(store.getIdentityById('123')?.username).toBeNull();
+
+    store.upsertIdentity('123', 'Jason', 'cigalefourmi');
+    expect(store.getIdentityById('123')?.username).toBe('cigalefourmi');
+
+    // Fetched history / relays only know a name: the handle survives.
+    store.upsertIdentity('123', 'Jay', '  ');
+    store.upsertIdentity('123', 'Jay');
+    expect(store.getIdentityById('123')).toMatchObject({ display_name: 'Jay', username: 'cigalefourmi' });
+
+    store.upsertIdentity('123', 'Jay', 'cigale2');
+    expect(store.getIdentityById('123')?.username).toBe('cigale2');
+  });
+
+  it('upsertIdentity() bumps updated_at when only the handle changes', () => {
+    store.upsertIdentity('123', 'Jason', 'old_handle');
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE identities SET updated_at = datetime('now', '-1 day') WHERE discord_user_id = '123'").run();
+    const before = store.getIdentityById('123')?.updated_at;
+
+    store.upsertIdentity('123', 'Jason', 'old_handle');
+    expect(store.getIdentityById('123')?.updated_at).toBe(before);
+
+    store.upsertIdentity('123', 'Jason', 'new_handle');
+    expect(store.getIdentityById('123')?.updated_at).not.toBe(before);
+  });
+
+  it('adds the username column to an existing identities table (additive migration)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-migration-'));
+    const file = path.join(dir, 'memory.db');
+    try {
+      const legacy = new Database(file);
+      legacy.exec(`CREATE TABLE identities (
+        discord_user_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, canonical_name TEXT NOT NULL, irl_name TEXT,
+        aliases TEXT NOT NULL DEFAULT '[]', first_seen_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')), active INTEGER DEFAULT 1)`);
+      legacy.prepare("INSERT INTO identities (discord_user_id, display_name, canonical_name) VALUES ('1', 'Jason', 'Jason')").run();
+      legacy.close();
+
+      const migrated = new MemoryStore(file);
+      expect(migrated.getIdentityById('1')).toMatchObject({ display_name: 'Jason', username: null });
+      migrated.upsertIdentity('1', 'Jason', 'cigalefourmi');
+      expect(migrated.getIdentityById('1')?.username).toBe('cigalefourmi');
+      migrated.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1788,6 +1843,27 @@ describe('stampSubjectUserIds() (startup link of name-only memories to member id
     // Subjects are left as written (the FTS index covers them); getForPerson now finds every row by id.
     expect(rowOf(b).subject).toBe('oldnick');
     expect(store.getForPerson({ userId: '111', names: [] }).map((m) => m.id).sort()).toEqual([a, b].sort());
+  });
+
+  it('also stamps Discord handles, IRL names and nicknames that only one member goes by', async () => {
+    store.upsertIdentity('222', 'Jason', 'cigalefourmi');
+    store.updateIdentityMeta('111', { irl_name: 'Derrick', aliases_add: ['Wheez'] });
+    const handle = await store.save({ category: 'fact', subject: 'cigalefourmi', content: 'Mains Jhin in ranked' });
+    const irl = await store.save({ category: 'fact', subject: 'Derrick', content: 'Works as an electrician' });
+    const alias = await store.save({ category: 'preference', subject: 'wheez', content: 'Hates cilantro' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 3, names: 3, ambiguous: 0 });
+    expect(rowOf(handle).subject_user_id).toBe('222');
+    expect(rowOf(irl).subject_user_id).toBe('111');
+    expect(rowOf(alias).subject_user_id).toBe('111');
+  });
+
+  it('treats a name two members go by in any form as ambiguous (a display name does not outrank a nickname here)', async () => {
+    store.updateIdentityMeta('111', { aliases_add: ['Jason'] });
+    const row = await store.save({ category: 'fact', subject: 'Jason', content: 'Drives a red Miata' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, names: 0, ambiguous: 1 });
+    expect(rowOf(row).subject_user_id).toBeNull();
   });
 
   it('is idempotent and never overwrites an existing id', async () => {

@@ -29,6 +29,14 @@ describe('identityTracker event', () => {
     expect(getMemoryStore().getIdentityById('u2')?.display_name).toBe('Jason');
   });
 
+  it('records the Discord handle and keeps it current', () => {
+    identityTracker.execute(createFakeMessage({ authorId: 'u3', authorDisplayName: 'Jason', authorUsername: 'cigalefourmi' }).message);
+    expect(getMemoryStore().getIdentityById('u3')?.username).toBe('cigalefourmi');
+
+    identityTracker.execute(createFakeMessage({ authorId: 'u3', authorDisplayName: 'Jason', authorUsername: 'cigale2' }).message);
+    expect(getMemoryStore().getIdentityById('u3')?.username).toBe('cigale2');
+  });
+
   it('ignores bots and webhook posts (relays are attributed through the relay registry)', () => {
     identityTracker.execute(createFakeMessage({ authorId: 'b1', authorIsBot: true }).message);
     identityTracker.execute(createFakeMessage({ authorId: 'w1', webhookId: 'wh' }).message);
