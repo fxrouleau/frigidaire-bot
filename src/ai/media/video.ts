@@ -423,9 +423,13 @@ export class VideoDescriber {
    * video (a skimmed link, say) the line says how much of it was heard.
    */
   private async transcriptLine(audio: Buffer, url: string, durationSecs: number | undefined): Promise<string> {
-    const transcript = await this.transcriber.transcribeBuffer(audio, 'mp3', `video ${redact(url)}`);
-    if (transcript.status !== 'ok') return "Its audio couldn't be transcribed.";
     const cutAt = this.maxAudioSeconds();
+    // The track was cut here, so its length is known: the transcriber needn't probe it and re-judge it.
+    const trackSecs = durationSecs !== undefined ? Math.min(durationSecs, cutAt) : undefined;
+    const transcript = await this.transcriber.transcribeBuffer(audio, 'mp3', `video ${redact(url)}`, {
+      durationSecs: trackSecs,
+    });
+    if (transcript.status !== 'ok') return "Its audio couldn't be transcribed.";
     const partial = durationSecs !== undefined && durationSecs > cutAt;
     if (!transcript.text)
       return partial ? `Its first ${formatClock(cutAt)} of audio has no speech.` : 'Its audio has no speech.';

@@ -34,6 +34,9 @@ export const AUDIO_MAX_BYTES = 25 * 1024 * 1024;
 export const INLINE_AUDIO_MAX_BYTES = 14 * 1024 * 1024;
 /** Shorter recordings hold no transcribable speech — and are exactly where Whisper invents text. */
 export const MIN_SPEECH_SECONDS = 1;
+// MP3 encoding pads a track by a frame or two, so audio ffmpeg cut at exactly the cap probes a little
+// over it (a `-t 600` cut reads 600.084 s). A probed length gets this much slack before it's too long.
+const PROBED_LENGTH_SLACK_SECS = 1;
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const TRANSCRIBE_TIMEOUT_MS = 120_000;
 // A failed recording is not retried on every chat turn that renders it; it gets another chance later.
@@ -166,13 +169,21 @@ export class AudioTranscriber {
     return run;
   }
 
-  /** Transcribes audio already in memory (a video's extracted track). Nothing is cached. */
-  async transcribeBuffer(data: Buffer, format: AudioFormat | undefined, label: string): Promise<TranscriptionOutcome> {
+  /**
+   * Transcribes audio already in memory (a video's extracted track). Nothing is cached. `durationSecs`
+   * is the buffer's own length when the caller knows it (a track it cut), which spares a probe.
+   */
+  async transcribeBuffer(
+    data: Buffer,
+    format: AudioFormat | undefined,
+    label: string,
+    opts: { durationSecs?: number } = {},
+  ): Promise<TranscriptionOutcome> {
     const client = this.client();
     if (!client) return { status: 'unavailable' };
     const route = await this.route();
     if (route.kind === 'off') return { status: 'unavailable' };
-    return this.transcribeData(client, route, data, format, undefined, label);
+    return this.transcribeData(client, route, data, format, opts.durationSecs, label);
   }
 
   /**
@@ -303,7 +314,9 @@ export class AudioTranscriber {
     if (native && format) {
       if (knownDurationSecs === undefined) {
         const probed = await this.probeDuration(data);
-        if (probed !== undefined && probed > maxSeconds) return { status: 'too_long', durationSecs: probed };
+        if (probed !== undefined && probed > maxSeconds + PROBED_LENGTH_SLACK_SECS) {
+          return { status: 'too_long', durationSecs: probed };
+        }
         if (tooShort(probed)) return SILENT;
       }
       try {
@@ -337,7 +350,7 @@ export class AudioTranscriber {
 
     // A file without an audio track has nothing to say.
     if (!mp3) return SILENT;
-    if (mp3.durationSecs !== undefined && mp3.durationSecs > maxSeconds) {
+    if (mp3.durationSecs !== undefined && mp3.durationSecs > maxSeconds + PROBED_LENGTH_SLACK_SECS) {
       return { status: 'too_long', durationSecs: mp3.durationSecs };
     }
     if (tooShort(mp3.durationSecs)) return SILENT;

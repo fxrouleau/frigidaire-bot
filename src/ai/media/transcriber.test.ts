@@ -184,6 +184,22 @@ describe('AudioTranscriber', () => {
     expect(requests).toHaveLength(0);
   });
 
+  it('gives a probed length the MP3 padding slack: a track cut at the cap is not too long', async () => {
+    // ffmpeg's `-t 600` MP3 cut probes as 600.084 s.
+    const transcoder = createFakeTranscoder({ probe: { durationSecs: 600.084, hasAudio: true, hasVideo: false } });
+    const { transcriber, requests } = setup([success], { transcoder });
+    expect((await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip')).status).toBe('ok');
+    expect(requests).toHaveLength(1);
+  });
+
+  it('takes a caller-known buffer length instead of probing it', async () => {
+    const transcoder = createFakeTranscoder({ probe: { durationSecs: 1200, hasAudio: true, hasVideo: false } });
+    const { transcriber, requests } = setup([success], { transcoder });
+    expect((await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip', { durationSecs: 600 })).status).toBe('ok');
+    expect(transcoder.calls.probe).toEqual([]);
+    expect(requests).toHaveLength(1);
+  });
+
   it('uses the source length the transcoder reports for transcoded files', async () => {
     const transcoder = createFakeTranscoder({ toMp3: { data: TRANSCODED_MP3, durationSecs: 900 } });
     const { transcriber, requests } = setup([success], { transcoder, model: () => BASELINE_MODEL });

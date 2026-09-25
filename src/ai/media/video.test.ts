@@ -14,6 +14,7 @@ import {
 } from '../../test-support/fakeMedia';
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import { FEATURE_HEADER } from '../usage';
+import { AudioTranscriber } from './transcriber';
 import type { TranscriptionOutcome } from './types';
 import { VideoDescriber, type VideoDescriberOptions } from './video';
 
@@ -273,6 +274,67 @@ describe('VideoDescriber', () => {
     const { describer, requests } = setup([described]);
     await Promise.all([describer.describe({ url: CLIP_URL }), describer.describe({ url: CLIP_URL })]);
     expect(requests).toHaveLength(1);
+  });
+});
+
+describe('VideoDescriber: soundtrack through the real transcriber', () => {
+  const transcribedFixture = loadFixture('transcription-success');
+
+  it('transcribes the soundtrack of a skimmed long video, though the cut MP3 probes a hair over the cap', async () => {
+    // ffmpeg's `-t 600` MP3 cut probes as 600.084 s (encoder padding): measured with the real transcoder.
+    const transcoder = createFakeTranscoder({
+      probe: { durationSecs: 600.084, hasAudio: true, hasVideo: false },
+      sampleVideo: { durationSecs: 720, frames: [FRAME], audio: TRANSCODED_MP3 },
+    });
+    const { client, requests } = createCapturingClient([transcribedFixture, described]);
+    const transcriber = new AudioTranscriber({
+      client: () => client,
+      transcoder,
+      model: () => 'google/gemini-3.5-flash-lite',
+      maxSeconds: () => 600,
+      catalog: createFakeCatalog(CATALOG_MODELS),
+    });
+    const describer = new VideoDescriber({
+      client: () => client,
+      fetch: createFileFetch({ [CLIP_URL]: { body: MP4_BYTES, contentType: 'video/mp4' } }),
+      transcoder,
+      transcriber,
+      model: () => 'google/gemini-3.5-flash-lite',
+      maxBytes: () => 1024,
+      maxSeconds: () => 300,
+      inputMode: () => 'auto',
+      maxAudioSeconds: () => 600,
+      catalog: createFakeCatalog(CATALOG_MODELS),
+    });
+
+    expect((await describer.describe({ url: CLIP_URL, durationSecs: 720 })).status).toBe('ok');
+
+    expect(requests).toHaveLength(2);
+    expect(userContent(requests[0])[0].type).toBe('input_audio');
+    const text = String(userContent(requests[1]).at(-1)?.text);
+    expect(text).toContain("Transcript of the first 10:00 of its audio (the rest wasn't transcribed):");
+    expect(text).not.toContain("couldn't be transcribed");
+  });
+
+  it('also transcribes it when the video reports no length of its own', async () => {
+    const transcoder = createFakeTranscoder({
+      probe: { durationSecs: 600.084, hasAudio: true, hasVideo: false },
+      sampleVideo: { frames: [FRAME], audio: TRANSCODED_MP3 },
+    });
+    const { client, requests } = createCapturingClient([transcribedFixture, described]);
+    const transcriber = new AudioTranscriber({
+      client: () => client,
+      transcoder,
+      model: () => 'google/gemini-3.5-flash-lite',
+      maxSeconds: () => 600,
+      catalog: createFakeCatalog(CATALOG_MODELS),
+    });
+    const { describer } = setup([], { client: () => client, transcoder, transcriber, inputMode: () => 'frames' });
+
+    expect((await describer.describe({ url: CLIP_URL })).status).toBe('ok');
+
+    expect(requests).toHaveLength(2);
+    expect(String(userContent(requests[1]).at(-1)?.text)).toContain('Transcript of its audio:');
   });
 });
 
