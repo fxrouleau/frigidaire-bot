@@ -119,7 +119,10 @@ export function parseRunResult(raw: unknown): SandboxRunResult | undefined {
   const files: SandboxFile[] = Array.isArray(raw.files)
     ? raw.files.filter(
         (f): f is SandboxFile =>
-          isRecord(f) && typeof f.name === 'string' && typeof f.content_base64 === 'string' && typeof f.size === 'number',
+          isRecord(f) &&
+          typeof f.name === 'string' &&
+          typeof f.content_base64 === 'string' &&
+          typeof f.size === 'number',
       )
     : [];
   const omitted: SandboxOmittedFile[] = Array.isArray(raw.files_omitted)
@@ -165,7 +168,10 @@ function describeFetchError(error: unknown): string {
 }
 
 /** POSTs one run to the sidecar. Never throws: every failure comes back as a typed outcome. */
-export async function runInSandbox(request: SandboxRunRequest, opts: SandboxClientOptions = {}): Promise<SandboxOutcome> {
+export async function runInSandbox(
+  request: SandboxRunRequest,
+  opts: SandboxClientOptions = {},
+): Promise<SandboxOutcome> {
   const baseUrl = opts.url ?? config.sandbox.url;
   if (!baseUrl) return { ok: false, kind: 'unconfigured', detail: 'SANDBOX_URL is not set' };
   const endpoint = runEndpoint(baseUrl);
@@ -238,7 +244,10 @@ export function sanitizeFileName(raw: string): string {
   return cleaned.slice(0, 100 - ext.length) + ext;
 }
 
-type AttachReport = { attached: Array<{ name: string; bytes: number }>; skipped: Array<{ name: string; reason: string }> };
+type AttachReport = {
+  attached: Array<{ name: string; bytes: number }>;
+  skipped: Array<{ name: string; reason: string }>;
+};
 
 /**
  * Queues the run's files on this turn's reply. A file named like one an earlier run attached this turn replaces
