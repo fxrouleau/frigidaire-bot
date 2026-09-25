@@ -126,6 +126,5 @@ export interface AiProvider {
   readonly chatModels?: string[];
   supportedTools: ProviderToolDefinition[];
   chat(input: ChatInput): Promise<ProviderChatResponse>;
-  summarizeMessages?(message: Message, startTime: string, endTime: string): Promise<string>;
   generateImage?(message: Message, prompt: string, options?: ImageGenerationOptions): Promise<string>;
 }

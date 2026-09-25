@@ -198,7 +198,6 @@ export async function runScenario(
           throw error;
         }
       },
-      summarizeMessages: inner.summarizeMessages?.bind(inner),
       generateImage: inner.generateImage?.bind(inner),
     };
     const agent = new AgentOrchestrator({ resolveProvider: () => provider });

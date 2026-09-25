@@ -7,7 +7,6 @@ import { config } from '../../config';
 import { logger } from '../../logger';
 import { requireOpenRouterClient } from '../openRouterClient';
 import { toolDefinitions } from '../tools';
-import { prepareSummaryPrompt } from '../tools/summary';
 import type {
   AiProvider,
   ChatInput,
@@ -122,33 +121,6 @@ export class OpenRouterProvider implements AiProvider {
   /** Every model a chat request may be served by: the primary, then the fallbacks in order. */
   get chatModels(): string[] {
     return [this.defaultModel, ...this.fallbackModels];
-  }
-
-  async summarizeMessages(message: Message, startTime: string, endTime: string): Promise<string> {
-    try {
-      const prepared = await prepareSummaryPrompt(message, startTime, endTime);
-      if (prepared.error) return prepared.error;
-
-      if (message.channel.isTextBased() && 'sendTyping' in message.channel) {
-        await message.channel.sendTyping();
-      }
-
-      const response = await this.client.chat.completions.create({
-        model: this.defaultModel,
-        messages: [
-          { role: 'system', content: 'You are an expert at summarizing conversations.' },
-          { role: 'user', content: prepared.prompt },
-        ],
-        // @ts-expect-error OpenRouter-specific field
-        provider: this.routing,
-      });
-
-      const text = response.choices[0]?.message?.content?.trim();
-      return text || 'I was unable to generate a summary.';
-    } catch (error) {
-      logger.error('Error in summarizeMessages (openrouter):', error);
-      return 'An error occurred while trying to summarize the messages.';
-    }
   }
 
   async generateImage(message: Message, prompt: string, options?: ImageGenerationOptions): Promise<string> {

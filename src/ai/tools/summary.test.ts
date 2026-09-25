@@ -7,7 +7,7 @@ import { createFakeBotMessage, createFakeMessage, type FakeMessageOptions } from
 import { setMemoryStoreForTesting } from '../memory';
 import { MemoryStore } from '../memory/memoryStore';
 import { FEATURE_HEADER } from '../usage';
-import { prepareSummaryPrompt, runSummaryTool, summarizeChannel } from './summary';
+import { runSummaryTool, summarizeChannel, summarizeChannelResult } from './summary';
 
 // Cached voice transcripts, keyed by message id (the media feature's cache, stubbed).
 const transcripts = vi.hoisted(() => new Map<string, string>());
@@ -485,12 +485,83 @@ describe('runSummaryTool (summarize_messages arguments)', () => {
   });
 });
 
-describe('prepareSummaryPrompt (legacy adapter)', () => {
-  it('builds a prompt from the same pipeline for the old provider method', async () => {
-    const { trigger } = channelWith([said(30, 'jason', 'legacy path works')]);
-    const prepared = await prepareSummaryPrompt(trigger, '2026-01-15T16:00:00Z', '2026-01-15T17:00:00Z');
-    expect(prepared.error).toBeUndefined();
-    expect(prepared.prompt).toContain('legacy path works');
-    expect((await prepareSummaryPrompt(trigger, 'nope', 'nope')).error).toMatch(/Invalid date/);
+describe('summarizeChannelResult', () => {
+  it('returns the summary, header, caveats and people footer as data', async () => {
+    const { trigger } = channelWith([said(30, 'jason', 'pineapple pizza is elite'), said(20, 'simon', 'no')]);
+    const { client } = okClient();
+
+    const result = await summarizeChannelResult({ message: trigger, start: new Date(NOW.getTime() - HOUR), client, now });
+
+    expect(result).toEqual({
+      ok: true,
+      summary: 'Jason and Simon argued about pizza.',
+      header: 'Summary of #banana-combo from 2026-01-15 11:00 to 2026-01-15 12:00 Eastern (2 messages from 2 people):',
+      caveats: [],
+      peopleFooter: 'People in this stretch: Jason, Simon.',
+    });
+    // summarizeChannel() is the same result, formatted for the chat model.
+    const text = await summarizeChannel({ message: trigger, start: new Date(NOW.getTime() - HOUR), client: okClient().client, now });
+    expect(text).toBe(
+      [
+        'Summary of #banana-combo from 2026-01-15 11:00 to 2026-01-15 12:00 Eastern (2 messages from 2 people):',
+        'Jason and Simon argued about pizza.',
+        'People in this stretch: Jason, Simon.',
+      ].join('\n'),
+    );
+  });
+
+  it('says why there is no summary', async () => {
+    const empty = channelWith([said(120, 'jason', 'too early')]);
+    expect(
+      await summarizeChannelResult({ message: empty.trigger, start: new Date(NOW.getTime() - HOUR), client: okClient().client, now }),
+    ).toMatchObject({ ok: false, reason: 'no_messages', message: expect.stringMatching(/^There are no messages in #banana-combo/) });
+
+    const { trigger } = channelWith([said(30, 'jason', 'hi')]);
+    const broken = createCapturingClient([{ status: 500, body: { error: { message: 'upstream died' } } }]);
+    expect(await summarizeChannelResult({ message: trigger, start: new Date(NOW.getTime() - HOUR), client: broken.client, now })).toMatchObject({
+      ok: false,
+      reason: 'model_failed',
+    });
+    const blank = createCapturingClient([{ body: chatCompletionBody('   ') }]);
+    expect(await summarizeChannelResult({ message: trigger, start: new Date(NOW.getTime() - HOUR), client: blank.client, now })).toMatchObject({
+      ok: false,
+      reason: 'model_empty',
+    });
+
+    const unreadable = channelWith([said(30, 'jason', 'hi')]);
+    (unreadable.trigger.channel as unknown as { messages: { fetch: () => Promise<never> } }).messages.fetch = async () => {
+      throw new Error('Missing Access');
+    };
+    expect(
+      await summarizeChannelResult({ message: unreadable.trigger, start: new Date(NOW.getTime() - HOUR), client: okClient().client, now }),
+    ).toMatchObject({ ok: false, reason: 'history_unreadable' });
+  });
+
+  it("summarizes from a target message: it is included, and history is read back from the range's end", async () => {
+    const before = said(50, 'simon', 'said before the target');
+    const target = said(40, 'jason', 'the target itself');
+    const after = [said(30, 'felix', 'first reply'), said(20, 'simon', 'second reply')];
+    const { fetchCalls } = channelWith([before, ...after], target);
+    const { client, requests } = okClient();
+
+    const result = await summarizeChannelResult({
+      message: target,
+      messageRole: 'target',
+      start: target.createdAt,
+      end: NOW,
+      requesterId: 'u-felix',
+      client,
+      now,
+    });
+
+    expect(result.ok).toBe(true);
+    const prompt = userPrompt(requests[0]);
+    expect(prompt).toContain('Jason: the target itself');
+    expect(prompt).toContain('Felix: first reply');
+    expect(prompt).toContain('Simon: second reply');
+    expect(prompt).not.toContain('said before the target');
+    expect(prompt).toContain('Requested by Felix.');
+    // Paged from the end of the range, not from the target (which would only see older messages).
+    expect(BigInt(String(fetchCalls[0].before))).toBeGreaterThan(BigInt(after[1].id));
   });
 });
