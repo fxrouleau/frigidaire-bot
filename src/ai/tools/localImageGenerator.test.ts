@@ -90,3 +90,166 @@ describe('extractImageFromResponse', () => {
     expect(extractImageFromResponse(response)).toBeUndefined();
   });
 });
+
+describe('generateLocalImage', () => {
+  type Captured = { body: Record<string, unknown>; feature: string | null };
+
+  // A replay OpenAI client that also captures each request's body and feature header.
+  function captureClient(fixture: OpenRouterFixture, captured: Captured[]): OpenAI {
+    return new OpenAI({
+      apiKey: 'test-key',
+      baseURL: 'https://openrouter.ai/api/v1',
+      maxRetries: 0,
+      fetch: (async (_url: unknown, init?: { body?: unknown; headers?: HeadersInit }) => {
+        captured.push({
+          body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+          feature: new Headers(init?.headers).get(FEATURE_HEADER),
+        });
+        return new Response(JSON.stringify(fixture.response), {
+          status: fixture.status,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as unknown as typeof globalThis.fetch,
+    });
+  }
+
+  function fixtureWithImage(image: unknown): OpenRouterFixture {
+    const fixture = loadFixture('image-generation');
+    const response = structuredClone(fixture.response) as OpenAI.ChatCompletion;
+    (response.choices[0].message as unknown as Record<string, unknown>).images = [image];
+    return { ...fixture, response };
+  }
+
+  const FIXTURE_PNG_BASE64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVR4nGPgEpHjEpFjgFAABk4A8Z5vd+AAAAAASUVORK5CYII=';
+
+  let channelCounter = 0;
+  // Refine sessions are per channel and module-level: every test gets its own channel.
+  const freshMessage = () => createFakeMessage({ channelId: `image-channel-${++channelCounter}` });
+
+  beforeEach(() => {
+    vi.spyOn(logger, 'error').mockImplementation(() => {});
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('puts the image on the turn instead of posting it, and asks the model for a caption', async () => {
+    const captured: Captured[] = [];
+    const fake = freshMessage();
+    const turn = createTurnEffects();
+
+    const result = await generateLocalImage(
+      fake.message,
+      'a fridge wearing sunglasses',
+      { turn },
+      { client: captureClient(loadFixture('image-generation'), captured) },
+    );
+
+    expect(turn.files).toHaveLength(1);
+    expect(turn.files[0].name).toBe(GENERATED_IMAGE_NAME);
+    expect(Buffer.isBuffer(turn.files[0].attachment)).toBe(true);
+    expect((turn.files[0].attachment as Buffer).equals(Buffer.from(FIXTURE_PNG_BASE64, 'base64'))).toBe(true);
+    expect(result).toContain('attached to your reply');
+    expect(result).toContain('caption');
+    // Nothing is posted on its own: the image rides on the model's reply.
+    expect(fake.recorders.reply.calls).toHaveLength(0);
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].feature).toBe('image');
+    expect(captured[0].body.provider).toEqual({ zdr: true });
+    expect(captured[0].body.modalities).toEqual(['image']);
+  });
+
+  it('gives a second image in the same turn its own file name', async () => {
+    const fake = freshMessage();
+    const turn = createTurnEffects();
+    const client = captureClient(loadFixture('image-generation'), []);
+
+    await generateLocalImage(fake.message, 'one', { turn }, { client });
+    await generateLocalImage(fake.message, 'two', { turn }, { client });
+
+    expect(turn.files.map((f) => f.name)).toEqual(['image.png', 'image-2.png']);
+  });
+
+  it('posts the image on its own (without the old canned text) when there is no turn to ride on', async () => {
+    const fake = freshMessage();
+
+    const result = await generateLocalImage(fake.message, 'a fridge', {}, {
+      client: captureClient(loadFixture('image-generation'), []),
+    });
+
+    expect(fake.recorders.reply.calls).toHaveLength(1);
+    const [payload] = fake.recorders.reply.calls[0] as [{ content?: string; files: unknown[] }];
+    expect(payload.content).toBeUndefined();
+    expect(payload.files).toHaveLength(1);
+    expect(result).toContain('posted in the channel');
+  });
+
+  it('keeps per-channel refine sessions: a refinement re-sends the previous image', async () => {
+    const captured: Captured[] = [];
+    const fake = freshMessage();
+    const client = captureClient(loadFixture('image-generation'), captured);
+
+    expect(
+      await generateLocalImage(fake.message, 'make it blue', { refinePrevious: true, turn: createTurnEffects() }, { client }),
+    ).toContain('could not find a previous image');
+
+    await generateLocalImage(fake.message, 'a fridge', { turn: createTurnEffects() }, { client });
+    const turn = createTurnEffects();
+    const result = await generateLocalImage(fake.message, 'make it blue', { refinePrevious: true, turn }, { client });
+
+    expect(result).toContain('Refined the previous image.');
+    expect(turn.files).toHaveLength(1);
+    const messages = captured[1].body.messages as Array<{ role: string; content: unknown }>;
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(JSON.stringify(messages[1].content)).toContain(`data:image/png;base64,${FIXTURE_PNG_BASE64}`);
+    expect(messages[2].content).toBe('make it blue');
+  });
+
+  it('downloads a URL-only image result', async () => {
+    const fake = freshMessage();
+    const turn = createTurnEffects();
+    const bytes = Buffer.from(FIXTURE_PNG_BASE64, 'base64');
+    const fetched: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      fetched.push(url);
+      return new Response(bytes, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await generateLocalImage(fake.message, 'a fridge', { turn }, {
+      client: captureClient(fixtureWithImage({ type: 'image_url', image_url: { url: 'https://cdn.example/gen.png' } }), []),
+      fetch: fetchImpl,
+    });
+
+    expect(fetched).toEqual(['https://cdn.example/gen.png']);
+    expect((turn.files[0].attachment as Buffer).equals(bytes)).toBe(true);
+  });
+
+  it('fails cleanly when the image download fails', async () => {
+    const fake = freshMessage();
+    const turn = createTurnEffects();
+    const fetchImpl = (async () => new Response('nope', { status: 403 })) as unknown as typeof fetch;
+
+    const result = await generateLocalImage(fake.message, 'a fridge', { turn }, {
+      client: captureClient(fixtureWithImage({ type: 'image_url', image_url: { url: 'https://cdn.example/gen.png' } }), []),
+      fetch: fetchImpl,
+    });
+
+    expect(result).toBe('Image generation failed.');
+    expect(turn.files).toHaveLength(0);
+  });
+
+  it("relays the model's text when no image came back", async () => {
+    const fake = freshMessage();
+    const turn = createTurnEffects();
+    const result = await generateLocalImage(fake.message, 'something weird', { turn }, {
+      client: captureClient(loadFixture('text-response'), []),
+    });
+
+    expect(result).toContain("didn't return an image");
+    expect(turn.files).toHaveLength(0);
+  });
+});

@@ -14,8 +14,10 @@ type SerializedState = {
 };
 
 // Hard cap on a serialized state blob. A runaway conversation should degrade to "not persisted"
-// rather than bloat the cache DB; matches the in-memory store's source-of-truth role.
-const MAX_STATE_BYTES = 1_000_000;
+// rather than bloat the cache DB; matches the in-memory store's source-of-truth role. Sized above the
+// largest history budget the agent keeps in a window (500k estimated tokens ≈ 1.75M chars, plus JSON
+// overhead), so a long, busy window within budget is still persisted.
+export const MAX_STATE_BYTES = 4_000_000;
 
 type StateRow = {
   channel_id: string;
