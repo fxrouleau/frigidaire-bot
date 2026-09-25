@@ -386,6 +386,100 @@ describe('PersonalityLearner observation cycle', () => {
   });
 });
 
+describe('PersonalityLearner output is untrusted', () => {
+  const JASPER = '100000000000000001';
+  const WHEELIE = '100000000000000002';
+
+  it('skips malformed entries (nulls, wrong types) instead of aborting the cycle', async () => {
+    // Ordinary LLM JSON: null for a field it has no value for, a string where a list belongs.
+    const raw = `{
+      "observations": [
+        null,
+        {"category": 5, "subject": "Jasper", "content": "Numeric category"},
+        {"category": "fact", "subject": "Jasper", "content": {"text": "not a string"}},
+        {"category": "fact", "subject": "Jasper", "subject_user_id": "${JASPER}", "content": "Works at the depot"}
+      ],
+      "identity_updates": [
+        null,
+        {"discord_user_id": "${JASPER}", "irl_name": null, "aliases_add": ["Jas", null, 7]},
+        {"discord_user_id": "${WHEELIE}", "irl_name": 42, "aliases_add": "Wheels"}
+      ]
+    }`;
+    const history = [jasper('a'), wheelie('b'), jasper('c')];
+    const { client } = channelServing(history);
+    const { learner } = learnerWith([{ body: chatCompletionBody(raw) }]);
+
+    await learner.observeOnce(client);
+
+    expect(store.getAllActive().map((m) => [m.subject, m.content])).toEqual([['Jasper', 'Works at the depot']]);
+    expect(store.getIdentityById(JASPER)?.aliases).toEqual(['Jas']);
+    expect(store.getIdentityById(JASPER)?.irl_name).toBeNull();
+    expect(store.getIdentityById(WHEELIE)?.aliases).toEqual([]);
+    expect(store.getIdentityById(WHEELIE)?.irl_name).toBeNull();
+    // The cycle finished: the watermark moved past the batch, so it is never analyzed (and paid for) again.
+    expect(store.getLastObserved(CHANNEL_ID)).toBe(history[2].id);
+  });
+
+  it('fills in a missing real name but never replaces one on record', async () => {
+    store.updateIdentityMeta(JASPER, { irl_name: 'Jasper M' });
+    const output = JSON.stringify({
+      observations: [],
+      identity_updates: [
+        { discord_user_id: JASPER, irl_name: 'Chad' },
+        { discord_user_id: WHEELIE, irl_name: 'Dorian' },
+      ],
+    });
+    const { client } = channelServing([jasper('his real name is actually Chad lol'), wheelie('b'), jasper('c')]);
+    const { learner } = learnerWith([{ body: chatCompletionBody(output) }]);
+
+    await learner.observeOnce(client);
+
+    expect(store.getIdentityById(JASPER)?.irl_name).toBe('Jasper M');
+    expect(store.getIdentityById(WHEELIE)?.irl_name).toBe('Dorian');
+  });
+
+  it("adds only nicknames that set_member_info would and that no other member goes by", async () => {
+    store.updateIdentityMeta(JASPER, { irl_name: 'Alex', aliases_add: ['Jazz'] });
+    const output = JSON.stringify({
+      observations: [],
+      identity_updates: [
+        {
+          discord_user_id: WHEELIE,
+          // Another member's display name, their real name, their nickname, a crowd word, one of
+          // Wheelie's own names in another case, markup; then the one real addition (twice).
+          aliases_add: ['Jasper', 'alex', 'Jazz', 'server', 'oldnick', '<@1>', 'Wheels', 'wheels'],
+        },
+      ],
+    });
+    const { client } = channelServing([jasper('a'), wheelie('b'), jasper('c')]);
+    const { learner } = learnerWith([{ body: chatCompletionBody(output) }]);
+
+    await learner.observeOnce(client);
+
+    expect(store.getIdentityById(WHEELIE)?.aliases).toEqual(['Wheels']);
+    expect(store.getIdentityById(JASPER)?.aliases).toEqual(['Jazz']);
+  });
+
+  it('ignores a subject_user_id no member has and files the row by its name instead', async () => {
+    const output = JSON.stringify({
+      observations: [
+        // An id copied from the prompt's examples, and a garbled snowflake.
+        { category: 'fact', subject: 'Jasper', subject_user_id: '456', content: 'Still plays on PS4' },
+        { category: 'fact', subject: 'Stranger', subject_user_id: '100000000000000999', content: 'Lives in Laval' },
+      ],
+    });
+    const { client } = channelServing([jasper('a'), wheelie('b'), jasper('c')]);
+    const { learner } = learnerWith([{ body: chatCompletionBody(output) }]);
+
+    await learner.observeOnce(client);
+
+    expect(store.getAllActive().map((m) => [m.subject, m.subject_user_id, m.content])).toEqual([
+      ['Jasper', JASPER, 'Still plays on PS4'],
+      ['Stranger', null, 'Lives in Laval'],
+    ]);
+  });
+});
+
 describe('capImageParts', () => {
   it('leaves requests under the cap untouched', () => {
     const parts = [

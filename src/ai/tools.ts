@@ -2,14 +2,20 @@ import type { Message } from 'discord.js';
 import { logger } from '../logger';
 import { getMemoryStore } from './memory';
 import {
-  type Identity,
   type Memory,
   type MemoryStore,
   NON_PERSON_SUBJECTS,
   SELF_DIAGNOSIS_CATEGORIES,
   nameKey,
 } from './memory/memoryStore';
-import { type Member, type ResolvedPerson, cleanSubject, foldMembers, resolvePerson } from './people';
+import {
+  MAX_MEMBER_NAME_LENGTH,
+  type ResolvedPerson,
+  checkNickname,
+  cleanSubject,
+  parseMemberName,
+  resolvePerson,
+} from './people';
 import { emojiSyntax } from './promptSections';
 import { birthdayTools } from './tools/birthdays';
 import { costTools } from './tools/costs';
@@ -112,56 +118,6 @@ const summarizeTool: ToolDefinition = {
   },
   handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => runSummaryTool(ctx.message, args),
 };
-
-// A real name or nickname the model passes to set_member_info: one short line of plain text.
-const MAX_MEMBER_NAME_LENGTH = 48;
-
-/** A name for set_member_info, or 'invalid' for anything that is not one (markup, mass pings, an essay). */
-function parseMemberName(raw: unknown): string | undefined | 'invalid' {
-  const value = optionalString(raw);
-  if (!value) return undefined;
-  if (/[<>\n]|@(everyone|here)\b|https?:/i.test(value)) return 'invalid';
-  const name = cleanSubject(value).replace(/\s+/g, ' ');
-  if (!name || name.length > MAX_MEMBER_NAME_LENGTH) return 'invalid';
-  return name;
-}
-
-/**
- * Whether a nickname may be added to a member: not a word that names the group, not one of their own
- * names already, and not another member's display name, handle or first-seen name (lookups rank those
- * above nicknames, so it would never find this member anyway). Returns the refusal, or a note when the
- * nickname is also someone else's real name or nickname, or undefined when it is fine.
- */
-function checkNickname(
-  store: MemoryStore,
-  userId: string,
-  displayName: string,
-  nickname: string,
-): { refusal?: string; note?: string } {
-  const key = nameKey(nickname);
-  if (NON_PERSON_SUBJECTS.has(key) || ['me', 'i', 'myself'].includes(key)) {
-    return { refusal: `"${nickname}" can't be a nickname.` };
-  }
-  // Members, not accounts: a name one of their own side accounts goes by is theirs already.
-  const members = foldMembers(store.getAllIdentities());
-  const own = members.find((m) => m.userId === userId);
-  if ([displayName, ...(own?.names ?? [])].some((n) => nameKey(n) === key)) {
-    return { refusal: `${displayName} already goes by "${nickname}".` };
-  }
-  const others = members.filter((m) => m.userId !== userId);
-  const goesBy = (member: Member, names: (i: Identity) => (string | null | undefined)[]) =>
-    member.rows.some((row) => names(row).some((n) => nameKey(n) === key));
-  const owner = others.find((m) => goesBy(m, (i) => [i.display_name, i.username, i.canonical_name]));
-  if (owner) {
-    return {
-      refusal: `"${nickname}" is ${owner.displayName}'s own name, so it can't also be ${displayName}'s nickname.`,
-    };
-  }
-  const sharer = others.find((m) => goesBy(m, (i) => [i.irl_name, ...i.aliases]));
-  return sharer
-    ? { note: `${sharer.displayName} also goes by "${nickname}", so that name alone won't tell them apart.` }
-    : {};
-}
 
 const setMemberInfoTool: ToolDefinition = {
   name: 'set_member_info',
