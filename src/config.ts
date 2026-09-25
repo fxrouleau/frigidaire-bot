@@ -294,7 +294,20 @@ export const config = {
   ramble: {},
 
   /** The code-execution sidecar (sandbox/, src/ai/tools/sandbox.ts). */
-  sandbox: {},
+  sandbox: {
+    /** Base URL of the sidecar, e.g. http://sandbox:8080. Unset ⇒ the run_code tool is not offered. */
+    get url(): string | undefined {
+      return envString('SANDBOX_URL');
+    },
+    /** Optional bearer token; must match the sidecar's own SANDBOX_TOKEN. */
+    get token(): string | undefined {
+      return envString('SANDBOX_TOKEN');
+    },
+    /** Run time limit when the model doesn't ask for one (the sidecar caps every run at 60 s). */
+    get timeoutSeconds(): number {
+      return envInt('SANDBOX_TIMEOUT_SECONDS', 20, { min: 1, max: 60 });
+    },
+  },
 
   /** Filing member feature requests as GitHub issues (src/ai/tools/featureRequest.ts). */
   featureRequests: {},
