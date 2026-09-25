@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EmojiRow } from '../ai/memory/memoryStore';
+import { AddressedGate } from '../gate/addressedGate';
 import { BotDb } from '../storage/botDb';
+import { createFakeMessage } from '../test-support/fakeDiscord';
 import {
   type AutoReactSettings,
   AutoReactor,
@@ -43,6 +45,8 @@ type Harness = {
   guide: { current: ReactionGuide };
   /** Message ids the agent was handed (the gate's wasRouted). */
   routed: Set<string>;
+  /** `channel:user` pairs the gate counts as partners in an active exchange (its isInExchange). */
+  partners: Set<string>;
   fire(): Promise<void>;
 };
 
@@ -53,7 +57,6 @@ function harness(overrides: Partial<AutoReactSettings> = {}, verdict: Verdict | 
     minGapMs: 45 * MIN,
     minProfileMessages: 200,
     delayMs: 10_000,
-    exchangeWindowMs: 120_000,
     ...overrides,
   };
   const clock = { now: T0 };
@@ -65,6 +68,7 @@ function harness(overrides: Partial<AutoReactSettings> = {}, verdict: Verdict | 
   const report = vi.fn(async (_text: string) => {});
   const loadImages = vi.fn(async (urls: string[], max: number) => urls.slice(0, max).map((u) => `data:${u}`));
   const routed = new Set<string>();
+  const partners = new Set<string>();
   const deps: AutoReactorDeps = {
     settings: () => settings,
     judge,
@@ -74,6 +78,7 @@ function harness(overrides: Partial<AutoReactSettings> = {}, verdict: Verdict | 
     loadImages,
     report,
     wasRouted: (messageId) => routed.has(messageId),
+    inExchange: (channelId, userId) => partners.has(`${channelId}:${userId}`),
     now: () => clock.now,
     setTimer: (fn, ms) => {
       const timer = { fn, ms, cleared: false };
@@ -96,6 +101,7 @@ function harness(overrides: Partial<AutoReactSettings> = {}, verdict: Verdict | 
     clock,
     guide,
     routed,
+    partners,
     async fire() {
       for (const timer of timers.splice(0)) if (!timer.cleared) timer.fn();
       await reactor.idle();
@@ -288,7 +294,7 @@ describe('AutoReactor: gates', () => {
 
   it('skips a post the bot replied to', async () => {
     const h = harness();
-    h.reactor.noteBotMessage('main', { repliedToId: 'm1', partnerId: DALE });
+    h.reactor.noteBotMessage('main', { repliedToId: 'm1' });
     expect(await h.reactor.evaluate(candidate('m1'))).toEqual({ status: 'skipped', reason: 'bot replied' });
   });
 
@@ -307,28 +313,64 @@ describe('AutoReactor: gates', () => {
     expect(h.ledger.has('m2')).toBe(false);
   });
 
-  it('skips a post whose author is mid-exchange with the bot (the gate answers those)', async () => {
+  it('skips a post whose author the gate counts as mid-exchange (its follow-ups are the gate\'s)', async () => {
     const h = harness();
-    h.reactor.noteBotMessage('main', { repliedToId: 'earlier', partnerId: REMI });
-    h.clock.now += 60_000;
+    h.partners.add(`main:${REMI}`);
     expect(await h.reactor.evaluate(candidate('m1'))).toEqual({
       status: 'skipped',
       reason: 'author is talking with the bot',
     });
-    // Other channels and other members are unaffected; the window ends.
-    expect(await h.reactor.evaluate({ ...candidate('m2', { authorId: DALE }) })).toMatchObject({ status: 'reacted' });
+    expect(h.judge).not.toHaveBeenCalled();
+    // Other members are unaffected, and so is the author once the gate's exchange is over.
+    expect(await h.reactor.evaluate(candidate('m2', { authorId: DALE }))).toMatchObject({ status: 'reacted' });
+    h.partners.clear();
     h.clock.now += 45 * MIN;
     expect(await h.reactor.evaluate(candidate('m3'))).toMatchObject({ status: 'reacted' });
   });
 
-  it('treats a linked side account as the same person', async () => {
+  it('asks the real gate: every partner of the exchange, side accounts included, not just the last one answered', async () => {
     vi.stubEnv('LINKED_ACCOUNTS', `200000000000000009:${REMI}`);
     try {
+      const clock = { now: T0 };
+      const gate = new AddressedGate({
+        classify: async () => undefined,
+        now: () => clock.now,
+        settings: () => ({
+          enabled: true,
+          channelIds: ['main'],
+          names: ['fridge'],
+          followupSeconds: 120,
+          maxPer10Min: 30,
+          maxColdPer10Min: 3,
+          threshold: 0.7,
+        }),
+      });
+      const answer = (authorId: string, messageId: string) => {
+        const { message } = createFakeMessage({ channelId: 'main', authorId, messageId, content: '<@bot-1> yo' });
+        gate.noteRouted(message);
+        gate.noteTurnDone(message);
+      };
+      answer(REMI, 'q1');
+      clock.now += 60_000;
+      answer(DALE, 'q2'); // the bot's latest answer went to Dale; Remi is still a partner
+
       const h = harness();
-      h.reactor.noteBotMessage('main', { repliedToId: 'earlier', partnerId: REMI });
-      expect(await h.reactor.evaluate(candidate('m1', { authorId: '200000000000000009' }))).toMatchObject({
+      const reactor = new AutoReactor({
+        settings: () => h.settings,
+        judge: h.judge,
+        guide: () => h.guide.current,
+        ledger: h.ledger,
+        emojis: () => EMOJIS,
+        loadImages: h.loadImages,
+        report: h.report,
+        inExchange: (channelId, userId) => gate.isInExchange(channelId, userId),
+        now: () => clock.now,
+      });
+      expect(await reactor.evaluate(candidate('m1', { authorId: '200000000000000009' }))).toMatchObject({
         reason: 'author is talking with the bot',
       });
+      clock.now += 121_000;
+      expect(await reactor.evaluate(candidate('m2'))).toMatchObject({ status: 'reacted' });
     } finally {
       vi.unstubAllEnvs();
     }

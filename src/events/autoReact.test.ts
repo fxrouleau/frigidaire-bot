@@ -35,7 +35,6 @@ beforeEach(() => {
       minGapMs: 0,
       minProfileMessages: 0,
       delayMs: 10_000,
-      exchangeWindowMs: 120_000,
     }),
     judge,
     guide: () => ({ messages: 0, reactedMessages: 0, baseRate: 0, emojis: [], text: '', builtAt: 0 }),

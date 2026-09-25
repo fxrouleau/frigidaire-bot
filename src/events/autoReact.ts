@@ -15,10 +15,7 @@ export default defineEvent(Events.MessageCreate, {
       // A voice-message transcript isn't the bot talking (aiChat's rule too): the voice message stays a
       // candidate, and its author isn't mid-exchange with the bot.
       if (isTranscriptReply(message)) return;
-      reactor.noteBotMessage(message.channel.id, {
-        repliedToId: message.reference?.messageId,
-        partnerId: message.mentions.repliedUser?.id,
-      });
+      reactor.noteBotMessage(message.channel.id, { repliedToId: message.reference?.messageId });
       return;
     }
     const skip = intakeSkipReason(message, {

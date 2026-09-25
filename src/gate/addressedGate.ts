@@ -152,6 +152,19 @@ export class AddressedGate {
     return this.routedIds.has(messageId);
   }
 
+  /**
+   * Whether `userId` (or their linked main/side account) is a partner in the channel's active exchange:
+   * their next message there is a candidate without naming the bot. Auto-react asks this, so "talking
+   * with the bot" means the same thing to both features (partners span the whole exchange, not just the
+   * last person answered). Read-only: no state is created for a channel the gate hasn't seen.
+   */
+  isInExchange(channelId: string, userId: string): boolean {
+    const settings = this.settings();
+    if (!settings.enabled || !settings.channelIds.includes(channelId) || !this.channels.has(channelId)) return false;
+    const state = this.current(channelId, settings, this.now());
+    return this.isActive(state, settings, this.now()) && this.isPartner(state, userId);
+  }
+
   /** The routed turn for `message` finished: the bot answered its author, which extends the exchange. */
   noteTurnDone(message: Message): void {
     const state = this.channels.get(message.channel.id);

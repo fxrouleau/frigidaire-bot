@@ -455,6 +455,46 @@ describe('AddressedGate.wasRouted', () => {
   });
 });
 
+describe('AddressedGate.isInExchange (asked by auto-react)', () => {
+  it('is true for every partner of the active exchange, and only while it lasts', () => {
+    const h = harness();
+    answered(h, T0 - 60_000); // user-1
+    answered(h, T0 - 20_000, KEV);
+    h.clock.now = T0;
+    expect(h.gate.isInExchange(CHANNEL, 'user-1')).toBe(true);
+    expect(h.gate.isInExchange(CHANNEL, KEV.authorId)).toBe(true);
+    expect(h.gate.isInExchange(CHANNEL, THEO.authorId)).toBe(false);
+    expect(h.gate.isInExchange('clips-1', 'user-1')).toBe(false);
+
+    // GATE_FOLLOWUP_SECONDS after the last answer (T0-15s), the exchange and its partners are over.
+    h.clock.now = T0 + 106_000;
+    expect(h.gate.isInExchange(CHANNEL, KEV.authorId)).toBe(false);
+    expect(h.gate.isInExchange(CHANNEL, 'user-1')).toBe(false);
+  });
+
+  it('counts a turn still being answered, and a side account as its member', () => {
+    vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
+    try {
+      const h = harness();
+      h.gate.noteRouted(human('<@bot-1> thoughts?', { authorId: '100000000000000001' }).message);
+      expect(h.gate.isInExchange(CHANNEL, '100000000000000002')).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('is false when the gate is off or not watching the channel', () => {
+    const off = harness({ enabled: false });
+    answered(off, T0 - 10_000);
+    off.clock.now = T0;
+    expect(off.gate.isInExchange(CHANNEL, 'user-1')).toBe(false);
+    const noFollowups = harness({ followupSeconds: 0 });
+    answered(noFollowups, T0 - 10_000);
+    noFollowups.clock.now = T0;
+    expect(noFollowups.gate.isInExchange(CHANNEL, 'user-1')).toBe(false);
+  });
+});
+
 describe('AddressedGate caps', () => {
   it('caps cold name-drops at GATE_MAX_COLD_PER_10MIN per channel, without calling the model', async () => {
     // No follow-up window: every name-drop is cold.

@@ -7,15 +7,15 @@
 //      reply, see candidate.ts); each candidate waits AUTO_REACT_DELAY_SECONDS so link previews resolve
 //      and a quick delete or the link fixer's repost lands first.
 //   2. before spending a model call: still there, attributable to a member (relays included), not
-//      replied to or reacted to by the bot, the author isn't mid-exchange with the bot (a follow-up there
-//      is the gate's to answer), the budget has room, and the archive has taught enough (learn first).
+//      replied to or reacted to by the bot, the author isn't mid-exchange with the bot (the gate's own
+//      notion, asked through `inExchange`: a partner's follow-up is the gate's to answer), the budget has
+//      room, and the archive has taught enough (learn first).
 //   3. the judge (judge.ts) sees the post, its images and preview text, a few messages of context and the
 //      reaction guide (guide.ts), and answers react / emoji / why.
 //   4. the emoji must exist (server emoji or unicode); the budget slot is claimed synchronously, then
 //      'on' reacts and 'shadow' only posts what it would have done to the report channel.
 import type { EmojiRow } from '../ai/memory/memoryStore';
 import { resolveReactionEmoji } from '../ai/tools/react';
-import { isSamePerson } from '../linkedAccounts';
 import { logger } from '../logger';
 import type { ReactionGuide } from './guide';
 import type { AutoReactJudge, ContextLine } from './judge';
@@ -29,8 +29,6 @@ export type AutoReactSettings = {
   minGapMs: number;
   minProfileMessages: number;
   delayMs: number;
-  /** A member the bot replied to within this window is mid-exchange with it. */
-  exchangeWindowMs: number;
 };
 
 /** What the judge is shown about the post, read after the debounce (embeds and reactions have landed). */
@@ -84,6 +82,11 @@ export type AutoReactorDeps = {
    * reply hasn't been posted yet, and a gate-routed follow-up from a partner answered earlier on.
    */
   wasRouted?: (messageId: string) => boolean;
+  /**
+   * Whether the author is a partner in the bot's active exchange in that channel (the gate's
+   * isInExchange): their follow-ups are the gate's to answer, so they are not reacted to meanwhile.
+   */
+  inExchange?: (channelId: string, userId: string) => boolean;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -93,11 +96,11 @@ const CONTEXT_MESSAGES = 6;
 const MAX_IMAGES = 2;
 // Posts waiting out the delay. A flood beyond this is not worth judging one by one.
 const MAX_PENDING = 50;
-// How long the bot's replies are remembered (the exchange window check and "the bot replied to it").
+// How long the bot's replies are remembered ("the bot replied to it").
 const REPLY_MEMORY_MS = 30 * 60 * 1000;
 const TALLY_PERIOD_MS = 24 * 60 * 60 * 1000;
 
-type BotReply = { repliedToId: string; partnerId?: string; at: number };
+type BotReply = { repliedToId: string; at: number };
 
 /** Model- and member-written text in a report line must never ping anyone (@everyone, @someone). */
 function noPings(text: string): string {
@@ -160,12 +163,12 @@ export class AutoReactor {
     if (this.cancelled.size > 500) this.cancelled.delete(this.cancelled.values().next().value as string);
   }
 
-  /** The bot posted in a channel; a reply marks its target (and its author) as engaged with the bot. */
-  noteBotMessage(channelId: string, reply: { repliedToId?: string; partnerId?: string }): void {
+  /** The bot posted in a channel; a reply marks its target as answered (never also reacted to). */
+  noteBotMessage(channelId: string, reply: { repliedToId?: string }): void {
     if (!reply.repliedToId) return;
     const now = this.now();
     const list = (this.botReplies.get(channelId) ?? []).filter((r) => now - r.at < REPLY_MEMORY_MS);
-    list.push({ repliedToId: reply.repliedToId, partnerId: reply.partnerId, at: now });
+    list.push({ repliedToId: reply.repliedToId, at: now });
     this.botReplies.set(channelId, list);
   }
 
@@ -184,12 +187,8 @@ export class AutoReactor {
     return (this.botReplies.get(candidate.channelId) ?? []).some((r) => r.repliedToId === candidate.id);
   }
 
-  private inExchange(candidate: Candidate, authorId: string | undefined, windowMs: number): boolean {
-    if (!authorId || windowMs <= 0) return false;
-    const now = this.now();
-    return (this.botReplies.get(candidate.channelId) ?? []).some(
-      (r) => isSamePerson(r.partnerId, authorId) && now - r.at <= windowMs,
-    );
+  private inExchange(candidate: Candidate, authorId: string | undefined): boolean {
+    return authorId !== undefined && (this.deps.inExchange?.(candidate.channelId, authorId) ?? false);
   }
 
   private budgetLimits(settings: AutoReactSettings): BudgetLimits {
@@ -230,7 +229,7 @@ export class AutoReactor {
     const snapshot = candidate.snapshot();
     if (!snapshot) return { status: 'skipped', reason: 'not a member post' };
     if (snapshot.botReacted) return { status: 'skipped', reason: 'bot already reacted' };
-    if (this.inExchange(candidate, snapshot.authorId, settings.exchangeWindowMs)) {
+    if (this.inExchange(candidate, snapshot.authorId)) {
       return { status: 'skipped', reason: 'author is talking with the bot' };
     }
 

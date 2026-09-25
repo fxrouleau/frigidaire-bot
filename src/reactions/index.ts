@@ -34,8 +34,6 @@ export function autoReactSettings(): AutoReactSettings {
     minGapMs: settings.minGapMinutes * 60_000,
     minProfileMessages: settings.minProfileMessages,
     delayMs: settings.delaySeconds * 1000,
-    // The gate answers a member's follow-ups for this long after the bot replied to them.
-    exchangeWindowMs: config.gate.enabled ? config.gate.followupSeconds * 1000 : 0,
   };
 }
 
@@ -56,6 +54,8 @@ export function getAutoReactor(client: Client): AutoReactor {
       report: (text) => sendToReportChannel(client, text),
       // A post the agent is answering (a gate-routed follow-up included) never also gets a reaction.
       wasRouted: (messageId) => addressedGate.wasRouted(messageId),
+      // Nor does one by a partner in the gate's active exchange: its follow-ups are the gate's to answer.
+      inExchange: (channelId, userId) => addressedGate.isInExchange(channelId, userId),
     });
   }
   return shared;

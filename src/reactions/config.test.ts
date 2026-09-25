@@ -39,12 +39,15 @@ describe('config.autoReact', () => {
     expect(config.autoReact.maxPerDay).toBe(3);
   });
 
-  it('turns into the reactor settings, with the gate follow-up window as the exchange window', () => {
+  it('turns into the reactor settings (who is mid-exchange is the gate\'s to say, not a setting)', () => {
     vi.stubEnv('AUTO_REACT_MIN_GAP_MINUTES', '30');
-    vi.stubEnv('GATE_FOLLOWUP_SECONDS', '90');
-    expect(autoReactSettings()).toMatchObject({ minGapMs: 30 * 60_000, delayMs: 10_000, exchangeWindowMs: 90_000 });
-    vi.stubEnv('GATE_ENABLED', 'false');
-    expect(autoReactSettings().exchangeWindowMs).toBe(0);
+    expect(autoReactSettings()).toEqual({
+      mode: 'shadow',
+      maxPerDay: 3,
+      minGapMs: 30 * 60_000,
+      minProfileMessages: expect.any(Number),
+      delayMs: 10_000,
+    });
   });
 });
 
