@@ -14,6 +14,7 @@ function fakeDeps(
     transcript?: TranscriptionOutcome;
     video?: VideoOutcome;
     cachedTranscripts?: Record<string, string>;
+    pendingTranscripts?: Record<string, Promise<TranscriptionOutcome>>;
     cachedDescriptions?: Record<string, string>;
   } = {},
 ) {
@@ -25,6 +26,7 @@ function fakeDeps(
       return opts.transcript ?? { status: 'ok', text: 'yo who is on tonight', cached: false };
     },
     cachedTranscript: (key) => opts.cachedTranscripts?.[key],
+    pendingTranscript: (key) => opts.pendingTranscripts?.[key],
     describe: async (input) => {
       described.push(input);
       return opts.video ?? { status: 'ok', text: 'A cat knocks a glass off a table.', cached: false };
@@ -126,6 +128,22 @@ describe('media enricher', () => {
     });
     expect(await createMediaEnricher(deps).enrich(message, 'current')).toHaveLength(3);
     expect(transcribed).toHaveLength(3);
+  });
+
+  it('joins a transcription already running for a history message instead of calling it untranscribed', async () => {
+    // The auto-transcript reply is still being computed when someone asks "what did he say".
+    const running = Promise.resolve<TranscriptionOutcome>({ status: 'ok', text: 'on joue ce soir', cached: false });
+    const { deps, transcribed } = fakeDeps({ pendingTranscripts: { 'voice-1': running } });
+
+    expect(await createMediaEnricher(deps).enrich(voiceMessage(), 'history')).toEqual([
+      { type: 'text', text: '[voice message from Remi, 0:42: on joue ce soir]' },
+    ]);
+    expect(transcribed).toEqual([]);
+
+    const nothingRunning = fakeDeps();
+    expect(await createMediaEnricher(nothingRunning.deps).enrich(voiceMessage(), 'history')).toEqual([
+      { type: 'text', text: '[voice message from Remi, 0:42 — not transcribed]' },
+    ]);
   });
 
   it('describes a posted video, passing who posted it and what they said', async () => {

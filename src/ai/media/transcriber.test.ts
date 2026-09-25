@@ -136,6 +136,20 @@ describe('AudioTranscriber', () => {
     expect(getStoredTranscript('msg-1')).toBe(TRANSCRIPT);
   });
 
+  it('exposes a run in flight, so a history reader can join it for free', async () => {
+    const { transcriber, requests } = setup([success]);
+    expect(transcriber.pending('msg-9')).toBeUndefined();
+
+    const run = transcriber.transcribe({ url: VOICE_URL, messageId: 'msg-9', durationSecs: 4 });
+    const joined = transcriber.pending('msg-9');
+
+    expect(joined).toBeDefined();
+    expect(await joined).toEqual({ status: 'ok', text: TRANSCRIPT, cached: false });
+    expect(await run).toEqual({ status: 'ok', text: TRANSCRIPT, cached: false });
+    expect(requests).toHaveLength(1);
+    expect(transcriber.pending('msg-9')).toBeUndefined();
+  });
+
   it('does not persist transcripts that have no message id', async () => {
     const { transcriber } = setup([success]);
     await transcriber.transcribe({ url: VOICE_URL });

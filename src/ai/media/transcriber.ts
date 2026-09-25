@@ -144,6 +144,14 @@ export class AudioTranscriber {
     return getStoredTranscript(key);
   }
 
+  /**
+   * The transcription running right now for a cache key (typically the auto-transcript reply, seconds
+   * after the voice message was posted), to join instead of reading the recording as untranscribed.
+   */
+  pending(key: string): Promise<TranscriptionOutcome> | undefined {
+    return this.inFlight.get(key);
+  }
+
   async transcribe(input: AudioInput): Promise<TranscriptionOutcome> {
     const key = input.messageId ?? `url:${mediaCacheKey(input.url)}`;
     if (input.messageId) {
