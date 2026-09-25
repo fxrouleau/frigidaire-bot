@@ -38,6 +38,12 @@ const SCHEMA = `
     updated_at          INTEGER NOT NULL,
     last_announced_year INTEGER
   );
+  -- Every user BIRTHDAYS_SEED has been applied to (inserted, or skipped because they already had a
+  -- birthday). The seed only ever touches a user once, so forget_birthday sticks across restarts.
+  CREATE TABLE IF NOT EXISTS birthday_seed_applied (
+    user_id    TEXT    PRIMARY KEY,
+    applied_at INTEGER NOT NULL
+  );
 `;
 
 /** The oldest birth year accepted; anything earlier is a typo. */
@@ -231,7 +237,8 @@ export function parseSeed(entries: string[], today: CalendarDate): { entries: Se
 /**
  * Applies BIRTHDAYS_SEED: inserts each entry whose user has no birthday yet. Entries for users who
  * already have one (set through the tool, or seeded on an earlier boot) are left alone, so the variable
- * can stay set forever without overwriting corrections made in chat.
+ * can stay set forever without overwriting corrections made in chat. Each user is seeded at most once,
+ * ever (birthday_seed_applied): a birthday deleted with forget_birthday stays deleted on the next boot.
  */
 export function applySeed(rawEntries: string[], now: Date, today: CalendarDate): { added: number; skipped: number } {
   if (rawEntries.length === 0) return { added: 0, skipped: 0 };
@@ -242,6 +249,11 @@ export function applySeed(rawEntries: string[], now: Date, today: CalendarDate):
   let added = 0;
   store.transaction(() => {
     for (const entry of entries) {
+      const firstTime =
+        store
+          .stmt('INSERT INTO birthday_seed_applied (user_id, applied_at) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING')
+          .run(entry.userId, now.getTime()).changes === 1;
+      if (!firstTime) continue;
       added += store
         .stmt(
           `INSERT INTO birthdays (user_id, month, day, year, set_by, updated_at, last_announced_year)
