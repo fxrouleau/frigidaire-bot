@@ -4,6 +4,7 @@ import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import { type FakeMessageOptions, createFakeMessage } from '../../test-support/fakeDiscord';
 import {
   TOO_LONG_HEADER,
+  TRANSCRIPT_CONTINUED_HEADER,
   TRANSCRIPT_HEADER,
   VoiceAutoTranscriber,
   type VoiceAutoTranscriberOptions,
@@ -12,6 +13,7 @@ import {
   isTranscriptReply,
   isTranscriptReplyId,
 } from './autoTranscribe';
+import { rememberTranscriptReply } from './store';
 import type { AudioInput, TranscriptionOutcome } from './types';
 
 const VOICE_URL = 'https://cdn.discordapp.com/attachments/1/2/voice-message.ogg';
@@ -170,13 +172,17 @@ describe('formatTranscriptReply', () => {
     const words = Array.from({ length: 900 }, (_, i) => `word${i}`).join(' ');
     const chunks = formatTranscriptReply(words);
     expect(chunks.length).toBeGreaterThan(1);
-    for (const chunk of chunks) {
+    for (const [index, chunk] of chunks.entries()) {
       expect(chunk.length).toBeLessThanOrEqual(2000);
-      for (const line of chunk.split('\n').filter((l) => l !== TRANSCRIPT_HEADER)) {
+      const [header, ...lines] = chunk.split('\n');
+      expect(header).toBe(index === 0 ? TRANSCRIPT_HEADER : TRANSCRIPT_CONTINUED_HEADER);
+      for (const line of lines) {
         expect(line.startsWith('>')).toBe(true);
       }
     }
-    expect(chunks[0].startsWith(TRANSCRIPT_HEADER)).toBe(true);
+    // Nothing lost or duplicated across the split.
+    const rejoined = chunks.flatMap((chunk) => chunk.split('\n').slice(1)).join(' ').replaceAll('> ', '');
+    expect(rejoined).toBe(words);
   });
 
   it('cuts runaway transcripts after five messages', () => {
@@ -198,5 +204,25 @@ describe('isTranscriptReply', () => {
     expect(formatTooLongNote(700).startsWith(TOO_LONG_HEADER)).toBe(true);
     expect(isTranscriptReply(quoted.message)).toBe(false);
     expect(isTranscriptReply(normal.message)).toBe(false);
+  });
+
+  it('recognizes every message of a multi-part transcript, not just the first', () => {
+    const chunks = formatTranscriptReply(Array.from({ length: 900 }, (_, i) => `word${i}`).join(' '));
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const content of chunks) {
+      const posted = createFakeMessage({ authorId: 'bot-1', botUserId: 'bot-1', content });
+      expect(isTranscriptReply(posted.message)).toBe(true);
+    }
+  });
+
+  it('recognizes a stored transcript reply by its id (a continuation posted before the marker existed)', () => {
+    rememberTranscriptReply('old-chunk-2', 'voice-1');
+    const continuation = createFakeMessage({
+      authorId: 'bot-1',
+      botUserId: 'bot-1',
+      messageId: 'old-chunk-2',
+      content: '> and then he said the thing',
+    });
+    expect(isTranscriptReply(continuation.message)).toBe(true);
   });
 });

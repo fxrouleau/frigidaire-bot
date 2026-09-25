@@ -16,6 +16,9 @@ import type { AudioInput, TranscriptionOutcome } from './types';
 import { audioAttachments, formatClock, isVoiceMessage, transcriptKey } from './voice';
 
 export const TRANSCRIPT_HEADER = '-# 🎙️ transcript';
+// Opens every message of a long transcript after the first, so each one reads as a transcript on its own
+// (to members, and to isTranscriptReply(): it starts with TRANSCRIPT_HEADER too).
+export const TRANSCRIPT_CONTINUED_HEADER = `${TRANSCRIPT_HEADER} (cont.)`;
 export const TOO_LONG_HEADER = '-# 🎙️ too long to transcribe';
 
 const MAX_AUDIO_PER_MESSAGE = 3;
@@ -38,11 +41,16 @@ const TRANSCRIBE_CHANNEL_TYPES: ReadonlySet<ChannelType> = new Set([
  * replays channel history to a model should skip these: the voice message they answer already carries
  * the transcript through the media enricher. And they are not the bot talking: a reply to one is a
  * reply to the voice message, not to the bot.
+ *
+ * By the header every transcript message opens with, else by the stored reply ids (continuations
+ * posted before they had a header of their own). The header is what answers for the bot's own
+ * MessageCreate: the id is stored only once the reply call returns, which can be after that event.
  */
 export function isTranscriptReply(message: Message): boolean {
   if (message.author.id !== message.client.user?.id) return false;
   const content = message.content ?? '';
-  return content.startsWith(TRANSCRIPT_HEADER) || content.startsWith(TOO_LONG_HEADER);
+  if (content.startsWith(TRANSCRIPT_HEADER) || content.startsWith(TOO_LONG_HEADER)) return true;
+  return isTranscriptReplyId(message.id);
 }
 
 /**
@@ -90,7 +98,6 @@ function wrapLine(line: string): string[] {
  * a quote. Transcripts are escaped so a spoken "*" or "# " can't turn into formatting.
  */
 export function formatTranscriptReply(text: string): string[] {
-  const header = TRANSCRIPT_HEADER;
   const quoted = text
     .split('\n')
     .map((line) =>
@@ -98,7 +105,11 @@ export function formatTranscriptReply(text: string): string[] {
     )
     .flatMap(wrapLine)
     .map((line) => (line.length > 0 ? `> ${line}` : '>'));
-  const chunks = splitMessage([header, ...quoted].join('\n'), 2000);
+  // Every message opens with a header line (the first TRANSCRIPT_HEADER, the rest the continued one),
+  // so the body is split with room for the longer of the two.
+  const chunks = splitMessage(quoted.join('\n'), 2000 - TRANSCRIPT_CONTINUED_HEADER.length - 1).map(
+    (body, index) => `${index === 0 ? TRANSCRIPT_HEADER : TRANSCRIPT_CONTINUED_HEADER}\n${body}`,
+  );
   if (chunks.length <= MAX_REPLY_CHUNKS) return chunks;
   const kept = chunks.slice(0, MAX_REPLY_CHUNKS);
   kept[MAX_REPLY_CHUNKS - 1] = `${kept[MAX_REPLY_CHUNKS - 1].slice(0, 1900)}\n-# (transcript cut short)`;
