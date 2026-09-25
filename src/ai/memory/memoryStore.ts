@@ -178,9 +178,10 @@ export function nameKey(name: string | null | undefined): string {
 }
 
 // The names a member goes by, strongest claim first: the current display name (what the group sees),
-// the Discord handle, the first-seen display name, the IRL name, then nicknames. Every name lookup
-// (memory tools, learner subjects, the startup stamp, summaries) walks these tiers in this order;
-// src/ai/people.ts adds one weaker tier (the first word of an IRL name) for interactive lookups.
+// the Discord handle, the first-seen display name, the IRL name, then nicknames. Interactive lookups
+// (src/ai/people.ts: memory tools, learner subjects, summaries, reminders) walk these tiers in this
+// order, plus one weaker tier (the first word of an IRL name); the startup stamp checks all of them at
+// once (everyoneGoingBy below).
 export const IDENTITY_NAME_TIERS: readonly ((identity: Identity) => (string | null | undefined)[])[] = [
   (i) => [i.display_name],
   (i) => [i.username],
@@ -188,31 +189,6 @@ export const IDENTITY_NAME_TIERS: readonly ((identity: Identity) => (string | nu
   (i) => [i.irl_name],
   (i) => i.aliases,
 ];
-
-/**
- * The members a name refers to, case-insensitively: the matches of the FIRST tier that has any (see
- * IDENTITY_NAME_TIERS). One element = a unique match; more = ambiguous (two members share that name at
- * the same strength, e.g. two people called Alex IRL); none = nobody goes by it. A display-name match
- * wins over another member's nickname, so adding an alias can never steal someone's own name.
- */
-export function findIdentitiesByName(identities: Identity[], name: string): Identity[] {
-  const needle = nameKey(name);
-  if (!needle) return [];
-  for (const namesInTier of IDENTITY_NAME_TIERS) {
-    const hits = identities.filter((i) => namesInTier(i).some((n) => nameKey(n) === needle));
-    if (hits.length > 0) return hits;
-  }
-  return [];
-}
-
-/**
- * The one identity a name refers to, or undefined when nobody or more than one member goes by it —
- * guessing between two people would file a memory under the wrong one.
- */
-export function matchIdentityByName(identities: Identity[], name: string): Identity | undefined {
-  const hits = findIdentitiesByName(identities, name);
-  return hits.length === 1 ? hits[0] : undefined;
-}
 
 /**
  * The main account ids of every member who goes by a name in ANY form, ignoring tier strength (the

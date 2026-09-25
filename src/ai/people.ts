@@ -206,11 +206,26 @@ function toResolved(member: Member): ResolvedPerson {
 export function findMembersByName(members: Member[], name: string): Member[] {
   const needle = nameKey(name);
   if (!needle) return [];
-  for (const tier of MEMBER_NAME_TIERS) {
-    const hits = members.filter((m) => m.rows.some((row) => tier(row).some((n) => nameKey(n) === needle)));
+  for (let tier = 0; tier < MEMBER_NAME_TIERS.length; tier++) {
+    const hits = members.filter((m) => tierKeysOf(m)[tier].has(needle));
     if (hits.length > 0) return hits;
   }
   return [];
+}
+
+// Per member, the name keys of each tier, computed once: a text matcher asks about every name of every
+// member, and normalizing each name again per question adds up.
+const tierKeysCache = new WeakMap<Member, ReadonlySet<string>[]>();
+
+function tierKeysOf(member: Member): ReadonlySet<string>[] {
+  let keys = tierKeysCache.get(member);
+  if (!keys) {
+    keys = MEMBER_NAME_TIERS.map(
+      (tier) => new Set(member.rows.flatMap((row) => tier(row).map(nameKey)).filter((key) => key.length > 0)),
+    );
+    tierKeysCache.set(member, keys);
+  }
+  return keys;
 }
 
 /** The one member a name refers to, or undefined when nobody or more than one member goes by it. */
