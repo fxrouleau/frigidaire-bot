@@ -428,6 +428,113 @@ describe('memories keyed by stable member id', () => {
     const aboutMe = await recallMemoriesTool!.handler(ctxFor(), { query: 'me' });
     expect(aboutMe).toContain('Miata');
   });
+
+  it('resolves a Discord handle in remember_fact and recall_memories (rows filed under it included)', async () => {
+    const store = getMemoryStore();
+    store.upsertIdentity('222222222222222222', 'Jason', 'cigalefourmi');
+    // What the learner used to do: file a memory under the handle, without an id.
+    const underHandle = await store.save({ category: 'fact', subject: 'cigalefourmi', content: 'Mains Jhin in ranked' });
+
+    await rememberFactTool!.handler(ctxFor({ authorId: '111111111111111111', authorDisplayName: 'Wheezer' }), {
+      category: 'fact',
+      subject: 'cigalefourmi',
+      content: 'Works nights at the depot',
+    });
+    const saved = store.getAllActive().find((m) => m.content === 'Works nights at the depot');
+    expect(saved).toMatchObject({ subject: 'Jason', subject_user_id: '222222222222222222' });
+
+    const recalled = await recallMemoriesTool!.handler(ctxFor(), { query: 'something', subject: 'Jason' });
+    expect(recalled).toContain(`[id:${underHandle}]`);
+    expect(recalled).toContain('Works nights at the depot');
+  });
+});
+
+describe('set_member_info tool', () => {
+  const setMemberInfoTool = toolDefinitions.find((t) => t.name === 'set_member_info');
+
+  function ctxFor(opts: FakeMessageOptions = {}): ToolHandlerContext {
+    const { message } = createFakeMessage({ authorId: '222222222222222222', authorDisplayName: 'Jason', ...opts });
+    return { message } as ToolHandlerContext;
+  }
+
+  beforeEach(() => {
+    const store = getMemoryStore();
+    store.upsertIdentity('111111111111111111', 'Wheezer', 'wheezy_d');
+    store.upsertIdentity('222222222222222222', 'Jason', 'cigalefourmi');
+    store.updateIdentityMeta('222222222222222222', { irl_name: 'Alex' });
+  });
+
+  it('is offered to the model with a person and optional real_name / add_nickname', () => {
+    const params = setMemberInfoTool!.parameters as { properties: Record<string, unknown>; required: string[] };
+    expect(Object.keys(params.properties).sort()).toEqual(['add_nickname', 'person', 'real_name']);
+    expect(params.required).toEqual(['person']);
+  });
+
+  it('"fridge, Yi\'s real name is Yi": sets the real name of an @-mentioned member, even one never seen before', async () => {
+    const ctx = ctxFor({
+      content: "<@1> <@333333333333333333>'s real name is Yi",
+      mentionedUsers: [{ id: '333333333333333333', displayName: 'yiyi_gamer' }],
+    });
+
+    const result = await setMemberInfoTool!.handler(ctx, { person: 'yiyi_gamer', real_name: 'Yi' });
+
+    expect(result).toBe('yiyi_gamer: real name is now Yi.');
+    expect(getMemoryStore().getIdentityById('333333333333333333')).toMatchObject({ display_name: 'yiyi_gamer', irl_name: 'Yi' });
+  });
+
+  it('replaces a real name and adds a nickname, which every later lookup then understands', async () => {
+    const result = await setMemberInfoTool!.handler(ctxFor(), { person: 'me', real_name: 'Alexandre', add_nickname: 'Big J' });
+
+    expect(result).toBe('Jason: real name is now Alexandre (was Alex); added nickname "Big J".');
+    expect(getMemoryStore().getIdentityById('222222222222222222')).toMatchObject({ irl_name: 'Alexandre', aliases: ['Big J'] });
+
+    await rememberFactTool!.handler(ctxFor({ authorId: '111111111111111111', authorDisplayName: 'Wheezer' }), {
+      category: 'fact',
+      subject: 'big j',
+      content: 'Drives a red Miata',
+    });
+    expect(getMemoryStore().getAllActive()[0]).toMatchObject({ subject: 'Jason', subject_user_id: '222222222222222222' });
+  });
+
+  it('resolves the person by any name they go by, and reports a no-op honestly', async () => {
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'wheezy_d', real_name: 'Derrick' })).toBe(
+      'Wheezer: real name is now Derrick.',
+    );
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Derrick', real_name: 'Derrick' })).toBe(
+      'Wheezer: real name was already Derrick.',
+    );
+  });
+
+  it("refuses a nickname that is another member's own name or already theirs, and notes a shared one", async () => {
+    const store = getMemoryStore();
+    store.updateIdentityMeta('111111111111111111', { aliases_add: ['Boss'] });
+
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Wheezer', add_nickname: 'cigalefourmi' })).toBe(
+      'Nothing changed for Wheezer. "cigalefourmi" is Jason\'s own name, so it can\'t also be Wheezer\'s nickname.',
+    );
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Wheezer', add_nickname: 'boss' })).toBe(
+      'Nothing changed for Wheezer. Wheezer already goes by "boss".',
+    );
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Wheezer', add_nickname: 'server' })).toMatch(
+      /"server" can't be a nickname/,
+    );
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason', add_nickname: 'Boss' })).toBe(
+      'Jason: added nickname "Boss". Wheezer also goes by "Boss", so that name alone won\'t tell them apart.',
+    );
+    expect(store.getIdentityById('111111111111111111')?.aliases).toEqual(['Boss']);
+  });
+
+  it('rejects unknown people, empty updates and anything that is not a plain name', async () => {
+    const store = getMemoryStore();
+    const before = store.getAllIdentities();
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Nobody', real_name: 'Bob' })).toMatch(/I don't know who "Nobody" is/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason' })).toMatch(/Nothing to update/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason', add_nickname: '@everyone' })).toMatch(/plain text/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason', real_name: 'x'.repeat(60) })).toMatch(/plain text/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: 'Jason', add_nickname: 'see https://x.com' })).toMatch(/plain text/);
+    expect(await setMemberInfoTool!.handler(ctxFor(), { person: ' ', real_name: 'Bob' })).toMatch(/person was empty/);
+    expect(store.getAllIdentities()).toEqual(before);
+  });
 });
 
 describe('summarize_messages tool', () => {

@@ -6,8 +6,8 @@ import { logger } from '../logger';
 import { attributeMessage } from '../relay';
 import { getCachedTranscript } from './media';
 import { type Identity, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
-import { matchIdentityByName, namesOf } from './people';
 import { getOpenRouterClient } from './openRouterClient';
+import { matchIdentityByName, namesOf } from './people';
 import { formatEmojiLines, formatIdentityLines } from './promptSections';
 import { type UsageFeature, featureRequestOptions } from './usage';
 import { formatTimestampET } from './utils';
@@ -478,7 +478,8 @@ export class PersonalityLearner {
       if (memberName) {
         this.store.upsertIdentity(msg.author.id, memberName, username);
       } else if (known) {
-        if (username && known.username !== username) this.store.upsertIdentity(msg.author.id, known.display_name, username);
+        if (username && known.username !== username)
+          this.store.upsertIdentity(msg.author.id, known.display_name, username);
       } else {
         const fallback = msg.author.displayName || msg.author.username;
         if (fallback) this.store.upsertIdentity(msg.author.id, fallback, username);

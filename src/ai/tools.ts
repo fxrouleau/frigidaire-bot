@@ -8,7 +8,7 @@ import {
   SELF_DIAGNOSIS_CATEGORIES,
   nameKey,
 } from './memory/memoryStore';
-import { type ResolvedPerson, cleanSubject, resolvePerson } from './people';
+import { type ResolvedPerson, cleanSubject, namesOf, resolvePerson } from './people';
 import { emojiSyntax } from './promptSections';
 import { birthdayTools } from './tools/birthdays';
 import { costTools } from './tools/costs';
@@ -86,7 +86,7 @@ function memoriesAbout(
 const summarizeTool: ToolDefinition = {
   name: 'summarize_messages',
   description:
-    'Summarize what was said in this channel over a stretch of time ("catch me up", "what did I miss", "tldr of last night"). Times are Eastern wall-clock (America/New_York) written as \'YYYY-MM-DD HH:MM\'; work them out from the current Eastern time in your context. Vague phrases: "last night" ≈ 18:00 yesterday, "this morning" ≈ 06:00 today, "today" = since 00:00 today, "the last hour" = one hour before now. For "what did I miss" / "since I left", set since_my_last_message instead of guessing a time. Covers at most the last 7 days.',
+    'Summarize what was said in this channel over a stretch of time ("catch me up", "what did I miss", "tldr of last night"). Times are Eastern wall-clock (America/New_York) written as \'YYYY-MM-DD HH:MM\'; work them out from the current Eastern time in your context. Vague phrases: "last night" ≈ 18:00 yesterday, "this morning" ≈ 06:00 today, "today" = since 00:00 today, "the last hour" = one hour before now. For "what did I miss" / "since I left", set since_my_last_message instead of guessing a time. Covers at most the last 7 days. The result ends with the people in that stretch.',
   parameters: {
     type: 'object',
     properties: {
@@ -109,6 +109,123 @@ const summarizeTool: ToolDefinition = {
     additionalProperties: false,
   },
   handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => runSummaryTool(ctx.message, args),
+};
+
+// A real name or nickname the model passes to set_member_info: one short line of plain text.
+const MAX_MEMBER_NAME_LENGTH = 48;
+
+/** A name for set_member_info, or 'invalid' for anything that is not one (markup, mass pings, an essay). */
+function parseMemberName(raw: unknown): string | undefined | 'invalid' {
+  const value = optionalString(raw);
+  if (!value) return undefined;
+  if (/[<>\n]|@(everyone|here)\b|https?:/i.test(value)) return 'invalid';
+  const name = cleanSubject(value).replace(/\s+/g, ' ');
+  if (!name || name.length > MAX_MEMBER_NAME_LENGTH) return 'invalid';
+  return name;
+}
+
+/**
+ * Whether a nickname may be added to a member: not a word that names the group, not one of their own
+ * names already, and not another member's display name, handle or first-seen name (lookups rank those
+ * above nicknames, so it would never find this member anyway). Returns the refusal, or a note when the
+ * nickname is also someone else's real name or nickname, or undefined when it is fine.
+ */
+function checkNickname(
+  store: MemoryStore,
+  userId: string,
+  displayName: string,
+  nickname: string,
+): { refusal?: string; note?: string } {
+  const key = nameKey(nickname);
+  if (NON_PERSON_SUBJECTS.has(key) || ['me', 'i', 'myself'].includes(key)) {
+    return { refusal: `"${nickname}" can't be a nickname.` };
+  }
+  const identities = store.getAllIdentities().filter((i) => i.active !== 0);
+  const own = identities.find((i) => i.discord_user_id === userId);
+  if (namesOf(own, [displayName]).some((n) => nameKey(n) === key)) {
+    return { refusal: `${displayName} already goes by "${nickname}".` };
+  }
+  const others = identities.filter((i) => i.discord_user_id !== userId);
+  const owner = others.find((i) => [i.display_name, i.username, i.canonical_name].some((n) => nameKey(n) === key));
+  if (owner) {
+    return {
+      refusal: `"${nickname}" is ${owner.display_name}'s own name, so it can't also be ${displayName}'s nickname.`,
+    };
+  }
+  const sharer = others.find((i) => [i.irl_name, ...i.aliases].some((n) => nameKey(n) === key));
+  return sharer
+    ? { note: `${sharer.display_name} also goes by "${nickname}", so that name alone won't tell them apart.` }
+    : {};
+}
+
+const setMemberInfoTool: ToolDefinition = {
+  name: 'set_member_info',
+  description:
+    'Record a member\'s real name or a nickname the group uses for them, when someone tells you ("fridge, Yi\'s real name is Yi", "we call Derrick D"). This is how you recognize people by every name they go by. Display names and Discord handles update on their own: never use this for those, for jokes, or for one-off insults.',
+  parameters: {
+    type: 'object',
+    properties: {
+      person: {
+        type: 'string',
+        description: 'Who: any name they go by (display name, handle, real name, nickname), an @mention, or "me".',
+      },
+      real_name: { type: 'string', description: 'Their real-life name. Replaces the one on record.' },
+      add_nickname: { type: 'string', description: 'A nickname the group uses for them, added to the ones on record.' },
+    },
+    required: ['person'],
+    additionalProperties: false,
+  },
+  handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
+    const rawPerson = optionalString(args.person);
+    if (!rawPerson) return 'Say who: person was empty.';
+    const realName = parseMemberName(args.real_name);
+    const nickname = parseMemberName(args.add_nickname);
+    if (realName === 'invalid' || nickname === 'invalid') {
+      return `Names must be plain text up to ${MAX_MEMBER_NAME_LENGTH} characters (no mentions, links or line breaks).`;
+    }
+    if (!realName && !nickname) return 'Nothing to update: give real_name and/or add_nickname.';
+
+    const store = getMemoryStore();
+    const person = resolveSubject(store, rawPerson, ctx.message);
+    if (!person) {
+      return `I don't know who "${rawPerson}" is. Use a name they go by or @mention them.`;
+    }
+
+    // A member @-mentioned before they ever posted has no identity row yet.
+    if (!store.getIdentityById(person.userId)) store.upsertIdentity(person.userId, person.displayName);
+    const before = store.getIdentityById(person.userId);
+
+    const results: string[] = [];
+    const notes: string[] = [];
+    let aliasToAdd: string | undefined;
+    if (nickname) {
+      const check = checkNickname(store, person.userId, person.displayName, nickname);
+      if (check.refusal) notes.push(check.refusal);
+      else aliasToAdd = nickname;
+      if (check.note) notes.push(check.note);
+    }
+
+    const changed = store.updateIdentityMeta(person.userId, {
+      irl_name: realName,
+      aliases_add: aliasToAdd ? [aliasToAdd] : [],
+    });
+    if (realName) {
+      results.push(
+        before?.irl_name === realName
+          ? `real name was already ${realName}`
+          : `real name is now ${realName}${before?.irl_name ? ` (was ${before.irl_name})` : ''}`,
+      );
+    }
+    if (aliasToAdd) results.push(`added nickname "${aliasToAdd}"`);
+
+    // Identity edits change how every later lookup resolves names: leave an audit line.
+    if (changed) logger.info(`set_member_info: ${person.displayName} (${person.userId}): ${results.join(', ')}`);
+    const summary =
+      results.length > 0
+        ? `${person.displayName}: ${results.join('; ')}.`
+        : `Nothing changed for ${person.displayName}.`;
+    return [summary, ...notes].join(' ');
+  },
 };
 
 const imageTool: ToolDefinition = {
@@ -368,6 +485,7 @@ export const toolDefinitions: ToolDefinition[] = [
   rememberFactTool,
   recallMemoriesTool,
   forgetMemoryTool,
+  setMemberInfoTool,
   querySelfDiagnosisTool,
   getEmojiTool,
   ...reactTools,

@@ -384,7 +384,9 @@ function backgroundFor(store: MemoryStore, person: StretchPerson): string[] {
 function describePerson(person: StretchPerson): string {
   const identity = person.identity;
   const handle =
-    identity?.username && identity.username.toLowerCase() !== person.name.toLowerCase() ? ` (@${identity.username})` : '';
+    identity?.username && identity.username.toLowerCase() !== person.name.toLowerCase()
+      ? ` (@${identity.username})`
+      : '';
   const irl = identity?.irl_name ? ` — real name ${identity.irl_name}` : '';
   const aliases = identity && identity.aliases.length > 0 ? `; also called ${identity.aliases.join(', ')}` : '';
   return `${person.name}${handle}${irl}${aliases}`;

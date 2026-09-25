@@ -8,16 +8,16 @@
 // after a rename. A member goes by up to six kinds of name: display name, Discord handle (username),
 // first-seen display name, IRL name and nicknames (aliases), plus their id.
 import type { Message } from 'discord.js';
+import { attributeMessage } from '../relay';
 import {
-  findIdentitiesByName,
   type Identity,
   type MemoryStore,
-  matchIdentityByName,
   NON_PERSON_SUBJECTS,
+  findIdentitiesByName,
+  matchIdentityByName,
   nameKey,
 } from './memory/memoryStore';
 import { STOP_WORDS } from './memory/wordOverlap';
-import { attributeMessage } from '../relay';
 
 export { findIdentitiesByName, matchIdentityByName };
 
@@ -166,7 +166,9 @@ export function createPeopleMatcher(identities: Identity[]): (text: string) => M
   // Longest names first so "Big Mike" wins over "Mike" at the same position.
   const alternatives = [...idByName.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp);
   const namePattern =
-    alternatives.length > 0 ? new RegExp(`(?<![\\p{L}\\p{N}_])(?:${alternatives.join('|')})(?![\\p{L}\\p{N}_])`, 'giu') : undefined;
+    alternatives.length > 0
+      ? new RegExp(`(?<![\\p{L}\\p{N}_])(?:${alternatives.join('|')})(?![\\p{L}\\p{N}_])`, 'giu')
+      : undefined;
 
   return (text: string) => {
     const counts = new Map<string, number>();
