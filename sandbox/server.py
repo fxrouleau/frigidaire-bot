@@ -25,11 +25,16 @@ is dropped when its turn comes. Otherwise a run could POST its own code back bef
 itself going forever. The bearer token alone is not relied on for that: runs share this server's uid.
 
 Everything else in the workspace persists between runs on purpose (saved files, `pip install --user`,
-`npm install`), so one run can leave things behind for the next. What a run leaves behind must not change
-how the *tools* behave in later runs: Python runs with -P and without the workspace on sys.path (a planted
-json.py can't shadow the stdlib), the workspace's bin directories come after the system ones on PATH (a
-planted `jq` can't shadow /usr/bin/jq), node's builtins can't be shadowed by design and its package lookups
-are pinned to the run's own directory (see prepare_run_dir). Installed packages themselves are trusted
+`npm install`), so one run can leave things behind for the next, within a size and file-count limit: the
+workspace is a volume on the host's disk, and filling that disk would take the bot's databases down with
+it. A run that pushes the workspace over the limit is killed, and a workspace found over it after a run is
+wiped (see WorkspaceQuota).
+
+What a run leaves behind must not change how the *tools* behave in later runs: Python runs with -P and
+without the workspace on sys.path (a planted json.py can't shadow the stdlib), the workspace's bin
+directories come after the system ones on PATH (a planted `jq` can't shadow /usr/bin/jq), node's builtins
+can't be shadowed by design and its package lookups are pinned to the run's own directory (see
+prepare_run_dir). Installed packages themselves are trusted
 until a run asks for "reset_workspace": true, which starts it on an empty workspace.
 
 Environment (all optional):
@@ -39,6 +44,8 @@ Environment (all optional):
     SANDBOX_WORKSPACE        working directory and HOME for runs (default /workspace)
     SANDBOX_MEMORY_MB        per-process RLIMIT_DATA (default 768)
     SANDBOX_FILE_SIZE_MB     per-file RLIMIT_FSIZE (default 100)
+    SANDBOX_WORKSPACE_MAX_MB     disk the whole workspace may use (default 2048)
+    SANDBOX_WORKSPACE_MAX_FILES  files and directories the workspace may hold (default 200000)
     SANDBOX_MAX_PROCESSES    RLIMIT_NPROC for the run's user (default 128)
     SANDBOX_QUEUE_SIZE       runs allowed to wait for the lock (default 3)
     SANDBOX_QUEUE_WAIT_SECONDS  how long a queued run waits before giving up (default 30)
@@ -167,6 +174,8 @@ class Settings:
         self.workspace = os.path.abspath(os.environ.get('SANDBOX_WORKSPACE', '').strip() or '/workspace')
         self.memory_bytes = env_int('SANDBOX_MEMORY_MB', 768, 64, 65536) * 1024 * 1024
         self.file_size_bytes = env_int('SANDBOX_FILE_SIZE_MB', 100, 1, 65536) * 1024 * 1024
+        self.workspace_max_bytes = env_int('SANDBOX_WORKSPACE_MAX_MB', 2048, 16, 1_048_576) * 1024 * 1024
+        self.workspace_max_files = env_int('SANDBOX_WORKSPACE_MAX_FILES', 200_000, 100, 100_000_000)
         self.max_processes = env_int('SANDBOX_MAX_PROCESSES', 128, 8, 1_000_000)
         self.queue_size = env_int('SANDBOX_QUEUE_SIZE', 3, 0, 100)
         self.queue_wait_seconds = env_int('SANDBOX_QUEUE_WAIT_SECONDS', 30, 1, 600)
@@ -550,6 +559,97 @@ def wipe_workspace(workspace: str) -> int:
     return removed
 
 
+def _make_owner_listable(path: str, info: os.stat_result) -> None:
+    """Gives the owner r-x on a directory so its entries can be counted (a run can't hide files from it)."""
+    if (info.st_mode & 0o500) != 0o500:
+        with contextlib.suppress(OSError):
+            os.chmod(path, stat.S_IMODE(info.st_mode) | 0o500)
+
+
+def workspace_usage(workspace: str, max_bytes: int, max_files: int) -> tuple[int, int]:
+    """(allocated bytes, entries) under the workspace. Stops counting as soon as either limit is passed,
+    so a run that planted millions of files costs one bounded walk. Symlinks are counted, never followed."""
+    total_bytes = 0
+    total_files = 0
+    stack = [workspace]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    total_files += 1
+                    # st_blocks: what the file really occupies (a sparse file costs next to nothing).
+                    total_bytes += info.st_blocks * 512
+                    if total_bytes > max_bytes or total_files > max_files:
+                        return total_bytes, total_files
+                    if stat.S_ISDIR(info.st_mode):
+                        _make_owner_listable(entry.path, info)
+                        stack.append(entry.path)
+        except OSError:
+            continue
+    return total_bytes, total_files
+
+
+def _filesystem_usage(path: str) -> tuple[int, int]:
+    """(bytes, inodes) in use on the filesystem holding `path`; (0, 0) when it can't be read."""
+    try:
+        info = os.statvfs(path)
+    except OSError:
+        return 0, 0
+    return (info.f_blocks - info.f_bfree) * info.f_frsize, max(0, info.f_files - info.f_ffree)
+
+
+class WorkspaceQuota:
+    """Keeps the workspace under SANDBOX_WORKSPACE_MAX_MB / _MAX_FILES.
+
+    RLIMIT_FSIZE only caps each file, and the workspace is a volume on the host's disk: without this, one
+    60 s run (or a few runs in a row) could write tens of GB there and fill the disk the bot's databases
+    live on. The exact size comes from walking the workspace after every run. During a run, the
+    filesystem's own usage (statvfs, cheap) is polled; only when the last exact size plus that growth
+    could be over the limit is the workspace walked again, and the run is killed if it really is.
+    """
+
+    POLL_SECONDS = 0.25
+
+    def __init__(self, settings: Settings) -> None:
+        self.workspace = settings.workspace
+        self.max_bytes = settings.workspace_max_bytes
+        self.max_files = settings.workspace_max_files
+        self.known_bytes = 0
+        self.known_files = 0
+        self._baseline = (0, 0)
+
+    @property
+    def limit_mb(self) -> int:
+        return self.max_bytes // (1024 * 1024)
+
+    def measure(self) -> bool:
+        """Walks the workspace; True when it is over a limit."""
+        self.known_bytes, self.known_files = workspace_usage(self.workspace, self.max_bytes, self.max_files)
+        self._baseline = _filesystem_usage(self.workspace)
+        return self.known_bytes > self.max_bytes or self.known_files > self.max_files
+
+    def start_run(self) -> None:
+        self._baseline = _filesystem_usage(self.workspace)
+
+    def run_over_limit(self) -> bool:
+        """Called while a run is going: True once the workspace is over a limit."""
+        used_bytes, used_files = _filesystem_usage(self.workspace)
+        grown_bytes = used_bytes - self._baseline[0]
+        grown_files = used_files - self._baseline[1]
+        if self.known_bytes + grown_bytes <= self.max_bytes and self.known_files + grown_files <= self.max_files:
+            return False
+        # Maybe the run, maybe something else on the same disk: only the workspace itself counts.
+        return self.measure()
+
+    def describe(self) -> str:
+        return f'{self.known_bytes // (1024 * 1024)} MB in {self.known_files} entries'
+
+
 def workspace_writable(settings: Settings) -> bool:
     return os.path.isdir(settings.workspace) and os.access(settings.workspace, os.W_OK | os.X_OK)
 
@@ -601,19 +701,26 @@ def rlimit_spec(settings: Settings, timeout_seconds: float) -> str:
     return ','.join(f'{name}={value}' for name, value in limits.items())
 
 
-def _wait_for_exit(pid: int, deadline: float) -> bool:
-    """Waits (without reaping) until the child exits or the deadline passes. True when it exited.
+def _wait_for_exit(pid: int, deadline: float, quota: WorkspaceQuota | None = None) -> str:
+    """Waits (without reaping) until the child exits ('exited'), the deadline passes ('timeout') or the
+    workspace goes over its limit ('disk').
 
     Not reaping keeps the child's pid, and so its process-group id, reserved until the group is killed.
     """
+    next_disk_check = time.monotonic() + WorkspaceQuota.POLL_SECONDS
     while True:
         try:
             if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
-                return True
+                return 'exited'
         except ChildProcessError:
-            return True
-        if time.monotonic() >= deadline:
-            return False
+            return 'exited'
+        now = time.monotonic()
+        if now >= deadline:
+            return 'timeout'
+        if quota is not None and now >= next_disk_check:
+            if quota.run_over_limit():
+                return 'disk'
+            next_disk_check = time.monotonic() + WorkspaceQuota.POLL_SECONDS
         time.sleep(0.01)
 
 
@@ -636,7 +743,12 @@ class WorkspaceResetError(Exception):
 
 
 def execute(
-    settings: Settings, language: str, code: str, timeout_seconds: float, reset_workspace: bool = False
+    settings: Settings,
+    language: str,
+    code: str,
+    timeout_seconds: float,
+    reset_workspace: bool = False,
+    quota: WorkspaceQuota | None = None,
 ) -> dict[str, Any]:
     command, filename = LANGUAGES[language]
     if reset_workspace:
@@ -646,6 +758,8 @@ def execute(
         except (OSError, RecursionError) as error:
             raise WorkspaceResetError(str(error)) from error
         log.info('workspace reset: removed %d entries', removed)
+        if quota is not None:
+            quota.measure()
     reset_out_dir(settings.out_dir)
     run_dir = tempfile.mkdtemp(prefix='run-')
     try:
@@ -682,7 +796,9 @@ def execute(
         stdout_reader.start()
         stderr_reader.start()
 
-        exited = _wait_for_exit(proc.pid, started + timeout_seconds)
+        if quota is not None:
+            quota.start_run()
+        outcome = _wait_for_exit(proc.pid, started + timeout_seconds, quota)
         duration_ms = int((time.monotonic() - started) * 1000)
         # The run is over when its main process exits; background jobs die with it. Kill the group while
         # the leader is still an unreaped zombie (so its pgid cannot have been recycled), reap the leader,
@@ -703,19 +819,42 @@ def execute(
             'stderr': stderr_reader.text(),
             'exit_code': returncode,
             'signal': signal_name(returncode),
-            'timed_out': not exited,
+            'timed_out': outcome == 'timeout',
             'duration_ms': duration_ms,
             'stdout_truncated': stdout_reader.truncated,
             'stderr_truncated': stderr_reader.truncated,
             'files': files,
             'files_omitted': omitted,
             'workspace_reset': reset_workspace,
+            'disk_limit_exceeded': outcome == 'disk',
+            'workspace_over_limit': False,
         }
         if strays:
             log.info('killed %d background process(es) left behind by the run', strays)
+        if quota is not None:
+            result['workspace_limit_mb'] = quota.limit_mb
+            result['workspace_over_limit'] = enforce_quota(settings, quota)
         return result
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def enforce_quota(settings: Settings, quota: WorkspaceQuota) -> bool:
+    """Wipes the workspace when it is over its limit (after a run, or at startup). True when it was over."""
+    if not quota.measure():
+        return False
+    log.warning(
+        'workspace over its limit (%s; max %d MB / %d entries): wiping it',
+        quota.describe(),
+        quota.limit_mb,
+        quota.max_files,
+    )
+    try:
+        wipe_workspace(settings.workspace)
+    except (OSError, RecursionError) as error:
+        log.error('could not wipe the over-limit workspace: %s', error)
+    quota.measure()
+    return True
 
 
 def signal_name(returncode: int) -> str | None:
@@ -808,7 +947,7 @@ def parse_run_request(body: bytes) -> tuple[str, str, float, bool]:
     return language, code, float(min(MAX_TIMEOUT_SECONDS, max(1, timeout))), reset
 
 
-def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandler]:
+def make_handler(settings: Settings, gate: RunGate, quota: WorkspaceQuota) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = 'frigidaire-sandbox/1'
         # Socket timeout for reading the request; a run itself is bounded by its own timeout.
@@ -888,7 +1027,7 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
                     self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'error': 'sandbox workspace is not writable'})
                     return
                 try:
-                    result = execute(settings, language, code, timeout, reset)
+                    result = execute(settings, language, code, timeout, reset, quota)
                 except WorkspaceResetError as error:
                     log.error('workspace reset failed: %s', error)
                     self.send_json(
@@ -904,7 +1043,7 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
                 gate.release()
 
             log.info(
-                'run language=%s exit=%s timed_out=%s duration_ms=%d waited_ms=%d stdout=%dB stderr=%dB files=%d%s',
+                'run language=%s exit=%s timed_out=%s duration_ms=%d waited_ms=%d stdout=%dB stderr=%dB files=%d%s%s%s',
                 language,
                 result['exit_code'],
                 result['timed_out'],
@@ -914,6 +1053,8 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
                 len(result['stderr']),
                 len(result['files']),
                 ' reset=True' if reset else '',
+                ' disk_limit=True' if result['disk_limit_exceeded'] else '',
+                ' wiped_over_limit=True' if result['workspace_over_limit'] else '',
             )
             self.send_json(HTTPStatus.OK, result)
 
@@ -966,8 +1107,13 @@ def main() -> None:
     if not workspace_writable(settings):
         log.error('workspace %s is not writable by uid %d; runs will fail until it is', settings.workspace, os.getuid())
 
+    quota = WorkspaceQuota(settings)
+    if workspace_writable(settings):
+        enforce_quota(settings, quota)
+        log.info('workspace holds %s (limit %d MB / %d entries)', quota.describe(), quota.limit_mb, quota.max_files)
+
     gate = RunGate(settings.queue_size, settings.queue_wait_seconds)
-    server = SandboxServer((settings.host, settings.port), make_handler(settings, gate))
+    server = SandboxServer((settings.host, settings.port), make_handler(settings, gate, quota))
     host, port = server.server_address[:2]
     log.info(
         'sandbox listening on %s:%d (workspace=%s, auth=%s)',

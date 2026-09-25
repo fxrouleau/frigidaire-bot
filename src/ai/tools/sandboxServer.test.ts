@@ -35,6 +35,9 @@ function startServer(
       // RLIMIT_NPROC counts every process of the user; the test runner itself (as a non-root user in the
       // test container) can already be over the sidecar's default, which would fail any fork in a run.
       SANDBOX_MAX_PROCESSES: '1000000',
+      // Small enough for the disk-limit test to cross cheaply; far above what the other tests write.
+      SANDBOX_WORKSPACE_MAX_MB: '64',
+      SANDBOX_WORKSPACE_MAX_FILES: '2000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -275,6 +278,42 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     const next = await runInSandbox({ language: 'bash', code: 'ls -A out | wc -l', timeoutSeconds: 10 }, client());
 
     expect(next).toMatchObject({ ok: true, result: { exit_code: 0, stdout: '0\n' } });
+  });
+
+  it('kills a run that fills the disk past the workspace limit, then wipes the workspace', async () => {
+    // Every file stays under RLIMIT_FSIZE; only the workspace total is over. The sleep would outlast the test.
+    const outcome = await runInSandbox(
+      {
+        language: 'bash',
+        code: 'echo kept > out/result.txt; for i in $(seq 12); do head -c 8M /dev/zero > big$i; done; sleep 30',
+        timeoutSeconds: 40,
+      },
+      client(),
+    );
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      result: { disk_limit_exceeded: true, workspace_over_limit: true, workspace_limit_mb: 64, timed_out: false },
+    });
+    if (!outcome.ok) return;
+    expect(outcome.result.duration_ms).toBeLessThan(20_000);
+    // What the run put in out/ still comes back.
+    expect(outcome.result.files.map((f) => f.name)).toEqual(['result.txt']);
+    expect(existsSync(path.join(workspace, 'big1'))).toBe(false);
+    expect(server.logs()).toMatch(/workspace over its limit \(\d+ MB in \d+ entries; max 64 MB \/ 2000 entries\): wiping it/);
+
+    const next = await runInSandbox({ language: 'bash', code: 'ls -A', timeoutSeconds: 10 }, client());
+    expect(next).toMatchObject({ ok: true, result: { stdout: 'out\n', disk_limit_exceeded: false, workspace_over_limit: false } });
+  });
+
+  it('wipes a workspace left over its file-count limit, even files hidden in an unreadable directory', async () => {
+    const outcome = await runInSandbox(
+      { language: 'bash', code: 'mkdir hidden && cd hidden && touch $(seq 2500) && chmod 000 . && echo made', timeoutSeconds: 20 },
+      client(),
+    );
+
+    expect(outcome).toMatchObject({ ok: true, result: { stdout: 'made\n', workspace_over_limit: true } });
+    expect(existsSync(path.join(workspace, 'hidden'))).toBe(false);
   });
 
   it('wipes the whole workspace on reset_workspace, without following symlinks out of it', async () => {

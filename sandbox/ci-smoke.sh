@@ -27,6 +27,7 @@ docker run -d --name "$NAME" \
   --security-opt no-new-privileges:true \
   --memory 1g --cpus 1 --pids-limit 256 \
   -e SANDBOX_TOKEN="$TOKEN" \
+  -e SANDBOX_WORKSPACE_MAX_MB=64 \
   -p 127.0.0.1:18080:8080 \
   "$IMAGE" >/dev/null
 

@@ -64,4 +64,6 @@ services:
 volumes:
   # Files the sandbox's runs keep between calls (pip --user installs, downloads, scratch data). A fresh named
   # volume inherits the image's /workspace ownership (uid 10001); a host bind mount would need a chown.
+  # It lives on the host's disk, so the sidecar caps it (SANDBOX_WORKSPACE_MAX_MB, default 2048; a run that
+  # goes over is killed and the workspace wiped).
   sandbox-workspace:

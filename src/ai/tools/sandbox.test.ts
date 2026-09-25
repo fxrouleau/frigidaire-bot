@@ -46,6 +46,9 @@ function runResult(overrides: Partial<SandboxRunResult> = {}): SandboxRunResult 
     files: [],
     files_omitted: [],
     workspace_reset: false,
+    disk_limit_exceeded: false,
+    workspace_over_limit: false,
+    workspace_limit_mb: 2048,
     ...overrides,
   };
 }
@@ -245,6 +248,38 @@ describe('run_code tool', () => {
 
     expect(output).toContain('Killed by SIGKILL (usually the memory limit)');
     expect(output).toContain('No output.');
+  });
+
+  it('says when a run was killed for filling the disk and the workspace was wiped', async () => {
+    const { fetch } = fakeFetch(() =>
+      jsonResponse(
+        200,
+        runResult({
+          exit_code: -9,
+          signal: 'SIGKILL',
+          duration_ms: 3100,
+          disk_limit_exceeded: true,
+          workspace_over_limit: true,
+          workspace_limit_mb: 2048,
+        }),
+      ),
+    );
+    const tool = createRunCodeTool({ url: 'http://sandbox:8080', fetch });
+
+    const output = await tool.handler(makeCtx(), { language: 'bash', code: 'yes > big' });
+
+    expect(output).toContain("Killed after 3.1 s: /workspace went over the sandbox's disk limit (2048 MB).");
+    expect(output).not.toContain('memory limit');
+    expect(output).toContain('/workspace was over its size limit (2048 MB) after this run, so the sandbox wiped it');
+  });
+
+  it('reads a result from a sidecar without the disk limit fields', () => {
+    const { disk_limit_exceeded: _a, workspace_over_limit: _b, workspace_limit_mb: _c, ...oldShape } = runResult();
+    expect(parseRunResult(oldShape)).toMatchObject({
+      disk_limit_exceeded: false,
+      workspace_over_limit: false,
+      workspace_limit_mb: null,
+    });
   });
 
   it('keeps the head and tail of long output for the model', async () => {

@@ -186,6 +186,20 @@ def main() -> int:
         result = sandbox.run('bash', f'kill -0 {pid} 2>/dev/null && echo alive || echo gone')
         expect(result['stdout'].strip() == 'gone', 'a setsid() background process survived the run', result)
 
+    def disk_limit() -> None:
+        # ci-smoke.sh starts the container with a small SANDBOX_WORKSPACE_MAX_MB; skip against a real-sized one.
+        limit = sandbox.run('bash', 'true').get('workspace_limit_mb')
+        expect(isinstance(limit, int), 'the sandbox reports no workspace limit')
+        if limit > 256:
+            return
+        chunks = limit // 8 + 4
+        code = f'for i in $(seq {chunks}); do head -c 8M /dev/zero > big$i; done; sleep 20'
+        result = sandbox.run('bash', code, timeout_seconds=30)
+        expect(result['disk_limit_exceeded'] is True, 'a run that filled the workspace was not killed', result)
+        expect(result['workspace_over_limit'] is True, 'the over-limit workspace was not wiped', result)
+        after = sandbox.run('bash', 'ls big1 2>/dev/null || echo wiped')
+        expect(after['stdout'].strip() == 'wiped', 'the over-limit workspace was not wiped', after)
+
     def memory_limit() -> None:
         result = sandbox.run('python', 'x = bytearray(3 * 1024 ** 3)')
         expect(result['exit_code'] != 0 and 'MemoryError' in result['stderr'], 'memory limit not enforced', result)
@@ -220,6 +234,7 @@ def main() -> int:
         ('timeout', timeout_kills),
         ('escaped process killed', escaped_process_is_killed),
         ('memory limit', memory_limit),
+        ('workspace disk limit', disk_limit),
         ('auth', auth_required),
         ('hardening', hardening),
     ]
