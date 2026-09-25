@@ -22,8 +22,8 @@ const MIKE = identity('3', 'Big Mike');
 const ED = identity('4', 'Ed');
 
 describe('identityNames', () => {
-  it('lists every name once: display, canonical, IRL (and its first word), aliases', () => {
-    expect(identityNames(JASON)).toEqual(['xX_Jay_Xx', 'jayboy', 'Jason Smith', 'Jason', 'J-Dog']);
+  it('lists every full name once: display, canonical, IRL, aliases', () => {
+    expect(identityNames(JASON)).toEqual(['xX_Jay_Xx', 'jayboy', 'Jason Smith', 'J-Dog']);
   });
 
   it('includes username when the identities row carries one', () => {
@@ -77,6 +77,17 @@ describe('findNamedPeople', () => {
 
   it('skips inactive identities', () => {
     expect(findNamedPeople('wheezer?', [identity('2', 'Wheezer', { active: 0 })])).toEqual([]);
+  });
+
+  it('matches an IRL first name only when it is unambiguous', () => {
+    expect(ids('did jason ever pay you back')).toEqual(['1']);
+    // Another member is actually called Jason: "jason" means them, not Jason Smith.
+    const otherJason = identity('9', 'Jason');
+    expect(findNamedPeople('jason?', [JASON, otherJason]).map((p) => p.identity.discord_user_id)).toEqual(['9']);
+    // Two members share the IRL first name: neither is matched by it (full names still work).
+    const jasonTwo = identity('10', 'JT', { irl_name: 'Jason Tran' });
+    expect(findNamedPeople('jason?', [JASON, jasonTwo])).toEqual([]);
+    expect(findNamedPeople('jason tran?', [JASON, jasonTwo]).map((p) => p.identity.discord_user_id)).toEqual(['10']);
   });
 
   it('prefers the longer name when two names of one person match at the same spot', () => {

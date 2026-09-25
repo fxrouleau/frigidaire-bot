@@ -15,19 +15,17 @@ export const MIN_NAME_LENGTH = 3;
 const NON_PROSE_TOKENS = /<[@#][!&]?\d+>|<a?:\w+:\d+>|<t:\d+(?::\w)?>|https?:\/\/\S+/g;
 
 /**
- * Every name a member may be called by in chat: current display name, first-seen (canonical) name, IRL
- * name (and its first word, since friends say "jason", not "Jason Smith"), aliases, and `username` when
- * the identities row carries one. Trimmed, deduplicated case-insensitively.
+ * Every full name a member may be filed or called under: current display name, first-seen (canonical)
+ * name, IRL name, aliases, and `username` when the identities row carries one. Trimmed, deduplicated
+ * case-insensitively. Also the key set for memory lookups by person.
  */
 export function identityNames(identity: Identity): string[] {
   // `username` is being added to the identities table by another change; read it only when present.
   const username = (identity as Identity & { username?: unknown }).username;
-  const irlFirst = identity.irl_name?.trim().split(/\s+/)[0];
   const raw = [
     identity.display_name,
     identity.canonical_name,
     identity.irl_name,
-    irlFirst,
     ...identity.aliases,
     typeof username === 'string' ? username : undefined,
   ];
@@ -40,6 +38,48 @@ export function identityNames(identity: Identity): string[] {
     names.push(name);
   }
   return names;
+}
+
+/** The first word of a multi-word IRL name ("Jason" of "Jason Smith"), which is what friends type. */
+function irlFirstName(identity: Identity): string | undefined {
+  const words = identity.irl_name?.trim().split(/\s+/) ?? [];
+  return words.length > 1 ? words[0] : undefined;
+}
+
+/**
+ * Per identity, the names text is matched against: its full names, plus its IRL first name when that is
+ * unambiguous — not another member's IRL first name too, and not one of another member's full names
+ * (then "mike" most likely means the member actually called Mike).
+ */
+function matchableNames(identities: Identity[]): Map<Identity, string[]> {
+  const fullNameOwners = new Map<string, Set<string>>();
+  const firstNameCounts = new Map<string, number>();
+  for (const identity of identities) {
+    for (const name of identityNames(identity)) {
+      const key = name.toLowerCase();
+      const owners = fullNameOwners.get(key) ?? new Set<string>();
+      owners.add(identity.discord_user_id);
+      fullNameOwners.set(key, owners);
+    }
+    const first = irlFirstName(identity)?.toLowerCase();
+    if (first) firstNameCounts.set(first, (firstNameCounts.get(first) ?? 0) + 1);
+  }
+
+  const result = new Map<Identity, string[]>();
+  for (const identity of identities) {
+    const names = identityNames(identity);
+    const first = irlFirstName(identity);
+    if (first) {
+      const key = first.toLowerCase();
+      const owners = fullNameOwners.get(key);
+      const claimedByOther = owners !== undefined && [...owners].some((id) => id !== identity.discord_user_id);
+      if (firstNameCounts.get(key) === 1 && !claimedByOther && !names.some((n) => n.toLowerCase() === key)) {
+        names.push(first);
+      }
+    }
+    result.set(identity, names);
+  }
+  return result;
 }
 
 function escapeRegExp(text: string): string {
@@ -82,11 +122,14 @@ export function findNamedPeople(
   const excludedNames = new Set([...(opts.excludeNames ?? [])].map((n) => n.trim().toLowerCase()));
   const max = opts.max ?? 3;
 
+  const active = identities.filter((identity) => identity.active !== 0);
+  const namesByIdentity = matchableNames(active);
+
   const matches: NamedPerson[] = [];
-  for (const identity of identities) {
-    if (identity.active === 0 || excludedIds.has(identity.discord_user_id)) continue;
+  for (const identity of active) {
+    if (excludedIds.has(identity.discord_user_id)) continue;
     let best: NamedPerson | undefined;
-    for (const name of identityNames(identity)) {
+    for (const name of namesByIdentity.get(identity) ?? []) {
       const lower = name.toLowerCase();
       if (name.length < MIN_NAME_LENGTH || STOP_WORDS.has(lower) || excludedNames.has(lower)) continue;
       const found = namePattern(name).exec(prose);

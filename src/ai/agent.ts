@@ -1098,8 +1098,8 @@ Right before each new message you get a context note with the current time (East
 
   /**
    * Who a person is for memory lookup: their stable Discord id plus every name their memories may be
-   * filed under — the current display name and the identity's display name, first-seen (canonical)
-   * name and aliases — so a nickname change doesn't orphan anyone's memories.
+   * filed under — the current display name and the identity's display, first-seen (canonical) and IRL
+   * names, aliases and username — so a nickname change doesn't orphan anyone's memories.
    */
   private personLookup(userId: string, currentName: string | undefined, store: MemoryStore) {
     let identity: Identity | undefined;
@@ -1108,7 +1108,7 @@ Right before each new message you get a context note with the current time (East
     } catch {
       identity = undefined;
     }
-    const names = [currentName, identity?.display_name, identity?.canonical_name, ...(identity?.aliases ?? [])].filter(
+    const names = [currentName, ...(identity ? identityNames(identity) : [])].filter(
       (n): n is string => typeof n === 'string' && n.trim().length > 0,
     );
     return { userId, names };
