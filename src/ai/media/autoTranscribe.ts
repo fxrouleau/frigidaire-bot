@@ -11,7 +11,7 @@ import { config } from '../../config';
 import { logger } from '../../logger';
 import { splitMessage } from '../../utils';
 import { getAudioTranscriber } from './index';
-import { isStoredTranscriptReply, rememberTranscriptReply } from './store';
+import { forgetTranscripts, isStoredTranscriptReply, rememberTranscriptReply, transcriptRepliesTo } from './store';
 import type { AudioInput, TranscriptionOutcome } from './types';
 import { audioAttachments, formatClock, isVoiceMessage, transcriptKey } from './voice';
 
@@ -196,3 +196,29 @@ export class VoiceAutoTranscriber {
 }
 
 export const voiceAutoTranscriber = new VoiceAutoTranscriber();
+
+/** Where deleted messages were: what removeTranscriptsOf needs to delete the bot's replies there. */
+export type ReplyDeleter = { messages: { delete(messageId: string): Promise<unknown> } };
+
+/**
+ * A deleted voice message takes its transcript with it, the way the archive scrubs the message itself:
+ * the bot's transcript replies to it are deleted (each of their deletions then scrubs them from the
+ * archive) and the cached transcript text is forgotten. Returns how many replies were deleted.
+ */
+export async function removeTranscriptsOf(channel: ReplyDeleter, messageIds: string[]): Promise<number> {
+  // A purge that took the replies along already deleted them.
+  const replyIds = transcriptRepliesTo(messageIds).filter((id) => !messageIds.includes(id));
+  forgetTranscripts(messageIds);
+  let deleted = 0;
+  for (const replyId of replyIds) {
+    try {
+      await channel.messages.delete(replyId);
+      deleted++;
+    } catch (error) {
+      // Typically already deleted by hand.
+      logger.warn(`voiceTranscribe: could not delete transcript reply ${replyId}:`, error);
+    }
+  }
+  if (replyIds.length > 0) logger.info(`voiceTranscribe: voice message deleted, removed ${deleted} transcript replies`);
+  return deleted;
+}
