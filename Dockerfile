@@ -40,9 +40,11 @@ FROM node:26-alpine AS prod
 # su-exec: the entrypoint starts as root only long enough to make the data volume writable by the
 # unprivileged `node` user, then drops privileges for the bot process itself.
 # ffmpeg/ffprobe (src/ai/media/transcoder.ts): videos too big to send whole are sampled into keyframes
-# + an audio track, clips for models that can't hear get their soundtrack transcribed, and audio a model
-# refuses (or can't take, e.g. Ogg for non-Gemini models) is re-encoded to MP3. About 130 MB installed.
-# Without it the media features degrade (voice messages still go to Gemini as-is) rather than fail.
+# + an audio track, clips for models that can't hear get their soundtrack transcribed, audio of unknown
+# length is probed, and audio the transcription route refuses or can't take (too big to send inline, or
+# not wav/mp3 for a non-Gemini chat model) is re-encoded to MP3. About 130 MB installed. Without it the
+# media features degrade rather than fail: voice messages (Ogg) still go as-is to Whisper, the default
+# TRANSCRIPTION_MODEL, or to the Gemini fallback, and both take Ogg.
 RUN apk add --no-cache su-exec ffmpeg
 # Baked in by CI (docker-push.yml) so the bot can announce which commit it's running.
 ARG GIT_SHA=""
