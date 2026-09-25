@@ -19,6 +19,7 @@ import { estimateTokens, historyBudgetFor, trimHistory } from './historyBudget';
 import { getMemoryStore } from './memory';
 import type { EmojiRow, Identity, Memory, MemoryStore } from './memory/memoryStore';
 import { type ModelContextLengths, getModelContextLengths } from './modelInfo';
+import { findNamedPeople, identityNames } from './namedPeople';
 import { emojiCdnUrl, findCustomEmojis, formatIdentityLines } from './promptSections';
 import { getProvider } from './providerRegistry';
 import { toolDefinitions } from './tools';
@@ -41,6 +42,8 @@ import { formatCurrentTimeET, formatRelativeAge, formatTimestampET } from './uti
 const USER_MENTION_REGEX = /<@!?(\d+)>/g;
 // Bound prompt growth: at most this many distinct mentioned users get a subject-memory pull.
 const MAX_MENTIONED_SUBJECTS = 3;
+// Same bound for members named in plain text (on top of the @-mentioned ones).
+const MAX_NAMED_PEOPLE = 3;
 // How many of the bot's previous replies the emoji guardrail looks back over (see emojiPolicy.ts).
 const EMOJI_LOOKBACK_REPLIES = 4;
 
@@ -922,6 +925,7 @@ ${identitiesSection}${emojisSection}${personalitySection}
 These memories are background knowledge — things you know from hanging out in this server. Do NOT force references to inside jokes, show off what you know, or try to reference multiple memories in one response. Let things come up naturally, the way you'd reference a friend's hobby only when it's actually relevant to the conversation. If nothing from your memories is relevant to what's being discussed, just don't mention them. Each memory is tagged with how long ago it was last confirmed; treat months-old current-state claims — what someone "still" does, owns, or plays — as possibly outdated, so hedge or ask instead of asserting them as current fact.
 
 MEMORY: You have a long-term memory system. Use the remember_fact tool when something genuinely important comes up — real names, jobs, major life events, strong preferences, or things someone would expect you to remember next time. Do NOT save every little thing; skip small talk, throwaway opinions, and mundane details. Think of what you'd actually remember about a friend after a night out — the big stuff, not every sentence. If someone corrects or updates a fact you already know (new job, moved, switched teams, got a new console), the stale version has to go or you'll keep surfacing both: call recall_memories to find its id, forget_memory the old one, then remember_fact the correction. Only do this for genuine factual updates — a joking "forget that" or general ribbing is never a reason to delete a memory, and your personality/vibe notes about the server aren't "corrected" this way.
+When someone is being discussed — named or @-mentioned — and nothing about them is in your context, call recall_memories for them before answering instead of guessing or saying you don't know them.
 
 RESPONDING TO THE CURRENT TURN:
 The last user message in the conversation is why you're being pinged. Read it first and figure out what it's actually asking before pulling from earlier history. Earlier messages are shared group context, not your subject.
@@ -1028,8 +1032,12 @@ Right before each new message you get a context note with the current time (East
     for (const mem of contextualMemories) existingIds.add(mem.id);
 
     // Pull memories for other people @-mentioned in the message, so "what's up with @Wheezer" surfaces
-    // what we know about Wheezer even when nothing keyword-matches.
-    const mentionedMemories = this.collectMentionedSubjectMemories(message, store, existingIds);
+    // what we know about Wheezer even when nothing keyword-matches — and for people named in plain text
+    // ("did jason ever pay you back"), which is how the server actually talks about someone.
+    const mentionedMemories = [
+      ...this.collectMentionedSubjectMemories(message, store, existingIds),
+      ...this.collectNamedPeopleMemories(message, store, existingIds),
+    ];
 
     const subjectLabel = (m: Memory) => this.memorySubjectLabel(m, store);
     const userSection =
@@ -1138,6 +1146,54 @@ Right before each new message you get a context note with the current time (East
       if (resolvedUsers >= MAX_MENTIONED_SUBJECTS) break;
     }
 
+    return collected;
+  }
+
+  /**
+   * Memories for members the message names in plain text (display/canonical/IRL name, alias, username;
+   * see namedPeople.ts), excluding the bot, the speaker and anyone @-mentioned (those have their own
+   * pulls). At most MAX_NAMED_PEOPLE people, 3 memories each, deduped against `alreadyInjected`.
+   */
+  private collectNamedPeopleMemories(message: Message, store: MemoryStore, alreadyInjected: Set<number>): Memory[] {
+    const botUser = message.client.user;
+    const mentionedIds = [...(message.content ?? '').matchAll(USER_MENTION_REGEX)].map((m) => m[1]);
+
+    let identities: Identity[];
+    try {
+      identities = store.getAllIdentities();
+    } catch (error) {
+      logger.warn('Failed to read identities for name matching:', error);
+      return [];
+    }
+
+    // Never the bot's own names: "fridge, what do you think" is the bot being addressed, not discussed.
+    const botIdentity = identities.find((i) => i.discord_user_id === botUser.id);
+    const botNames = [
+      botUser.displayName,
+      botUser.username,
+      message.guild?.members.me?.displayName,
+      ...(botIdentity ? identityNames(botIdentity) : []),
+    ].filter((n): n is string => typeof n === 'string' && n.length > 0);
+
+    const named = findNamedPeople(message.content ?? '', identities, {
+      excludeUserIds: [botUser.id, message.author.id, ...mentionedIds],
+      excludeNames: botNames,
+      max: MAX_NAMED_PEOPLE,
+    });
+
+    const collected: Memory[] = [];
+    for (const { identity } of named) {
+      try {
+        const lookup = this.personLookup(identity.discord_user_id, identity.display_name, store);
+        for (const mem of store.getForPerson(lookup, 3)) {
+          if (alreadyInjected.has(mem.id)) continue;
+          alreadyInjected.add(mem.id);
+          collected.push(mem);
+        }
+      } catch (error) {
+        logger.warn(`Failed to fetch memories for named member ${identity.discord_user_id}:`, error);
+      }
+    }
     return collected;
   }
 

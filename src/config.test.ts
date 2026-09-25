@@ -94,7 +94,49 @@ describe('config', () => {
     expect(config.links.instagramFixers).toEqual(DEFAULT_INSTAGRAM_FIXERS);
     expect(config.deleteRepost.mode).toBe('edgy');
     expect(config.deleteRepost.userIds).toEqual([]);
-    expect(config.agent.maxToolRounds).toBe(10);
+    expect(config.agent.maxToolRounds).toBe(25);
+    expect(config.agent.maxToolInvocations).toBe(200);
+    expect(config.agent.chatContextTokens).toBe(131_072);
+    expect(config.agent.historyTokenBudget).toBeUndefined();
+    expect(config.agent.channelNotes).toEqual({ notes: {}, invalid: false });
+    expect(config.models.chatFallbacks).toEqual([]);
+  });
+
+  it('reads CHAT_FALLBACK_MODELS in order, without duplicates or the primary', () => {
+    vi.stubEnv('CHAT_MODEL', 'primary/model');
+    vi.stubEnv('CHAT_FALLBACK_MODELS', ' backup/one, primary/model ,backup/two,backup/one ');
+    expect(config.models.chatFallbacks).toEqual(['backup/one', 'backup/two']);
+  });
+
+  it('takes HISTORY_TOKEN_BUDGET and CHAT_CONTEXT_TOKENS only when they are sane', () => {
+    vi.stubEnv('HISTORY_TOKEN_BUDGET', '200000');
+    expect(config.agent.historyTokenBudget).toBe(200_000);
+    vi.stubEnv('HISTORY_TOKEN_BUDGET', '12');
+    expect(config.agent.historyTokenBudget).toBeUndefined();
+    vi.stubEnv('HISTORY_TOKEN_BUDGET', 'lots');
+    expect(config.agent.historyTokenBudget).toBeUndefined();
+    vi.stubEnv('CHAT_CONTEXT_TOKENS', '1310720');
+    expect(config.agent.chatContextTokens).toBe(1_310_720);
+    vi.stubEnv('CHAT_CONTEXT_TOKENS', '0');
+    expect(config.agent.chatContextTokens).toBe(131_072);
+  });
+
+  it('parses CHANNEL_NOTES as a JSON object of channel id to note', () => {
+    vi.stubEnv('CHANNEL_NOTES', '{"961358115645845654":" banana-combo: the main hangout ","1":42,"2":""}');
+    expect(config.agent.channelNotes).toEqual({
+      notes: { '961358115645845654': 'banana-combo: the main hangout' },
+      invalid: false,
+    });
+    // A single-quoted .env value still parses (config strips surrounding quotes).
+    vi.stubEnv('CHANNEL_NOTES', `'{"3":"clips"}'`);
+    expect(config.agent.channelNotes.notes).toEqual({ '3': 'clips' });
+  });
+
+  it('flags CHANNEL_NOTES that is not a JSON object instead of throwing', () => {
+    for (const bad of ['{not json', '["a","b"]', '"just a string"', 'null']) {
+      vi.stubEnv('CHANNEL_NOTES', bad);
+      expect(config.agent.channelNotes).toEqual({ notes: {}, invalid: true });
+    }
   });
 
   it('reads the values lazily, so a change is visible on the next access', () => {
