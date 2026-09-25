@@ -349,7 +349,7 @@ describe('RambleWatcher and the gate', () => {
       examples: () => EXAMPLES,
       cooldowns: createBotDbRambleCooldowns(),
       now: () => T0,
-      wasRouted: (message) => routed.has(message.id),
+      wasRouted: (messageId) => routed.has(messageId),
     });
     await watcher.observe(post(LINE, T0 - 2_000).message);
     await watcher.observe(post(LINE, T0 - 1_000).message);
@@ -360,7 +360,8 @@ describe('RambleWatcher and the gate', () => {
     expect(judge).not.toHaveBeenCalled();
   });
 
-  it('answers instead of nudging when the gate routes the message while the judge thinks', async () => {
+  /** A watcher whose judge answers only when released, with a controllable set of routed message ids. */
+  function slowJudgeWatcher() {
     const routed = new Set<string>();
     let release: (verdict: RambleVerdict) => void = () => {};
     const watcher = new RambleWatcher({
@@ -369,8 +370,13 @@ describe('RambleWatcher and the gate', () => {
       examples: () => EXAMPLES,
       cooldowns: createBotDbRambleCooldowns(),
       now: () => T0,
-      wasRouted: (message) => routed.has(message.id),
+      wasRouted: (messageId) => routed.has(messageId),
     });
+    return { watcher, routed, release: (verdict: RambleVerdict) => release(verdict) };
+  }
+
+  it('answers instead of nudging when the gate routes the message while the judge thinks', async () => {
+    const { watcher, routed, release } = slowJudgeWatcher();
     await watcher.observe(post(LINE, T0 - 2_000).message);
     await watcher.observe(post(LINE, T0 - 1_000).message);
     const named = post(`fridge ${LINE}`, T0);
@@ -378,10 +384,40 @@ describe('RambleWatcher and the gate', () => {
     routed.add(named.message.id); // the gate's decision lands first
     release({ ramble: true, confidence: 0.99 });
 
-    expect(await outcome).toBe('addressed_bot');
+    expect(await outcome).toBe('bot_spoke');
     expect(named.recorders.reply.calls).toHaveLength(0);
     // No nudge happened, so no cooldown either.
     expect(createBotDbRambleCooldowns().lastNudgedAt(GUS)).toBeUndefined();
+  });
+
+  it('does not nudge once the member pinged the bot, or the bot spoke, while the judge thought', async () => {
+    const pinged = slowJudgeWatcher();
+    await pinged.watcher.observe(post(LINE, T0 - 2_000).message);
+    await pinged.watcher.observe(post(LINE, T0 - 1_000).message);
+    const judged = post(LINE, T0);
+    const outcome = pinged.watcher.observe(judged.message);
+    const ping = post(`<@${BOT_ID}> wait what do you think`, T0 + 1_000, { mentionedUserIds: [BOT_ID] });
+    expect(await pinged.watcher.observe(ping.message)).toBe('addressed_bot');
+    pinged.routed.add(ping.message.id); // aiChat routed the explicit mention
+    pinged.release({ ramble: true, confidence: 0.99 });
+    expect(await outcome).toBe('bot_spoke');
+
+    const spoke = slowJudgeWatcher();
+    await spoke.watcher.observe(post(LINE, T0 - 2_000).message);
+    await spoke.watcher.observe(post(LINE, T0 - 1_000).message);
+    const judged2 = post(LINE, T0);
+    const outcome2 = spoke.watcher.observe(judged2.message);
+    const botPost = createFakeBotMessage({
+      botUserId: BOT_ID,
+      channelId: MAIN,
+      content: 'lmao',
+      messageId: 'b-meanwhile',
+      createdAt: new Date(T0 + 1_000),
+    });
+    await spoke.watcher.observe(botPost.message);
+    spoke.release({ ramble: true, confidence: 0.99 });
+    expect(await outcome2).toBe('bot_spoke');
+    expect(judged2.recorders.reply.calls).toHaveLength(0);
   });
 });
 

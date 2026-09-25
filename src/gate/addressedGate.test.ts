@@ -441,9 +441,9 @@ describe('AddressedGate.wasRouted', () => {
     await h.gate.evaluate(named);
     await h.gate.evaluate(plain);
 
-    expect(h.gate.wasRouted(pinged)).toBe(true);
-    expect(h.gate.wasRouted(named)).toBe(true);
-    expect(h.gate.wasRouted(plain)).toBe(false);
+    expect(h.gate.wasRouted(pinged.id)).toBe(true);
+    expect(h.gate.wasRouted(named.id)).toBe(true);
+    expect(h.gate.wasRouted(plain.id)).toBe(false);
   });
 
   it('forgets the oldest ids past a few hundred', () => {
@@ -451,7 +451,7 @@ describe('AddressedGate.wasRouted', () => {
     const first = human('<@bot-1> first').message;
     h.gate.noteRouted(first);
     for (let i = 0; i < 200; i++) h.gate.noteRouted(human(`<@bot-1> ${i}`).message);
-    expect(h.gate.wasRouted(first)).toBe(false);
+    expect(h.gate.wasRouted(first.id)).toBe(false);
   });
 });
 

@@ -138,6 +138,7 @@ export function createBotDbRambleCooldowns(): RambleCooldowns {
 // ---- The watcher ----
 
 type Buffered = {
+  messageId: string;
   authorId: string;
   authorName: string;
   /** What the judge reads: readable mentions/emojis, plus notes for images and files. */
@@ -157,6 +158,7 @@ export type RambleOutcome =
   | 'ignored'
   | 'below_rule'
   | 'addressed_bot'
+  | 'bot_spoke'
   | 'cooldown'
   | 'checking'
   | 'recheck_wait'
@@ -174,8 +176,8 @@ export type RambleWatcherOptions = {
   /** Picks the nudge line; injectable so tests are deterministic. */
   random?: () => number;
   lines?: readonly string[];
-  /** Whether the bot is answering this message anyway (the gate routed it); default: never. */
-  wasRouted?: (message: Message) => boolean;
+  /** Whether the bot is answering this message id anyway (it was routed to the agent); default: never. */
+  wasRouted?: (messageId: string) => boolean;
 };
 
 const NO_EXAMPLES: RambleExamples = { rambles: [], ramblesAreTheirs: false, normal: [] };
@@ -220,7 +222,7 @@ export class RambleWatcher {
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly lines: readonly string[];
-  private readonly wasRouted: (message: Message) => boolean;
+  private readonly wasRouted: (messageId: string) => boolean;
   private readonly buffers = new Map<string, Buffered[]>();
   private readonly inFlight = new Set<string>();
   /** Per channel+member: timestamp of the newest message the last judgement covered. */
@@ -264,7 +266,7 @@ export class RambleWatcher {
         ? 'run'
         : undefined;
     if (!trigger) return 'below_rule';
-    if (addressesBot(message, botId) || this.wasRouted(message)) return 'addressed_bot';
+    if (addressesBot(message, botId) || this.wasRouted(message.id)) return 'addressed_bot';
 
     const personId = canonicalUserId(message.author.id);
     if (this.inCooldown(personId, settings)) return 'cooldown';
@@ -316,11 +318,12 @@ export class RambleWatcher {
         return 'not_ramble';
       }
       // Re-checked after the (slow) judge call: another channel may have nudged this member meanwhile,
-      // or the gate may have decided this message was meant for the bot (then it answers, no nudge).
+      // and the chat may have moved on: the bot spoke here, or a message since the judged one (this one
+      // included) was handed to the agent. Then the bot is talking with them, and a nudge would be noise.
       if (this.inCooldown(personId, settings)) return 'cooldown';
-      if (this.wasRouted(message)) {
-        logger.info(`ramble: skip, the bot is answering this message ${described} ${tail}`);
-        return 'addressed_bot';
+      if (this.botEngagedSince(channelId, current)) {
+        logger.info(`ramble: skip, the bot is talking with the channel ${described} ${tail}`);
+        return 'bot_spoke';
       }
       // Recorded before sending, and kept when the send fails: a missing permission must not turn into
       // a judge call (and a failed reply) on every message that follows.
@@ -340,6 +343,7 @@ export class RambleWatcher {
     const buffer = (this.buffers.get(channelId) ?? []).filter((entry) => entry.at >= keepFrom);
     const replyTo = replyTargetName(message);
     buffer.push({
+      messageId: message.id,
       authorId: message.author.id,
       authorName: message.member?.displayName || message.author.displayName || message.author.username,
       text: renderMessageText(message, botId, message.client.user.displayName || 'Frigidaire'),
@@ -351,6 +355,15 @@ export class RambleWatcher {
     const trimmed = buffer.slice(-BUFFER_MAX_PER_CHANNEL);
     this.buffers.set(channelId, trimmed);
     return trimmed;
+  }
+
+  /** The bot posted in the channel, or a message was routed to the agent, at or after `since`. */
+  private botEngagedSince(channelId: string, since: Buffered): boolean {
+    const buffer = this.buffers.get(channelId) ?? [];
+    const from = buffer.indexOf(since);
+    // Trimmed out of the buffer meanwhile: a lot was said since, the moment has passed anyway.
+    if (from < 0) return true;
+    return buffer.slice(from).some((entry) => entry.self || this.wasRouted(entry.messageId));
   }
 
   private inCooldown(personId: string, settings: RambleSettings): boolean {

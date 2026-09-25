@@ -145,11 +145,11 @@ export class AddressedGate {
   }
 
   /**
-   * Whether a turn was handed to the agent for this message (it is being, or was, answered). The ramble
-   * redirect asks, so a member who names the bot mid-run gets an answer, not an answer and a nudge.
+   * Whether a turn was handed to the agent for this message id (it is being, or was, answered). The
+   * ramble redirect asks, so a member who talks to the bot mid-run gets an answer, not also a nudge.
    */
-  wasRouted(message: Message): boolean {
-    return this.routedIds.has(message.id);
+  wasRouted(messageId: string): boolean {
+    return this.routedIds.has(messageId);
   }
 
   /** The routed turn for `message` finished: the bot answered its author, which extends the exchange. */
