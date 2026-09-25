@@ -311,7 +311,14 @@ describe('intro line', () => {
       model: 'test/model',
     });
     expect(intro).toBe('Hello! This is a plain text reply.');
-    expect(seen.body).toMatchObject({ model: 'test/model', provider: { zdr: true } });
+    // Low reasoning effort with room for it: the default chat model reasons at 'max' unless told
+    // otherwise, and at a 200-token cap that came back empty.
+    expect(seen.body).toMatchObject({
+      model: 'test/model',
+      max_tokens: 1500,
+      reasoning: { effort: 'low' },
+      provider: { zdr: true },
+    });
     expect(seen.headers?.get(FEATURE_HEADER)).toBe('wrapped');
     const prompt = JSON.stringify(seen.body?.messages);
     expect(prompt).toContain('Year: 2026.');

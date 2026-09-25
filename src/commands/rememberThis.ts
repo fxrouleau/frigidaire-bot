@@ -126,7 +126,7 @@ MESSAGE from ${author.name}:
 <<<
 ${source}
 >>>`,
-      maxTokens: 1000,
+      maxTokens: 1500,
       temperature: 0.1,
     });
 

@@ -1,6 +1,9 @@
 // A cheap regression guard for two hard rules: every OpenRouter call is attributed to a feature in the
 // usage ledger (featureRequestOptions() on SDK calls, recordUsage() on raw requests), and every call that
-// sends member content to a model is ZDR-routed (`provider: { zdr: true }`). It parses every production
+// sends member content to a model is ZDR-routed (`provider: { zdr: true }`). It also pins one soft rule:
+// a call that caps `max_tokens` either says its reasoning effort or has a cap big enough for an unasked
+// reasoning pass (the default chat model reasons at 'max' unless told otherwise, and reasoning counts
+// toward max_tokens, so a small cap comes back empty with finish_reason 'length'). It parses every production
 // source file with TypeScript's own parser (so strings, comments and regexes can't fool it) and checks
 // each OpenAI-SDK call site and each raw request to OpenRouter. When it fails, fix the call site; don't
 // loosen the check.
@@ -31,6 +34,13 @@ const USAGE_EXEMPT: Record<string, string> = {
 };
 // The one file allowed to construct an OpenAI client: it installs the usage-tracking fetch.
 const CLIENT_FACTORY = 'ai/openRouterClient.ts';
+// A content call whose body caps max_tokens below this must send `reasoning` (e.g. { effort: 'low' }).
+const UNREASONED_MIN_MAX_TOKENS = 4000;
+// Files whose capped calls send no reasoning override, and why that is fine.
+const REASONING_EXEMPT: Record<string, string> = {
+  'ai/emojiCaptioner.ts':
+    "EMOJI_CAPTION_MODEL defaults to Claude Opus, which doesn't reason unless asked: an effort would switch paid thinking on",
+};
 
 type CallSite = { file: string; line: number; callee: string; kind: 'content' | 'sdk' | 'raw' };
 type Audit = { calls: CallSite[]; problems: string[]; referencesOpenRouter: boolean; recordsUsage: boolean };
@@ -108,6 +118,51 @@ function findDeclaration(name: string, sourceFile: ts.SourceFile): ts.VariableDe
   return found;
 }
 
+/** A request body as an object literal, following `create(body as …)` to the body's declaration. */
+function bodyObject(body: ts.Expression | undefined, sourceFile: ts.SourceFile): ts.ObjectLiteralExpression | undefined {
+  if (!body) return undefined;
+  const expr = unwrap(body);
+  if (ts.isObjectLiteralExpression(expr)) return expr;
+  if (ts.isIdentifier(expr)) return bodyObject(findDeclaration(expr.text, sourceFile)?.initializer, sourceFile);
+  return undefined;
+}
+
+/** A numeric literal, or a file-level constant holding one (`const MAX_TOKENS = 4_000`). */
+function numericValue(node: ts.Expression, sourceFile: ts.SourceFile): number | undefined {
+  const expr = unwrap(node);
+  if (ts.isNumericLiteral(expr)) return Number(expr.text.replace(/_/g, ''));
+  if (ts.isIdentifier(expr)) {
+    const initializer = findDeclaration(expr.text, sourceFile)?.initializer;
+    return initializer ? numericValue(initializer, sourceFile) : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Why a body's max_tokens cap is unsafe on a reasoning model, or undefined: no cap, a `reasoning` field
+ * (directly or in a spread, as in `...(effort ? { reasoning: { effort } } : {})`), or a cap known to be at
+ * least UNREASONED_MIN_MAX_TOKENS. A cap the scanner can't read counts as small.
+ */
+function unreasonedCap(body: ts.Expression | undefined, sourceFile: ts.SourceFile): string | undefined {
+  const object = bodyObject(body, sourceFile);
+  if (!object) return undefined;
+  let cap: ts.PropertyAssignment | undefined;
+  let reasoning = false;
+  for (const property of object.properties) {
+    if (ts.isPropertyAssignment(property)) {
+      const name = property.name.getText(sourceFile);
+      if (name === 'max_tokens') cap = property;
+      if (name === 'reasoning') reasoning = true;
+    } else if (ts.isSpreadAssignment(property) && /\breasoning\s*:/.test(property.expression.getText(sourceFile))) {
+      reasoning = true;
+    }
+  }
+  if (!cap || reasoning) return undefined;
+  const value = numericValue(cap.initializer, sourceFile);
+  if (value !== undefined && value >= UNREASONED_MIN_MAX_TOKENS) return undefined;
+  return value !== undefined ? String(value) : cap.initializer.getText(sourceFile);
+}
+
 function calleeName(call: ts.CallExpression, sourceFile: ts.SourceFile): string {
   return call.expression.getText(sourceFile).replace(/\s+/g, '');
 }
@@ -140,6 +195,12 @@ function auditSource(file: string, text: string): Audit {
         }
         if (kind === 'content' && !bodyIsZdr(node.arguments[0], sourceFile)) {
           audit.problems.push(`${where(node)} ${callee}(…) is not visibly routed with provider: { zdr: true }.`);
+        }
+        const cap = kind === 'content' && !(file in REASONING_EXEMPT) && unreasonedCap(node.arguments[0], sourceFile);
+        if (cap) {
+          audit.problems.push(
+            `${where(node)} ${callee}(…) caps max_tokens at ${cap} without a reasoning override: a model that reasons at 'max' by default can spend it all before answering. Send reasoning: { effort: 'low' } (bridged through the body type) or a cap of at least ${UNREASONED_MIN_MAX_TOKENS}.`,
+          );
         }
       }
     }
@@ -182,7 +243,7 @@ function auditTree(): { calls: CallSite[]; problems: string[] } {
 describe('OpenRouter call sites', () => {
   const { calls, problems } = auditTree();
 
-  it('are all tagged with a feature and ZDR-routed', () => {
+  it('are all tagged with a feature, ZDR-routed, and leave room for reasoning under a max_tokens cap', () => {
     expect(problems).toEqual([]);
   });
 
@@ -229,6 +290,41 @@ describe('the call-site scanner', () => {
     expect(raw.problems).toEqual([
       'ai/rawExample.ts calls OpenRouter directly without recording usage: report each response through recordUsage() (see src/ai/decisions.ts).',
     ]);
+  });
+
+  it('flags a small or unreadable max_tokens cap without a reasoning override', () => {
+    const audit = auditSource(
+      'ai/example.ts',
+      `
+      const SMALL = 600;
+      await client.chat.completions.create({ model, max_tokens: 200, provider: { zdr: true } }, featureRequestOptions('x'));
+      await client.chat.completions.create({ model, max_tokens: SMALL, provider: { zdr: true } }, featureRequestOptions('x'));
+      await client.chat.completions.create({ model, max_tokens: opts.cap, provider: { zdr: true } }, featureRequestOptions('x'));
+      `,
+    );
+    expect(audit.problems).toHaveLength(3);
+    expect(audit.problems[0]).toMatch(/:3 client\.chat\.completions\.create\(…\) caps max_tokens at 200 without a reasoning override/);
+    expect(audit.problems[1]).toMatch(/:4 .* caps max_tokens at 600 without/);
+    expect(audit.problems[2]).toMatch(/:5 .* caps max_tokens at opts\.cap without/);
+  });
+
+  it('accepts a capped call that sets reasoning (directly, through its body, or in a spread) or a big cap', () => {
+    const audit = auditSource(
+      'ai/example.ts',
+      `
+      const BIG = 4_000;
+      const body: Body = { model, max_tokens: 200, reasoning: { effort: 'low' }, provider: { zdr: true } };
+      await client.chat.completions.create(body as unknown as Params, featureRequestOptions('x'));
+      await client.chat.completions.create(
+        { model, max_tokens: req.max, ...(effort ? { reasoning: { effort } } : {}), provider: { zdr: true } },
+        featureRequestOptions('x'),
+      );
+      await client.chat.completions.create({ model, max_tokens: BIG, provider: { zdr: true } }, featureRequestOptions('x'));
+      await client.chat.completions.create({ model, provider: { zdr: true } }, featureRequestOptions('x'));
+      `,
+    );
+    expect(audit.problems).toEqual([]);
+    expect(auditSource('ai/emojiCaptioner.ts', "await o.chat.completions.create({ max_tokens: 1, provider: { zdr: true } }, featureRequestOptions('x'));").problems).toEqual([]);
   });
 
   it('accepts the shapes the code base uses', () => {

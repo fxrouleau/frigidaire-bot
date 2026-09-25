@@ -1,6 +1,9 @@
 import { ChannelType, type Client, type Collection, type Message, type TextChannel } from 'discord.js';
 import type OpenAI from 'openai';
-import type { ChatCompletionContentPart } from 'openai/resources/chat/completions';
+import type {
+  ChatCompletionContentPart,
+  ChatCompletionCreateParamsNonStreaming,
+} from 'openai/resources/chat/completions';
 import { config } from '../config';
 import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
@@ -38,6 +41,20 @@ const OBSERVATION_CATEGORIES = [
 ] as const;
 
 export type ObservationCategory = (typeof OBSERVATION_CATEGORIES)[number];
+
+// The default learner model (z-ai/glm-5.3-flash) reasons at 'max' unless told otherwise, and reasoning
+// counts toward max_tokens: at 'max', the old 1536-token cap could be spent before any JSON was written.
+// Each pass asks for 'low' and keeps room for the observations after it (only generated tokens are billed).
+const LEARNER_MAX_TOKENS = 4096;
+
+type LearnerRequestBody = {
+  model: string;
+  max_tokens: number;
+  temperature: number;
+  messages: Array<{ role: 'user'; content: ChatCompletionContentPart[] }>;
+  reasoning: { effort: 'low' };
+  provider: { zdr: true };
+};
 
 /**
  * Normalizes an LLM-emitted category string (trim + lowercase) and validates it against the known
@@ -649,20 +666,28 @@ export class PersonalityLearner {
   ): Promise<{ observations: number; identityUpdates: number }> {
     logger.info(`${label}: Sending request to ${model} for channel ${channelId}`);
 
+    const body: LearnerRequestBody = {
+      model,
+      max_tokens: LEARNER_MAX_TOKENS,
+      temperature: 0.3,
+      messages: [{ role: 'user', content: contentParts }],
+      reasoning: { effort: 'low' },
+      provider: { zdr: true },
+    };
+    // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
     const response = await openai.chat.completions.create(
-      {
-        model,
-        max_tokens: 1536,
-        temperature: 0.3,
-        messages: [{ role: 'user', content: contentParts }],
-        // @ts-expect-error OpenRouter-specific field
-        provider: { zdr: true },
-      },
+      body as unknown as ChatCompletionCreateParamsNonStreaming,
       featureRequestOptions(feature),
     );
 
-    const text = response.choices?.[0]?.message?.content?.trim();
-    if (!text) return { observations: 0, identityUpdates: 0 };
+    const choice = response.choices?.[0];
+    const text = choice?.message?.content?.trim();
+    if (!text) {
+      logger.warn(
+        `${label}: ${model} returned nothing for channel ${channelId} (finish=${choice?.finish_reason ?? 'none'}).`,
+      );
+      return { observations: 0, identityUpdates: 0 };
+    }
 
     const parsed = parseLearnerOutput(text);
     if (!parsed) {

@@ -6,6 +6,7 @@
 import { createHash } from 'node:crypto';
 import { type Client, RESTJSONErrorCodes } from 'discord.js';
 import type OpenAI from 'openai';
+import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 import { getMemoryStore } from '../ai/memory';
 import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { getOpenRouterClient } from '../ai/openRouterClient';
@@ -20,6 +21,10 @@ import { describeError, discordErrorCode, fetchPostableChannel, type PostableCha
 const MINUTE_MS = 60_000;
 const MEMORY_CONTEXT_LIMIT = 5;
 const MODEL_TIMEOUT_MS = 30_000;
+// The default chat model (z-ai/glm-5.3-flash) reasons at 'max' unless told otherwise, and reasoning counts
+// toward max_tokens: the writer asks for 'low' and leaves room for it before the message (only the tokens
+// actually generated are billed).
+const MODEL_MAX_TOKENS = 1500;
 const MAX_MESSAGE_CHARS = 600;
 /** Waits between failed attempts for the same birthday (the last one repeats until the day ends). */
 const RETRY_DELAYS_MS = [MINUTE_MS, 5 * MINUTE_MS, 15 * MINUTE_MS, 30 * MINUTE_MS, 60 * MINUTE_MS];
@@ -82,30 +87,47 @@ export function finalizeBirthdayMessage(text: string | null | undefined, userId:
   return `🎂 ${withMention}`;
 }
 
-/** The chat-model writer (ZDR, tagged 'birthday' for cost attribution). */
+type WriterRequestBody = {
+  model: string;
+  max_tokens: number;
+  temperature: number;
+  messages: Array<{ role: 'system' | 'user'; content: string }>;
+  reasoning: { effort: 'low' };
+  provider: { zdr: true };
+};
+
+/** The chat-model writer (ZDR, low reasoning effort, tagged 'birthday' for cost attribution). */
 export function createBirthdayWriter(opts: BirthdayWriterOptions = {}): BirthdayWriter {
   return async (input) => {
     const client = opts.client ?? getOpenRouterClient();
     if (!client) return undefined;
     const model = opts.model ?? config.models.chat;
     const prompt = buildPrompt(input);
+    const body: WriterRequestBody = {
+      model,
+      max_tokens: MODEL_MAX_TOKENS,
+      temperature: 0.9,
+      messages: [
+        { role: 'system', content: prompt.system },
+        { role: 'user', content: prompt.user },
+      ],
+      reasoning: { effort: 'low' },
+      provider: { zdr: true },
+    };
     try {
-      const response = await client.chat.completions.create(
-        {
-          model,
-          max_tokens: 600,
-          temperature: 0.9,
-          messages: [
-            { role: 'system', content: prompt.system },
-            { role: 'user', content: prompt.user },
-          ],
-          // @ts-expect-error OpenRouter-specific field
-          provider: { zdr: true },
-        },
-        { ...featureRequestOptions('birthday'), timeout: opts.timeoutMs ?? MODEL_TIMEOUT_MS, maxRetries: 1 },
-      );
-      const finalized = finalizeBirthdayMessage(response.choices?.[0]?.message?.content, input.userId);
-      if (!finalized) logger.warn(`birthdays: ${model} returned no usable message; using the template.`);
+      // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
+      const response = await client.chat.completions.create(body as unknown as ChatCompletionCreateParamsNonStreaming, {
+        ...featureRequestOptions('birthday'),
+        timeout: opts.timeoutMs ?? MODEL_TIMEOUT_MS,
+        maxRetries: 1,
+      });
+      const choice = response.choices?.[0];
+      const finalized = finalizeBirthdayMessage(choice?.message?.content, input.userId);
+      if (!finalized) {
+        logger.warn(
+          `birthdays: ${model} returned no usable message (finish=${choice?.finish_reason ?? 'none'}); using the template.`,
+        );
+      }
       return finalized;
     } catch (error) {
       logger.warn(`birthdays: ${model} call failed; using the template:`, error);

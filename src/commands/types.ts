@@ -17,9 +17,9 @@ export type ChannelSummary = { ok: true; text: string } | { ok: false; reason: s
 export type SummarizeRequest = { message: Message; start: Date; end: Date; requesterId?: string };
 
 /**
- * A one-shot, tool-less chat completion: a system prompt, one user turn, one text answer. `maxTokens` is
- * only a ceiling (just the generated tokens are billed); keep it generous so a CHAT_MODEL that reasons
- * before answering still has room left for the answer itself.
+ * A one-shot, tool-less chat completion (low reasoning effort): a system prompt, one user turn, one text
+ * answer. `maxTokens` is only a ceiling (just the generated tokens are billed); keep it at 1500 or more
+ * so a CHAT_MODEL that reasons before answering still has room left for the answer itself.
  */
 export type CompletionRequest = { system: string; user: string; maxTokens: number; temperature?: number };
 

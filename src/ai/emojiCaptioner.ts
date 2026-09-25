@@ -10,6 +10,10 @@ import { featureRequestOptions } from './usage';
  * Claude Opus by default — see config.ts for why). Returns the caption string, or undefined if the
  * captioning failed or OPENROUTER_API_KEY is unset. The caption is intentionally terse so it fits in
  * prompt preambles without blowing up token budgets.
+ *
+ * Neither call here sends a reasoning effort: Claude only reasons when asked, and an effort would switch
+ * paid thinking on. A model that reasons by default (z-ai/glm-5.3-flash reasons at 'max') would spend
+ * these small max_tokens caps before answering, so pointing EMOJI_CAPTION_MODEL at one needs an override.
  */
 export async function captionEmoji(params: {
   id: string;

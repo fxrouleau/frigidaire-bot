@@ -337,7 +337,14 @@ describe('createBirthdayWriter', () => {
     expect(requests).toHaveLength(1);
     expect(requests[0].url).toBe('https://openrouter.ai/api/v1/chat/completions');
     expect(requests[0].headers.get(FEATURE_HEADER)).toBe('birthday');
-    expect(requests[0].body).toMatchObject({ model: 'test-chat-model', provider: { zdr: true } });
+    // Low reasoning effort with room for it: the default chat model reasons at 'max' unless told
+    // otherwise, and at a 600-token cap that came back empty.
+    expect(requests[0].body).toMatchObject({
+      model: 'test-chat-model',
+      max_tokens: 1500,
+      reasoning: { effort: 'low' },
+      provider: { zdr: true },
+    });
     const messages = requests[0].body.messages as Array<{ role: string; content: string }>;
     expect(messages[0].content).toContain("It's Alice's birthday today (turning 30)");
     expect(messages[0].content).toContain(`<@${ALICE}>`);

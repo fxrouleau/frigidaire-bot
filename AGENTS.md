@@ -159,7 +159,8 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
   - an SDK call without `featureRequestOptions()`;
   - a chat/embeddings/responses call that isn't visibly ZDR-routed;
   - `new OpenAI(` outside `openRouterClient.ts`;
-  - a file that talks to OpenRouter but never records usage (the exemption is `modelCatalog.ts`: free public metadata).
+  - a file that talks to OpenRouter but never records usage (the exemption is `modelCatalog.ts`: free public metadata);
+  - a call that caps `max_tokens` below 4000 without a `reasoning` field (see Reasoning budgets; the exemption is `emojiCaptioner.ts`: Claude only reasons when asked).
 
   Pass options inline: `create(body, { ...featureRequestOptions('x'), timeout })`.
 - **Model catalog** (`modelCatalog.ts`): OpenRouter's public metadata, fetched with plain `fetch` (no key, no member content) and refreshed daily:
@@ -168,7 +169,11 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
 
   A failed fetch keeps the previous copy and retries after 10 minutes. A ZDR verdict older than 3 days doesn't count. It never fetches under Vitest.
 - **Decisions endpoint** (`decisions.ts`): TypeSafe decision models answer typed questions about a small JSON state with a calibrated probability: text-only, ~$0.04 per million input tokens, free output, on the ZDR list. `typesafe/jev-1.13` is pinned (`DEFAULT_DECISION_MODEL`) because thresholds are tuned against one version. Every call is ZDR with a 6 s timeout and one retry (network, timeout, 408, 429, 5xx), and records usage. It resolves to `undefined` on no answer, and callers fail closed. Following TypeSafe's guidance, arithmetic stays in code and the state stays small.
-- **Reasoning budgets**: the default chat/learner model (`z-ai/glm-5.3-flash`) reasons mandatorily, at `max` effort by default, and reasoning is billed as output. One-shot judgement calls therefore send `reasoning: { effort: 'low' }` with `max_tokens` ≥ 1500: the ramble judge, the auto-react judge and the message-judge fallback. Media calls send the catalog's lowest effort. A small `max_tokens` without an effort override can come back empty (`finish_reason: length`).
+- **Reasoning budgets**: the default chat/learner model (`z-ai/glm-5.3-flash`) reasons mandatorily, at `max` effort by default, and reasoning is billed as output and counts toward `max_tokens`. A small `max_tokens` without an effort override can come back empty (`finish_reason: length`), so:
+  - One-shot calls send `reasoning: { effort: 'low' }` with `max_tokens` ≥ 1500: the ramble judge, the auto-react judge, the message-judge fallback, the Wrapped intro, the birthday writer and the command completions (Translate, Remember this). The learner and self-improvement passes do too, with 4096.
+  - Media calls send the catalog's lowest effort.
+  - The emoji captioner sends none: its default model (Claude Opus) only reasons when asked, and an effort would switch paid thinking on. A reasoning model in `EMOJI_CAPTION_MODEL` needs an override there.
+  - Summaries (`max_tokens` 4000) and the chat turn (no cap) run at the model's default effort.
 
 ### Chat turn (`src/events/aiChat.ts`, `AgentOrchestrator`)
 
@@ -434,7 +439,7 @@ Every member message the bot can see (guild text and announcement channels and t
   - **Visibility** (`replyAccessFor`): a channel is searchable only if the asker can read it AND it is at least as visible as the channel the answer is posted in, so a mod's question in the main channel never quotes a private channel. This also closes Ask Fridge, where the "asker" is the target's author. `watch_video` jump links follow the same rule.
 - **Wrapped** (`wrapped.ts`, `archiveWrapped` + `wrappedPreview` events): a **yearly** post for the previous year, from Jan 1 15:00 ET within a 3-day late window, in `WRAPPED_CHANNEL_ID` (default: the report channel, so the owner sees it before the group).
   - Contents: top yappers, busiest ET day and hour, top channel, top custom emojis, most reacted message, links per platform, voice messages, most regretted, edits and deletions, ramble of the year, bot pings.
-  - The text is deterministic and pings nobody. An optional roast-y intro line comes from `CHAT_MODEL` (`WRAPPED_LLM_INTRO`); a failure drops the line.
+  - The text is deterministic and pings nobody. An optional roast-y intro line comes from `CHAT_MODEL` at low reasoning effort (`WRAPPED_LLM_INTRO`); a failure drops the line.
   - Only channels at least as public as the Wrapped channel count.
   - Watermark in bot.db `wrapped_posts` (`year:YYYY`): `posting` (taken over after 15 min), `sending` (never retried), `posted`, `skipped` (final, WARN), `retry` (backoff 5 min → 6 h until the window ends), `failed`.
   - **`!wrapped` / `!wrapped 2025` in the report channel** posts a preview through the same pipeline without touching the watermark. It works even with `WRAPPED_ENABLED=false`, and its footnote lists the channels it counted.
@@ -463,7 +468,7 @@ Everyone lives in America/New_York, so every time a tool takes or shows is Easte
 - **`create_poll({question, answers, duration_hours?, allow_multiselect?})`**: a native poll, validated against Discord's limits first (question ≤300, 1–10 unique answers ≤55, 1–768 h, default 24). It needs the Create Polls permission.
 - **Birthdays** (bot.db `birthdays`): `set_birthday` (`MM-DD` or `YYYY-MM-DD`), `list_birthdays` (by next occurrence, with the age they'll turn) and `forget_birthday`.
   - The announcement starts once ET reaches `BIRTHDAY_ANNOUNCE_HOUR`, for birthdays that are **today** (Feb 29 → Feb 28 in common years), so a bot down all afternoon announces late the same day, never the next. It goes to `BIRTHDAY_CHANNEL_ID` (default main).
-  - The text is written by `CHAT_MODEL` (ZDR, tagged `birthday`) with ≤5 of the person's memories, then cleaned and 🎂-prefixed. A template is used on failure.
+  - The text is written by `CHAT_MODEL` (ZDR, low reasoning effort, tagged `birthday`) with ≤5 of the person's memories, then cleaned and 🎂-prefixed. A template is used on failure.
   - The year is claimed before posting and released if the send fails. A birthday set in chat on the day is marked announced (the reply was the wish). Members who left are skipped.
   - **`BIRTHDAYS_SEED`** (`userId:MM-DD` / `userId:YYYY-MM-DD`) is applied **once per user** (`birthday_seed_applied`): chat corrections and `forget_birthday` stick. A seed entry that differs from a saved birthday is logged as a WARN (use `set_birthday` to change it).
 
@@ -962,5 +967,4 @@ Both image workflows build the `ci` Docker stage (GHA layer cache), which runs `
   - Unifying the helpers that remain duplicated per module (small truncate/one-line helpers, two capturing test clients).
 - **Tuning is owner-driven from the logs**: `GATE_THRESHOLD` (`gate: REPLY|skip` lines + `yarn eval:gate`), `RAMBLE_THRESHOLD` (`ramble:` lines), auto-react (shadow lines, then `AUTO_REACT_MODE=on`), fixer order (`*_FIXERS`, alerts).
 - **Grandfathered public-repo exception**: the learner prompt's GOOD/BAD examples in `personalityLearner.ts` still use a few real first names; the owner kept them as-is for now. Don't copy them anywhere, and don't add more.
-- **Known sharp edge**: the Wrapped intro (`max_tokens` 200) and the birthday writer (600) call `CHAT_MODEL` without a reasoning-effort override. With the default reasoning model they may come back empty; both then degrade (no intro line, the template birthday). Check `WRAPPED_INTRO` in the live tests before relying on them.
 - Cloud / no-Docker fallback: `npm install && npx vitest run && npx tsc -p tsconfig.test.json && npx biome check --fix src/`; set `LEFTHOOK=0` when committing; never commit `package-lock.json`; regenerate `yarn.lock` with a Yarn 4 binary from npm (`npm pack @yarnpkg/cli-dist@4.18.1`) when dependencies change. The sandbox server tests need `python3` and `bash`.

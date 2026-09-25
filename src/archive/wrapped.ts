@@ -3,10 +3,10 @@
 // computed from the archive. There is no monthly post: once a year keeps it an event, not noise.
 //
 // The post is deterministic text; the only model output is one optional roast-y intro line (chat model,
-// ZDR-routed, tagged 'wrapped'), and any failure there just drops the line. Each year posts once: a
-// watermark row in bot.db is claimed ('posting') before the stats and the intro are computed, switched
-// to 'sending' right before the first message goes out, and finalized after, so a restart, a second
-// tick or a redeploy never double-posts. A claim abandoned while still 'posting' (the bot restarted
+// ZDR-routed, low reasoning effort, tagged 'wrapped'), and any failure there just drops the line. Each
+// year posts once: a watermark row in bot.db is claimed ('posting') before the stats and the intro are
+// computed, switched to 'sending' right before the first message goes out, and finalized after, so a
+// restart, a second tick or a redeploy never double-posts. A claim abandoned while still 'posting' (the bot restarted
 // mid-intro: nothing was sent) is taken over once stale; one abandoned while 'sending' never is, since
 // part of the post may be out. An attempt that failed before anything went out (the channel could not
 // be fetched, the first send was rejected) is retried with a growing backoff for as long as the year is
@@ -22,6 +22,7 @@
 // BOTH the Wrapped channel and the channel the preview is posted in.
 import { type Client, escapeMarkdown } from 'discord.js';
 import type OpenAI from 'openai';
+import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 import { getMemoryStore } from '../ai/memory';
 import { getOpenRouterClient } from '../ai/openRouterClient';
 import { featureRequestOptions } from '../ai/usage';
@@ -65,6 +66,10 @@ const LATE_WINDOW_MS = 3 * 86_400_000;
 const RETRY_BASE_MS = 5 * 60_000;
 const RETRY_MAX_MS = 6 * 60 * 60_000;
 const INTRO_TIMEOUT_MS = 30_000;
+// The default chat model (z-ai/glm-5.3-flash) reasons at 'max' unless told otherwise, and reasoning counts
+// toward max_tokens: the intro asks for 'low' and leaves room for it before the one line (only the tokens
+// actually generated are billed).
+const INTRO_MAX_TOKENS = 1500;
 // Far longer than computing the stats and the intro ever takes: a 'posting' claim this old was abandoned.
 const STALE_CLAIM_MS = 15 * 60_000;
 // Discord's launch year: nothing older can be in the archive.
@@ -396,6 +401,15 @@ export function cleanIntro(raw: string | null | undefined): string | undefined {
   return cleaned.length > 280 ? `${cleaned.slice(0, 279)}…` : cleaned;
 }
 
+type IntroRequestBody = {
+  model: string;
+  max_tokens: number;
+  temperature: number;
+  messages: Array<{ role: 'system' | 'user'; content: string }>;
+  reasoning: { effort: 'low' };
+  provider: { zdr: true };
+};
+
 /** One roast-y intro line from the chat model, or undefined (no key, error, timeout, empty answer). */
 export async function generateWrappedIntro(
   period: WrappedPeriod,
@@ -407,26 +421,31 @@ export async function generateWrappedIntro(
   if (!client) return undefined;
   const model = deps.model ?? config.models.chat;
   try {
-    const response = await client.chat.completions.create(
-      {
-        model,
-        max_tokens: 200,
-        temperature: 0.9,
-        // @ts-expect-error OpenRouter-specific field
-        provider: { zdr: true },
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You write the one-line intro of a year-in-review stats recap for a private Discord server of close friends who roast each other constantly. Be funny and a little mean about the numbers: call someone out by name. Crude is fine. Max 25 words, one line, no hashtags, no emojis, no quotation marks. Output only the line.',
-          },
-          { role: 'user', content: statsDigest(period, stats, nameOf) },
-        ],
-      },
-      { ...featureRequestOptions('wrapped'), timeout: INTRO_TIMEOUT_MS },
-    );
-    const intro = cleanIntro(response.choices?.[0]?.message?.content);
-    if (!intro) logger.warn(`wrapped: ${model} returned no usable intro line.`);
+    const body: IntroRequestBody = {
+      model,
+      max_tokens: INTRO_MAX_TOKENS,
+      temperature: 0.9,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You write the one-line intro of a year-in-review stats recap for a private Discord server of close friends who roast each other constantly. Be funny and a little mean about the numbers: call someone out by name. Crude is fine. Max 25 words, one line, no hashtags, no emojis, no quotation marks. Output only the line.',
+        },
+        { role: 'user', content: statsDigest(period, stats, nameOf) },
+      ],
+      reasoning: { effort: 'low' },
+      provider: { zdr: true },
+    };
+    // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
+    const response = await client.chat.completions.create(body as unknown as ChatCompletionCreateParamsNonStreaming, {
+      ...featureRequestOptions('wrapped'),
+      timeout: INTRO_TIMEOUT_MS,
+    });
+    const choice = response.choices?.[0];
+    const intro = cleanIntro(choice?.message?.content);
+    if (!intro) {
+      logger.warn(`wrapped: ${model} returned no usable intro line (finish=${choice?.finish_reason ?? 'none'}).`);
+    }
     return intro;
   } catch (error) {
     logger.warn(`wrapped: intro line from ${model} failed; posting without it:`, error);

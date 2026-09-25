@@ -27,7 +27,7 @@ function capturingClient(fixtureName: string, override?: unknown) {
 }
 
 describe('createCompletion', () => {
-  it('sends one ZDR-routed, command-tagged chat request and returns the trimmed answer', async () => {
+  it('sends one ZDR-routed, command-tagged, low-effort chat request and returns the trimmed answer', async () => {
     const { client, captured } = capturingClient('text-response');
     const complete = createCompletion({ client, model: 'test/model' });
 
@@ -40,6 +40,7 @@ describe('createCompletion', () => {
       model: 'test/model',
       max_tokens: 123,
       temperature: 0.1,
+      reasoning: { effort: 'low' },
       provider: { zdr: true },
       messages: [
         { role: 'system', content: 'be brief' },

@@ -197,7 +197,7 @@ describe('PersonalityLearner observation cycle', () => {
     expect(parts.filter((p) => p.text === '[image not shown]')).toHaveLength(3);
   });
 
-  it('routes with ZDR and tags each pass with its feature', async () => {
+  it('routes with ZDR, asks for low reasoning effort, and tags each pass with its feature', async () => {
     vi.stubEnv('SELF_IMPROVEMENT_ENABLED', 'true');
     const { client } = channelServing([jasper('a'), wheelie('b'), jasper('c')]);
     const { learner, requests } = learnerWith([noObservations(), noObservations()]);
@@ -206,6 +206,9 @@ describe('PersonalityLearner observation cycle', () => {
 
     expect(requests).toHaveLength(2);
     expect(requests.map((r) => r.body.provider)).toEqual([{ zdr: true }, { zdr: true }]);
+    // The default learner model reasons at 'max' unless told otherwise, which could spend the whole cap.
+    expect(requests.map((r) => r.body.reasoning)).toEqual([{ effort: 'low' }, { effort: 'low' }]);
+    expect(requests.map((r) => r.body.max_tokens)).toEqual([4096, 4096]);
     expect(requests.map((r) => r.headers.get(FEATURE_HEADER))).toEqual(['learner', 'self_improvement']);
   });
 
