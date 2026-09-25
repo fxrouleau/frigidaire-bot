@@ -10,6 +10,7 @@ on:
         - '.github/workflows/**'
         - 'package.json'
         - 'yarn.lock'
+        - '.yarnrc.yml'
         - '.dockerignore'
         - 'src/**'
         - 'tsconfig.json'
