@@ -27,6 +27,7 @@ export const TRANSCRIBE_LINES = {
 export const transcribe: MessageCommand = {
   type: ApplicationCommandType.Message,
   name: 'Transcribe',
+  exclusive: 'target',
   async run(interaction, deps) {
     const target = interaction.targetMessage;
     const media = mediaAttachments(target).slice(0, MAX_MEDIA_PER_MESSAGE);

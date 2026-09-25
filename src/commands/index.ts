@@ -9,7 +9,8 @@
 // Dispatch: interactionCreate hands every context-menu interaction to handleContextMenuCommand(), which
 // finds the command and runs it behind one error boundary: an expected outcome (CommandError) becomes a
 // private in-character line, anything else a private "that broke" plus a WARN. Nothing escapes as an
-// unhandled rejection, and every response to the invoker is ephemeral.
+// unhandled rejection, and every response to the invoker is ephemeral. A repeat of a run still in progress
+// (same command and target) is turned away privately instead of doing the work twice.
 import {
   type ApplicationCommandDataResolvable,
   ApplicationCommandType,
@@ -43,6 +44,14 @@ export const COMMANDS: readonly ContextMenuCommand[] = [
 ];
 
 const MISSING_ACCESS = 50001;
+
+// Runs in progress, keyed by command, target and (for private commands) invoker; see CommandExclusivity.
+const running = new Set<string>();
+
+function runKey(command: ContextMenuCommand, interaction: ContextMenuCommandInteraction): string {
+  const scope = command.exclusive === 'target' ? '' : `:${interaction.user.id}`;
+  return `${command.type}:${command.name}:${interaction.targetId}${scope}`;
+}
 
 /** The registration payload: name + type only. Guild commands are usable by every member by default. */
 export function commandPayloads(
@@ -141,7 +150,15 @@ export async function handleContextMenuCommand(
     return;
   }
 
+  const key = runKey(command, interaction);
+  if (running.has(key)) {
+    logger.info(`commands: ${label} on ${interaction.targetId} is already running, ignoring the repeat`);
+    await failPrivately(interaction, LINES.busy);
+    return;
+  }
+
   logger.info(`commands: ${interaction.user.username} used ${label} in channel ${interaction.channelId}`);
+  running.add(key);
   try {
     if (command.type === ApplicationCommandType.Message && interaction.isMessageContextMenuCommand()) {
       await command.run(interaction, deps);
@@ -156,5 +173,7 @@ export async function handleContextMenuCommand(
     }
     logger.warn(`commands: ${label} failed:`, error);
     await failPrivately(interaction, LINES.failed);
+  } finally {
+    running.delete(key);
   }
 }

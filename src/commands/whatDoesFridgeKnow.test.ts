@@ -60,6 +60,23 @@ describe('What does Fridge know?', () => {
     expect(text).toMatch(/`#\d+` Still plays on PS4\. \*\(fact, today\)\*/);
   });
 
+  it('also finds rows filed under the IRL name or the Discord handle', async () => {
+    store.upsertIdentity('user-7', 'Jason');
+    store.updateIdentityMeta('user-7', { irl_name: 'Jason M' });
+    await store.save({ category: 'fact', subject: 'Jason M', content: 'Grew up in Laval.' });
+    await store.save({ category: 'preference', subject: 'cigalefourmi', content: 'Mains Thresh.' });
+
+    const { interaction, responses } = createFakeUserCommandInteraction(
+      { id: 'user-7', username: 'cigalefourmi', memberDisplayName: 'Jason' },
+      { commandName: 'What does Fridge know?' },
+    );
+    await handleContextMenuCommand(interaction, createFakeCommandDeps({ store, now: new Date() }).deps);
+
+    const text = responses[0].content ?? '';
+    expect(text).toContain('Grew up in Laval.');
+    expect(text).toContain('Mains Thresh.');
+  });
+
   it('says so when it knows nothing', async () => {
     const { interaction, responses } = createFakeUserCommandInteraction(
       { id: 'user-9', username: 'newguy', memberDisplayName: null },

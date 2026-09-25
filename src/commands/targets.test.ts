@@ -11,6 +11,7 @@ import {
   invokerName,
   liveDisplayName,
   mediaAttachments,
+  personNames,
   readableText,
   resolveTargetAuthor,
   transcriptOf,
@@ -158,21 +159,27 @@ describe('ensureTargetChannel', () => {
 describe('resolveTargetAuthor', () => {
   it("uses a human author's live server name", async () => {
     const { guild, recorders } = createFakeGuild({ members: { 'user-7': 'Jason (live)' } });
-    const { message } = createFakeTargetMessage({ authorId: 'user-7', authorDisplayName: 'Jason', guild });
-    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-7', name: 'Jason (live)' });
+    const { message } = createFakeTargetMessage({
+      authorId: 'user-7',
+      authorDisplayName: 'Jason',
+      authorUsername: 'cigalefourmi',
+      guild,
+    });
+    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-7', name: 'Jason (live)', username: 'cigalefourmi' });
     expect(recorders.membersFetch.calls).toEqual([['user-7']]);
   });
 
   it('falls back to the message name when the member left the server', async () => {
     const { guild } = createFakeGuild();
     const { message } = createFakeTargetMessage({ authorId: 'user-7', authorDisplayName: 'Jason', guild });
-    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-7', name: 'Jason' });
+    expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-7', name: 'Jason', username: 'testuser' });
   });
 
   it('credits a link-fix repost to the member it was posted for', async () => {
     recordRelay({ messageId: 'relay-1', channelId: 'channel-1', authorId: 'user-8', authorName: 'Simon', kind: 'link_fix' });
     const { guild } = createFakeGuild({ members: { 'user-8': 'Simon B' } });
     const { message } = createFakeTargetMessage({ messageId: 'relay-1', webhookId: 'hook-1', authorUsername: 'Simon', guild });
+    // No username: the message's author is the webhook, whose "username" is only the name it posted under.
     expect(await resolveTargetAuthor(message)).toEqual({ id: 'user-8', name: 'Simon B' });
   });
 
@@ -181,6 +188,27 @@ describe('resolveTargetAuthor', () => {
     expect(
       await resolveTargetAuthor(createFakeTargetMessage({ webhookId: 'hook-x', applicationId: 'someone-else' }).message),
     ).toBeUndefined();
+  });
+});
+
+describe('personNames', () => {
+  it("collects every name a person's memories may be filed under, without blanks or duplicates", () => {
+    store.upsertIdentity('user-7', 'Jay');
+    store.upsertIdentity('user-7', 'Jason');
+    store.updateIdentityMeta('user-7', { irl_name: 'Jason M', aliases_add: ['JJ', 'Jason'] });
+    const identity = store.getIdentityById('user-7');
+    expect(personNames(identity, 'Jason (live)', '  ', undefined, 'cigalefourmi')).toEqual([
+      'Jason (live)',
+      'cigalefourmi',
+      'Jason',
+      'Jay',
+      'Jason M',
+      'JJ',
+    ]);
+  });
+
+  it('works for someone the bot has no identity for', () => {
+    expect(personNames(undefined, 'newguy', 'newguy', null)).toEqual(['newguy']);
   });
 });
 

@@ -185,6 +185,80 @@ describe('handleContextMenuCommand', () => {
     ).resolves.toBeUndefined();
   });
 
+  describe('repeat clicks while a run is in progress', () => {
+    function slowCommand(exclusive?: 'target' | 'invoker') {
+      let finish = () => {};
+      const gate = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      let runs = 0;
+      const command: MessageCommand = {
+        type: ApplicationCommandType.Message,
+        name: 'Slow',
+        exclusive,
+        run: async (interaction) => {
+          runs += 1;
+          await interaction.deferReply({ flags: 64 });
+          await gate;
+          await interaction.editReply('done');
+        },
+      };
+      return { command, finish: () => finish(), runs: () => runs };
+    }
+
+    it("turns away a repeat on the same target privately, whoever clicks, for 'target' commands", async () => {
+      const slow = slowCommand('target');
+      const message = target();
+      const first = createFakeMessageCommandInteraction(message, { commandName: 'Slow', invokerId: 'a' });
+      const second = createFakeMessageCommandInteraction(message, { commandName: 'Slow', invokerId: 'b' });
+      const deps = createFakeCommandDeps().deps;
+
+      const running = handleContextMenuCommand(first.interaction, deps, [slow.command]);
+      await handleContextMenuCommand(second.interaction, deps, [slow.command]);
+      expect(second.responses).toEqual([expect.objectContaining({ method: 'reply', content: LINES.busy, ephemeral: true })]);
+
+      slow.finish();
+      await running;
+      expect(slow.runs()).toBe(1);
+      expect(first.texts()).toEqual(['done']);
+
+      // Once the first run is over, the command is available again.
+      const third = createFakeMessageCommandInteraction(message, { commandName: 'Slow', invokerId: 'b' });
+      await handleContextMenuCommand(third.interaction, deps, [slow.command]);
+      expect(slow.runs()).toBe(2);
+    });
+
+    it('lets different invokers run private commands on the same target at once', async () => {
+      const slow = slowCommand();
+      const message = target();
+      const deps = createFakeCommandDeps().deps;
+      const a = createFakeMessageCommandInteraction(message, { commandName: 'Slow', invokerId: 'a' });
+      const b = createFakeMessageCommandInteraction(message, { commandName: 'Slow', invokerId: 'b' });
+      const again = createFakeMessageCommandInteraction(message, { commandName: 'Slow', invokerId: 'a' });
+
+      const runs = [
+        handleContextMenuCommand(a.interaction, deps, [slow.command]),
+        handleContextMenuCommand(b.interaction, deps, [slow.command]),
+      ];
+      await handleContextMenuCommand(again.interaction, deps, [slow.command]);
+      expect(again.texts()).toEqual([LINES.busy]);
+
+      slow.finish();
+      await Promise.all(runs);
+      expect(slow.runs()).toBe(2);
+    });
+
+    it('releases the target when a run fails', async () => {
+      const message = target();
+      const deps = createFakeCommandDeps().deps;
+      const boom = { ...commandThatThrows(new Error('kaboom')), exclusive: 'target' as const };
+      await handleContextMenuCommand(createFakeMessageCommandInteraction(message, { commandName: 'Boom' }).interaction, deps, [boom]);
+      const retry = createFakeMessageCommandInteraction(message, { commandName: 'Boom' });
+      await handleContextMenuCommand(retry.interaction, deps, [boom]);
+      expect(retry.texts()).toEqual([LINES.failed]);
+    });
+  });
+
   it('never rejects when the acknowledgement itself fails (token already expired)', async () => {
     const guild = createFakeGuild();
     const message = createFakeTargetMessage({ content: 'bonjour', guild: guild.guild }).message;

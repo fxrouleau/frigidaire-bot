@@ -8,7 +8,14 @@ import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { easternParts } from '../ai/utils';
 import { logger } from '../logger';
 import { answerPrivately, deferPrivately } from './respond';
-import { ensureTargetChannel, invokerName, readableText, resolveTargetAuthor, voiceTranscriptOf } from './targets';
+import {
+  ensureTargetChannel,
+  invokerName,
+  personNames,
+  readableText,
+  resolveTargetAuthor,
+  voiceTranscriptOf,
+} from './targets';
 import { CommandError, type MessageCommand } from './types';
 
 export const MAX_FACT_CHARS = 80;
@@ -107,15 +114,7 @@ export const rememberThis: MessageCommand = {
     const store = deps.memoryStore();
     const identity = author.id ? store.getIdentityById(author.id) : undefined;
     const known = store
-      .getForPerson({
-        userId: author.id,
-        names: [
-          author.name,
-          identity?.display_name ?? '',
-          identity?.canonical_name ?? '',
-          ...(identity?.aliases ?? []),
-        ],
-      })
+      .getForPerson({ userId: author.id, names: personNames(identity, author.name, author.username) })
       .filter((m) => !SELF_DIAGNOSIS.has(m.category))
       .slice(0, MAX_KNOWN_MEMORIES);
 

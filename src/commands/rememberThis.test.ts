@@ -114,6 +114,24 @@ describe('Remember this', () => {
     });
   });
 
+  it("shows the model what is already known under any of the author's names (IRL name, Discord handle)", async () => {
+    store.upsertIdentity('user-7', 'Jason');
+    store.updateIdentityMeta('user-7', { irl_name: 'Jason M' });
+    await store.save({ category: 'fact', subject: 'Jason M', content: 'Grew up in Laval.' });
+    await store.save({ category: 'preference', subject: 'cigalefourmi', content: 'Mains Thresh.' });
+    await store.save({ category: 'fact', subject: 'Simon', content: 'Drives a Civic.' });
+    const target = jasonSays('moving back to laval next month', { authorUsername: 'cigalefourmi' });
+    const { interaction } = createFakeMessageCommandInteraction(target.message, { commandName: 'Remember this' });
+    const { deps, recorders } = createFakeCommandDeps({ store, complete: async () => '{"fact": null}' });
+
+    await handleContextMenuCommand(interaction, deps);
+
+    const user = recorders.complete.calls[0][0].user;
+    expect(user).toContain('- Grew up in Laval.');
+    expect(user).toContain('- Mains Thresh.');
+    expect(user).not.toContain('Civic');
+  });
+
   it('reports when nothing durable is in the message, saving nothing', async () => {
     const target = jasonSays('lmaooo');
     const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Remember this' });

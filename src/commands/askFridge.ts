@@ -11,16 +11,31 @@ import { type CommandDeps, CommandError, type MessageCommand } from './types';
 export const ASK_FRIDGE_LINES = {
   onIt: 'on it',
   ownMessage: "that's my own message, just reply to it if you want more out of me",
+  alreadyAnswering: "already answering that one, it's coming",
 } as const;
+
+// Targets whose answer is still being written. The dispatcher's own guard ends when run() returns, which
+// is right after the "on it"; this one lasts until the agent is done, so a double-click doesn't get the
+// same message answered twice.
+const answering = new Set<string>();
 
 export const askFridge: MessageCommand = {
   type: ApplicationCommandType.Message,
   name: 'Ask Fridge',
+  exclusive: 'target',
   async run(interaction, deps) {
     const target = interaction.targetMessage;
     if (target.author.id === interaction.client.user.id) throw new CommandError(ASK_FRIDGE_LINES.ownMessage);
+    if (answering.has(target.id)) throw new CommandError(ASK_FRIDGE_LINES.alreadyAnswering);
 
-    await answerPrivately(interaction, ASK_FRIDGE_LINES.onIt);
+    answering.add(target.id);
+    try {
+      await answerPrivately(interaction, ASK_FRIDGE_LINES.onIt);
+    } catch (error) {
+      // The acknowledgement failed (expired token): don't answer a click the invoker was never told about.
+      answering.delete(target.id);
+      throw error;
+    }
     void answerInBackground(interaction, target, deps);
   },
 };
@@ -44,5 +59,7 @@ async function answerInBackground(
     }
     logger.warn(`commands: "Ask Fridge" on message ${target.id} failed:`, error);
     await failPrivately(interaction, LINES.failed);
+  } finally {
+    answering.delete(target.id);
   }
 }

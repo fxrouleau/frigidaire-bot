@@ -36,16 +36,28 @@ export type CommandDeps = {
   now: () => Date;
 };
 
-export type MessageCommand = {
-  type: ApplicationCommandType.Message;
+/**
+ * Which concurrent uses of a command on the same target the dispatcher lets through while one is running.
+ * 'target': one at a time per target, whoever asks — for commands that post publicly, so a double-click (a
+ * double long-press on mobile) or two people at once can't post the same summary twice. 'invoker' (the
+ * default): one at a time per invoker and target — private answers, where a second person asking about the
+ * same message must still get their own.
+ */
+export type CommandExclusivity = 'target' | 'invoker';
+
+type CommandBase = {
   /** Shown verbatim under Apps (1–32 characters, spaces and mixed case allowed). Changing it re-creates the command. */
   name: string;
+  exclusive?: CommandExclusivity;
+};
+
+export type MessageCommand = CommandBase & {
+  type: ApplicationCommandType.Message;
   run: (interaction: MessageContextMenuCommandInteraction, deps: CommandDeps) => Promise<void>;
 };
 
-export type UserCommand = {
+export type UserCommand = CommandBase & {
   type: ApplicationCommandType.User;
-  name: string;
   run: (interaction: UserContextMenuCommandInteraction, deps: CommandDeps) => Promise<void>;
 };
 

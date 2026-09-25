@@ -49,6 +49,49 @@ describe('Ask Fridge', () => {
     expect(responses).toHaveLength(1);
   });
 
+  it('does not answer the same message twice while the first answer is still being written', async () => {
+    const target = createFakeTargetMessage({ messageId: 'msg-dup', content: 'thoughts?' });
+    let finishAgent = () => {};
+    const agentDone = new Promise<void>((resolve) => {
+      finishAgent = resolve;
+    });
+    const { deps, recorders } = createFakeCommandDeps({ askAgent: () => agentDone });
+
+    const first = createFakeMessageCommandInteraction(target.message, { commandName: 'Ask Fridge', invokerId: 'a' });
+    await handleContextMenuCommand(first.interaction, deps);
+    await vi.waitFor(() => expect(recorders.askAgent.calls).toHaveLength(1));
+
+    // The first run() has returned (the invoker got "on it"), but the agent is still going.
+    const second = createFakeMessageCommandInteraction(target.message, { commandName: 'Ask Fridge', invokerId: 'b' });
+    await handleContextMenuCommand(second.interaction, deps);
+    expect(second.responses).toEqual([
+      expect.objectContaining({ method: 'reply', content: ASK_FRIDGE_LINES.alreadyAnswering, ephemeral: true }),
+    ]);
+
+    finishAgent();
+    await vi.waitFor(async () => {
+      const third = createFakeMessageCommandInteraction(target.message, { commandName: 'Ask Fridge' });
+      await handleContextMenuCommand(third.interaction, deps);
+      expect(third.texts()).toEqual([ASK_FRIDGE_LINES.onIt]);
+    });
+    await vi.waitFor(() => expect(recorders.askAgent.calls).toHaveLength(2));
+  });
+
+  it('does not run the agent, and frees the message again, when the acknowledgement fails', async () => {
+    const target = createFakeTargetMessage({ messageId: 'msg-expired' });
+    const { deps, recorders } = createFakeCommandDeps();
+    const expired = createFakeMessageCommandInteraction(target.message, {
+      commandName: 'Ask Fridge',
+      failOn: { reply: new Error('Unknown interaction') },
+    });
+    await expect(handleContextMenuCommand(expired.interaction, deps)).resolves.toBeUndefined();
+    expect(recorders.askAgent.calls).toHaveLength(0);
+
+    const retry = createFakeMessageCommandInteraction(target.message, { commandName: 'Ask Fridge' });
+    await handleContextMenuCommand(retry.interaction, deps);
+    await vi.waitFor(() => expect(recorders.askAgent.calls).toHaveLength(1));
+  });
+
   it("refuses the bot's own messages", async () => {
     const target = createFakeTargetMessage({ authorId: 'bot-1', authorIsBot: true });
     const { interaction, responses } = createFakeMessageCommandInteraction(target.message, { commandName: 'Ask Fridge' });

@@ -11,6 +11,7 @@ export const MAX_SUMMARY_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const summarizeFromHere: MessageCommand = {
   type: ApplicationCommandType.Message,
   name: 'Summarize from here',
+  exclusive: 'target',
   async run(interaction, deps) {
     const target = interaction.targetMessage;
     await deferPrivately(interaction);

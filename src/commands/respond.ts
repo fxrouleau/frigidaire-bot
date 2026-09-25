@@ -29,6 +29,7 @@ export const LINES = {
   guildOnly: 'that only works in the server',
   noChannel: "can't see that channel from here",
   cannotPost: "I'm not allowed to post in here",
+  busy: 'already on that one, give me a sec',
 } as const;
 
 /** No pings from anything the commands post: quoted chat text, names and model output can contain mentions. */
