@@ -431,6 +431,30 @@ describe('AddressedGate exchanges (follow-ups without a name)', () => {
   });
 });
 
+describe('AddressedGate.wasRouted', () => {
+  it('remembers which messages were handed to the agent (explicit or by the gate), in any channel', async () => {
+    const h = harness();
+    const pinged = human('<@bot-1> yo', { channelId: 'not-a-gate-channel' }).message;
+    const named = human('fridge who wins worlds').message;
+    const plain = human('who is playing tonight', KEV).message; // not in the exchange, names nobody
+    h.gate.noteRouted(pinged);
+    await h.gate.evaluate(named);
+    await h.gate.evaluate(plain);
+
+    expect(h.gate.wasRouted(pinged)).toBe(true);
+    expect(h.gate.wasRouted(named)).toBe(true);
+    expect(h.gate.wasRouted(plain)).toBe(false);
+  });
+
+  it('forgets the oldest ids past a few hundred', () => {
+    const h = harness();
+    const first = human('<@bot-1> first').message;
+    h.gate.noteRouted(first);
+    for (let i = 0; i < 200; i++) h.gate.noteRouted(human(`<@bot-1> ${i}`).message);
+    expect(h.gate.wasRouted(first)).toBe(false);
+  });
+});
+
 describe('AddressedGate caps', () => {
   it('caps cold name-drops at GATE_MAX_COLD_PER_10MIN per channel, without calling the model', async () => {
     // No follow-up window: every name-drop is cold.

@@ -339,6 +339,52 @@ describe('RambleWatcher judgement', () => {
   });
 });
 
+describe('RambleWatcher and the gate', () => {
+  it('does not judge a message the gate already handed to the agent', async () => {
+    const routed = new Set<string>();
+    const judge = vi.fn(async () => ({ ramble: true, confidence: 0.99 }));
+    const watcher = new RambleWatcher({
+      settings: () => SETTINGS,
+      judge,
+      examples: () => EXAMPLES,
+      cooldowns: createBotDbRambleCooldowns(),
+      now: () => T0,
+      wasRouted: (message) => routed.has(message.id),
+    });
+    await watcher.observe(post(LINE, T0 - 2_000).message);
+    await watcher.observe(post(LINE, T0 - 1_000).message);
+    const named = post(`fridge ${LINE}`, T0);
+    routed.add(named.message.id);
+
+    expect(await watcher.observe(named.message)).toBe('addressed_bot');
+    expect(judge).not.toHaveBeenCalled();
+  });
+
+  it('answers instead of nudging when the gate routes the message while the judge thinks', async () => {
+    const routed = new Set<string>();
+    let release: (verdict: RambleVerdict) => void = () => {};
+    const watcher = new RambleWatcher({
+      settings: () => SETTINGS,
+      judge: () => new Promise<RambleVerdict | undefined>((resolve) => (release = resolve)),
+      examples: () => EXAMPLES,
+      cooldowns: createBotDbRambleCooldowns(),
+      now: () => T0,
+      wasRouted: (message) => routed.has(message.id),
+    });
+    await watcher.observe(post(LINE, T0 - 2_000).message);
+    await watcher.observe(post(LINE, T0 - 1_000).message);
+    const named = post(`fridge ${LINE}`, T0);
+    const outcome = watcher.observe(named.message);
+    routed.add(named.message.id); // the gate's decision lands first
+    release({ ramble: true, confidence: 0.99 });
+
+    expect(await outcome).toBe('addressed_bot');
+    expect(named.recorders.reply.calls).toHaveLength(0);
+    // No nudge happened, so no cooldown either.
+    expect(createBotDbRambleCooldowns().lastNudgedAt(GUS)).toBeUndefined();
+  });
+});
+
 describe('createBotDbRambleCooldowns', () => {
   it('still enforces the cooldown in memory when bot.db is unavailable', () => {
     const broken = new BotDb(':memory:');

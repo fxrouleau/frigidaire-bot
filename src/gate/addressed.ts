@@ -33,7 +33,10 @@ export type AddressedInput = {
   context: ChatLine[];
   /** Seconds from the bot's last message in the channel to `message`; undefined = not recently / unknown. */
   secondsSinceBotSpoke?: number;
-  /** Whether the author of `message` is who the bot was last talking with in the channel. */
+  /**
+   * Whether the author of `message` is in the bot's current exchange in the channel: the bot answered
+   * them while that exchange has been going (not necessarily last). A ramble nudge doesn't count.
+   */
   authorIsBotsPartner: boolean;
 };
 

@@ -34,6 +34,8 @@ const DEFAULT_CONTEXT_SIZE = 6;
 // (aiChat always does; this is the backstop) stops counting after this long.
 const PENDING_TURN_TTL_MS = 5 * 60 * 1000;
 const LOG_EXCERPT_CHARS = 80;
+// How many routed message ids wasRouted() remembers (a few minutes of busy chat).
+const ROUTED_IDS_KEPT = 200;
 
 export type GateSettings = {
   enabled: boolean;
@@ -112,6 +114,8 @@ export class AddressedGate {
   private readonly contextSize: number;
   private readonly channels = new Map<string, ChannelState>();
   private matcher: { key: string; match: (text: string) => string | undefined } | undefined;
+  /** Ids of the latest messages handed to the agent, oldest first (see wasRouted). */
+  private readonly routedIds = new Set<string>();
 
   constructor(opts: AddressedGateOptions = {}) {
     this.classify = opts.classify ?? createAddressedClassifier();
@@ -131,12 +135,21 @@ export class AddressedGate {
 
   /** A turn was handed to the agent (explicit mention/reply, or the gate): its author joins the exchange. */
   noteRouted(message: Message): void {
+    this.rememberRouted(message.id);
     const settings = this.settings();
     if (!settings.channelIds.includes(message.channel.id)) return;
     const now = this.now();
     // Read through current(): a turn arriving after the last exchange lapsed starts a fresh one.
     const state = this.current(message.channel.id, settings, now);
     state.pending.set(message.id, { userId: message.author.id, at: now });
+  }
+
+  /**
+   * Whether a turn was handed to the agent for this message (it is being, or was, answered). The ramble
+   * redirect asks, so a member who names the bot mid-run gets an answer, not an answer and a nudge.
+   */
+  wasRouted(message: Message): boolean {
+    return this.routedIds.has(message.id);
   }
 
   /** The routed turn for `message` finished: the bot answered its author, which extends the exchange. */
@@ -209,6 +222,15 @@ export class AddressedGate {
     state.routed.push({ at: this.now(), cold });
     this.noteRouted(message);
     return { respond: true, trigger, probability, cold };
+  }
+
+  private rememberRouted(messageId: string): void {
+    this.routedIds.add(messageId);
+    // A Set iterates in insertion order: the first entry is the oldest.
+    if (this.routedIds.size > ROUTED_IDS_KEPT) {
+      const oldest = this.routedIds.values().next().value;
+      if (oldest !== undefined) this.routedIds.delete(oldest);
+    }
   }
 
   private state(channelId: string): ChannelState {

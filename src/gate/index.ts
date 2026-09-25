@@ -4,4 +4,5 @@ import { AddressedGate } from './addressedGate';
 import { RambleWatcher } from './ramble';
 
 export const addressedGate = new AddressedGate();
-export const rambleWatcher = new RambleWatcher();
+// A message the gate hands to the agent gets an answer, never also a ramble nudge.
+export const rambleWatcher = new RambleWatcher({ wasRouted: (message) => addressedGate.wasRouted(message) });

@@ -19,14 +19,21 @@
 //         ],
 //         "message": { "author": "Marco", "text": "fridge who wins worlds", "replyTo": "Theo" },
 //         "botLastSpokeSecondsAgo": 30,        // optional; omitted/null = the bot hasn't spoken recently
-//         "talkingWithBot": true               // optional, default false: the author is who the bot last answered
+//         "talkingWithBot": true               // optional, default false: the author is in the bot's current exchange
 //       }
 //     ]
 //   }
 //
 // `bot: true` marks the bot's own messages, `otherBot: true` another bot's; `replyTo` is whose message a
-// Discord reply points at. A case is only relevant to the live gate when it passes the prefilter (its
-// text names the bot, or it is a follow-up); the runner reports both views.
+// Discord reply points at. `talkingWithBot` mirrors the live gate's partners: the bot answered this author
+// during the exchange still going on (any of them, not only the last one it answered); a ramble nudge or
+// another unasked-for bot post never makes someone a partner. A case is only relevant to the live gate
+// when it passes the prefilter (its text names the bot, or it is a follow-up from a partner); the runner
+// reports both views.
+//
+// Case id prefixes group the kinds the gate has to tell apart (cases.test.ts checks each is covered):
+// name-, followup-, group- (exchanges with several people), about-, fridge-, gaming-, reaction-,
+// clanker-, otherbot-, nudge- (right after a ramble nudge).
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AddressedInput, ChatLine } from '../addressed';

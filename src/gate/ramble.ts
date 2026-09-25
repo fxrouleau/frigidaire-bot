@@ -174,6 +174,8 @@ export type RambleWatcherOptions = {
   /** Picks the nudge line; injectable so tests are deterministic. */
   random?: () => number;
   lines?: readonly string[];
+  /** Whether the bot is answering this message anyway (the gate routed it); default: never. */
+  wasRouted?: (message: Message) => boolean;
 };
 
 const NO_EXAMPLES: RambleExamples = { rambles: [], ramblesAreTheirs: false, normal: [] };
@@ -218,6 +220,7 @@ export class RambleWatcher {
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly lines: readonly string[];
+  private readonly wasRouted: (message: Message) => boolean;
   private readonly buffers = new Map<string, Buffered[]>();
   private readonly inFlight = new Set<string>();
   /** Per channel+member: timestamp of the newest message the last judgement covered. */
@@ -232,6 +235,7 @@ export class RambleWatcher {
     this.now = opts.now ?? Date.now;
     this.random = opts.random ?? Math.random;
     this.lines = opts.lines ?? RAMBLE_LINES;
+    this.wasRouted = opts.wasRouted ?? (() => false);
   }
 
   async observe(message: Message): Promise<RambleOutcome> {
@@ -260,7 +264,7 @@ export class RambleWatcher {
         ? 'run'
         : undefined;
     if (!trigger) return 'below_rule';
-    if (addressesBot(message, botId)) return 'addressed_bot';
+    if (addressesBot(message, botId) || this.wasRouted(message)) return 'addressed_bot';
 
     const personId = canonicalUserId(message.author.id);
     if (this.inCooldown(personId, settings)) return 'cooldown';
@@ -311,8 +315,13 @@ export class RambleWatcher {
         logger.info(`ramble: not a ramble ${described} ${tail}`);
         return 'not_ramble';
       }
-      // Re-checked after the judge call: another channel may have nudged this member meanwhile.
+      // Re-checked after the (slow) judge call: another channel may have nudged this member meanwhile,
+      // or the gate may have decided this message was meant for the bot (then it answers, no nudge).
       if (this.inCooldown(personId, settings)) return 'cooldown';
+      if (this.wasRouted(message)) {
+        logger.info(`ramble: skip, the bot is answering this message ${described} ${tail}`);
+        return 'addressed_bot';
+      }
       // Recorded before sending, and kept when the send fails: a missing permission must not turn into
       // a judge call (and a failed reply) on every message that follows.
       this.cooldowns.recordNudge(personId, this.now());
