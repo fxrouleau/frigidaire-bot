@@ -273,6 +273,11 @@ export class AgentOrchestrator {
     this.enrichers = opts.enrichers ?? defaultEnrichers;
     this.random = opts.random ?? Math.random;
     this.contextLengths = opts.contextLengths ?? getModelContextLengths();
+    if (!opts.contextLengths) {
+      // Warm OpenRouter's model list at startup (the shared agent is built when the bot boots), so the
+      // first turn reads the context length from cache instead of waiting on the fetch. Never rejects.
+      void this.contextLengths.get(config.models.chat, 0);
+    }
     this.historyTokenBudget = opts.historyTokenBudget;
     this.channelNotes = opts.channelNotes ?? (() => config.agent.channelNotes);
   }
