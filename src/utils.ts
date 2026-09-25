@@ -121,6 +121,25 @@ export function identityOf(message: Message): WebhookIdentity {
   };
 }
 
+// Webhook names are 1-80 characters and may not contain "clyde" or "discord" (any case); a hair space
+// (U+200A) inside the word gets past the check without visibly changing the name (the PluralKit fix).
+const MAX_WEBHOOK_NAME = 80;
+const HAIR_SPACE = '\u200A';
+const FALLBACK_WEBHOOK_NAME = 'someone';
+
+/** A member's name as Discord will accept it for a webhook, reading the same. */
+export function webhookName(name: string): string {
+  const safe = name
+    .trim()
+    .replace(/(c)(lyde)|(d)(iscord)/gi, (_match, c, lyde, d, iscord) =>
+      c !== undefined ? `${c}${HAIR_SPACE}${lyde}` : `${d}${HAIR_SPACE}${iscord}`,
+    );
+  const chars = [...safe].slice(0, MAX_WEBHOOK_NAME);
+  if (chars.length === 0) return FALLBACK_WEBHOOK_NAME;
+  // Single-character webhook names are refused too.
+  return chars.length === 1 ? `${chars[0]}${HAIR_SPACE}` : chars.join('');
+}
+
 /**
  * Runs `use` with a one-time webhook wearing `identity`. The webhook is always deleted afterwards —
  * including when `use` throws — so a failure can never leak one of the 15 webhooks a channel may hold.
@@ -130,7 +149,7 @@ export async function withTemporaryWebhook<T>(
   identity: WebhookIdentity,
   use: (webhook: Webhook<WebhookType.Incoming>) => Promise<T>,
 ): Promise<T> {
-  const webhook = await channel.createWebhook({ name: identity.name, avatar: identity.avatar });
+  const webhook = await channel.createWebhook({ name: webhookName(identity.name), avatar: identity.avatar });
   logger.info(`Created webhook ${webhook.id} in #${channel.id}.`);
   try {
     return await use(webhook);

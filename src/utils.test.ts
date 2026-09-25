@@ -17,6 +17,7 @@ import {
   repostMessage,
   sendViaWebhook,
   splitMessage,
+  webhookName,
   webhookTargetOf,
 } from './utils';
 
@@ -499,6 +500,38 @@ describe('sendViaWebhook', () => {
       { content: 'part two', allowedMentions: { users: ['7'] } },
     ]);
     expect(hook.delete.calls).toHaveLength(1);
+  });
+});
+
+describe('webhookName', () => {
+  it('keeps ordinary names as they are', () => {
+    expect(webhookName('Jasper')).toBe('Jasper');
+    expect(webhookName('  Jay #1 @home: ok  ')).toBe('Jay #1 @home: ok');
+  });
+
+  it('breaks up "clyde" and "discord" (any case), which Discord refuses in webhook names', () => {
+    expect(webhookName('Clyde')).toBe('C\u200Alyde');
+    expect(webhookName('discordmod')).toBe('d\u200Aiscordmod');
+    expect(webhookName('THE DISCORD CLYDE')).toBe('THE D\u200AISCORD C\u200ALYDE');
+    for (const name of ['Clyde', 'discordmod', 'THE DISCORD CLYDE', 'xDiScOrDx']) {
+      expect(webhookName(name).toLowerCase()).not.toMatch(/clyde|discord/);
+    }
+  });
+
+  it('fits the 2-80 character range', () => {
+    expect(webhookName('J')).toBe('J\u200A');
+    expect(webhookName('x'.repeat(100))).toBe('x'.repeat(80));
+    expect(webhookName('   ')).toBe('someone');
+  });
+
+  it('is what a repost webhook is created with', async () => {
+    setBotDbForTesting(new BotDb(':memory:'));
+    const fake = createFakeMessage({ authorDisplayName: 'Discord Andy' });
+
+    await repostMessage(fake.message, 'hi', { fetch: noFetch });
+
+    expect((fake.recorders.createWebhook.calls[0][0] as { name: string }).name).toBe('D\u200Aiscord Andy');
+    setBotDbForTesting(undefined);
   });
 });
 
