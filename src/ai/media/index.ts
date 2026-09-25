@@ -3,35 +3,81 @@
 // calls — the chat agent (through the media enricher), the learner, summaries, the link reader and the
 // context-menu commands. Every call that reaches a model goes through OpenRouter with ZDR routing.
 //
-// Placeholder implementations: they report "no transcript / no description" until the media feature
-// fills them in, so callers already handle the undefined case.
+// Results are cached in bot.db (transcripts by message id, descriptions by URL), so whichever feature
+// pays for a recording first, every later reader gets it for free.
+import type OpenAI from 'openai';
+import { config } from '../../config';
+import { getOpenRouterClient } from '../openRouterClient';
+import { FfmpegTranscoder, type MediaTranscoder } from './transcoder';
+import { AudioTranscriber } from './transcriber';
+import type { AudioInput, VideoInput } from './types';
+import { VideoDescriber } from './video';
 
-export type AudioInput = {
-  url: string;
-  contentType?: string | null;
-  /** When set, the transcript is cached under this Discord message id (see getCachedTranscript). */
-  messageId?: string;
-  durationSecs?: number | null;
-};
+export type { AudioInput, TranscriptionOutcome, VideoInput, VideoOutcome } from './types';
 
-export type VideoInput = {
-  url: string;
-  contentType?: string | null;
-  /** Optional hint for the model: who shared it, the accompanying message, the link's title. */
-  context?: string;
-};
+let transcoder: MediaTranscoder | undefined;
+let transcriber: AudioTranscriber | undefined;
+let describer: VideoDescriber | undefined;
 
-/** Transcribes an audio file. Undefined when transcription is unavailable or failed. */
-export async function transcribeAudio(_input: AudioInput): Promise<string | undefined> {
-  return undefined;
+// Under Vitest the shared instances never reach OpenRouter, even on a machine with a key exported:
+// tests that render messages through the default enricher must stay hermetic.
+function defaultClient(): OpenAI | undefined {
+  return config.isTest ? undefined : getOpenRouterClient();
 }
 
-/** A previously produced transcript for a message, without doing any paid work. */
-export function getCachedTranscript(_messageId: string): string | undefined {
-  return undefined;
+function sharedTranscoder(): MediaTranscoder {
+  if (!transcoder) transcoder = new FfmpegTranscoder();
+  return transcoder;
 }
 
-/** Describes a video (visuals + speech). Undefined when video understanding is unavailable or failed. */
-export async function describeVideo(_input: VideoInput): Promise<string | undefined> {
-  return undefined;
+/** The process-wide transcriber (in-flight dedup and failure cooldowns are per instance). */
+export function getAudioTranscriber(): AudioTranscriber {
+  if (!transcriber) transcriber = new AudioTranscriber({ client: defaultClient, transcoder: sharedTranscoder() });
+  return transcriber;
+}
+
+export function getVideoDescriber(): VideoDescriber {
+  if (!describer) {
+    describer = new VideoDescriber({
+      client: defaultClient,
+      transcoder: sharedTranscoder(),
+      transcriber: getAudioTranscriber(),
+    });
+  }
+  return describer;
+}
+
+/** Test-only: swaps the shared instances (undefined restores lazily built defaults). */
+export function setMediaForTesting(opts?: { transcriber?: AudioTranscriber; describer?: VideoDescriber }): void {
+  transcriber = opts?.transcriber;
+  describer = opts?.describer;
+}
+
+/**
+ * Transcribes an audio file: the words in the language they were spoken, plus a final "English: …"
+ * line when that wasn't English. '' when the recording holds no speech; undefined when transcription
+ * is unavailable, the recording is over VOICE_MAX_SECONDS or 25 MB, or the call failed.
+ */
+export async function transcribeAudio(input: AudioInput): Promise<string | undefined> {
+  const outcome = await getAudioTranscriber().transcribe(input);
+  return outcome.status === 'ok' ? outcome.text : undefined;
+}
+
+/** A previously produced transcript for a message ('' = no speech), without doing any paid work. */
+export function getCachedTranscript(messageId: string): string | undefined {
+  return getAudioTranscriber().cached(messageId);
+}
+
+/**
+ * Describes a video (what happens, on-screen text, what's said) in a few compact lines. Undefined when
+ * video understanding is unavailable, the file is over the download cap, or the call failed.
+ */
+export async function describeVideo(input: VideoInput): Promise<string | undefined> {
+  const outcome = await getVideoDescriber().describe(input);
+  return outcome.status === 'ok' ? outcome.text : undefined;
+}
+
+/** A previously produced description for this URL, without doing any paid work. */
+export function getCachedVideoDescription(url: string): string | undefined {
+  return getVideoDescriber().cached(url);
 }

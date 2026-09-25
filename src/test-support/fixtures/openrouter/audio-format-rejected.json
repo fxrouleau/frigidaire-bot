@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "description": "HTTP 400: the upstream provider refused the audio container (the envelope OpenRouter uses for provider errors). The transcriber must retry the recording as MP3.",
+  "status": 400,
+  "response": {
+    "error": {
+      "message": "Provider returned error",
+      "code": 400,
+      "metadata": {
+        "raw": "{\"error\":{\"code\":400,\"message\":\"Unsupported MIME type: audio/ogg\",\"status\":\"INVALID_ARGUMENT\"}}",
+        "provider_name": "Google"
+      }
+    }
+  }
+}
