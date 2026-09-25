@@ -5,13 +5,13 @@
 // feature's own note, shown to the invoker, instead of the generic failure line.
 import { ApplicationCommandType, type Message } from 'discord.js';
 import { videoOutcomeNote } from '../ai/media';
+import { formatClock } from '../ai/media/voice';
 import { config } from '../config';
 import { logger } from '../logger';
 import { answerPrivately, blockQuote, deferPrivately, postPublicReply, subtext } from './respond';
 import {
   type MediaAttachment,
   ensureTargetChannel,
-  formatDuration,
   invokerName,
   mediaAttachments,
   readableText,
@@ -81,7 +81,7 @@ async function readMedia(
   if (item.kind === 'audio') {
     // The transcriber refuses these without a call; the attachment's duration says so up front.
     if (item.durationSecs && item.durationSecs > config.media.voiceMaxSeconds) {
-      return { note: `too long to transcribe (${formatDuration(item.durationSecs)})` };
+      return { note: `too long to transcribe (${formatClock(item.durationSecs)})` };
     }
     const transcript = await transcriptOf(message, item, deps, onlyAudio);
     return transcript ? { text: transcript } : undefined;
@@ -107,5 +107,5 @@ async function readMedia(
 
 function labelFor(item: MediaAttachment): string {
   const name = item.voice ? 'voice message' : item.name;
-  return item.durationSecs ? `${name} (${formatDuration(item.durationSecs)})` : name;
+  return item.durationSecs ? `${name} (${formatClock(item.durationSecs)})` : name;
 }

@@ -130,8 +130,3 @@ export function videoOutcomeNote(outcome: Exclude<VideoOutcome, { status: 'ok' }
       return "couldn't watch it";
   }
 }
-
-/** A previously produced description for this URL, without doing any paid work. */
-export function getCachedVideoDescription(url: string): string | undefined {
-  return getVideoDescriber().cached(url);
-}

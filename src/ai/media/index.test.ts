@@ -14,7 +14,7 @@ import {
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import {
   getCachedTranscript,
-  getCachedVideoDescription,
+  getVideoDescriber,
   setMediaForTesting,
   startTranscriptionRouteChecks,
   transcribeAudio,
@@ -76,7 +76,7 @@ describe('media entry points', () => {
     install([loadFixture('video-description')]);
     const outcome = await watchVideo({ url: CLIP_URL, contentType: 'video/mp4', context: 'shared by Jasper' });
     expect(outcome).toMatchObject({ status: 'ok', text: expect.stringMatching(/^League of Legends clip/) });
-    expect(getCachedVideoDescription(CLIP_URL)).toBe(outcome.status === 'ok' ? outcome.text : 'no description');
+    expect(getVideoDescriber().cached(CLIP_URL)).toBe(outcome.status === 'ok' ? outcome.text : 'no description');
   });
 
   it('reports nothing without an API key (the defaults under test)', async () => {

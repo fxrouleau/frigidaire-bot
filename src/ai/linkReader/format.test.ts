@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { UNTRUSTED_HEADER, formatCount, formatDuration, formatLinkForTool, formatLinkPreview } from './format';
+import { UNTRUSTED_HEADER, formatCount, formatLinkForTool, formatLinkPreview } from './format';
 import type { LinkContent } from './types';
 
 const tweet: LinkContent = {
@@ -27,12 +27,6 @@ describe('small formatters', () => {
     expect(formatCount(1234)).toBe('1,234');
     expect(formatCount(56_789)).toBe('56.8K');
     expect(formatCount(1_500_000)).toBe('1.5M');
-  });
-
-  it('formats durations', () => {
-    expect(formatDuration(9.3)).toBe('0:09');
-    expect(formatDuration(212)).toBe('3:32');
-    expect(formatDuration(3723)).toBe('1:02:03');
   });
 });
 

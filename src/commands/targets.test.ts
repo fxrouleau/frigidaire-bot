@@ -7,7 +7,6 @@ import { createFakeCommandDeps, createFakeGuild, createFakeTargetMessage } from 
 import { LINES } from './respond';
 import {
   ensureTargetChannel,
-  formatDuration,
   invokerName,
   liveDisplayName,
   mediaAttachments,
@@ -231,11 +230,5 @@ describe('small helpers', () => {
   it('readableText uses the mention-resolved text', () => {
     const { message } = createFakeTargetMessage({ content: 'hi <@1>', cleanContent: 'hi @Jasper' });
     expect(readableText(message)).toBe('hi @Jasper');
-  });
-
-  it('formats durations as m:ss', () => {
-    expect(formatDuration(5)).toBe('0:05');
-    expect(formatDuration(65.4)).toBe('1:05');
-    expect(formatDuration(600)).toBe('10:00');
   });
 });

@@ -1,6 +1,7 @@
 // Renders what the link reader found as model-facing text: the full read_link result, and the one-line
 // preview the enricher attaches to a message. Plain labeled lines, not JSON: cheaper in tokens and
 // read the same way by every chat model.
+import { formatClock } from '../media/voice';
 import { formatTimestampET } from '../utils';
 import type { LinkContent, LinkReadResult, LinkStats, LinkVideo } from './types';
 
@@ -17,15 +18,6 @@ const COMPACT = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFra
 
 export function formatCount(value: number): string {
   return Math.abs(value) < 10_000 ? value.toLocaleString('en-US') : COMPACT.format(value);
-}
-
-export function formatDuration(totalSecs: number): string {
-  const secs = Math.max(0, Math.round(totalSecs));
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  const s = secs % 60;
-  const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
-  return `${h > 0 ? `${h}:` : ''}${mm}:${String(s).padStart(2, '0')}`;
 }
 
 const STAT_LABELS: Array<[keyof LinkStats, string, string]> = [
@@ -60,7 +52,7 @@ function oneLine(text: string, max: number): string {
 }
 
 function describeVideoLine(video: LinkVideo): string {
-  const head = `video${video.durationSecs ? ` (${formatDuration(video.durationSecs)})` : ''}`;
+  const head = `video${video.durationSecs ? ` (${formatClock(video.durationSecs)})` : ''}`;
   if (video.description) return `${head}: ${video.description}`;
   const where = video.url ?? video.pageUrl;
   const details = [video.note, where].filter(Boolean).join(' — ');
@@ -143,7 +135,7 @@ export function formatLinkPreview(url: string, result: LinkReadResult): string {
   }
   const video = c.media.find((m): m is LinkVideo => m.type === 'video');
   if (video) {
-    const length = video.durationSecs ? ` ${formatDuration(video.durationSecs)}` : '';
+    const length = video.durationSecs ? ` ${formatClock(video.durationSecs)}` : '';
     if (video.description)
       extras.push(`video${length}: ${oneLine(video.description, VIDEO_DESCRIPTION_PREVIEW_CHARS)}`);
     else if (video.url) extras.push(`video${length}, not watched yet (read_link watches it)`);
