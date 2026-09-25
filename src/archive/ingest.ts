@@ -19,6 +19,7 @@ import {
   type ArchiveStore,
   type ArchivedAttachment,
   type ArchivedEmbed,
+  type DeletionKind,
   VOICE_MESSAGE_FLAG,
   getArchiveStore,
 } from './archiveStore';
@@ -263,18 +264,28 @@ export async function archiveMessageUpdate(
   }
 }
 
-/** MessageDelete / MessageDeleteBulk: marks the messages deleted (their text is scrubbed). */
+/** MessageDelete: marks the messages deleted (their text is scrubbed). */
 export function archiveMessageDeletes(
   ids: string[],
   store: ArchiveStore = getArchiveStore(),
   now: number = Date.now(),
+  kind: Exclude<DeletionKind, 'channel'> = 'message',
 ): number {
   try {
-    return store.markDeleted(ids, now);
+    return store.markDeleted(ids, now, kind);
   } catch (error) {
     logger.warn(`archive: failed to mark ${ids.length} message(s) deleted:`, error);
     return 0;
   }
+}
+
+/** MessageDeleteBulk: a purge (by a moderator or a bot), so not the authors' own deletions in stats. */
+export function archiveBulkDeletes(
+  ids: string[],
+  store: ArchiveStore = getArchiveStore(),
+  now: number = Date.now(),
+): number {
+  return archiveMessageDeletes(ids, store, now, 'bulk');
 }
 
 /** ChannelDelete / ThreadDelete: the channel's messages are gone from Discord, so they go here too. */

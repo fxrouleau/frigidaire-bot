@@ -343,6 +343,11 @@ describe('archive events', () => {
       {} as Parameters<typeof bulkDeleteEvent.execute>[1],
     );
     expect(store.getMessage(second.id)?.deletedAt).not.toBeNull();
+    // A purge is recorded as one, so Wrapped doesn't count it as the author's own deletion.
+    const kindOf = (id: string) =>
+      (store.db.prepare('SELECT deleted_kind AS kind FROM messages WHERE id = ?').get(id) as { kind: string }).kind;
+    expect(kindOf(message.id)).toBe('message');
+    expect(kindOf(second.id)).toBe('bulk');
 
     const inThread = archivableMessage({
       id: snowflake(T0, 6),

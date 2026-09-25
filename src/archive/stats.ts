@@ -274,12 +274,15 @@ export function computeWrappedStats(
   );
   const editRows = countByAuthor(store, scope, `${MEMBER} AND edit_count > 0`, 1000, { sum: 'SUM(edit_count)' });
 
-  // Deletions by members, minus originals the bot itself replaced (link fixing posts the relay first,
-  // then deletes the original). Regret relays come AFTER the deletion, so they never match.
+  // Deletions by members: single deletions only (a purge or a deleted thread is not each author deleting
+  // their messages; NULL = deleted before the kind was recorded), minus originals the bot itself replaced
+  // (link fixing posts the relay first, then deletes the original). Regret relays come AFTER the
+  // deletion, so they never match.
   const deletionRows = store.db
     .prepare(
       `SELECT o.author_id, MAX(o.author_name) AS author_name, COUNT(*) AS n FROM messages o
        WHERE ${scopeSql(scope, 'o').where} AND o.source = 'human' AND o.deleted_at IS NOT NULL
+         AND COALESCE(o.deleted_kind, 'message') = 'message'
          AND NOT EXISTS (
            SELECT 1 FROM messages r
            WHERE r.channel_id = o.channel_id AND r.source = 'relay' AND r.relay_kind IS NOT 'regret'

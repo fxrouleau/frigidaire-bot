@@ -86,6 +86,13 @@ export type ArchivedMessage = Omit<ArchiveMessageInput, 'hasAudio'> & {
   deletedAt: number | null;
 };
 
+/**
+ * Why a message was marked deleted: 'message' = a single MessageDelete (usually the author's own),
+ * 'bulk' = a MessageDeleteBulk purge (a moderator or a bot), 'channel' = its channel or thread was
+ * deleted. Only 'message' counts as the author's deletion in stats.
+ */
+export type DeletionKind = 'message' | 'bulk' | 'channel';
+
 export type ArchiveChannelInput = {
   id: string;
   guildId: string | null;
@@ -252,6 +259,7 @@ const SCHEMA = `
     edited_at         INTEGER,
     edit_count        INTEGER NOT NULL DEFAULT 0,
     deleted_at        INTEGER,
+    deleted_kind      TEXT,
     reply_to_id       TEXT,
     flags             INTEGER NOT NULL DEFAULT 0,
     has_audio         INTEGER NOT NULL DEFAULT 0,
@@ -486,6 +494,14 @@ export class ArchiveStore {
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('busy_timeout = 5000');
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** Additive changes for an archive.db created by an earlier build (CREATE TABLE IF NOT EXISTS skips them). */
+  private migrate(): void {
+    const columns = new Set((this.db.pragma('table_info(messages)') as { name: string }[]).map((c) => c.name));
+    // Rows deleted before this column existed stay NULL and count as single deletions, as they did then.
+    if (!columns.has('deleted_kind')) this.db.exec('ALTER TABLE messages ADD COLUMN deleted_kind TEXT');
   }
 
   private stmt(sql: string): Database.Statement {
@@ -556,22 +572,22 @@ export class ArchiveStore {
    * someone deleted is not kept around to be quoted back. The row itself stays, with author and times,
    * for the edits/deletions stats. Idempotent; unknown ids are ignored. Returns rows newly marked.
    */
-  markDeleted(ids: string[], at: number): number {
+  markDeleted(ids: string[], at: number, kind: Exclude<DeletionKind, 'channel'> = 'message'): number {
     if (ids.length === 0) return 0;
     return this.stmt(
       `UPDATE messages
-       SET deleted_at = ?, content = '', extra_text = '', transcript = NULL, attachments_json = NULL, embeds_json = NULL,
-         reactions_json = NULL
+       SET deleted_at = ?, deleted_kind = ?, content = '', extra_text = '', transcript = NULL, attachments_json = NULL,
+         embeds_json = NULL, reactions_json = NULL
        WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL`,
-    ).run(at, JSON.stringify(ids)).changes;
+    ).run(at, kind, JSON.stringify(ids)).changes;
   }
 
   /** markDeleted() for every message of a deleted channel or thread (and, for a channel, its threads). */
   markChannelDeleted(channelId: string, at: number): number {
     return this.stmt(
       `UPDATE messages
-       SET deleted_at = ?, content = '', extra_text = '', transcript = NULL, attachments_json = NULL, embeds_json = NULL,
-         reactions_json = NULL
+       SET deleted_at = ?, deleted_kind = 'channel', content = '', extra_text = '', transcript = NULL,
+         attachments_json = NULL, embeds_json = NULL, reactions_json = NULL
        WHERE (channel_id = ? OR parent_channel_id = ?) AND deleted_at IS NULL`,
     ).run(at, channelId, channelId).changes;
   }
