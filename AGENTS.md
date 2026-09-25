@@ -160,7 +160,8 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
   - a chat/embeddings/responses call that isn't visibly ZDR-routed;
   - `new OpenAI(` outside `openRouterClient.ts`;
   - a file that talks to OpenRouter but never records usage (the exemption is `modelCatalog.ts`: free public metadata);
-  - a call that caps `max_tokens` below 4000 without a `reasoning` field (see Reasoning budgets; the exemption is `emojiCaptioner.ts`: Claude only reasons when asked).
+  - a call that caps `max_tokens` below 4000 without a `reasoning` field (see Reasoning budgets; the exemption is `emojiCaptioner.ts`: Claude only reasons when asked);
+  - a `UsageFeature` member that no production code mentions (a tag nothing sends).
 
   Pass options inline: `create(body, { ...featureRequestOptions('x'), timeout })`.
 - **Model catalog** (`modelCatalog.ts`): OpenRouter's public metadata, fetched with plain `fetch` (no key, no member content) and refreshed daily:
@@ -905,13 +906,13 @@ Sidecar-only (the `sandbox` service's own environment, read by `server.py`): `SA
   - Tests needing memory inject `new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() })` via `setMemoryStoreForTesting()`.
   - Anything that can write an error capture stubs `DEBUG_CAPTURE_DIR` (or sets `DEBUG_CAPTURE=0`).
   - Clocks are injected, or faked with `vi.useFakeTimers({ toFake: ['Date'] })`.
-- **Guard tests** worth knowing: `openRouterCallSites.test.ts` (tags + ZDR), `config.test.ts` (a startup-summary token per config section, no secrets in it), `eventModule.test.ts` (every event file), `claudeWorkflow.test.ts` (the owner-only guard, the auth default, no `@` in bot comments), `dockerPushPaths.test.ts` (push triggers cover every build input), `scenarioFile.test.ts` / `cases.test.ts` (placeholder ids, no links), `loadEnv.test.ts` (dotenv first).
+- **Guard tests** worth knowing: `openRouterCallSites.test.ts` (tags, ZDR, reasoning under a small cap, no unused `UsageFeature`), `config.test.ts` (a startup-summary token per config section, no secrets in it), `eventModule.test.ts` (every event file), `claudeWorkflow.test.ts` (the owner-only guard, the auth default, no `@` in bot comments), `dockerPushPaths.test.ts` (push triggers cover every build input), `scenarioFile.test.ts` / `cases.test.ts` (placeholder ids, no links), `loadEnv.test.ts` (dotenv first).
 - `src/test-support/`:
   - `fakeProvider.ts`: scripted `AiProvider` (`textResponse()`, `toolCallResponse()`, `errorStep()`), records every `chat()` input.
   - `fakeDiscord.ts`: `createFakeMessage()` (typed as the exact `MessageCreate` argument). Its options cover channel types incl. threads and parents, attachments with size/duration, embeds incl. `proxyURL`, mentions, `replyPinged`, `cachedMessages`, a channel message log with Discord's before/after/around fetch rules, reference details, flags, polls, webhook recorders and send failures. Also `createFakeChannel()`, `createFakeClient()` (a ready `Client<true>`), `createFakeBotMessage()`, `sentContent()`.
   - `fakeEmbeddings.ts`: deterministic bag-of-words embeddings; `failWith` simulates outages.
-  - `openRouterFetch.ts`: replay/record OpenAI-SDK clients backed by JSON fixtures (`loadFixture()`). `capturingClient.ts` also records request headers (the feature tag).
-  - `fakeMedia.ts`: scripted/missing ffmpeg, a capturing client, file fetches, `createFileSafeFetch()` (the real guarded fetch over an in-memory transport), `createFakeCatalog()` with ZDR endpoint coverage. Synthetic samples live in `fixtures/media/`.
+  - `openRouterFetch.ts`: replay/record OpenAI-SDK clients backed by JSON fixtures (`loadFixture()`). `capturingClient.ts` is the capturing client: scripted replies (or fixtures through `fixtureReply()`), every request's body and headers (the feature tag) recorded.
+  - `fakeMedia.ts`: scripted/missing ffmpeg, file fetches, `createFileSafeFetch()` (the real guarded fetch over an in-memory transport), `createFakeCatalog()` with ZDR endpoint coverage. Synthetic samples live in `fixtures/media/`.
   - `fakeSafeFetch.ts` (link-reader routes, `htmlPage()`), `fakeArchive.ts` (archive rows, archivable messages, snowflakes), `fakeScheduling.ts` (postable channels, Discord error codes), `fakeInteraction.ts` (context-menu interactions that enforce the reply state machine; `createFakeCommandDeps()`), `fakeGitHub.ts` (in-memory GitHub endpoints with scripted failures).
   - `replayCli.ts` backs `yarn replay`; `recorder.ts` is the call-recorder util.
 - Link fixers are tested with an injected `FixerDeps` (fake fetch + clock). The message judge takes a fake decisions fetch and a replay chat client. The deleted-message reposter, the auto-reactor, the gate, the scheduler and the command handlers take every dependency through their constructors or options.
@@ -966,7 +967,7 @@ Both image workflows build the `ci` Docker stage (GHA layer cache), which runs `
   - A backlog of scheduled events: recurring reminders, DM reminders, scheduled events beyond reminders and birthdays.
   - Thread history backfill in the archive.
   - An offline eval set for the ramble judge (hold out real rambles as positives).
-  - Unifying the helpers that remain duplicated per module (small truncate/one-line helpers, two capturing test clients).
+  - Unifying the helpers that remain duplicated per module (small truncate/one-line helpers; a few test files still build a local capturing client instead of using `capturingClient.ts`).
 - **Tuning is owner-driven from the logs**: `GATE_THRESHOLD` (`gate: REPLY|skip` lines + `yarn eval:gate`), `RAMBLE_THRESHOLD` (`ramble:` lines), auto-react (shadow lines, then `AUTO_REACT_MODE=on`), fixer order (`*_FIXERS`, alerts).
 - **Grandfathered public-repo exception**: the learner prompt's GOOD/BAD examples in `personalityLearner.ts` still use a few real first names; the owner kept them as-is for now. Don't copy them anywhere, and don't add more.
 - Cloud / no-Docker fallback: `npm install && npx vitest run && npx tsc -p tsconfig.test.json && npx biome check --fix src/`; set `LEFTHOOK=0` when committing; never commit `package-lock.json`; regenerate `yarn.lock` with a Yarn 4 binary from npm (`npm pack @yarnpkg/cli-dist@4.18.1`) when dependencies change. The sandbox server tests need `python3` and `bash`.

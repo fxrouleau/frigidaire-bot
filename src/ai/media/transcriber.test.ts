@@ -7,7 +7,6 @@ import {
   MP3_BYTES,
   OGG_BYTES,
   TRANSCODED_MP3,
-  createCapturingClient,
   createFakeCatalog,
   createFakeTranscoder,
   createFileFetch,
@@ -16,6 +15,7 @@ import {
   userContent,
   WHISPER_ENDPOINTS,
 } from '../../test-support/fakeMedia';
+import { createCapturingClient, fixtureReply } from '../../test-support/capturingClient';
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import { FEATURE_HEADER } from '../usage';
 import { getStoredTranscript } from './store';
@@ -47,7 +47,7 @@ const files = createFileFetch({
 type SetupOverrides = Partial<Omit<AudioTranscriberOptions, 'transcoder'>> & { transcoder?: FakeTranscoder };
 
 function setup(fixtures: OpenRouterFixture[], overrides: SetupOverrides = {}) {
-  const { client, requests } = createCapturingClient(fixtures);
+  const { client, requests } = createCapturingClient(fixtures.map(fixtureReply));
   const transcoder = overrides.transcoder ?? createFakeTranscoder();
   let now = 1_000_000;
   const transcriber = new AudioTranscriber({
@@ -101,7 +101,7 @@ describe('AudioTranscriber', () => {
     expect(request.body.temperature).toBeUndefined();
     // Flash-Lite's lowest effort, from the catalog: a verbatim transcript needs no thinking.
     expect(request.body.reasoning).toEqual({ effort: 'minimal' });
-    expect(request.headers[FEATURE_HEADER.toLowerCase()]).toBe('transcription');
+    expect(request.headers.get(FEATURE_HEADER)).toBe('transcription');
     const [audio, prompt] = userContent(request);
     expect(audio).toEqual({
       type: 'input_audio',
@@ -415,7 +415,7 @@ describe('AudioTranscriber: Whisper route', () => {
       response_format: 'verbose_json',
       timestamp_granularities: ['segment'],
     });
-    expect(request.headers[FEATURE_HEADER.toLowerCase()]).toBe('transcription');
+    expect(request.headers.get(FEATURE_HEADER)).toBe('transcription');
     // No translation line on either route.
     expect(outcome.status === 'ok' && outcome.text.includes('English:')).toBe(false);
     expect(getStoredTranscript('v1')).toBe(SAID);

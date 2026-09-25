@@ -5,12 +5,12 @@ import {
   CATALOG_MODELS,
   MP4_BYTES,
   OGG_BYTES,
-  createCapturingClient,
   createFakeCatalog,
   createFakeTranscoder,
   createFileFetch,
   createFileSafeFetch,
 } from '../../test-support/fakeMedia';
+import { createCapturingClient, fixtureReply } from '../../test-support/capturingClient';
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import {
   getCachedTranscript,
@@ -28,7 +28,7 @@ const CLIP_URL = 'https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/clip.mp
 const TRANSCRIPT = 'salut tout le monde, on se fait une game ce soir?';
 
 function install(fixtures: OpenRouterFixture[] = []) {
-  const { client, requests } = createCapturingClient(fixtures);
+  const { client, requests } = createCapturingClient(fixtures.map(fixtureReply));
   const fetch = createFileFetch({ [VOICE_URL]: { body: OGG_BYTES, contentType: 'audio/ogg' } });
   // The clip is on a third-party host: it comes through the SSRF-guarded fetch.
   const safeFetch = createFileSafeFetch({ [CLIP_URL]: { body: MP4_BYTES, contentType: 'video/mp4' } });

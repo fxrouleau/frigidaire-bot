@@ -264,6 +264,44 @@ describe('OpenRouter call sites', () => {
   });
 });
 
+/** The members of the `UsageFeature` union in usage.ts. */
+function usageFeatures(): string[] {
+  const text = fs.readFileSync(path.join(SRC_DIR, 'ai/usage.ts'), 'utf8');
+  const sourceFile = ts.createSourceFile('ai/usage.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const alias = sourceFile.statements.find(
+    (s): s is ts.TypeAliasDeclaration => ts.isTypeAliasDeclaration(s) && s.name.text === 'UsageFeature',
+  );
+  if (!alias || !ts.isUnionTypeNode(alias.type)) throw new Error('UsageFeature is no longer a union in ai/usage.ts');
+  return alias.type.types.flatMap((t) =>
+    ts.isLiteralTypeNode(t) && ts.isStringLiteral(t.literal) ? [t.literal.text] : [],
+  );
+}
+
+/** Every string literal in value position (not in a type) across the production files. */
+function valueStrings(): Set<string> {
+  const found = new Set<string>();
+  for (const full of productionFiles()) {
+    const sourceFile = ts.createSourceFile(full, fs.readFileSync(full, 'utf8'), ts.ScriptTarget.Latest, true);
+    const visit = (node: ts.Node): void => {
+      if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && !ts.isLiteralTypeNode(node.parent)) {
+        found.add(node.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  return found;
+}
+
+describe('usage features', () => {
+  it('are each used by some code (a feature nothing tags with is dead weight in the ledger and the digest)', () => {
+    const features = usageFeatures();
+    expect(features).toContain('chat');
+    const used = valueStrings();
+    expect(features.filter((f) => !used.has(f))).toEqual([]);
+  });
+});
+
 describe('the call-site scanner', () => {
   it('flags an untagged call, a non-ZDR body, a hand-built client and an unrecorded raw request', () => {
     const audit = auditSource(

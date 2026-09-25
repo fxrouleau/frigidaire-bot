@@ -29,7 +29,6 @@ export type UsageFeature =
   | 'gate'
   | 'transcription'
   | 'video'
-  | 'link_reader'
   | 'command'
   | 'wrapped'
   | 'birthday'

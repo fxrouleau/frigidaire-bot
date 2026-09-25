@@ -1,12 +1,19 @@
 // An OpenAI-SDK client for OpenRouter that serves scripted responses and records every request's
 // body AND headers (the replay clients in openRouterFetch.ts only see bodies) — for asserting ZDR
-// routing and the per-feature usage header.
+// routing and the per-feature usage header. The one capturing client in test-support: replies are
+// scripted inline, or come from committed fixtures through fixtureReply().
 import OpenAI from 'openai';
+import type { OpenRouterFixture } from './openRouterFetch';
 
 export type CapturedRequest = { url: string; body: Record<string, unknown>; headers: Headers };
 
 /** One scripted reply: a JSON body (status 200 unless given), or a network-level failure. */
 export type ScriptedReply = { status?: number; body: unknown } | { error: Error };
+
+/** A committed OpenRouter fixture (loadFixture()) as a scripted reply: its status and response body. */
+export function fixtureReply(fixture: OpenRouterFixture): ScriptedReply {
+  return { status: fixture.status, body: fixture.response };
+}
 
 /** A minimal chat.completion body whose first choice says `content`. */
 export function chatCompletionBody(content: string, model = 'test-model'): unknown {

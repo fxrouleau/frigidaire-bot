@@ -1,12 +1,11 @@
-// Fakes for the media features: a scripted transcoder (so no test ever needs ffmpeg), an OpenRouter
-// client that replays fixtures while capturing each request's body AND headers (the feature tag rides
-// in a header), and a fetch that serves in-memory files by URL.
-import OpenAI from 'openai';
+// Fakes for the media features: a scripted transcoder (so no test ever needs ffmpeg), fetches that serve
+// in-memory files by URL (plain, and through the real SSRF-guarded fetch), and a model catalog. The
+// capturing OpenRouter client is capturingClient.ts's (fixtures go in through fixtureReply()).
 import type { Resolver } from '../ai/linkReader/netGuard';
 import { createSafeFetch, type HttpTransport, type SafeFetch } from '../ai/linkReader/safeFetch';
 import type { MediaTranscoder, ProbeResult, VideoSample } from '../ai/media/transcoder';
 import type { EndpointCoverage, ModelCatalog, ModelInfo } from '../ai/modelCatalog';
-import type { OpenRouterFixture } from './openRouterFetch';
+import type { CapturedRequest } from './capturingClient';
 
 // Minimal buffers with the right magic numbers for format sniffing.
 export const OGG_BYTES = Buffer.concat([Buffer.from('OggS'), Buffer.alloc(60, 1)]);
@@ -61,34 +60,6 @@ export function createFakeTranscoder(opts: FakeTranscoderOptions = {}): FakeTran
 export function createMissingTranscoder(): FakeTranscoder {
   const missing = () => new Error('ffmpeg is not installed (spawn ENOENT)');
   return createFakeTranscoder({ probe: missing, toMp3: missing, sampleVideo: missing });
-}
-
-export type CapturedRequest = { url: string; body: Record<string, unknown>; headers: Record<string, string> };
-
-/** Serves `fixtures` in order (throws when exhausted) and records every request. */
-export function createCapturingClient(fixtures: OpenRouterFixture[]): { client: OpenAI; requests: CapturedRequest[] } {
-  const requests: CapturedRequest[] = [];
-  const fetchImpl = async (url: unknown, init?: RequestInit): Promise<Response> => {
-    const headers: Record<string, string> = {};
-    new Headers(init?.headers).forEach((value, key) => {
-      headers[key.toLowerCase()] = value;
-    });
-    const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {};
-    requests.push({ url: String(url), body, headers });
-    const fixture = fixtures[requests.length - 1];
-    if (!fixture) throw new Error(`No fixture for request #${requests.length}`);
-    return new Response(JSON.stringify(fixture.response), {
-      status: fixture.status,
-      headers: { 'content-type': 'application/json' },
-    });
-  };
-  const client = new OpenAI({
-    apiKey: 'test-key',
-    baseURL: 'https://openrouter.ai/api/v1',
-    maxRetries: 0,
-    fetch: fetchImpl as unknown as typeof globalThis.fetch,
-  });
-  return { client, requests };
 }
 
 export type FakeFile = { body: Buffer; contentType?: string; status?: number; headers?: Record<string, string> };

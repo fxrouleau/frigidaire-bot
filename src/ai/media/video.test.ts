@@ -5,13 +5,13 @@ import {
   MKV_BYTES,
   MP4_BYTES,
   TRANSCODED_MP3,
-  createCapturingClient,
   createFakeCatalog,
   createFakeTranscoder,
   createFileFetch,
   createMissingTranscoder,
   userContent,
 } from '../../test-support/fakeMedia';
+import { createCapturingClient, fixtureReply } from '../../test-support/capturingClient';
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import { FEATURE_HEADER } from '../usage';
 import { AudioTranscriber } from './transcriber';
@@ -28,7 +28,7 @@ const DESCRIPTION = (described.response as { choices: Array<{ message: { content
   .content;
 
 function setup(fixtures: OpenRouterFixture[], overrides: Partial<VideoDescriberOptions> = {}) {
-  const { client, requests } = createCapturingClient(fixtures);
+  const { client, requests } = createCapturingClient(fixtures.map(fixtureReply));
   const transcribed: Buffer[] = [];
   const fetch = createFileFetch({
     [CLIP_URL]: { body: MP4_BYTES, contentType: 'video/mp4' },
@@ -72,7 +72,7 @@ describe('VideoDescriber', () => {
     expect(outcome).toEqual({ status: 'ok', text: DESCRIPTION, cached: false });
     const [request] = requests;
     expect(request.body.provider).toEqual({ zdr: true });
-    expect(request.headers[FEATURE_HEADER.toLowerCase()]).toBe('video');
+    expect(request.headers.get(FEATURE_HEADER)).toBe('video');
     const [video, prompt] = userContent(request);
     expect(video).toEqual({
       type: 'video_url',
@@ -168,7 +168,7 @@ describe('VideoDescriber', () => {
     const text = String(content.at(-1)?.text);
     expect(text).toContain('2 still frames sampled evenly, in order, from a 1:15 video');
     expect(text).toContain('Transcript of its audio:\nno way, NO WAY');
-    expect(requests[0].headers[FEATURE_HEADER.toLowerCase()]).toBe('video');
+    expect(requests[0].headers.get(FEATURE_HEADER)).toBe('video');
   });
 
   it('samples keyframes for clips over VIDEO_MAX_SECONDS', async () => {
@@ -286,7 +286,7 @@ describe('VideoDescriber: soundtrack through the real transcriber', () => {
       probe: { durationSecs: 600.084, hasAudio: true, hasVideo: false },
       sampleVideo: { durationSecs: 720, frames: [FRAME], audio: TRANSCODED_MP3 },
     });
-    const { client, requests } = createCapturingClient([transcribedFixture, described]);
+    const { client, requests } = createCapturingClient([transcribedFixture, described].map(fixtureReply));
     const transcriber = new AudioTranscriber({
       client: () => client,
       transcoder,
@@ -321,7 +321,7 @@ describe('VideoDescriber: soundtrack through the real transcriber', () => {
       probe: { durationSecs: 600.084, hasAudio: true, hasVideo: false },
       sampleVideo: { frames: [FRAME], audio: TRANSCODED_MP3 },
     });
-    const { client, requests } = createCapturingClient([transcribedFixture, described]);
+    const { client, requests } = createCapturingClient([transcribedFixture, described].map(fixtureReply));
     const transcriber = new AudioTranscriber({
       client: () => client,
       transcoder,
@@ -356,7 +356,7 @@ describe('VideoDescriber: follow-up questions', () => {
     expect(String(prompt.text)).toContain("If it doesn't show or say that, say so plainly");
     expect(String(prompt.text)).not.toContain('On-screen text:');
     expect(requests[1].body.provider).toEqual({ zdr: true });
-    expect(requests[1].headers[FEATURE_HEADER.toLowerCase()]).toBe('video');
+    expect(requests[1].headers.get(FEATURE_HEADER)).toBe('video');
   });
 
   it('caches answers per clip and question (case and punctuation aside), apart from the description', async () => {
