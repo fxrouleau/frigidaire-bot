@@ -96,8 +96,13 @@ export function memoryAlertStore(): AlertStore {
   };
 }
 
+// setTimeout turns any delay above 2^31-1 ms (~24.8 days) into 1 ms, which would make a long
+// LINK_FIX_ALERT_MIN_INTERVAL_MS re-check (and log) every millisecond. A longer wait runs in steps: the
+// early re-check finds the window still open and schedules the rest.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
 function defaultSchedule(callback: () => void, delayMs: number): () => void {
-  const timer = setTimeout(callback, delayMs);
+  const timer = setTimeout(callback, Math.min(delayMs, MAX_TIMER_DELAY_MS));
   timer.unref();
   return () => clearTimeout(timer);
 }

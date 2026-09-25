@@ -199,6 +199,26 @@ describe('linkRepost event', () => {
     expect(fake.recorders.delete.calls).toHaveLength(0);
   });
 
+  it('does not repost a message edited while its attachments were being carried over', async () => {
+    const fake = createFakeMessage({
+      content: 'https://x.com/u/status/1',
+      attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/pic.png', contentType: 'image/png', name: 'pic.png', size: 3 }],
+    });
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      if (String(input).startsWith('https://cdn.discordapp.com/')) {
+        // The author fixes a typo while the bot is downloading the attachment.
+        (fake.message as unknown as { content: string }).content = 'edited https://x.com/u/status/1';
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      return respondWithOg();
+    });
+
+    await linkRepostEvent.execute(fake.message);
+
+    expect(fake.webhooks.flatMap((hook) => hook.send.calls)).toHaveLength(0);
+    expect(fake.recorders.delete.calls).toHaveLength(0);
+  });
+
   it('logs (and does not throw) when the webhook send fails, keeping the original', async () => {
     const fake = createFakeMessage({
       content: 'https://x.com/u/status/1',

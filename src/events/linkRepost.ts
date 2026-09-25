@@ -39,6 +39,8 @@ export default defineEvent(Events.MessageCreate, {
       const outcome = await repostMessage(message, result.content, {
         // The bot is about to delete this message itself — that is not the author changing their mind.
         onBeforeDelete: () => deletedMessageReposter.forget(message.id),
+        // Downloads and the reply lookup take seconds: an edit landing then must not be undone either.
+        stillCurrent: () => message.content === original,
       });
       if (outcome.status !== 'reposted') {
         logger.warn(`linkfix: message ${message.id} not reposted (${outcome.status}): ${outcome.reason}`);

@@ -18,7 +18,11 @@ export type RelayRecord = {
   authorName: string;
   kind: RelayKind;
   createdAt: number;
-  /** The member's own message this relay stands in for (deleted by then); unknown for older rows. */
+  /**
+   * The member's message this relay replaced (deleted by the bot for a link fix, by the member for a
+   * regret). Lets a conversation that already holds the original recognize the relay as the same
+   * message. Absent for relays recorded before the column existed.
+   */
   originalId?: string;
 };
 
@@ -45,16 +49,16 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_relayed_messages_author ON relayed_messages(author_id);
 `;
 
-// Handles whose relayed_messages table is known to have every column (see db()).
+// Databases whose relayed_messages table is known to have every column (see db()).
 const migrated = new WeakSet<BotDb>();
 
 function db() {
   const botDb = getBotDb();
   botDb.ensureSchema('relayed_messages', SCHEMA);
   if (!migrated.has(botDb)) {
-    // Additive: a table created before original_id existed gets the column (older rows keep NULL).
+    // Additive migration: a table created before original_id existed gets the column (NULL for old rows).
     const columns = botDb.db.prepare('PRAGMA table_info(relayed_messages)').all() as { name: string }[];
-    if (!columns.some((column) => column.name === 'original_id')) {
+    if (!columns.some((c) => c.name === 'original_id')) {
       botDb.db.exec('ALTER TABLE relayed_messages ADD COLUMN original_id TEXT');
     }
     migrated.add(botDb);

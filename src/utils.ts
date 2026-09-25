@@ -29,7 +29,7 @@ export type WebhookParentChannel = TextChannel | NewsChannel | VoiceChannel | Fo
 export type WebhookTarget = { channel: WebhookParentChannel; threadId?: string };
 
 // Discord's limit for a webhook message's content (Nitro members can send up to 4000 themselves).
-const MAX_WEBHOOK_CONTENT = 2000;
+export const MAX_WEBHOOK_CONTENT = 2000;
 
 // Creating the one-time webhook, and deleting the original once the repost is up.
 const REPOST_PERMISSIONS = [PermissionFlagsBits.ManageWebhooks, PermissionFlagsBits.ManageMessages];
@@ -132,6 +132,25 @@ export function identityOf(message: Message): WebhookIdentity {
   };
 }
 
+// Webhook names are 1-80 characters and may not contain "clyde" or "discord" (any case); a hair space
+// (U+200A) inside the word gets past the check without visibly changing the name (the PluralKit fix).
+const MAX_WEBHOOK_NAME = 80;
+const HAIR_SPACE = '\u200A';
+const FALLBACK_WEBHOOK_NAME = 'someone';
+
+/** A member's name as Discord will accept it for a webhook, reading the same. */
+export function webhookName(name: string): string {
+  const safe = name
+    .trim()
+    .replace(/(c)(lyde)|(d)(iscord)/gi, (_match, c, lyde, d, iscord) =>
+      c !== undefined ? `${c}${HAIR_SPACE}${lyde}` : `${d}${HAIR_SPACE}${iscord}`,
+    );
+  const chars = [...safe].slice(0, MAX_WEBHOOK_NAME);
+  if (chars.length === 0) return FALLBACK_WEBHOOK_NAME;
+  // Single-character webhook names are refused too.
+  return chars.length === 1 ? `${chars[0]}${HAIR_SPACE}` : chars.join('');
+}
+
 /**
  * Runs `use` with a one-time webhook wearing `identity`. The webhook is always deleted afterwards —
  * including when `use` throws — so a failure can never leak one of the 15 webhooks a channel may hold.
@@ -141,7 +160,7 @@ export async function withTemporaryWebhook<T>(
   identity: WebhookIdentity,
   use: (webhook: Webhook<WebhookType.Incoming>) => Promise<T>,
 ): Promise<T> {
-  const webhook = await channel.createWebhook({ name: identity.name, avatar: identity.avatar });
+  const webhook = await channel.createWebhook({ name: webhookName(identity.name), avatar: identity.avatar });
   logger.info(`Created webhook ${webhook.id} in #${channel.id}.`);
   try {
     return await use(webhook);
@@ -156,15 +175,24 @@ export async function withTemporaryWebhook<T>(
 }
 
 /**
- * Posts as `identity` through a one-time webhook (deleted afterwards, also on failure). To post into a
- * thread, pass its parent as `channel` and the thread's id as `payload.threadId`.
+ * Posts `payloads` in order as `identity` through one one-time webhook (deleted afterwards, also on
+ * failure), so a long text split into chunks shares a single webhook. Resolves to the posted messages.
+ * Nothing pings unless a payload sets its own `allowedMentions`: a webhook post never fires @everyone,
+ * role or user mentions by default. To post into a thread, pass its parent as `channel` and the thread's
+ * id as each payload's `threadId`.
  */
 export async function sendViaWebhook(
   channel: WebhookParentChannel,
   identity: WebhookIdentity,
-  payload: string | WebhookMessageCreateOptions,
-): Promise<Message> {
-  return withTemporaryWebhook(channel, identity, (webhook) => webhook.send(payload));
+  payloads: WebhookMessageCreateOptions[],
+): Promise<Message[]> {
+  return withTemporaryWebhook(channel, identity, async (webhook) => {
+    const sent: Message[] = [];
+    for (const payload of payloads) {
+      sent.push(await webhook.send({ allowedMentions: { parse: [] }, ...payload }));
+    }
+    return sent;
+  });
 }
 
 /**
@@ -204,6 +232,12 @@ export type RepostOptions = {
   maxAttachmentBytes?: number;
   /** Runs right before the original is deleted (the deleted-message reposter must not see a "regret"). */
   onBeforeDelete?: () => void;
+  /**
+   * Whether `newContent` still matches the message (it was not edited). Checked again after the slow
+   * part (attachment downloads, reply lookup, webhook creation) and right before the post goes out: a
+   * message edited meanwhile is left alone rather than reposted as its pre-edit text and deleted.
+   */
+  stillCurrent?: () => boolean;
 };
 
 export type RepostOutcome =
@@ -266,6 +300,9 @@ export async function repostMessage(
   if (content === undefined) {
     return { status: 'skipped', reason: `the rewritten text is over the ${MAX_WEBHOOK_CONTENT} a webhook can post` };
   }
+  const stillCurrent = options.stillCurrent ?? (() => true);
+  const edited: RepostOutcome = { status: 'skipped', reason: 'it was edited while the repost was being prepared' };
+  if (!stillCurrent()) return edited;
 
   const identity = identityOf(message);
   const payload: WebhookMessageCreateOptions = {
@@ -277,6 +314,7 @@ export async function repostMessage(
   };
 
   return withTemporaryWebhook(target.channel, identity, async (webhook): Promise<RepostOutcome> => {
+    if (!stillCurrent()) return edited;
     const repost = await webhook.send(payload);
     recordRelay({
       messageId: repost.id,

@@ -131,19 +131,26 @@ export function parseChannelNotes(raw: string | undefined): { notes: Record<stri
 const SNOWFLAKE = /^\d{15,21}$/;
 
 export type LinkedAccountsParse = {
+  /** Every side account → the person's final main account. */
   links: Map<string, string>;
-  /** Entries that were dropped, and why (logged once at startup, see configWarnings()). */
+  /** Entries that don't parse, and why. */
   rejected: Array<{ entry: string; reason: string }>;
+  /** Well-formed pairs that can't be resolved (a side linked to two mains, a loop), one line each. */
+  problems: string[];
 };
 
 /**
- * Parses `sideId:mainId` pairs into side → main, keeping what was dropped and why. Pairs may also be
- * separated by `;` or line breaks (a pasted multi-line value). Malformed entries and self-links are
- * dropped: a silently dropped pair makes a side account a separate person again everywhere.
+ * Parses `sideId:mainId` pairs into side → main. Pairs may also be separated by `;` or line breaks (a
+ * pasted multi-line value). Malformed entries and self-links are dropped and listed in `rejected`: a
+ * silently dropped pair makes a side account a separate person again everywhere. A chain (A:B,B:C — a
+ * third account linked to a side, or a main re-linked later) resolves every account to the end of the
+ * chain, so all three are one person. A side linked to two different mains, and every account whose
+ * chain loops (A:B,B:A), can't be resolved: those pairs are dropped and reported in `problems` rather
+ * than guessed at (a wrong link merges two people's memories). Both are logged at startup (configWarnings()).
  */
-export function parseLinkedAccountsReport(entries: string[]): LinkedAccountsParse {
-  const links = new Map<string, string>();
+export function inspectLinkedAccounts(entries: string[]): LinkedAccountsParse {
   const rejected: LinkedAccountsParse['rejected'] = [];
+  const mainsOf = new Map<string, string[]>();
   const pairs = entries.flatMap((entry) => entry.split(/[;\r\n]+/)).map((entry) => entry.trim());
   for (const entry of pairs.filter((pair) => pair.length > 0)) {
     const [side, main, ...rest] = entry.split(':').map((part) => part.trim());
@@ -154,15 +161,42 @@ export function parseLinkedAccountsReport(entries: string[]): LinkedAccountsPars
     } else if (side === main) {
       rejected.push({ entry, reason: 'links an account to itself' });
     } else {
-      links.set(side, main);
+      const mains = mainsOf.get(side) ?? [];
+      if (!mains.includes(main)) mains.push(main);
+      mainsOf.set(side, mains);
     }
   }
-  return { links, rejected };
+
+  const problems: string[] = [];
+  const direct = new Map<string, string>();
+  for (const [side, mains] of mainsOf) {
+    if (mains.length === 1) direct.set(side, mains[0]);
+    else problems.push(`LINKED_ACCOUNTS links ${side} to several main accounts (${mains.join(', ')}); ignored`);
+  }
+
+  const links = new Map<string, string>();
+  const looping: string[] = [];
+  for (const [side, first] of direct) {
+    const chain = new Set([side]);
+    let main = first;
+    let next = direct.get(main);
+    while (next !== undefined && !chain.has(main)) {
+      chain.add(main);
+      main = next;
+      next = direct.get(main);
+    }
+    if (chain.has(main)) looping.push(side);
+    else links.set(side, main);
+  }
+  if (looping.length > 0) {
+    problems.push(`LINKED_ACCOUNTS links ${looping.join(', ')} in a loop with no main account; ignored`);
+  }
+  return { links, rejected, problems };
 }
 
-/** Parses `sideId:mainId` pairs into side → main. Malformed entries and self-links are dropped. */
+/** Side account → final main account (see inspectLinkedAccounts). */
 export function parseLinkedAccounts(entries: string[]): Map<string, string> {
-  return parseLinkedAccountsReport(entries).links;
+  return inspectLinkedAccounts(entries).links;
 }
 
 export const config = {
@@ -467,11 +501,24 @@ export const config = {
     },
     /**
      * Side accounts that belong to the same person as a main account, as `sideId:mainId` pairs
-     * (LINKED_ACCOUNTS, csv; `;` and line breaks separate pairs too). Malformed pairs and self-links are
-     * ignored, with a startup WARN each (configWarnings()). See src/linkedAccounts.ts.
+     * (LINKED_ACCOUNTS, csv; `;` and line breaks separate pairs too). Chains resolve to their final main;
+     * malformed pairs, self-links, a side linked to two mains and loops are ignored, with a startup WARN
+     * each (configWarnings()). See src/linkedAccounts.ts.
      */
     get linkedAccounts(): Map<string, string> {
       return parseLinkedAccounts(envCsv('LINKED_ACCOUNTS'));
+    },
+    /**
+     * LINKED_ACCOUNTS entries that were ignored, one WARN line each: malformed entries and self-links,
+     * then pairs that can't be resolved (a side with two mains, a loop).
+     */
+    get linkedAccountProblems(): string[] {
+      const { rejected, problems } = inspectLinkedAccounts(envCsv('LINKED_ACCOUNTS'));
+      const unparsed = rejected.map(({ entry, reason }) => {
+        const shown = entry.length > 80 ? `${entry.slice(0, 80)}…` : entry;
+        return `LINKED_ACCOUNTS: ignoring "${shown}" (${reason}); that account counts as its own person.`;
+      });
+      return [...unparsed, ...problems];
     },
   },
 
@@ -894,12 +941,7 @@ function feature(name: string, enabled: boolean, details: string[] = [], offReas
  * (next to the Effective config line). Empty when everything parsed.
  */
 export function configWarnings(): string[] {
-  const warnings: string[] = [];
-  for (const { entry, reason } of parseLinkedAccountsReport(envCsv('LINKED_ACCOUNTS')).rejected) {
-    const shown = entry.length > 80 ? `${entry.slice(0, 80)}…` : entry;
-    warnings.push(`LINKED_ACCOUNTS: ignoring "${shown}" (${reason}); that account counts as its own person.`);
-  }
-  return warnings;
+  return [...config.server.linkedAccountProblems];
 }
 
 /**
@@ -954,7 +996,7 @@ export function describeEffectiveConfig(): string {
     `logDebug=${onOff(config.logging.debug)}`,
     // Server layout
     `mainChannel=${server.mainChannelId ? 'set' : 'off'}`,
-    `linkedAccounts=${server.linkedAccounts.size}`,
+    `linkedAccounts=${server.linkedAccounts.size}${server.linkedAccountProblems.length > 0 ? `,ignored:${server.linkedAccountProblems.length}` : ''}`,
     report.channelId
       ? `reportChannel=set(digest:${onOff(report.digestEnabled)}@${formatDuration(report.digestPeriodMs)},deploy:${deployAnnounce})`
       : 'reportChannel=off',

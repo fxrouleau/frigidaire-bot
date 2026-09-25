@@ -1,4 +1,5 @@
 import { ChannelType } from 'discord.js';
+import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { JudgeInput } from './ai/messageJudge';
 import { DeletedMessageReposter } from './deletedMessages';
@@ -31,7 +32,7 @@ function makeReposter(opts: {
     fetchAttachment: async () => opts.attachmentBytes,
     send: (async (...args: SendCall) => {
       sendCalls.push(args);
-      return { id: `repost-${sendCalls.length}` };
+      return args[2].map((_, index) => ({ id: `repost-${sendCalls.length}-${index}` }));
     }) as unknown as typeof sendViaWebhook,
     now: opts.now ?? (() => T0),
   });
@@ -68,28 +69,8 @@ describe('DeletedMessageReposter', () => {
     const [channel, identity, payload] = sendCalls[0];
     expect(channel.id).toBe('channel-1');
     expect(identity).toEqual({ name: 'Jasper', avatar: 'https://cdn.example/avatar.png' });
-    expect(payload).toEqual({ content: 'something edgy', files: [], allowedMentions: { parse: [] } });
-  });
-
-  it('reposts mentions inert: the original already pinged, and a webhook must not ping @everyone for them', async () => {
-    const { reposter, sendCalls } = makeReposter({ now: () => T0 + 10_000 });
-    const fake = jasperMessage({ content: '@everyone <@&123456789012345678> <@234567890123456789> goblin' });
-
-    reposter.observe(fake.message);
-    await reposter.handleDelete(fake.message);
-
-    expect(sendCalls[0][2]).toMatchObject({ allowedMentions: { parse: [] } });
-  });
-
-  it('records the repost as a relay of the deleted message', async () => {
-    setBotDbForTesting(new BotDb(':memory:'));
-    const { reposter } = makeReposter({ now: () => T0 + 10_000 });
-    const fake = jasperMessage({ messageId: 'm-regret' });
-
-    reposter.observe(fake.message);
-    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
-
-    expect(getRelay('repost-1')).toMatchObject({ authorId: JASPER, kind: 'regret', originalId: 'm-regret' });
+    // Never pings again: the original already did.
+    expect(payload).toEqual([{ content: 'something edgy', allowedMentions: { parse: [] } }]);
   });
 
   it("watches a member's linked side account too, and reposts it as that account", async () => {
@@ -104,7 +85,7 @@ describe('DeletedMessageReposter', () => {
       fetchAttachment: async () => undefined,
       send: (async (...args: SendCall) => {
         sendCalls.push(args);
-        return { id: 'repost-1' };
+        return [{ id: 'repost-1' }];
       }) as unknown as typeof sendViaWebhook,
       now: () => T0 + 10_000,
     });
@@ -196,8 +177,10 @@ describe('DeletedMessageReposter', () => {
     expect(reposter.size).toBe(0);
   });
 
-  it('re-uploads attachments captured at post time and tells the judge about images', async () => {
-    const bytes = Buffer.from('png-bytes');
+  it('re-uploads attachments captured at post time and shows the judge the saved image, not the dead CDN url', async () => {
+    const bytes = await sharp({ create: { width: 1200, height: 600, channels: 4, background: '#ff000080' } })
+      .png()
+      .toBuffer();
     const { reposter, judgeCalls, sendCalls } = makeReposter({ attachmentBytes: bytes });
     const fake = jasperMessage({
       content: '',
@@ -207,18 +190,15 @@ describe('DeletedMessageReposter', () => {
     reposter.observe(fake.message);
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
 
-    expect(judgeCalls[0]).toEqual({
-      author: 'Jasper',
-      text: '',
-      imageUrls: ['https://cdn.discordapp.com/attachments/1/2/spicy.png'],
-      attachmentNames: ['spicy.png'],
-    });
+    expect(judgeCalls[0]).toMatchObject({ author: 'Jasper', text: '', attachmentNames: ['spicy.png'] });
+    const [image] = judgeCalls[0].imageUrls;
+    expect(judgeCalls[0].imageUrls).toHaveLength(1);
+    expect(image.startsWith('data:image/jpeg;base64,')).toBe(true);
+    // Downscaled for the judge.
+    const shown = await sharp(Buffer.from(image.slice('data:image/jpeg;base64,'.length), 'base64')).metadata();
+    expect([shown.width, shown.height]).toEqual([768, 384]);
     const [, , payload] = sendCalls[0];
-    expect(payload).toEqual({
-      content: undefined,
-      files: [{ attachment: bytes, name: 'spicy.png' }],
-      allowedMentions: { parse: [] },
-    });
+    expect(payload).toEqual([{ files: [{ attachment: bytes, name: 'spicy.png' }], allowedMentions: { parse: [] } }]);
   });
 
   it('still reposts the text when an attachment could not be downloaded', async () => {
@@ -229,7 +209,63 @@ describe('DeletedMessageReposter', () => {
 
     reposter.observe(fake.message);
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
-    expect(sendCalls[0][2]).toEqual({ content: 'something edgy', files: [], allowedMentions: { parse: [] } });
+    expect(sendCalls[0][2]).toEqual([{ content: 'something edgy', allowedMentions: { parse: [] } }]);
+  });
+
+  it('never re-pings anyone: @everyone, roles and users in a reposted regret stay inert', async () => {
+    const { reposter, sendCalls } = makeReposter({ mode: 'always' });
+    const fake = jasperMessage({ content: '@everyone <@&42> <@7> lol' });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+    expect(sendCalls[0][2]).toEqual([{ content: '@everyone <@&42> <@7> lol', allowedMentions: { parse: [] } }]);
+  });
+
+  it("reposts a Nitro-length regret in webhook-sized chunks, files on the last, each one recorded as theirs", async () => {
+    setBotDbForTesting(new BotDb(':memory:'));
+    const bytes = Buffer.from('png-bytes');
+    const { reposter, sendCalls } = makeReposter({ mode: 'always', attachmentBytes: bytes });
+    const content = `${'a'.repeat(1500)}\n${'b'.repeat(1500)}`;
+    const fake = jasperMessage({
+      content,
+      attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/pic.png', contentType: 'image/png', name: 'pic.png' }],
+    });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+
+    expect(sendCalls).toHaveLength(1);
+    const payloads = sendCalls[0][2];
+    expect(payloads).toEqual([
+      { content: 'a'.repeat(1500), allowedMentions: { parse: [] } },
+      { content: 'b'.repeat(1500), allowedMentions: { parse: [] }, files: [{ attachment: bytes, name: 'pic.png' }] },
+    ]);
+    expect(getRelay('repost-1-0')).toMatchObject({ authorId: JASPER, kind: 'regret', originalId: 'm1' });
+    expect(getRelay('repost-1-1')).toMatchObject({ authorId: JASPER, kind: 'regret', originalId: 'm1' });
+  });
+
+  it('judges an image whose bytes could not be decoded (or saved) by its name alone', async () => {
+    const { reposter, judgeCalls } = makeReposter({ attachmentBytes: Buffer.from('not an image') });
+    const fake = jasperMessage({
+      attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/odd.png', contentType: 'image/png', name: 'odd.png' }],
+    });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+    expect(judgeCalls[0]).toEqual({ author: 'Jasper', text: 'something edgy', imageUrls: [], attachmentNames: ['odd.png'] });
+  });
+
+  it('does not pay the judge when nothing could be reposted anyway', async () => {
+    const { reposter, judgeCalls, sendCalls } = makeReposter({ attachmentBytes: undefined });
+    const fake = jasperMessage({
+      content: '',
+      attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/huge.png', contentType: 'image/png', name: 'huge.png' }],
+    });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('empty');
+    expect(judgeCalls).toHaveLength(0);
+    expect(sendCalls).toHaveLength(0);
   });
 
   it('reports "empty" when there is nothing left to repost', async () => {

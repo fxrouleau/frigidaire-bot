@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import {
   type AlertStore,
@@ -77,6 +77,47 @@ function harness(store: AlertStore = memoryAlertStore()): Harness {
 }
 
 describe('FixerAlerter', () => {
+  it('waits out a rate-limit window longer than setTimeout can hold, without spinning', async () => {
+    vi.useFakeTimers();
+    const DAY = 24 * HOUR;
+    const sent: string[] = [];
+    const states = new Map<Platform, PlatformState>();
+    let evaluations = 0;
+    const alerter = new FixerAlerter({
+      send: async (text) => {
+        sent.push(text);
+        return true;
+      },
+      currentState: (platform) => {
+        evaluations += 1;
+        return states.get(platform) ?? 'unknown';
+      },
+      minIntervalMs: 30 * DAY,
+    });
+    const change = (state: PlatformState) => {
+      const previous = states.get('instagram') ?? 'unknown';
+      states.set('instagram', state);
+      return alerter.handle({ platform: 'instagram', state, previous, at: Date.now(), detail: 'a.test: down' });
+    };
+    try {
+      await change('down');
+      await change('up');
+      await change('down');
+      expect(sent).toHaveLength(2);
+
+      evaluations = 0;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(evaluations).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(30 * DAY);
+      expect(sent).toHaveLength(3);
+      expect(evaluations).toBe(2);
+    } finally {
+      alerter.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it('posts once when a platform goes down, and once when it recovers', async () => {
     const h = harness();
 

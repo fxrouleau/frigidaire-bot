@@ -8,7 +8,7 @@ import {
 import { config } from '../config';
 import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
-import { type MessageAttribution, attributeMessage, getRelays } from '../relay';
+import { type MessageAttribution, attributeMessage, getRelay, getRelays } from '../relay';
 import { splitMessage } from '../utils';
 import type { ConversationPersistence } from './conversationPersistence';
 import { type ConversationState, ConversationStore } from './conversationStore';
@@ -162,6 +162,25 @@ function collectMessageIds(entries: ConversationEntry[]): Set<string> {
     if (entry.kind === 'message') for (const id of entry.messageIds ?? []) ids.add(id);
   }
   return ids;
+}
+
+/**
+ * A test for "this message is already in the window": its id was rendered into `entries`, or it is the
+ * bot's relay (link-fix or regret repost) of a message that was. A relay posted after its original entered
+ * the window (asking about a tweet: the link fix reposts the question while the bot answers it) is that
+ * same message again, not something new someone said. `candidates` are looked up in the relay registry in
+ * one query; any other id is looked up on first use.
+ */
+function windowMembership(entries: ConversationEntry[], candidates: string[] = []): (id: string) => boolean {
+  const known = collectMessageIds(entries);
+  const originals = new Map<string, string | undefined>(candidates.map((id) => [id, undefined]));
+  for (const [id, relay] of getRelays(candidates)) originals.set(id, relay.originalId);
+  return (id) => {
+    if (known.has(id)) return true;
+    if (!originals.has(id)) originals.set(id, getRelay(id)?.originalId);
+    const original = originals.get(id);
+    return original !== undefined && known.has(original);
+  };
 }
 
 /** Every memory id rendered into these entries. */
@@ -700,16 +719,12 @@ export class AgentOrchestrator {
       return [];
     }
 
-    const known = collectMessageIds(state.entries);
-    // A relay of a message the window already shows is that message again: link fixing deletes a ping
-    // and reposts it through a webhook right after the turn that read it (the relay has a newer id).
-    const relays = getRelays(fetched.messages.filter((msg) => msg.webhookId).map((msg) => msg.id));
-    const alreadyShown = (msg: Message) => {
-      const originalId = relays.get(msg.id)?.originalId;
-      return known.has(msg.id) || (originalId !== undefined && known.has(originalId));
-    };
+    const inWindow = windowMembership(
+      state.entries,
+      fetched.messages.map((msg) => msg.id),
+    );
     const rendered = await Promise.all(
-      fetched.messages.filter((msg) => !alreadyShown(msg)).map((msg) => this.renderHistoryMessage(msg)),
+      fetched.messages.filter((msg) => !inWindow(msg.id)).map((msg) => this.renderHistoryMessage(msg)),
     );
     const entries = rendered.filter((e): e is ConversationEntry => e !== undefined);
 
@@ -782,7 +797,7 @@ export class AgentOrchestrator {
    */
   private async buildReplyContext(message: Message, window: ConversationEntry[]): Promise<ReplyContext> {
     const channelId = message.channel.id;
-    const knownIds = collectMessageIds(window);
+    const inWindow = windowMembership(window);
     const referencedId = replyParentId(message, channelId);
     if (!referencedId) return {};
 
@@ -795,13 +810,13 @@ export class AgentOrchestrator {
     }
 
     const header = `(replying to ${this.contextAuthorLabel(referenced)} — ${referenced.url})`;
-    if (knownIds.has(referenced.id)) return { header, entry: await this.enrichKnownReference(referenced, window) };
+    if (inWindow(referenced.id)) return { header, entry: await this.enrichKnownReference(referenced, window) };
 
     const chain: Message[] = [referenced];
     let cursor = referenced;
     for (let depth = 0; depth < MAX_REPLY_CHAIN_DEPTH; depth++) {
       const parentId = replyParentId(cursor, channelId);
-      if (!parentId || knownIds.has(parentId)) break;
+      if (!parentId || inWindow(parentId)) break;
       try {
         cursor = await message.channel.messages.fetch(parentId);
       } catch (error) {
@@ -826,7 +841,7 @@ export class AgentOrchestrator {
         .filter(
           (m) =>
             !chainIds.has(m.id) &&
-            !knownIds.has(m.id) &&
+            !inWindow(m.id) &&
             compareSnowflakes(m.id, message.id) < 0 &&
             !m.system &&
             (m.author.id === m.client.user.id || attributeMessage(m) !== undefined),

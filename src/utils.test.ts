@@ -12,10 +12,13 @@ import { BotDb, setBotDbForTesting } from './storage/botDb';
 import { createFakeMessage } from './test-support/fakeDiscord';
 import {
   type RepostOutcome,
+  type WebhookParentChannel,
   mentionsInText,
   repostBlocker,
   repostMessage,
+  sendViaWebhook,
   splitMessage,
+  webhookName,
   webhookTargetOf,
 } from './utils';
 
@@ -245,6 +248,26 @@ describe('repostMessage', () => {
 
     expect(outcome.status).toBe('skipped');
     expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+    expect(fake.recorders.delete.calls).toHaveLength(0);
+  });
+
+  it('posts nothing when the message was edited while the webhook was being created', async () => {
+    const fake = createFakeMessage({ content: 'https://x.com/u/status/1' });
+    const channel = fake.message.channel as unknown as { createWebhook: (options: unknown) => Promise<unknown> };
+    const create = channel.createWebhook;
+    channel.createWebhook = async (options) => {
+      (fake.message as unknown as { content: string }).content = 'edited https://x.com/u/status/1';
+      return create(options);
+    };
+
+    const outcome = await repostMessage(fake.message, 'https://fixvx.com/u/status/1', {
+      fetch: noFetch,
+      stillCurrent: () => fake.message.content === 'https://x.com/u/status/1',
+    });
+
+    expect(outcome).toEqual({ status: 'skipped', reason: 'it was edited while the repost was being prepared' });
+    expect(fake.webhooks[0].send.calls).toHaveLength(0);
+    expect(fake.webhooks[0].delete.calls).toHaveLength(1);
     expect(fake.recorders.delete.calls).toHaveLength(0);
   });
 
@@ -484,6 +507,59 @@ describe('repostMessage', () => {
 
       expect(sentPayload(fake).content).toBe(body);
     });
+  });
+});
+
+describe('sendViaWebhook', () => {
+  it('posts every payload through one webhook, never pinging unless told to, then deletes the webhook', async () => {
+    const fake = createFakeMessage();
+    const channel = fake.message.channel as unknown as WebhookParentChannel;
+
+    const sent = await sendViaWebhook(channel, { name: 'Jasper' }, [
+      { content: '@everyone part one' },
+      { content: 'part two', allowedMentions: { users: ['7'] } },
+    ]);
+
+    expect(sent).toHaveLength(2);
+    expect(fake.recorders.createWebhook.calls).toHaveLength(1);
+    const hook = fake.webhooks[0];
+    expect(hook.send.calls.map((call) => call[0])).toEqual([
+      { content: '@everyone part one', allowedMentions: { parse: [] } },
+      { content: 'part two', allowedMentions: { users: ['7'] } },
+    ]);
+    expect(hook.delete.calls).toHaveLength(1);
+  });
+});
+
+describe('webhookName', () => {
+  it('keeps ordinary names as they are', () => {
+    expect(webhookName('Jasper')).toBe('Jasper');
+    expect(webhookName('  Jay #1 @home: ok  ')).toBe('Jay #1 @home: ok');
+  });
+
+  it('breaks up "clyde" and "discord" (any case), which Discord refuses in webhook names', () => {
+    expect(webhookName('Clyde')).toBe('C\u200Alyde');
+    expect(webhookName('discordmod')).toBe('d\u200Aiscordmod');
+    expect(webhookName('THE DISCORD CLYDE')).toBe('THE D\u200AISCORD C\u200ALYDE');
+    for (const name of ['Clyde', 'discordmod', 'THE DISCORD CLYDE', 'xDiScOrDx']) {
+      expect(webhookName(name).toLowerCase()).not.toMatch(/clyde|discord/);
+    }
+  });
+
+  it('fits the 2-80 character range', () => {
+    expect(webhookName('J')).toBe('J\u200A');
+    expect(webhookName('x'.repeat(100))).toBe('x'.repeat(80));
+    expect(webhookName('   ')).toBe('someone');
+  });
+
+  it('is what a repost webhook is created with', async () => {
+    setBotDbForTesting(new BotDb(':memory:'));
+    const fake = createFakeMessage({ authorDisplayName: 'Discord Andy' });
+
+    await repostMessage(fake.message, 'hi', { fetch: noFetch });
+
+    expect((fake.recorders.createWebhook.calls[0][0] as { name: string }).name).toBe('D\u200Aiscord Andy');
+    setBotDbForTesting(undefined);
   });
 });
 
