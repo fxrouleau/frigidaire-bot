@@ -2,6 +2,7 @@ import { config } from '../config';
 import { logger } from '../logger';
 import { getOpenRouterClient } from './openRouterClient';
 import { emojiCdnUrl } from './promptSections';
+import { featureRequestOptions } from './usage';
 
 /**
  * Captions a single Discord custom emoji via a vision model over OpenRouter (EMOJI_CAPTION_MODEL,
@@ -27,19 +28,20 @@ export async function captionEmoji(params: {
   logger.info(`emojiCaptioner: requesting caption for ${params.name} (${params.id}) via ${model}`);
 
   try {
-    const response = await openai.chat.completions.create({
-      model,
-      max_tokens: 160,
-      temperature: 0.2,
-      // @ts-expect-error OpenRouter-specific provider-routing hint — matches learner config
-      provider: { zdr: true },
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `You are captioning a Discord custom emoji for a chat bot's system prompt. The emoji's name is "${params.name}".
+    const response = await openai.chat.completions.create(
+      {
+        model,
+        max_tokens: 160,
+        temperature: 0.2,
+        // @ts-expect-error OpenRouter-specific provider-routing hint — matches learner config
+        provider: { zdr: true },
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: `You are captioning a Discord custom emoji for a chat bot's system prompt. The emoji's name is "${params.name}".
 
 IMPORTANT: Most custom Discord emojis come from Twitch/streaming culture, anime fandoms, League of Legends, game-specific memes. The NAME usually carries more meaning than the image alone, because the cultural usage defines what the emote signals. Common families you should recognize by name:
 - monkaS / monkaW / monkaX / monkaGIGA: panic, fear, nervousness, sweating through something
@@ -68,12 +70,14 @@ OUTPUT: one line, ≤80 characters, format "<brief visual>; for <emotion or situ
 - "hype wide-eyed face; for excitement, pog moments"
 
 Now caption "${params.name}":`,
-            },
-            { type: 'image_url', image_url: { url: imageUrl } },
-          ],
-        },
-      ],
-    });
+              },
+              { type: 'image_url', image_url: { url: imageUrl } },
+            ],
+          },
+        ],
+      },
+      featureRequestOptions('emoji_caption'),
+    );
 
     const text = response.choices?.[0]?.message?.content?.trim();
     if (!text) {

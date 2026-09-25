@@ -83,6 +83,12 @@ export const DEFAULT_TWITTER_FIXERS = ['fixvx.com', 'fxtwitter.com', 'vxtwitter.
 export const DEFAULT_INSTAGRAM_FIXERS = ['instagram7.com', 'uuinstagram.com', 'kkinstagram.com'];
 export const DEFAULT_TIKTOK_FIXERS = ['tnktok.com', 'fixtiktok.com', 'tfxktok.com'];
 
+// Persona eval judge: a frontier reasoning model with ZDR endpoints (Google Vertex / AI Studio) that
+// OpenRouter does not run through its moderation layer — Anthropic/OpenAI endpoints are moderated,
+// and the transcripts being graded are roasts and dark banter. A different family from the default
+// chat model also avoids a judge grading its own style.
+export const DEFAULT_EVAL_JUDGE_MODEL = 'google/gemini-3.1-pro-preview';
+
 export const DELETE_REPOST_MODES = ['edgy', 'always'] as const;
 export type DeleteRepostMode = (typeof DELETE_REPOST_MODES)[number];
 
@@ -98,6 +104,17 @@ export const config = {
     /** Required for every AI feature (chat, embeddings, image generation, emoji captions, learner). */
     get apiKey(): string | undefined {
       return envString('OPENROUTER_API_KEY');
+    },
+    /**
+     * Per-attempt timeout of every call through the shared client. The SDK default is 10 minutes, and
+     * chat turns are serialized per channel, so one hung call would stall the bot in that channel.
+     */
+    get timeoutMs(): number {
+      return envInt('OPENROUTER_TIMEOUT_MS', 2 * MINUTE_MS, { min: 1000, max: 30 * MINUTE_MS });
+    },
+    /** SDK retries on connection errors, timeouts, 408/409/429 and 5xx (exponential backoff). */
+    get maxRetries(): number {
+      return envInt('OPENROUTER_MAX_RETRIES', 2, { min: 0, max: 10 });
     },
   },
 
@@ -300,7 +317,38 @@ export const config = {
   featureRequests: {},
 
   /** OpenRouter usage/cost accounting (src/ai/usage.ts). */
-  costs: {},
+  costs: {
+    /**
+     * Kill switch for the usage ledger (the shared client's response inspection + the bot.db rows).
+     * Off ⇒ requests pass through untouched and query_costs / the digest's Spend section say so.
+     */
+    get ledgerEnabled(): boolean {
+      return envBool('USAGE_LEDGER_ENABLED', true);
+    },
+  },
+
+  /** The persona eval harness (src/evals/persona/, `yarn eval:persona`). Never read by the bot itself. */
+  evals: {
+    /** Paid runs are opt-in, like the live tests. */
+    get runLive(): boolean {
+      return envBool('RUN_LIVE', false);
+    },
+    /** Candidate chat models to compare; defaults to the configured CHAT_MODEL. */
+    get models(): string[] {
+      const fromEnv = envCsv('EVAL_MODELS');
+      return fromEnv.length > 0 ? fromEnv : [config.models.chat];
+    },
+    get judgeModel(): string {
+      return envString('EVAL_JUDGE_MODEL') ?? DEFAULT_EVAL_JUDGE_MODEL;
+    },
+    /** Optional csv of scenario ids to run (default: all). */
+    get scenarioIds(): string[] {
+      return envCsv('EVAL_SCENARIOS');
+    },
+    get outputDir(): string {
+      return envString('EVAL_OUTPUT_DIR') ?? './data/evals';
+    },
+  },
 
   /** Discord application commands: right-click message/user menu entries (src/commands/). */
   commands: {},

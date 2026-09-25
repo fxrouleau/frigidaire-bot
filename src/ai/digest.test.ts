@@ -6,6 +6,7 @@ import {
   buildDigest,
   summarizeErrorCaptures,
 } from './digest';
+import type { UsageSummary } from './usage';
 
 const WATERMARK = new Date('2026-06-10T00:00:00Z');
 
@@ -191,5 +192,63 @@ describe('summarizeErrorCaptures', () => {
 
   it('handles the empty case', () => {
     expect(summarizeErrorCaptures([], SINCE)).toEqual({ total: 0, capped: false, byType: [] });
+  });
+});
+
+describe('buildDigest spend section', () => {
+  const ZERO = { promptTokens: 0, completionTokens: 0, unpricedRequests: 0 };
+  const SPEND: UsageSummary = {
+    fromDay: '2026-06-12',
+    toDay: '2026-06-18',
+    total: { requests: 1234, promptTokens: 2_000_000, completionTokens: 40_000, costUsd: 3.21, unpricedRequests: 0 },
+    byFeature: [
+      { feature: 'chat', requests: 900, costUsd: 2.5, ...ZERO },
+      { feature: 'learner', requests: 300, costUsd: 0.7, ...ZERO },
+      { feature: 'embedding', requests: 34, costUsd: 0.01, ...ZERO },
+    ],
+    byModel: [{ model: 'deepseek/deepseek-v3.2', requests: 900, costUsd: 2.5, ...ZERO }],
+    trackedSince: '2026-06-01',
+  };
+
+  it('appends total, per-feature and top-model spend to the full digest', () => {
+    const digest = buildDigest(
+      baseOpts({ signals: [{ category: 'pain_point', content: 'x', updated_at: NEW }], spend: SPEND }),
+    );
+    const lines = digest.split('\n');
+    const at = lines.findIndex((l) => l.startsWith('Spend'));
+    expect(lines[at]).toBe(
+      'Spend (OpenRouter, 2026-06-12 → 2026-06-18 ET) — $3.21 over 1.2k calls (2M prompt + 40k completion tokens)',
+    );
+    expect(lines[at + 1]).toBe(
+      '  by feature: chat $2.50 (900 calls) · learner $0.70 (300 calls) · embedding $0.01 (34 calls)',
+    );
+    expect(lines[at + 2]).toBe('  top models: deepseek/deepseek-v3.2 $2.50 (900 calls)');
+    expect(at).toBeGreaterThan(lines.findIndex((l) => l.startsWith('Backlog totals')));
+  });
+
+  it('keeps the spend on a quiet week', () => {
+    const digest = buildDigest(baseOpts({ spend: SPEND }));
+    expect(digest).toContain('No new self-diagnosis signals this week.');
+    expect(digest).toContain('Spend (OpenRouter, 2026-06-12 → 2026-06-18 ET) — $3.21');
+  });
+
+  it('says nothing was recorded for an empty ledger, and omits the section when the ledger is unavailable', () => {
+    const empty: UsageSummary = {
+      ...SPEND,
+      total: { ...SPEND.total, requests: 0, costUsd: 0 },
+      byFeature: [],
+      byModel: [],
+    };
+    expect(buildDigest(baseOpts({ spend: empty }))).toContain(
+      'Spend (OpenRouter, 2026-06-12 → 2026-06-18 ET) — nothing recorded',
+    );
+    expect(buildDigest(baseOpts())).not.toContain('Spend');
+  });
+
+  it('handles a digest that runs again before a full day has passed', () => {
+    const inverted: UsageSummary = { ...SPEND, fromDay: '2026-06-19', toDay: '2026-06-18' };
+    expect(buildDigest(baseOpts({ spend: inverted }))).toContain(
+      'Spend (OpenRouter) — no complete day since the last digest.',
+    );
   });
 });

@@ -4,6 +4,8 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
+import { recordUsage } from '../ai/usage';
+import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { createFakeChannel, createFakeClient } from '../test-support/fakeDiscord';
 import reportDigestEvent, { runDigestCheck } from './reportDigest';
 
@@ -13,6 +15,7 @@ const ENV_KEYS = [
   'DIGEST_PERIOD_MS',
   'DIGEST_CHECK_INTERVAL_MS',
   'DEBUG_CAPTURE_DIR',
+  'USAGE_LEDGER_ENABLED',
 ] as const;
 const CHANNEL_ID = 'report-digest-1';
 const WATERMARK_KEY = 'digest:last_run_at';
@@ -37,6 +40,7 @@ beforeEach(() => {
 
   store = new MemoryStore(':memory:');
   setMemoryStoreForTesting(store);
+  setBotDbForTesting(new BotDb(':memory:'));
 
   fakeChannel = createFakeChannel({ id: CHANNEL_ID });
   fakeClient = createFakeClient({ channelsById: { [CHANNEL_ID]: fakeChannel.channel } });
@@ -48,6 +52,7 @@ afterEach(() => {
     else process.env[k] = savedEnv[k];
   }
   setMemoryStoreForTesting(undefined);
+  setBotDbForTesting(undefined);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -160,5 +165,34 @@ describe('reportDigest execute master switch', () => {
     process.env.DIGEST_ENABLED = flag;
     execute(fakeClient.client);
     expect(fakeClient.recorders.channelsFetch.calls).toHaveLength(0);
+  });
+});
+
+describe('runDigestCheck spend', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it("reports the period's complete Eastern days of spend; today is left for the next digest", async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    store.setState(WATERMARK_KEY, new Date(Date.now() - 8 * DAY).toISOString());
+    recordUsage({ feature: 'chat', model: 'deepseek/deepseek-v3.2', cost: 0.25, at: Date.now() - 2 * DAY });
+    recordUsage({ feature: 'learner', model: 'qwen/qwen3-vl', cost: 0.1, at: Date.now() - 3 * DAY });
+    recordUsage({ feature: 'image', model: 'gemini-image', cost: 7, at: Date.now() }); // today
+    recordUsage({ feature: 'image', model: 'gemini-image', cost: 9, at: Date.now() - 30 * DAY }); // before the period
+
+    await runDigestCheck(fakeClient.client);
+
+    const sent = fakeChannel.recorders.send.calls.map((c) => String(c[0])).join('\n');
+    expect(sent).toContain('— $0.35 over 2 calls');
+    expect(sent).toContain('by feature: chat $0.25 (1 call) · learner $0.10 (1 call)');
+    expect(sent).not.toContain('gemini-image');
+  });
+
+  it('omits the Spend section when the ledger is disabled', async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    process.env.USAGE_LEDGER_ENABLED = 'false';
+
+    await runDigestCheck(fakeClient.client);
+
+    expect(String(fakeChannel.recorders.send.calls[0][0])).not.toContain('Spend');
   });
 });

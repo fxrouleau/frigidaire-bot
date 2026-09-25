@@ -2,6 +2,8 @@
 // is passed in, so the whole module is trivially unit-testable. The event handler (events/reportDigest)
 // does the data gathering and posting.
 import { MAX_CAPTURES } from './debugCapture';
+import type { UsageSummary } from './usage';
+import { describeSpend } from './usageFormat';
 
 // Learner-authored signals: rendered WITH their content (capability gaps, pain points, etc.).
 export const SIGNAL_CATEGORIES = ['capability_gap', 'pain_point', 'feature_request', 'improvement_idea'] as const;
@@ -34,19 +36,24 @@ export type BuildDigestOptions = {
   signals: DigestSignal[];
   failures: DigestFailure[];
   captures: ErrorCaptureSummary;
+  /** OpenRouter spend over the period's complete Eastern days; undefined (ledger unreadable/off) ⇒ no section. */
+  spend?: UsageSummary;
 };
 
 export function buildDigest(opts: BuildDigestOptions): string {
-  const { periodStart, periodEnd, watermark, signals, failures, captures } = opts;
+  const { periodStart, periodEnd, watermark, signals, failures, captures, spend } = opts;
 
   const header = `🩺 Weekly self-diagnosis digest · ${isoDate(periodStart)} → ${isoDate(periodEnd)}`;
   const newSignals = signals.filter((s) => isNew(s.updated_at, watermark));
   const newFailures = failures.filter((f) => isNew(f.updated_at, watermark));
   const backlogTotal = signals.length + failures.length;
 
-  // Quiet week: nothing in self-diagnosis moved since the last run — collapse to one line.
+  const spendSection = spend ? `\n\n${renderSpend(spend).join('\n')}` : '';
+
+  // Quiet week: nothing in self-diagnosis moved since the last run — collapse to one line (plus the
+  // spend, which is worth seeing every week).
   if (newSignals.length === 0 && newFailures.length === 0) {
-    return `${header}\n\nNo new self-diagnosis signals this week. ${backlogTotal} active in backlog, ${captures.total} AI errors captured.`;
+    return `${header}\n\nNo new self-diagnosis signals this week. ${backlogTotal} active in backlog, ${captures.total} AI errors captured.${spendSection}`;
   }
 
   const lines: string[] = [header, ''];
@@ -79,7 +86,18 @@ export function buildDigest(opts: BuildDigestOptions): string {
 
   lines.push(`Backlog totals: ${backlogTotal} active self-diagnosis items.`);
 
-  return lines.join('\n');
+  return `${lines.join('\n')}${spendSection}`;
+}
+
+/** The Spend section: total, per feature, top models. Covers whole Eastern days (see getUsageSummary). */
+function renderSpend(spend: UsageSummary): string[] {
+  if (spend.toDay < spend.fromDay) return ['Spend (OpenRouter) — no complete day since the last digest.'];
+  const text = describeSpend(spend);
+  const lines = [`Spend (OpenRouter, ${spend.fromDay} → ${spend.toDay} ET) — ${text.headline}`];
+  if (text.byFeature) lines.push(`  by feature: ${text.byFeature}`);
+  if (text.topModels) lines.push(`  top models: ${text.topModels}`);
+  for (const note of text.notes) lines.push(`  ${note}`);
+  return lines;
 }
 
 export function summarizeErrorCaptures(captures: CaptureMeta[], since: Date): ErrorCaptureSummary {

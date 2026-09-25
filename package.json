@@ -32,6 +32,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:live": "vitest run .live.test",
-    "replay": "ts-node src/test-support/replayCli.ts"
+    "replay": "ts-node src/test-support/replayCli.ts",
+    "eval:persona": "ts-node src/evals/persona/cli.ts"
   }
 }
