@@ -22,7 +22,7 @@ const BUNDLED_CASES = path.join(__dirname, 'cases.json');
 const LOCAL_CASES = path.resolve('data', 'gate-cases.json');
 
 async function main(args: string[]): Promise<number> {
-  if (!process.env.RUN_LIVE || !config.openRouter.apiKey) {
+  if (!config.evals.runLive || !config.openRouter.apiKey) {
     console.error('eval:gate calls the live decision model: set RUN_LIVE=1 and OPENROUTER_API_KEY.');
     return 2;
   }

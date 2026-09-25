@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import ts from '@typescript/typescript6';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_INSTAGRAM_FIXERS,
@@ -395,5 +398,68 @@ describe('describeEffectiveConfig', () => {
     vi.stubEnv('GATE_ENABLED', 'false');
     expect(describeEffectiveConfig()).toContain('featureRequests=off(no-token)');
     expect(describeEffectiveConfig()).toContain('gate=off ');
+  });
+});
+
+/**
+ * Every `process.env` read in `text` outside config.ts, as "file:line expression". Writes (the eval CLIs
+ * switch error captures and the log file off for their own run) are not reads.
+ */
+function envReads(file: string, text: string): string[] {
+  const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const reads: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(node) && node.getText(sourceFile) === 'process.env') {
+      const parent = node.parent;
+      const member = (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent;
+      const target = member && member.expression === node ? member : node;
+      const assigned =
+        ts.isBinaryExpression(target.parent) &&
+        target.parent.left === target &&
+        target.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+      if (target !== node && (assigned || ts.isDeleteExpression(target.parent))) return;
+      const line = sourceFile.getLineAndCharacterOfPosition(target.getStart()).line + 1;
+      reads.push(`${file}:${line} ${target.getText(sourceFile)}`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return reads;
+}
+
+function productionFiles(dir: string): string[] {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === 'test-support' ? [] : productionFiles(full);
+    return entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') ? [full] : [];
+  });
+}
+
+describe('environment access', () => {
+  it('reads process.env only in config.ts (one set of parsing rules, e.g. RUN_LIVE=0 is off everywhere)', () => {
+    const reads = productionFiles(__dirname)
+      .map((full) => path.relative(__dirname, full).split(path.sep).join('/'))
+      .filter((file) => file !== 'config.ts')
+      .flatMap((file) => envReads(file, fs.readFileSync(path.join(__dirname, file), 'utf8')));
+    expect(reads).toEqual([]);
+  });
+
+  it('tells reads from writes', () => {
+    const reads = envReads(
+      'x.ts',
+      [
+        "process.env.LOG_FILE = 'off';",
+        'delete process.env.X;',
+        '// process.env.IN_A_COMMENT',
+        'if (!process.env.RUN_LIVE) exit();',
+        "const key = process.env['OPENROUTER_API_KEY'];",
+        'spawn(cmd, { env: { ...process.env } });',
+      ].join('\n'),
+    );
+    expect(reads).toEqual([
+      'x.ts:4 process.env.RUN_LIVE',
+      "x.ts:5 process.env['OPENROUTER_API_KEY']",
+      'x.ts:6 process.env',
+    ]);
   });
 });
