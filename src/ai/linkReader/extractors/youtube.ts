@@ -82,8 +82,10 @@ export function parseWatchPage(html: string, pageUrl: string): WatchPageInfo {
   if (status === 'LOGIN_REQUIRED') playabilityNote = 'age-restricted or sign-in required';
   else if (status && status !== 'OK') playabilityNote = str(playability?.reason) ?? status.toLowerCase();
 
+  // <title> alone is useless here: removed/private videos still serve "YouTube" or "- YouTube" pages.
+  const pageTitle = meta.meta['og:title'] ?? meta.documentTitle?.replace(/\s*-\s*YouTube$/i, '');
   return {
-    title: str(details?.title) ?? meta.title,
+    title: str(details?.title) ?? (pageTitle && !/^youtube$/i.test(pageTitle.trim()) ? pageTitle : undefined),
     channel: str(details?.author) ?? str(micro?.ownerChannelName),
     description: str(details?.shortDescription) ?? meta.description,
     durationSecs: num(details?.lengthSeconds),

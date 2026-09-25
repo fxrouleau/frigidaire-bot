@@ -66,13 +66,15 @@ async function readFixerPage(ctx: ExtractorContext, domains: string[], path: str
   return undefined;
 }
 
-/** "Name (@handle)" / "Name ✔ (@handle) • Instagram reel" / "@handle" → parts. */
-function parseAccountTitle(title: string | undefined): { author?: string; handle?: string } {
+/** "Name (@handle)" / "Name ✔ (@handle) • Instagram reel" / "@handle • …" / "Name on Instagram: …" → parts. */
+export function parseAccountTitle(title: string | undefined): { author?: string; handle?: string } {
   if (!title) return {};
   const full = title.match(/^(.*?)\s*[✔✓]?\s*\(@([\w.]+)\)/u);
   if (full) return { author: full[1].trim() || undefined, handle: full[2] };
-  const bare = title.trim().match(/^@([\w.]+)$/);
-  return bare ? { handle: bare[1] } : {};
+  const bare = title.trim().match(/^@([\w.]+)(?:\s*[•·|].*)?$/u);
+  if (bare) return { handle: bare[1] };
+  const on = title.match(/^(.{1,80}?) on (?:Instagram|TikTok)\b/);
+  return on ? { author: on[1].trim() } : {};
 }
 
 async function resolveSharePath(
