@@ -235,6 +235,11 @@ export type HandleMentionOptions = {
   unprompted?: boolean;
 };
 
+// Added to the dynamic context of a turn whose message a later turn already showed the model (it was
+// posted before a ping that got routed, and answered, first).
+export const LATE_MESSAGE_NOTE =
+  "This message came in before your last reply, so it also shows up earlier in the history. Answer it now, without repeating what you've already said.";
+
 // Added to the dynamic context of a turn the gate routed (see HandleMentionOptions.unprompted).
 export const UNPROMPTED_NOTE =
   "Nobody pinged you this time: the last message doesn't @-mention you or reply to you. You're chiming in on your own because it was clearly meant for you (you were named, or you're mid-conversation with them). Don't say they pinged, tagged or mentioned you; just answer like you were part of the conversation.";
@@ -310,6 +315,16 @@ export class AgentOrchestrator {
 
   private async processMention(message: Message, opts: HandleMentionOptions): Promise<void> {
     const channelId = message.channel.id;
+    // Turns can land out of order: the gate takes seconds to route a message while a ping posted right
+    // after it is routed at once. When a later turn already showed this message to the model, the bot has
+    // replied since with it in view: an unprompted turn on it would answer the conversation twice.
+    const alreadyInWindow = this.windowHasMessage(channelId, message.id);
+    if (opts.unprompted && alreadyInWindow) {
+      logger.info(
+        `Skipping the unprompted turn for message ${message.id} in #${channelId}: a later turn already answered with it in view.`,
+      );
+      return;
+    }
     const stopTyping = this.startTypingLoop(message);
     let provider: AiProvider | undefined;
     let workingEntries: ConversationEntry[] = [];
@@ -345,7 +360,10 @@ export class AgentOrchestrator {
       // outside the tool loop. The static prompt (entries[0]) is never touched, preserving provider
       // prefix-caching.
       const priorInjectedIds = state.injectedMemoryIds ?? [];
-      const dynamic = await this.buildDynamicContextEntry(message, this.safeStore(), priorInjectedIds, opts);
+      const dynamic = await this.buildDynamicContextEntry(message, this.safeStore(), priorInjectedIds, {
+        ...opts,
+        late: alreadyInWindow,
+      });
       let injectedMemoryIds = [...priorInjectedIds, ...dynamic.injectedIds];
 
       workingEntries = [
@@ -406,6 +424,12 @@ export class AgentOrchestrator {
     } finally {
       stopTyping();
     }
+  }
+
+  /** Whether the channel's live window already rendered this Discord message (as history, a turn or context). */
+  private windowHasMessage(channelId: string, messageId: string): boolean {
+    const state = this.store.get(channelId);
+    return state !== undefined && collectMessageIds(state.entries).has(messageId);
   }
 
   /**
@@ -1006,12 +1030,13 @@ Right before each new message you get a context note with the current time (East
     message: Message,
     store: MemoryStore | undefined,
     alreadyInjectedIds: number[],
-    opts: HandleMentionOptions = {},
+    opts: HandleMentionOptions & { late?: boolean } = {},
   ): Promise<{ entry: ConversationEntry; injectedIds: number[] }> {
     const header = [
       `Current time: ${describeNowET()} (America/New_York).`,
       ...this.describeChannel(message),
       ...(opts.unprompted ? [UNPROMPTED_NOTE] : []),
+      ...(opts.late ? [LATE_MESSAGE_NOTE] : []),
     ].join('\n');
 
     const sections = store ? await this.buildMemorySections(message, store, alreadyInjectedIds) : undefined;

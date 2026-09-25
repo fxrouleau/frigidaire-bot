@@ -5,7 +5,7 @@ import { logger } from '../logger';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { type FakeMessageOptions, createFakeMessage } from '../test-support/fakeDiscord';
 import { FakeProvider, textResponse } from '../test-support/fakeProvider';
-import { AgentOrchestrator, UNPROMPTED_NOTE } from './agent';
+import { AgentOrchestrator, LATE_MESSAGE_NOTE, UNPROMPTED_NOTE } from './agent';
 import { setMemoryStoreForTesting } from './memory';
 import { MemoryStore } from './memory/memoryStore';
 import type { ConversationEntry } from './types';
@@ -93,5 +93,82 @@ describe('unprompted turns (routed by the gate)', () => {
     const agent = makeAgent(provider);
     await agent.handleMention(createFakeMessage({ ...BASE, messageId: '3000', content: '<@900000000000000001> hi' }).message);
     expect(dynamicEntries(provider.calls[0].messages).join('\n')).not.toContain('Nobody pinged you');
+  });
+});
+
+describe('turns that land after a later turn (the gate was still deciding when a ping came in)', () => {
+  const BOB = '100000000000000002';
+  const CAROL = '100000000000000003';
+
+  /** A window opened by Marco's ping; Bob then names the bot, and Carol pings right after. */
+  function scene() {
+    const opening = createFakeMessage({ ...BASE, messageId: '5000', content: '<@900000000000000001> yo' });
+    const named = (channelMessages: FakeMessageOptions['channelMessages']) =>
+      createFakeMessage({
+        ...BASE,
+        messageId: '5001',
+        authorId: BOB,
+        authorDisplayName: 'Bob',
+        content: 'fridge who carries the raid tonight',
+        channelMessages,
+      });
+    const late = named([opening.message]);
+    const ping = createFakeMessage({
+      ...BASE,
+      messageId: '5002',
+      authorId: CAROL,
+      authorDisplayName: 'Carol',
+      content: '<@900000000000000001> you awake?',
+      channelMessages: [opening.message, late.message],
+    });
+    return { opening, late, ping };
+  }
+
+  it("drops a gate-routed turn whose message the bot already answered past, instead of replying to it twice", async () => {
+    const provider = new FakeProvider([textResponse('sup'), textResponse('always, and bob carries')]);
+    const agent = makeAgent(provider);
+    const { opening, late, ping } = scene();
+
+    await agent.handleMention(opening.message);
+    // Carol's ping is routed at once; its catch-up already shows Bob's message.
+    await agent.handleMention(ping.message);
+    expect(provider.calls[1].messages.filter((e) => textOf(e).includes('who carries the raid'))).toHaveLength(1);
+    // Then the gate's verdict on Bob's message comes back.
+    await agent.handleMention(late.message, { unprompted: true });
+
+    expect(provider.calls).toHaveLength(2);
+    expect(late.recorders.reply.calls).toHaveLength(0);
+    expect(vi.mocked(logger.info).mock.calls.flat().join('\n')).toMatch(/Skipping the unprompted turn for message 5001/);
+  });
+
+  it('still answers a late explicit turn, telling the model why its message shows up twice', async () => {
+    const provider = new FakeProvider([textResponse('sup'), textResponse('always'), textResponse('bob does')]);
+    const agent = makeAgent(provider);
+    const { opening, late, ping } = scene();
+
+    await agent.handleMention(opening.message);
+    await agent.handleMention(ping.message);
+    await agent.handleMention(late.message);
+
+    expect(provider.calls).toHaveLength(3);
+    const dynamic = dynamicEntries(provider.calls[2].messages);
+    expect(dynamic.at(-1)).toContain(LATE_MESSAGE_NOTE);
+    expect(dynamic.slice(0, -1).join('\n')).not.toContain(LATE_MESSAGE_NOTE);
+    expect(late.recorders.reply.calls).toEqual([['bob does']]);
+  });
+
+  it('answers a gate-routed turn normally when no later turn has shown its message', async () => {
+    const provider = new FakeProvider([textResponse('sup'), textResponse('bob, obviously')]);
+    const agent = makeAgent(provider);
+    const { opening, late } = scene();
+
+    await agent.handleMention(opening.message);
+    await agent.handleMention(late.message, { unprompted: true });
+
+    expect(provider.calls).toHaveLength(2);
+    const current = dynamicEntries(provider.calls[1].messages).at(-1);
+    expect(current).toContain(UNPROMPTED_NOTE);
+    expect(current).not.toContain(LATE_MESSAGE_NOTE);
+    expect(late.recorders.reply.calls).toEqual([['bob, obviously']]);
   });
 });
