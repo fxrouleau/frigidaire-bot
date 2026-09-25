@@ -303,6 +303,21 @@ describe('AgentOrchestrator.handleMention', () => {
     expect(getMemoryStore().getByCategory('parse_failure').length).toBeGreaterThan(0);
   });
 
+  it('posts nothing when an unprompted turn blows up, but still logs and captures it', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capture-'));
+    vi.stubEnv('DEBUG_CAPTURE_DIR', dir);
+    const provider = new FakeProvider([errorStep('boom')]);
+    const orchestrator = makeOrchestrator(provider);
+    const fake = createFakeMessage({ content: 'fridge would know' });
+
+    await orchestrator.handleMention(fake.message, { unprompted: true });
+
+    expect(fake.recorders.reply.calls).toHaveLength(0);
+    expect(fake.recorders.send.calls).toHaveLength(0);
+    expect(getMemoryStore().getByCategory('tool_error').length).toBeGreaterThan(0);
+    expect(fs.readdirSync(dir).filter((f) => f.startsWith('error-'))).toHaveLength(1);
+  });
+
   it('splits a long response into multiple replies', async () => {
     const provider = new FakeProvider([textResponse('a'.repeat(2500))]);
     const orchestrator = makeOrchestrator(provider);

@@ -454,7 +454,13 @@ export class AgentOrchestrator {
         logger.info(`Error capture written to ${capturePath}`);
       }
       stopTyping();
-      await this.sendErrorReply(message);
+      // Like an empty answer: nobody pinged on an unprompted turn, so a failure isn't announced either
+      // (an outage would otherwise have the bot butt in with "hit me again" on every routed follow-up).
+      if (opts.unprompted) {
+        logger.info(`Unprompted turn for message ${message.id} in #${channelId} failed; nothing posted.`);
+      } else {
+        await this.sendErrorReply(message);
+      }
     } finally {
       stopTyping();
     }
