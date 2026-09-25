@@ -12,6 +12,7 @@ import {
   lastRunAt,
   runUsageRecaption,
   runUsageRecaptionIfDue,
+  scheduleUsageRecaption,
 } from './usageCaptions';
 
 const SAJ = '300000000000000001';
@@ -162,5 +163,41 @@ describe('runUsageRecaptionIfDue', () => {
     expect(await runUsageRecaptionIfDue({ force: true }, deps)).toMatchObject({ updated: 2 });
     clock.now = T0 + 2 * WEEK_MS;
     expect(await runUsageRecaptionIfDue({}, deps)).toMatchObject({ due: 0 });
+  });
+});
+
+describe('scheduleUsageRecaption', () => {
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  it('schedules a first check and a periodic one; nothing without a key, the archive, or either switch', () => {
+    vi.useFakeTimers();
+    vi.stubEnv('OPENROUTER_API_KEY', '');
+    scheduleUsageRecaption();
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.stubEnv('OPENROUTER_API_KEY', 'sk-test');
+    vi.stubEnv('ARCHIVE_ENABLED', 'false');
+    scheduleUsageRecaption();
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.stubEnv('ARCHIVE_ENABLED', 'true');
+    vi.stubEnv('EMOJI_USAGE_CAPTIONS_ENABLED', 'false');
+    scheduleUsageRecaption();
+    expect(vi.getTimerCount()).toBe(0);
+
+    // The one-shot flag alone: a single forced pass, no weekly checks.
+    vi.stubEnv('EMOJI_RECAPTION_FROM_USAGE', '1');
+    scheduleUsageRecaption();
+    expect(vi.getTimerCount()).toBe(1);
+    vi.clearAllTimers();
+
+    vi.stubEnv('EMOJI_RECAPTION_FROM_USAGE', '0');
+    vi.stubEnv('EMOJI_USAGE_CAPTIONS_ENABLED', 'true');
+    scheduleUsageRecaption();
+    expect(vi.getTimerCount()).toBe(2);
   });
 });
