@@ -1,22 +1,22 @@
+// Must stay the first import: it applies .env before any module below reads config while loading.
+import './loadEnv';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 import { type ClientEvents, Events } from 'discord.js';
-import * as dotenv from 'dotenv';
 import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
 import { getMemoryStore } from './ai/memory';
 import { runStartupMemoryMaintenance } from './ai/memory/startupMaintenance';
 import { closeArchiveStore } from './archive/archiveStore';
-import { config, describeEffectiveConfig } from './config';
+import { config, configWarnings, describeEffectiveConfig } from './config';
 import { createDiscordClient } from './discordClient';
 import { resolveEventModule } from './eventModule';
 import { logger } from './logger';
 import { getBotDb } from './storage/botDb';
 
-dotenv.config({ quiet: true });
-
 logger.info(`Effective config: ${describeEffectiveConfig()}`);
+for (const warning of configWarnings()) logger.warn(warning);
 
 // A rejected promise nobody awaited must never take the process down (Node turns it into an
 // uncaught exception by default). Event handlers are already dispatched behind a catch below; this

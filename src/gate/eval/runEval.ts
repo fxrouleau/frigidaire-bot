@@ -6,17 +6,17 @@
 // with the free prefilter in front) and every case misclassified at GATE_THRESHOLD. Paid: ~$0.00001 per
 // case. Needs RUN_LIVE=1 and OPENROUTER_API_KEY (a .env file works too):
 //   docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... test yarn eval:gate
+
+// Must stay the first import: it applies .env before any module below reads config while loading.
+import '../../loadEnv';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
-import * as dotenv from 'dotenv';
 import { config } from '../../config';
 import { createAddressedClassifier } from '../addressed';
 import { gateSettingsFromConfig } from '../addressedGate';
 import { loadCaseSources } from './cases';
 import { EVAL_THRESHOLDS, formatMisclassified, formatTable, runCases } from './runner';
-
-dotenv.config({ quiet: true });
 
 const BUNDLED_CASES = path.join(__dirname, 'cases.json');
 const LOCAL_CASES = path.resolve('data', 'gate-cases.json');

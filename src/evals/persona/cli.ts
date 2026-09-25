@@ -8,10 +8,12 @@
 //
 //   docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... \
 //     -e EVAL_MODELS=z-ai/glm-5.3-flash,moonshotai/kimi-k3 test yarn eval:persona
+
+// Must stay the first import: it applies .env before any module below reads config while loading.
+import '../../loadEnv';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
-import * as dotenv from 'dotenv';
 import { OpenRouterEmbeddingProvider } from '../../ai/memory/embeddingProvider';
 import { requireOpenRouterClient } from '../../ai/openRouterClient';
 import { OpenRouterProvider } from '../../ai/providers/openRouterProvider';
@@ -23,8 +25,6 @@ import { createLlmJudge } from './judge';
 import { type EvalReport, renderComparisonTable, renderScenarioTable } from './report';
 import { runPersonaEval } from './runner';
 import { DEFAULT_SCENARIOS_PATH, loadScenarioFile, selectScenarios } from './scenarioFile';
-
-dotenv.config({ quiet: true });
 
 function writeReport(report: EvalReport, dir: string): string {
   fs.mkdirSync(dir, { recursive: true });

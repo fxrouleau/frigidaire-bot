@@ -130,16 +130,39 @@ export function parseChannelNotes(raw: string | undefined): { notes: Record<stri
 
 const SNOWFLAKE = /^\d{15,21}$/;
 
+export type LinkedAccountsParse = {
+  links: Map<string, string>;
+  /** Entries that were dropped, and why (logged once at startup, see configWarnings()). */
+  rejected: Array<{ entry: string; reason: string }>;
+};
+
+/**
+ * Parses `sideId:mainId` pairs into side → main, keeping what was dropped and why. Pairs may also be
+ * separated by `;` or line breaks (a pasted multi-line value). Malformed entries and self-links are
+ * dropped: a silently dropped pair makes a side account a separate person again everywhere.
+ */
+export function parseLinkedAccountsReport(entries: string[]): LinkedAccountsParse {
+  const links = new Map<string, string>();
+  const rejected: LinkedAccountsParse['rejected'] = [];
+  const pairs = entries.flatMap((entry) => entry.split(/[;\r\n]+/)).map((entry) => entry.trim());
+  for (const entry of pairs.filter((pair) => pair.length > 0)) {
+    const [side, main, ...rest] = entry.split(':').map((part) => part.trim());
+    if (rest.length > 0 || !side || !main) {
+      rejected.push({ entry, reason: 'expected sideId:mainId' });
+    } else if (!SNOWFLAKE.test(side) || !SNOWFLAKE.test(main)) {
+      rejected.push({ entry, reason: 'both sides must be Discord user ids' });
+    } else if (side === main) {
+      rejected.push({ entry, reason: 'links an account to itself' });
+    } else {
+      links.set(side, main);
+    }
+  }
+  return { links, rejected };
+}
+
 /** Parses `sideId:mainId` pairs into side → main. Malformed entries and self-links are dropped. */
 export function parseLinkedAccounts(entries: string[]): Map<string, string> {
-  const links = new Map<string, string>();
-  for (const entry of entries) {
-    const [side, main, ...rest] = entry.split(':').map((part) => part.trim());
-    if (rest.length > 0 || !side || !main || side === main) continue;
-    if (!SNOWFLAKE.test(side) || !SNOWFLAKE.test(main)) continue;
-    links.set(side, main);
-  }
-  return links;
+  return parseLinkedAccountsReport(entries).links;
 }
 
 export const config = {
@@ -444,7 +467,8 @@ export const config = {
     },
     /**
      * Side accounts that belong to the same person as a main account, as `sideId:mainId` pairs
-     * (LINKED_ACCOUNTS, csv). Malformed pairs and self-links are ignored. See src/linkedAccounts.ts.
+     * (LINKED_ACCOUNTS, csv; `;` and line breaks separate pairs too). Malformed pairs and self-links are
+     * ignored, with a startup WARN each (configWarnings()). See src/linkedAccounts.ts.
      */
     get linkedAccounts(): Map<string, string> {
       return parseLinkedAccounts(envCsv('LINKED_ACCOUNTS'));
@@ -863,6 +887,19 @@ function formatDuration(ms: number): string {
 function feature(name: string, enabled: boolean, details: string[] = [], offReason?: string): string {
   if (!enabled) return offReason ? `${name}=off(${offReason})` : `${name}=off`;
   return details.length > 0 ? `${name}=on(${details.join(',')})` : `${name}=on`;
+}
+
+/**
+ * Configuration values that were set but could not be used, one WARN line each for the startup log
+ * (next to the Effective config line). Empty when everything parsed.
+ */
+export function configWarnings(): string[] {
+  const warnings: string[] = [];
+  for (const { entry, reason } of parseLinkedAccountsReport(envCsv('LINKED_ACCOUNTS')).rejected) {
+    const shown = entry.length > 80 ? `${entry.slice(0, 80)}…` : entry;
+    warnings.push(`LINKED_ACCOUNTS: ignoring "${shown}" (${reason}); that account counts as its own person.`);
+  }
+  return warnings;
 }
 
 /**
