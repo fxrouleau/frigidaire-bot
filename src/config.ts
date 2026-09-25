@@ -319,11 +319,13 @@ export const config = {
       return envNumber('GATE_THRESHOLD', 0.7, { min: 0, max: 1 });
     },
     /**
-     * TypeSafe decision model for the gate and the ramble check (decisions endpoint only). Pinned rather
-     * than `~typesafe/jev-latest` because the thresholds are tuned against one model version.
+     * TypeSafe decision model for the gate and the ramble check. Pinned rather than `~typesafe/jev-latest`
+     * because the thresholds are tuned against one model version. Only decision models are served by the
+     * decisions endpoint, so anything else (a chat model id) ⇒ the default.
      */
     get model(): string {
-      return envString('GATE_MODEL') ?? 'typesafe/jev-1.13';
+      const fromEnv = envString('GATE_MODEL');
+      return fromEnv && /^~?typesafe\//.test(fromEnv) ? fromEnv : 'typesafe/jev-1.13';
     },
   },
 
