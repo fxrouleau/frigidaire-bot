@@ -24,7 +24,9 @@ class Sandbox:
         self.base_url = base_url.rstrip('/')
         self.token = token
 
-    def request(self, method: str, path: str, body: dict[str, Any] | None = None, token: str | None = None):
+    def request(
+        self, method: str, path: str, body: dict[str, Any] | None = None, token: str | None = None
+    ) -> tuple[int, Any]:
         headers = {'Content-Type': 'application/json'}
         bearer = token if token is not None else self.token
         if bearer:
@@ -42,7 +44,7 @@ class Sandbox:
         if timeout_seconds is not None:
             body['timeout_seconds'] = timeout_seconds
         status, payload = self.request('POST', '/run', body)
-        if status != 200:
+        if status != 200 or not isinstance(payload, dict):
             raise AssertionError(f'/run returned HTTP {status}: {payload}')
         return payload
 

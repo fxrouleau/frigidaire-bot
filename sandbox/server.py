@@ -94,8 +94,16 @@ PASSTHROUGH_ENV = (
 # Runs inside the child right before exec: applies the rlimits, then replaces itself with the real
 # interpreter. A separate launcher instead of subprocess's preexec_fn because preexec_fn is unsafe in a
 # threaded server (the forked child can deadlock on a lock another thread held at fork time).
+# RLIMIT_DATA is per process, so a run that forks can still fill the container's memory cap; the maximum
+# OOM score (raising it needs no privilege, and children inherit it) makes the kernel kill the run then,
+# not this server.
 LAUNCHER = r"""
 import os, resource, sys
+try:
+    with open('/proc/self/oom_score_adj', 'w') as handle:
+        handle.write('1000')
+except OSError:
+    pass
 spec = sys.argv[1]
 for item in spec.split(','):
     name, value = item.split('=')
@@ -150,7 +158,8 @@ _PR_SET_CHILD_SUBREAPER = 36
 def _prctl(option: int, value: int) -> bool:
     try:
         libc = ctypes.CDLL(None, use_errno=True)
-        return libc.prctl(option, value, 0, 0, 0) == 0
+        result: int = libc.prctl(option, value, 0, 0, 0)
+        return result == 0
     except (OSError, AttributeError):
         return False
 
