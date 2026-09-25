@@ -177,6 +177,18 @@ describe('extractUsage', () => {
     });
   });
 
+  it('reads a speech-to-text response: input/output token names, model from the request', () => {
+    const body = { text: 'salut', usage: { seconds: 9.2, input_tokens: 83, output_tokens: 30, cost: 0.000508 } };
+    const request = JSON.stringify({ model: 'openai/gpt-4o-transcribe', input_audio: { data: 'AAAA', format: 'mp3' } });
+    expect(extractUsage(body, 'transcription', request)).toEqual({
+      feature: 'transcription',
+      model: 'openai/gpt-4o-transcribe',
+      promptTokens: 83,
+      completionTokens: 30,
+      cost: 0.000508,
+    });
+  });
+
   it('adds the upstream cost on BYOK calls, where `cost` is only the OpenRouter fee', () => {
     const body = {
       model: 'm',

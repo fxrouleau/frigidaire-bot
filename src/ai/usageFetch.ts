@@ -123,8 +123,9 @@ export function extractUsage(
   return {
     feature,
     model: nonEmptyString(body.model) ?? modelFromRequest(requestBody) ?? 'unknown',
-    promptTokens: finiteNumber(usage.prompt_tokens),
-    completionTokens: finiteNumber(usage.completion_tokens),
+    // Speech-to-text responses name their token counts input_tokens/output_tokens (and carry no `model`).
+    promptTokens: finiteNumber(usage.prompt_tokens) ?? finiteNumber(usage.input_tokens),
+    completionTokens: finiteNumber(usage.completion_tokens) ?? finiteNumber(usage.output_tokens),
     cost,
   };
 }

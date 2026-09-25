@@ -1,7 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '../../logger';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import {
   CATALOG_MODELS,
+  type FakeEndpoints,
   MP3_BYTES,
   OGG_BYTES,
   TRANSCODED_MP3,
@@ -12,11 +14,18 @@ import {
   type FakeTranscoder,
   createMissingTranscoder,
   userContent,
+  WHISPER_ENDPOINTS,
 } from '../../test-support/fakeMedia';
 import { type OpenRouterFixture, loadFixture } from '../../test-support/openRouterFetch';
 import { FEATURE_HEADER } from '../usage';
 import { getStoredTranscript } from './store';
-import { AudioTranscriber, type AudioTranscriberOptions, INLINE_AUDIO_MAX_BYTES, cleanTranscript } from './transcriber';
+import {
+  AudioTranscriber,
+  type AudioTranscriberOptions,
+  INLINE_AUDIO_MAX_BYTES,
+  cleanTranscript,
+  looksLikeSttModel,
+} from './transcriber';
 
 const VOICE_URL = 'https://cdn.discordapp.com/attachments/1/2/voice-message.ogg?ex=1&hm=sig';
 const MP3_URL = 'https://cdn.discordapp.com/attachments/1/3/memo.mp3';
@@ -320,6 +329,179 @@ describe('AudioTranscriber', () => {
       cached: false,
     });
     expect(requests).toHaveLength(1);
+  });
+});
+
+describe('AudioTranscriber: Whisper route', () => {
+  const WHISPER = 'openai/whisper-large-v3';
+  const FALLBACK = 'google/gemini-3.5-flash-lite';
+  const whisperVerbose = loadFixture('stt-whisper-verbose');
+  const whisperSilence = loadFixture('stt-whisper-silence');
+  const whisperPlain = loadFixture('stt-whisper-plain');
+  const SAID = "Salut tout le monde, on se fait une game ce soir ? Genre vers 21 h, j'amène les chips.";
+
+  function whisperSetup(
+    fixtures: OpenRouterFixture[],
+    endpoints: Parameters<typeof createFakeCatalog>[1] = { [WHISPER]: WHISPER_ENDPOINTS },
+    overrides: SetupOverrides = {},
+  ) {
+    return setup(fixtures, {
+      model: () => WHISPER,
+      fallbackModel: () => FALLBACK,
+      catalog: createFakeCatalog(CATALOG_MODELS, endpoints),
+      ...overrides,
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("sends a voice message's Ogg as-is to the speech-to-text endpoint, and keeps only what was said", async () => {
+    const { transcriber, requests, transcoder } = whisperSetup([whisperVerbose]);
+
+    const outcome = await transcriber.transcribe({ url: VOICE_URL, contentType: 'audio/ogg', messageId: 'v1', durationSecs: 9.4 });
+
+    expect(outcome).toEqual({ status: 'ok', text: SAID, cached: false });
+    expect(transcoder.calls.toMp3).toEqual([]);
+    expect(requests).toHaveLength(1);
+    const [request] = requests;
+    expect(request.url).toBe('https://openrouter.ai/api/v1/audio/transcriptions');
+    expect(request.body).toEqual({
+      model: WHISPER,
+      input_audio: { data: OGG_BYTES.toString('base64'), format: 'ogg' },
+      response_format: 'verbose_json',
+      timestamp_granularities: ['segment'],
+    });
+    expect(request.headers[FEATURE_HEADER.toLowerCase()]).toBe('transcription');
+    // No translation line on this route.
+    expect(outcome.status === 'ok' && outcome.text.includes('English:')).toBe(false);
+    expect(getStoredTranscript('v1')).toBe(SAID);
+  });
+
+  it("stores Whisper's silence hallucination as no speech", async () => {
+    const { transcriber } = whisperSetup([whisperSilence]);
+    expect(await transcriber.transcribe({ url: VOICE_URL, messageId: 'v2', durationSecs: 4.1 })).toEqual({
+      status: 'ok',
+      text: '',
+      cached: false,
+    });
+    expect(getStoredTranscript('v2')).toBe('');
+  });
+
+  it('skips clips under a second without downloading or calling anything', async () => {
+    const { transcriber, requests } = whisperSetup([whisperVerbose]);
+    expect(await transcriber.transcribe({ url: VOICE_URL, messageId: 'v3', durationSecs: 0.6 })).toEqual({
+      status: 'ok',
+      text: '',
+      cached: false,
+    });
+    expect(files.urls).toEqual([]);
+    expect(requests).toHaveLength(0);
+    expect(getStoredTranscript('v3')).toBe('');
+  });
+
+  it('skips files whose probed length is under a second', async () => {
+    const transcoder = createFakeTranscoder({ probe: { durationSecs: 0.4, hasAudio: true, hasVideo: false } });
+    const { transcriber, requests } = whisperSetup([whisperVerbose], undefined, { transcoder });
+    expect((await transcriber.transcribe({ url: MP3_URL, messageId: 'v4' })).status).toBe('ok');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('retries a refused container as MP3 with the plain json form', async () => {
+    const { transcriber, requests, transcoder } = whisperSetup([rejected, whisperPlain]);
+
+    const outcome = await transcriber.transcribe({ url: VOICE_URL, messageId: 'v5', durationSecs: 3.4 });
+
+    expect(outcome).toEqual({ status: 'ok', text: 'Salut tout le monde, on se fait une game ce soir ?', cached: false });
+    expect(transcoder.calls.toMp3).toHaveLength(1);
+    expect(requests[1].body).toEqual({
+      model: WHISPER,
+      input_audio: { data: TRANSCODED_MP3.toString('base64'), format: 'mp3' },
+    });
+  });
+
+  it('transcodes formats the STT hosts do not all take', async () => {
+    const aacUrl = 'https://cdn.discordapp.com/attachments/1/4/memo.aac';
+    const aac = Buffer.concat([Buffer.from([0xff, 0xf1]), Buffer.alloc(40, 5)]);
+    const fetch = createFileFetch({ [aacUrl]: { body: aac, contentType: 'audio/aac' } });
+    const { transcriber, requests, transcoder } = whisperSetup([whisperVerbose], undefined, { fetch });
+
+    await transcriber.transcribe({ url: aacUrl, messageId: 'v6', durationSecs: 5 });
+
+    expect(transcoder.calls.toMp3).toHaveLength(1);
+    expect((requests[0].body.input_audio as { format: string }).format).toBe('mp3');
+    // A first attempt, so the segment scores are still asked for.
+    expect(requests[0].body.response_format).toBe('verbose_json');
+  });
+
+  it("transcribes a video's soundtrack with Whisper too", async () => {
+    const { transcriber, requests } = whisperSetup([whisperVerbose]);
+    expect(await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip')).toEqual({
+      status: 'ok',
+      text: SAID,
+      cached: false,
+    });
+    expect(requests[0].url).toBe('https://openrouter.ai/api/v1/audio/transcriptions');
+  });
+
+  it('falls back to the chat model, with a single WARN, when a host is not zero-data-retention', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const leaky = { transcription: true, hosts: [...WHISPER_ENDPOINTS.hosts, { provider: 'Leaky', zdr: false }] };
+    const { transcriber, requests } = whisperSetup([success, success], { [WHISPER]: leaky });
+
+    await transcriber.transcribe({ url: VOICE_URL, messageId: 'v7', durationSecs: 4 });
+    await transcriber.transcribe({ url: VOICE_URL, messageId: 'v8', durationSecs: 4 });
+
+    expect(requests.map((r) => r.url)).toEqual([
+      'https://openrouter.ai/api/v1/chat/completions',
+      'https://openrouter.ai/api/v1/chat/completions',
+    ]);
+    expect(requests[0].body.model).toBe(FALLBACK);
+    expect(requests[0].body.provider).toEqual({ zdr: true });
+    const routeWarnings = warn.mock.calls.filter((call) => String(call[0]).includes(`not using ${WHISPER}`));
+    expect(routeWarnings).toHaveLength(1);
+    expect(String(routeWarnings[0][0])).toContain('Leaky');
+    expect(getStoredTranscript('v7')).toBe(TRANSCRIPT);
+  });
+
+  it("falls back when the hosts can't be checked, or OpenRouter doesn't list the model", async () => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const unverifiable = whisperSetup([success], {});
+    expect(await unverifiable.transcriber.route()).toEqual({ kind: 'chat', model: FALLBACK, effort: 'minimal' });
+
+    const unknown = whisperSetup([success], { [WHISPER]: 'not_found' });
+    expect(await unknown.transcriber.route()).toEqual({ kind: 'chat', model: FALLBACK, effort: 'minimal' });
+  });
+
+  it('logs the route once, then again only when the verdict changes', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const endpoints: Record<string, FakeEndpoints> = { [WHISPER]: WHISPER_ENDPOINTS };
+    const { transcriber } = whisperSetup([], endpoints);
+
+    expect(await transcriber.route()).toEqual({ kind: 'stt', model: WHISPER });
+    expect(await transcriber.route()).toEqual({ kind: 'stt', model: WHISPER });
+    expect(info.mock.calls.filter((c) => String(c[0]).includes('every endpoint is zero-data-retention'))).toHaveLength(1);
+
+    endpoints[WHISPER] = { transcription: true, hosts: [{ provider: 'Leaky', zdr: false }] };
+    expect((await transcriber.route()).kind).toBe('chat');
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a chat model named in TRANSCRIPTION_MODEL directly', async () => {
+    const { transcriber } = whisperSetup([], {}, { model: () => FALLBACK });
+    expect(await transcriber.route()).toEqual({ kind: 'chat', model: FALLBACK, effort: 'minimal' });
+  });
+});
+
+describe('looksLikeSttModel', () => {
+  it('recognizes speech-to-text model names, and nothing else', () => {
+    expect(looksLikeSttModel('openai/whisper-large-v3')).toBe(true);
+    expect(looksLikeSttModel('openai/gpt-4o-mini-transcribe')).toBe(true);
+    expect(looksLikeSttModel('qwen/qwen3-asr-1.7b')).toBe(true);
+    expect(looksLikeSttModel('google/gemini-3.5-flash-lite')).toBe(false);
+    expect(looksLikeSttModel('z-ai/glm-5.3-flash')).toBe(false);
   });
 });
 

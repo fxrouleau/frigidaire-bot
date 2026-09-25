@@ -4,8 +4,10 @@
 //   docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... test yarn test:live
 //
 // What they establish (a fraction of a cent per run; grep the output for MEDIA_LIVE):
-//   - the transcription model accepts our audio parts on a zero-data-retention endpoint, for a WAV built
-//     in memory and (reported) for Discord's own Ogg/Opus container, and reports a tone as "no speech";
+//   - every endpoint of the speech-to-text TRANSCRIPTION_MODEL (Whisper) is still on OpenRouter's ZDR
+//     list — the endpoint ignores routing, so this is the privacy canary — and the transcriber's route;
+//   - Whisper transcribes a WAV built in memory and Discord's own Ogg/Opus container as-is, and the
+//     chat-model fallback (reported) still takes Ogg;
 //   - the video model describes a clip sent as a base64 data URL on a ZDR endpoint;
 //   - which candidate video models (LIVE_VIDEO_MODELS, csv) have a ZDR endpoint that takes base64 video
 //     — reported, not asserted, since that is a routing fact about OpenRouter's providers, not our code;
@@ -70,21 +72,31 @@ describe.skipIf(!RUN_LIVE)('media pipeline live checks (paid, opt-in)', () => {
   const catalog = new ModelCatalog();
 
   it(
-    'finds the configured models in the catalog with the modalities they need',
+    'verifies every host of the speech-to-text model is ZDR, and the video model takes video',
     async () => {
-      const transcription = await catalog.catalogInfo(config.media.transcriptionModel);
+      const coverage = await catalog.endpointCoverage(config.media.transcriptionModel);
+      const fallback = await catalog.catalogInfo(config.media.transcriptionFallbackModel);
       const video = await catalog.catalogInfo(config.media.videoModel);
+      const route = await new AudioTranscriber({ transcoder: createMissingTranscoder(), catalog }).route();
       console.log(
-        `MEDIA_LIVE catalog transcription=${config.media.transcriptionModel} modalities=${[...(transcription?.inputModalities ?? [])]} effort=${transcription?.lowestEffort} video=${config.media.videoModel} modalities=${[...(video?.inputModalities ?? [])]} effort=${video?.lowestEffort}`,
+        `MEDIA_LIVE stt-zdr model=${config.media.transcriptionModel} allZdr=${coverage?.allZdr} hosts=${JSON.stringify(coverage?.endpoints)} route=${JSON.stringify(route)}`,
       );
-      expect(transcription?.inputModalities.has('audio')).toBe(true);
+      console.log(
+        `MEDIA_LIVE catalog fallback=${config.media.transcriptionFallbackModel} modalities=${[...(fallback?.inputModalities ?? [])]} effort=${fallback?.lowestEffort} video=${config.media.videoModel} modalities=${[...(video?.inputModalities ?? [])]} effort=${video?.lowestEffort}`,
+      );
+      expect(coverage?.outputModalities.has('transcription')).toBe(true);
+      // If this fails, a non-ZDR host now serves the STT model: prod has already fallen back to the chat
+      // model (with a WARN), but pick a different TRANSCRIPTION_MODEL.
+      expect(coverage?.allZdr).toBe(true);
+      expect(route).toEqual({ kind: 'stt', model: config.media.transcriptionModel });
+      expect(fallback?.inputModalities.has('audio')).toBe(true);
       expect(video?.inputModalities.has('video') || video?.inputModalities.has('image')).toBe(true);
     },
     LIVE_TIMEOUT,
   );
 
   it(
-    'transcribes an in-memory WAV on a ZDR endpoint and hears no speech in a tone',
+    'transcribes an in-memory WAV through Whisper and hears no speech in a tone',
     async () => {
       setBotDbForTesting(new BotDb(':memory:'));
       const transcriber = new AudioTranscriber({
@@ -102,7 +114,7 @@ describe.skipIf(!RUN_LIVE)('media pipeline live checks (paid, opt-in)', () => {
   );
 
   it(
-    "sends Discord's Ogg/Opus as-is, and reports whether the endpoint took it",
+    "sends Discord's Ogg/Opus to Whisper as-is",
     async () => {
       setBotDbForTesting(new BotDb(':memory:'));
       const transcriber = new AudioTranscriber({
@@ -112,10 +124,30 @@ describe.skipIf(!RUN_LIVE)('media pipeline live checks (paid, opt-in)', () => {
         catalog,
       });
       const outcome = await transcriber.transcribe({ url: OGG_URL, messageId: 'live-ogg', durationSecs: 2 });
-      // Reported, not asserted: prod sends Ogg to Gemini as-is (Vertex documents audio/ogg) and re-encodes
-      // to MP3 when refused. 'failed' here means every voice message pays for a refused request first:
-      // then take 'ogg' out of GEMINI_AUDIO_FORMATS (formats.ts). No transcoder here, so no fallback.
-      console.log(`MEDIA_LIVE transcription ogg-native ${JSON.stringify(outcome)}`);
+      // All three Whisper hosts document ogg; no transcoder here, so a refusal would show as 'failed'.
+      console.log(`MEDIA_LIVE transcription whisper-ogg ${JSON.stringify(outcome)}`);
+      expect(outcome.status).toBe('ok');
+      setBotDbForTesting(undefined);
+    },
+    LIVE_TIMEOUT,
+  );
+
+  it(
+    'reports whether the chat-model fallback takes Ogg/Opus as-is',
+    async () => {
+      setBotDbForTesting(new BotDb(':memory:'));
+      const transcriber = new AudioTranscriber({
+        client: getOpenRouterClient,
+        fetch: files,
+        transcoder: createMissingTranscoder(),
+        model: () => config.media.transcriptionFallbackModel,
+        catalog,
+      });
+      const outcome = await transcriber.transcribe({ url: OGG_URL, messageId: 'live-ogg-chat', durationSecs: 2 });
+      // Reported, not asserted: the fallback sends Ogg to Gemini as-is (Vertex documents audio/ogg) and
+      // re-encodes to MP3 when refused. 'failed' here means every fallback voice message pays for a
+      // refused request first: then take 'ogg' out of GEMINI_AUDIO_FORMATS (formats.ts).
+      console.log(`MEDIA_LIVE transcription chat-ogg-native ${JSON.stringify(outcome)}`);
       expect(['ok', 'failed']).toContain(outcome.status);
       setBotDbForTesting(undefined);
     },

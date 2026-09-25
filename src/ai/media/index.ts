@@ -1,12 +1,19 @@
 // Media understanding: audio transcription (Discord voice messages, audio files) and video description
 // (uploaded clips, videos behind shared links). These are the stable entry points the rest of the bot
 // calls — the chat agent (through the media enricher), the learner, summaries, the link reader and the
-// context-menu commands. Every call that reaches a model goes through OpenRouter with ZDR routing.
+// context-menu commands. The chat model itself never receives audio or video, only the text made here:
+//   - voice / audio → Whisper Large V3 on the speech-to-text endpoint (transcriber.ts), while every
+//     host serving it is verified zero-data-retention; otherwise a chat model with provider.zdr
+//   - video → VIDEO_MODEL (Gemini) watching the picture and hearing the soundtrack in one call
+//     (video.ts); long or huge clips → keyframes + the soundtrack's Whisper transcript
+//   - YouTube → metadata only (link reader): no ZDR host can fetch it, and it's too big to upload
+// Every chat-completions call carries provider.zdr; the STT endpoint is covered by the host check.
 //
 // Results are cached in bot.db (transcripts by message id, descriptions by URL), so whichever feature
 // pays for a recording first, every later reader gets it for free.
 import type OpenAI from 'openai';
 import { config } from '../../config';
+import { logger } from '../../logger';
 import { getOpenRouterClient } from '../openRouterClient';
 import { FfmpegTranscoder, type MediaTranscoder } from './transcoder';
 import { AudioTranscriber } from './transcriber';
@@ -53,10 +60,39 @@ export function setMediaForTesting(opts?: { transcriber?: AudioTranscriber; desc
   describer = opts?.describer;
 }
 
+const ROUTE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let routeCheckTimer: NodeJS.Timeout | undefined;
+
 /**
- * Transcribes an audio file: the words in the language they were spoken, plus a final "English: …"
- * line when that wasn't English. '' when the recording holds no speech; undefined when transcription
- * is unavailable, the recording is over VOICE_MAX_SECONDS or 25 MB, or the call failed.
+ * Verifies the transcription route now and then daily: a speech-to-text TRANSCRIPTION_MODEL is only
+ * used while every endpoint serving it is on OpenRouter's ZDR list (that endpoint ignores routing
+ * preferences), and the verdict — or a WARN plus the chat-model fallback — lands in the log at startup
+ * rather than on the first voice message. Idempotent; returns a stop function.
+ */
+export function startTranscriptionRouteChecks(intervalMs = ROUTE_CHECK_INTERVAL_MS): () => void {
+  const check = () => {
+    // Without a key nothing is transcribed, so there is no route to vouch for.
+    if (!config.openRouter.apiKey) return;
+    getAudioTranscriber()
+      .route()
+      .catch((error: unknown) => logger.warn('transcription: route check failed:', error));
+  };
+  if (!routeCheckTimer) {
+    check();
+    routeCheckTimer = setInterval(check, intervalMs);
+    routeCheckTimer.unref();
+  }
+  return () => {
+    if (routeCheckTimer) clearInterval(routeCheckTimer);
+    routeCheckTimer = undefined;
+  };
+}
+
+/**
+ * Transcribes an audio file: the words in the language they were spoken (the chat-model fallback also
+ * adds a final "English: …" line under non-English speech). '' when the recording holds no speech;
+ * undefined when transcription is unavailable, the recording is over VOICE_MAX_SECONDS or 25 MB, or
+ * the call failed.
  */
 export async function transcribeAudio(input: AudioInput): Promise<string | undefined> {
   const outcome = await getAudioTranscriber().transcribe(input);
