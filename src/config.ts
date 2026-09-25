@@ -63,9 +63,13 @@ const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-export const DEFAULT_CHAT_MODEL = 'deepseek/deepseek-v3.2:nitro';
-export const DEFAULT_IMAGE_MODEL = 'google/gemini-2.5-flash-image';
-export const DEFAULT_LEARNER_MODEL = 'qwen/qwen3-vl-235b-a22b-instruct';
+// Code defaults match prod. GLM-5.3-Flash reads text, images and video (members post memes, custom emojis
+// and screenshots constantly, so a text-only default like the old deepseek/deepseek-v3.2 broke every image
+// turn), has a 1.31M-token context, and costs $0.045/M in, $0.14/M out; most of its OpenRouter hosts are
+// zero-data-retention. The learner reads the same images, so it shares the model.
+export const DEFAULT_CHAT_MODEL = 'z-ai/glm-5.3-flash';
+export const DEFAULT_IMAGE_MODEL = 'google/gemini-3.1-flash-image';
+export const DEFAULT_LEARNER_MODEL = 'z-ai/glm-5.3-flash';
 // Opus over Qwen here because Qwen3-VL, despite being a strong generalist vision model, had no grasp of
 // Twitch/meme-emote culture — it kept describing every Pepe variant as "green frog with wide eyes"
 // regardless of whether it was monkaW, pepega, or FeelsGoodMan. Captions are one-shot per emoji and

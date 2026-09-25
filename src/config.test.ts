@@ -102,6 +102,19 @@ describe('config', () => {
     expect(config.models.chatFallbacks).toEqual([]);
   });
 
+  it('defaults the models to what prod runs (an image-capable chat and learner model)', () => {
+    for (const name of ['CHAT_MODEL', 'LEARNER_MODEL', 'IMAGE_MODEL', 'SELF_IMPROVEMENT_MODEL', 'DELETE_REPOST_MODEL']) {
+      vi.stubEnv(name, undefined);
+    }
+    // Regression: the old default chat model (deepseek/deepseek-v3.2) was text-only, so a deploy without
+    // CHAT_MODEL failed every turn that carried an image, custom emoji or sticker.
+    expect(config.models.chat).toBe('z-ai/glm-5.3-flash');
+    expect(config.models.learner).toBe('z-ai/glm-5.3-flash');
+    expect(config.models.selfImprovement).toBe('z-ai/glm-5.3-flash');
+    expect(config.models.image).toBe('google/gemini-3.1-flash-image');
+    expect(config.models.messageJudge).toBe('z-ai/glm-5.3-flash');
+  });
+
   it('reads CHAT_FALLBACK_MODELS in order, without duplicates or the primary', () => {
     vi.stubEnv('CHAT_MODEL', 'primary/model');
     vi.stubEnv('CHAT_FALLBACK_MODELS', ' backup/one, primary/model ,backup/two,backup/one ');

@@ -7,7 +7,7 @@
 // bot.db are in-memory for the run, and error captures and the log file are off.
 //
 //   docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... \
-//     -e EVAL_MODELS=deepseek/deepseek-v3.2:nitro,moonshotai/kimi-k2.6 test yarn eval:persona
+//     -e EVAL_MODELS=z-ai/glm-5.3-flash,moonshotai/kimi-k3 test yarn eval:persona
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';

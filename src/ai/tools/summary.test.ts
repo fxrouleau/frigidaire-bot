@@ -1,5 +1,6 @@
 import { Collection, type FetchMessagesOptions, type Message, SnowflakeUtil } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_CHAT_MODEL } from '../../config';
 import { recordRelay } from '../../relay';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import { type CapturedRequest, chatCompletionBody, createCapturingClient } from '../../test-support/capturingClient';
@@ -99,7 +100,7 @@ describe('summarizeChannel', () => {
     const result = await summarizeChannel({ message: trigger, start: new Date(NOW.getTime() - HOUR), client, now });
 
     expect(requests).toHaveLength(1);
-    expect(requests[0].body.model).toBe('deepseek/deepseek-v3.2:nitro');
+    expect(requests[0].body.model).toBe(DEFAULT_CHAT_MODEL);
     expect(requests[0].body.provider).toEqual({ zdr: true });
     expect(requests[0].headers.get(FEATURE_HEADER)).toBe('summary');
     expect(result).toContain('Jason and Simon argued about pizza.');
