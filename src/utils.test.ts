@@ -1,4 +1,11 @@
-import { ChannelType, type Message, MessageFlags, MessageReferenceType } from 'discord.js';
+import {
+  ChannelType,
+  type Message,
+  MessageFlags,
+  MessageReferenceType,
+  PermissionFlagsBits,
+  PermissionsBitField,
+} from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getRelay } from './relay';
 import { BotDb, setBotDbForTesting } from './storage/botDb';
@@ -376,6 +383,26 @@ describe('repostMessage', () => {
       expect(outcome).toEqual({ status: 'skipped', reason: expect.stringContaining('sticker') });
       expect(fake.recorders.createWebhook.calls).toHaveLength(0);
       expect(fake.recorders.delete.calls).toHaveLength(0);
+    });
+
+    it('refuses (before any network work) when the bot lacks Manage Webhooks or Manage Messages', async () => {
+      const fake = createFakeMessage({ content: 'x' });
+      const message = fake.message as unknown as {
+        guild: { members: { me: unknown } };
+        channel: { name: string; permissionsFor: (member: unknown) => PermissionsBitField };
+      };
+      message.guild.members.me = { id: 'bot-1' };
+      message.channel.name = 'banana-combo';
+      message.channel.permissionsFor = () => new PermissionsBitField([PermissionFlagsBits.ManageWebhooks]);
+
+      const outcome = await repostMessage(fake.message, 'y', { fetch: noFetch });
+
+      expect(outcome).toEqual({ status: 'skipped', reason: 'the bot lacks ManageMessages in #banana-combo' });
+      expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+
+      message.channel.permissionsFor = () =>
+        new PermissionsBitField([PermissionFlagsBits.ManageWebhooks, PermissionFlagsBits.ManageMessages]);
+      expect((await repostMessage(fake.message, 'y', { fetch: noFetch })).status).toBe('reposted');
     });
 
     it('refuses polls', () => {

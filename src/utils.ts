@@ -6,6 +6,7 @@ import {
   type Message,
   MessageFlags,
   type NewsChannel,
+  PermissionFlagsBits,
   type TextChannel,
   type VoiceChannel,
   type Webhook,
@@ -29,6 +30,9 @@ export type WebhookTarget = { channel: WebhookParentChannel; threadId?: string }
 
 // Discord's limit for a webhook message's content (Nitro members can send up to 4000 themselves).
 const MAX_WEBHOOK_CONTENT = 2000;
+
+// Creating the one-time webhook, and deleting the original once the repost is up.
+const REPOST_PERMISSIONS = [PermissionFlagsBits.ManageWebhooks, PermissionFlagsBits.ManageMessages];
 
 /**
  * Splits a string into multiple chunks of a specified size.
@@ -163,6 +167,13 @@ export function repostBlocker(
   const target = webhookTargetOf(message.channel);
   if (!target) return "its channel can't host a webhook repost (DM, archived or locked thread)";
   if (target.threadId === message.id) return 'it opens a forum post (deleting it would delete the post)';
+  // Without these the repost either fails outright or flashes up and is taken back (see repostMessage).
+  // Threads inherit the parent's permissions, so the parent answers for both.
+  const me = message.guild?.members.me;
+  if (me) {
+    const missing = target.channel.permissionsFor(me).missing(REPOST_PERMISSIONS);
+    if (missing.length > 0) return `the bot lacks ${missing.join(' and ')} in #${target.channel.name}`;
+  }
   if (message.stickers.size > 0) return "it has a sticker (webhooks can't send stickers)";
   if (message.poll) return 'it has a poll';
   if (message.content.length > MAX_WEBHOOK_CONTENT) {
