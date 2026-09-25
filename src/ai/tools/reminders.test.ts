@@ -100,6 +100,17 @@ describe('resolveDueTime', () => {
     if (!result.ok) expect(result.error).toContain('Include a clock time, e.g. "2026-09-26 09:00"');
   });
 
+  it('accepts "in 1 minute" whatever the current millisecond is (the due time rounds up to a whole second)', () => {
+    for (const ms of [0, 1, 234, 499, 500, 999]) {
+      const now = new Date(NOW.getTime() + ms);
+      const result = resolveDueTime(undefined, 1, now);
+      expect(result.ok, `ms=${ms}`).toBe(true);
+      if (!result.ok) continue;
+      expect(result.dueAt.getTime() % 1000).toBe(0);
+      expect(result.dueAt.getTime() - now.getTime()).toBeGreaterThanOrEqual(60_000);
+    }
+  });
+
   it('reads in_minutes relative to now and at as Eastern wall-clock', () => {
     const relative = resolveDueTime(undefined, '90', NOW);
     expect(relative.ok && relative.dueAt.toISOString()).toBe('2026-09-25T19:30:00.000Z');
