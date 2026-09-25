@@ -1,7 +1,16 @@
 // What the link reader knows about a shared link, independent of where it came from. Extractors fill
 // this in; format.ts renders it for the read_link tool (full) and the enricher (a one-line preview).
 
-export type LinkSource = 'twitter' | 'youtube' | 'tiktok' | 'instagram' | 'reddit' | 'bluesky' | 'web';
+export type LinkSource =
+  | 'twitter'
+  | 'youtube'
+  | 'tiktok'
+  | 'instagram'
+  | 'reddit'
+  | 'bluesky'
+  | 'tenor'
+  | 'klipy'
+  | 'web';
 
 /** Human-readable kind, shown to the model as-is ("tweet", "youtube short", "article", …). */
 export type LinkKind =
@@ -13,6 +22,9 @@ export type LinkKind =
   | 'instagram reel'
   | 'reddit post'
   | 'bluesky post'
+  | 'gif'
+  | 'sticker'
+  | 'video clip'
   | 'article'
   | 'web page'
   | 'image'

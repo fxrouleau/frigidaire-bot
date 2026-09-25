@@ -14,7 +14,11 @@ export type LinkTarget =
   | { source: 'instagram'; key: string; url: string; path: string }
   | { source: 'reddit'; key: string; url: string; postId?: string }
   | { source: 'bluesky'; key: string; url: string; actor: string; rkey: string }
+  | { source: 'tenor'; key: string; url: string }
+  | { source: 'klipy'; key: string; url: string; section: KlipySection }
   | { source: 'web'; key: string; url: string };
+
+export type KlipySection = 'gifs' | 'stickers' | 'clips' | 'memes';
 
 // Embed-fixer and mirror domains that serve the same path shapes as the platform they mirror, on top
 // of whatever the link fixer is configured to rewrite to (config.links.*Fixers).
@@ -108,6 +112,32 @@ function redditTarget(url: URL, host: string): LinkTarget | undefined {
   return undefined;
 }
 
+// Tenor's pages (not media.tenor.com / c.tenor.com: those are the GIF files themselves, read as images).
+const TENOR_HOSTS = new Set(['tenor.com', 'www.tenor.com']);
+const KLIPY_HOSTS = new Set(['klipy.com', 'www.klipy.com']);
+
+function tenorTarget(url: URL): LinkTarget | undefined {
+  // /view/<slug>-gif-<id>, optionally locale-prefixed (/es/view/…, /pt-BR/view/…).
+  const view = url.pathname.match(/^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?view\/([^/]*?)(\d{6,25})\/?$/i);
+  if (view) return { source: 'tenor', key: `tenor:${view[2]}`, url: `https://tenor.com/view/${view[1]}${view[2]}` };
+  // Share short links (tenor.com/bEfN4.gif) redirect to the view page.
+  const short = url.pathname.match(/^\/([A-Za-z0-9]{3,16})\.gif$/);
+  if (short) return { source: 'tenor', key: `tenor:short:${short[1].toLowerCase()}`, url: `https://tenor.com/${short[1]}.gif` };
+  return undefined;
+}
+
+function klipyTarget(url: URL): LinkTarget | undefined {
+  const match = url.pathname.match(/^\/(gifs|stickers|clips|memes)\/([A-Za-z0-9_-]{1,200})\/?$/);
+  if (!match) return undefined;
+  const section = match[1] as KlipySection;
+  return {
+    source: 'klipy',
+    key: `klipy:${section}/${match[2].toLowerCase()}`,
+    url: `https://klipy.com/${section}/${match[2]}`,
+    section,
+  };
+}
+
 function blueskyTarget(url: URL): LinkTarget | undefined {
   const match = url.pathname.match(/^\/profile\/([^/]+)\/post\/([A-Za-z0-9._:~-]{1,64})\/?$/);
   if (!match) return undefined;
@@ -132,6 +162,8 @@ export function identifyLink(url: URL): LinkTarget {
   else if (hostIn(host, [...INSTAGRAM_DOMAINS, ...config.links.instagramFixers])) target = instagramTarget(url);
   else if (host === 'redd.it' || hostIn(host, REDDIT_DOMAINS)) target = redditTarget(url, host);
   else if (hostIn(host, BLUESKY_DOMAINS)) target = blueskyTarget(url);
+  else if (TENOR_HOSTS.has(host)) target = tenorTarget(url);
+  else if (KLIPY_HOSTS.has(host)) target = klipyTarget(url);
   if (target) return target;
 
   const clean = new URL(url.toString());
