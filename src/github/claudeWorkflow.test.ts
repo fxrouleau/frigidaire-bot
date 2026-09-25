@@ -133,6 +133,17 @@ describe.skipIf(!present && !inCheckout)('claude-feature-request workflow', () =
     expect(text).toContain('AGENTS.md');
   });
 
+  it('has Claude open the PR without handing issue text to the shell', () => {
+    // `gh pr create --title "<issue title>"` would let a `$(…)` or backtick in an issue title run, and a
+    // double-quoted body would expand every markdown code span: the title is Claude's own and plain, and the
+    // body goes through a quoted heredoc.
+    const prompt = text.replace(/\s+/g, ' ');
+    expect(prompt).not.toMatch(/--body "<body>"|--title "\$\{\{/);
+    expect(prompt).toContain(`--title "<title>" --body "$(cat <<'EOF'`);
+    expect(prompt).toContain('Write the title yourself');
+    expect(prompt).toContain('never paste the issue title into it');
+  });
+
   it('tells Claude that the bot’s +1 comments (owner account, member words) are untrusted too', () => {
     // include_comments_by_actor passes the owner's comments to Claude, and the bot posts with the
     // owner's token: the prompt must name what marks a bot comment, exactly as the bot writes it.
