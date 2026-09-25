@@ -4,6 +4,7 @@ import { getMemoryStore } from '../ai/memory';
 import { config } from '../config';
 import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
+import { scheduleUsageRecaption } from '../reactions/usageCaptions';
 
 export default defineEvent(Events.ClientReady, {
   once: true,
@@ -42,6 +43,7 @@ export default defineEvent(Events.ClientReady, {
     // would mean re-captioning everything on the next startup for no reason.
     if (liveIds.size === 0) {
       logger.warn('emojiReady: zero live emojis aggregated — skipping deactivation to avoid nuking the DB');
+      scheduleUsageRecaption();
       return;
     }
 
@@ -68,5 +70,8 @@ export default defineEvent(Events.ClientReady, {
     }
 
     logger.info(`emojiReady: done — live=${liveIds.size} deactivated=${deactivated} captioned=${captioned}`);
+
+    // Usage-grounded captions rewrite the "for …" half of the captions just made, so they start after.
+    scheduleUsageRecaption();
   },
 });

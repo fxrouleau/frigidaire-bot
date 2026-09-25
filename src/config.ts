@@ -246,6 +246,14 @@ export const config = {
     get forceRecaption(): boolean {
       return envBool('EMOJI_FORCE_RECAPTION', false);
     },
+    /** Weekly job that rewrites each caption's "for …" half from how the group actually uses the emoji. */
+    get usageCaptionsEnabled(): boolean {
+      return envBool('EMOJI_USAGE_CAPTIONS_ENABLED', true);
+    },
+    /** One-shot: re-ground every eligible caption from usage at startup. Unset it again afterwards. */
+    get recaptionFromUsage(): boolean {
+      return envBool('EMOJI_RECAPTION_FROM_USAGE', false);
+    },
   },
 
   memory: {
@@ -778,6 +786,40 @@ export const config = {
     },
   },
 
+  /** Spontaneous emoji reactions to standout posts (src/reactions/). */
+  autoReact: {
+    /**
+     * off: nothing runs. shadow (default): decides as if live but only posts what it WOULD react with to
+     * the report channel, so the owner can review it before switching to on. on: actually reacts.
+     */
+    get mode(): 'off' | 'shadow' | 'on' {
+      return envEnum('AUTO_REACT_MODE', ['off', 'shadow', 'on'] as const, 'shadow');
+    },
+    /** Channels (a thread matches through its parent) whose posts may get a reaction. Defaults to MAIN_CHANNEL_ID. */
+    get channelIds(): string[] {
+      const fromEnv = envCsv('AUTO_REACT_CHANNELS');
+      if (fromEnv.length > 0) return fromEnv;
+      const main = config.server.mainChannelId;
+      return main ? [main] : [];
+    },
+    /** Reactions (shadow ones included) in any rolling 24 hours; 0 ⇒ never. */
+    get maxPerDay(): number {
+      return envInt('AUTO_REACT_MAX_PER_DAY', 3, { min: 0, max: 100 });
+    },
+    /** Minimum time between two reactions. */
+    get minGapMinutes(): number {
+      return envNumber('AUTO_REACT_MIN_GAP_MINUTES', 45, { min: 0, max: 24 * 60 });
+    },
+    /** Learn first: nothing is judged until the archive holds this many member messages that got a reaction. */
+    get minProfileMessages(): number {
+      return envInt('AUTO_REACT_MIN_PROFILE_MESSAGES', 200, { min: 0 });
+    },
+    /** Wait after a post before judging it: link previews resolve and a quick delete or edit lands first. */
+    get delaySeconds(): number {
+      return envNumber('AUTO_REACT_DELAY_SECONDS', 10, { min: 1, max: 300 });
+    },
+  },
+
   /** True inside the Vitest runner — the structural test-hermeticity guard. */
   get isTest(): boolean {
     return Boolean(process.env.VITEST);
@@ -815,7 +857,7 @@ function feature(name: string, enabled: boolean, details: string[] = [], offReas
  */
 export function describeEffectiveConfig(): string {
   const { models, agent, learner, memory, report, links, deleteRepost, server } = config;
-  const { birthdays, archive, media, linkReader, gate, ramble, sandbox, featureRequests } = config;
+  const { birthdays, archive, media, linkReader, gate, ramble, sandbox, featureRequests, autoReact } = config;
 
   const fallbacks = models.chatFallbacks;
   const notes = agent.channelNotes;
@@ -867,6 +909,8 @@ export function describeEffectiveConfig(): string {
     `semanticMemory=${onOff(memory.semanticEnabled)}`,
     `learning=every:${formatDuration(learner.intervalMs)},ignore:${learner.ignoredChannels.length},selfImprovement:${onOff(learner.selfImprovementEnabled)}`,
     `forceRecaption=${onOff(config.emoji.forceRecaption)}`,
+    `usageCaptions=${onOff(config.emoji.usageCaptionsEnabled)}`,
+    `recaptionFromUsage=${onOff(config.emoji.recaptionFromUsage)}`,
     // Features
     `links=verify:${onOff(links.verify)},fixers:${fixers},translate:${translate},alerts:${onOff(links.alertsEnabled)}`,
     feature('deleteRepost', deleteRepost.userIds.length > 0, [
@@ -906,6 +950,17 @@ export function describeEffectiveConfig(): string {
       featureRequestsOff,
     ),
     `commands=${onOff(config.commands.enabled)}`,
+    feature(
+      'autoReact',
+      autoReact.mode !== 'off' && autoReact.channelIds.length > 0,
+      [
+        `mode:${autoReact.mode}`,
+        `channels:${autoReact.channelIds.length}`,
+        `max:${autoReact.maxPerDay}/day`,
+        `gap:${formatDuration(autoReact.minGapMinutes * MINUTE_MS)}`,
+      ],
+      autoReact.mode !== 'off' ? 'no-channel' : undefined,
+    ),
   ];
   return parts.join(' ');
 }

@@ -203,6 +203,7 @@ describe('describeEffectiveConfig', () => {
     BIRTHDAYS_SEED: '202020202020202020:03-29',
     CHANNEL_NOTES: '{"212121212121212121":"note-SENTINEL"}',
     GIT_SHA: 'deadbeefSENTINEL',
+    AUTO_REACT_CHANNELS: '232323232323232323',
   };
 
   function stubAll(values: Record<string, string>): void {
@@ -217,7 +218,7 @@ describe('describeEffectiveConfig', () => {
     models: /(^| )chat=.* learner=.* image=.* embedding=/,
     agent: /(^| )agent=/,
     learner: /(^| )learning=/,
-    emoji: /(^| )forceRecaption=/,
+    emoji: /(^| )forceRecaption=.* usageCaptions=.* recaptionFromUsage=/,
     memory: /(^| )semanticMemory=/,
     debugCapture: /(^| )debugCapture=/,
     report: /(^| )reportChannel=/,
@@ -236,6 +237,7 @@ describe('describeEffectiveConfig', () => {
     featureRequests: /(^| )featureRequests=/,
     costs: /(^| )usageLedger=/,
     commands: /(^| )commands=/,
+    autoReact: /(^| )autoReact=/,
   };
   // Not bot configuration: the eval harness's own settings, and the Vitest guard.
   const NOT_SUMMARIZED = ['evals', 'isTest'];
@@ -286,7 +288,14 @@ describe('describeEffectiveConfig', () => {
       BIRTHDAYS_SEED: '202020202020202020:03-29,212121212121212121:12-01',
       SANDBOX_URL: 'http://sandbox:8080',
     });
-    for (const name of ['SANDBOX_TOKEN', 'GITHUB_TOKEN', 'GITHUB_REPO', 'BIRTHDAY_CHANNEL_ID', 'RAMBLE_USER_IDS']) {
+    for (const name of [
+      'SANDBOX_TOKEN',
+      'GITHUB_TOKEN',
+      'GITHUB_REPO',
+      'BIRTHDAY_CHANNEL_ID',
+      'RAMBLE_USER_IDS',
+      'AUTO_REACT_CHANNELS',
+    ]) {
       vi.stubEnv(name, undefined);
     }
     const tokens = describeEffectiveConfig().split(' ');
@@ -313,6 +322,9 @@ describe('describeEffectiveConfig', () => {
         'sandbox=on(token:none,timeout:20s)',
         'featureRequests=off',
         'commands=on',
+        'autoReact=on(mode:shadow,channels:1,max:3/day,gap:45m)',
+        'usageCaptions=on',
+        'recaptionFromUsage=off',
         'usageLedger=on',
       ]),
     );
@@ -335,7 +347,14 @@ describe('describeEffectiveConfig', () => {
       DELETE_REPOST_USER_IDS: '161616161616161616,171717171717171717',
       DELETE_REPOST_MODE: 'always',
     });
-    for (const name of ['GITHUB_REPO', 'RAMBLE_CHANNEL_ID', 'GIT_SHA', 'MAIN_CHANNEL_ID', 'GATE_CHANNELS']) {
+    for (const name of [
+      'GITHUB_REPO',
+      'RAMBLE_CHANNEL_ID',
+      'GIT_SHA',
+      'MAIN_CHANNEL_ID',
+      'GATE_CHANNELS',
+      'AUTO_REACT_CHANNELS',
+    ]) {
       vi.stubEnv(name, undefined);
     }
     const summary = describeEffectiveConfig();
@@ -343,6 +362,7 @@ describe('describeEffectiveConfig', () => {
     expect(summary).toContain('featureRequests=off(no-repo)');
     expect(summary).toContain('ramble=off(no-channel)');
     expect(summary).toContain('gate=off(no-channel)');
+    expect(summary).toContain('autoReact=off(no-channel)');
     expect(summary).toContain('birthdays=announce:no-channel,');
     expect(summary).toContain('reportChannel=set(digest:on@7d,deploy:no-sha)');
     expect(summary).toContain('mainChannel=off');
