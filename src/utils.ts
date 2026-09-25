@@ -227,7 +227,12 @@ export async function repostMessage(
   if (!target || blocker) return { status: 'skipped', reason: blocker ?? "its channel can't host a webhook repost" };
 
   const carried = await downloadAttachments(
-    [...message.attachments.values()].map((a) => ({ url: a.url, name: a.name, size: a.size, description: a.description })),
+    [...message.attachments.values()].map((a) => ({
+      url: a.url,
+      name: a.name,
+      size: a.size,
+      description: a.description,
+    })),
     {
       fetch: options.fetch ?? ((input, init) => globalThis.fetch(input, init)),
       maxTotalBytes: options.maxAttachmentBytes ?? config.links.maxRepostAttachmentBytes,

@@ -221,8 +221,7 @@ export function createFakeMessage(opts: FakeMessageOptions = {}): FakeMessage {
     return collection as unknown;
   });
 
-  const guildId =
-    opts.guildId !== undefined ? opts.guildId : channelType === ChannelType.DM ? null : 'guild-1';
+  const guildId = opts.guildId !== undefined ? opts.guildId : channelType === ChannelType.DM ? null : 'guild-1';
   const guildMembers = new Collection<string, { id: string; displayName: string }>();
   if (opts.repliedUserId && opts.repliedMemberDisplayName) {
     guildMembers.set(opts.repliedUserId, { id: opts.repliedUserId, displayName: opts.repliedMemberDisplayName });

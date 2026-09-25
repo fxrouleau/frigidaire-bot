@@ -151,6 +151,11 @@ export class FixerAlerter {
     return this.enqueue(() => this.evaluate(change.platform));
   }
 
+  /** Resolves once every queued evaluation (including fired deferred ones) has finished. */
+  idle(): Promise<void> {
+    return this.queue;
+  }
+
   /** Cancels every deferred re-check (shutdown, tests). */
   stop(): void {
     for (const cancel of this.deferred.values()) cancel();
