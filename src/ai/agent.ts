@@ -103,10 +103,22 @@ export function describeNowET(now: Date = new Date()): string {
   return `${ET_WEEKDAY_FORMAT.format(now)} ${wallClock} ${zone}`;
 }
 
+/** What the bot says when the model came back with nothing to post on a turn someone asked for. In character. */
+export const EMPTY_REPLIES: readonly string[] = [
+  'blanked on that one, say it again',
+  'I had something for that and it just left my head. again?',
+  'drew a total blank there. run it back',
+  'my mind went fully empty for a sec. one more time?',
+];
+
+function pickLine(lines: readonly string[], random: () => number): string {
+  const index = Math.floor(random() * lines.length);
+  return lines[Math.min(Math.max(index, 0), lines.length - 1)];
+}
+
 /** Picks an error line; `random` returns [0, 1) like Math.random. */
 export function pickErrorReply(random: () => number = Math.random): string {
-  const index = Math.floor(random() * ERROR_REPLIES.length);
-  return ERROR_REPLIES[Math.min(Math.max(index, 0), ERROR_REPLIES.length - 1)];
+  return pickLine(ERROR_REPLIES, random);
 }
 
 /**
@@ -387,7 +399,7 @@ export class AgentOrchestrator {
       });
 
       stopTyping();
-      const sentIds = await this.sendReply(reply, message, turn);
+      const sentIds = await this.sendReply(reply, message, turn, opts);
       const replyEntry = finalResponse.outputEntries.find(
         (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'assistant',
       );
@@ -1362,7 +1374,12 @@ ${lines.join('\n')}
    * Sends the reply (text in Discord-sized chunks, this turn's files on the first chunk, 10 per message)
    * and returns the ids of the messages posted. A turn whose only output is a reaction sends nothing.
    */
-  private async sendReply(content: string | undefined, message: Message, turn: TurnEffects): Promise<string[]> {
+  private async sendReply(
+    content: string | undefined,
+    message: Message,
+    turn: TurnEffects,
+    opts: HandleMentionOptions,
+  ): Promise<string[]> {
     const sentIds: string[] = [];
     const record = (sent: Message | undefined) => {
       if (sent?.id) sentIds.push(sent.id);
@@ -1377,8 +1394,16 @@ ${lines.join('\n')}
       }
       if (turn.reactions.length > 0) return sentIds;
       const authorName = message.member?.displayName || message.author.username;
+      // Nobody asked on an unprompted turn: with nothing to say, the bot just doesn't chime in.
+      if (opts.unprompted) {
+        logFailure(
+          'parse_failure',
+          `Empty LLM response on an unprompted turn (message from ${authorName}); nothing posted`,
+        );
+        return sentIds;
+      }
       logFailure('parse_failure', `Empty LLM response for message from ${authorName}`);
-      record(await this.safeSend(message, "I've processed the information, but I don't have anything further to add."));
+      record(await this.safeSend(message, pickLine(EMPTY_REPLIES, this.random)));
       return sentIds;
     }
 
