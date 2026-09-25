@@ -17,7 +17,7 @@ import { getCachedTranscript } from '../media';
 import { getMemoryStore } from '../memory';
 import type { Identity, MemoryStore } from '../memory/memoryStore';
 import { requireOpenRouterClient } from '../openRouterClient';
-import { createPeopleMatcher, namesOf } from '../people';
+import { createPeopleMatcher, foldMembers, memoryKeyFor } from '../people';
 import { featureRequestOptions } from '../usage';
 import { formatTimestampET, parseEasternDateTime } from '../utils';
 
@@ -343,13 +343,15 @@ function peopleInStretch(transcript: Transcript, identities: Identity[], store: 
     return person;
   };
 
+  // References come back by main account id (a side account's names count as its member).
+  const membersById = new Map(foldMembers(identities).map((m) => [m.userId, m]));
   const findReferences = createPeopleMatcher(identities);
   for (const { msg, author } of transcript.entries) {
     if (!author.isBot) personFor(author.key, author.userId, author.name).messages++;
     const text = [msg.content ?? '', cachedTranscript(msg.id) ?? ''].join('\n');
     for (const [userId, count] of findReferences(text)) {
-      const identity = identitiesById.get(userId);
-      if (identity) personFor(userId, userId, identity.display_name).references += count;
+      const member = membersById.get(userId);
+      if (member) personFor(userId, userId, member.displayName).references += count;
     }
   }
 
@@ -370,7 +372,7 @@ function backgroundFor(store: MemoryStore, person: StretchPerson): string[] {
   if (!person.userId) return [];
   try {
     return store
-      .getForPerson({ userId: person.userId, names: namesOf(person.identity, [person.name]) }, 50)
+      .getForPerson(memoryKeyFor(store, person.userId, [person.name]), 50)
       .filter((m) => BACKGROUND_CATEGORIES.has(m.category))
       .slice(0, MAX_BACKGROUND_MEMORIES)
       .map((m) => truncate(m.content.replace(/\s+/g, ' ').trim(), MAX_BACKGROUND_MEMORY_CHARS));

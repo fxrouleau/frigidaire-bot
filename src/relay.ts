@@ -4,6 +4,8 @@
 // tell a relayed human message from another integration's bot post, or know who actually wrote it.
 import type { Message } from 'discord.js';
 import { getMemoryStore } from './ai/memory';
+import { nameKey } from './ai/memory/memoryStore';
+import { canonicalUserId } from './linkedAccounts';
 import { logger } from './logger';
 import { getBotDb } from './storage/botDb';
 
@@ -116,24 +118,29 @@ export type MessageAttribution = {
  * Attributes a message to a person, or returns undefined for messages that should be treated as
  * non-human (other bots, other integrations' webhooks, the bot's own replies).
  *
+ * The person is always their MAIN account (LINKED_ACCOUNTS): a message from a side account is
+ * attributed to the main account's id, under the main account's current display name when the bot
+ * knows it, so memories, the learner, summaries and the archive see one person.
+ *
  * Relayed messages resolve through the registry first. Older relays (posted before the registry
  * existed) fall back to a heuristic: a webhook message owned by this bot's application whose webhook
- * name matches a known member's display or canonical name. Discord stamps `applicationId` on messages
- * from application-owned webhooks, which is what tells the bot's relays apart from other webhooks.
+ * name matches exactly one known member's display or canonical name. Discord stamps `applicationId` on
+ * messages from application-owned webhooks, which is what tells the bot's relays apart from other webhooks.
  */
 export function attributeMessage(message: Message): MessageAttribution | undefined {
   if (!message.webhookId) {
     if (message.author.bot) return undefined;
-    return {
-      authorId: message.author.id,
-      authorName: message.member?.displayName || message.author.displayName || message.author.username,
-      source: 'human',
-    };
+    const liveName = message.member?.displayName || message.author.displayName || message.author.username;
+    const authorId = canonicalUserId(message.author.id);
+    const authorName = authorId === message.author.id ? liveName : (currentName(authorId) ?? liveName);
+    return { authorId, authorName, source: 'human' };
   }
 
   const relay = getRelay(message.id);
   if (relay) {
-    return { authorId: relay.authorId, authorName: currentName(relay.authorId) ?? relay.authorName, source: 'relay' };
+    // The registry keeps the account the original was posted from; the person is its main account.
+    const authorId = canonicalUserId(relay.authorId);
+    return { authorId, authorName: currentName(authorId) ?? relay.authorName, source: 'relay' };
   }
 
   const ownApplicationId = message.client?.application?.id ?? message.client?.user?.id;
@@ -141,8 +148,12 @@ export function attributeMessage(message: Message): MessageAttribution | undefin
   if (!ownWebhook) return undefined;
 
   const webhookName = message.author.username;
-  const identity = findIdentityByName(webhookName);
-  return { authorId: identity?.discord_user_id, authorName: identity?.display_name ?? webhookName, source: 'relay' };
+  const authorId = findMemberByWebhookName(webhookName);
+  return {
+    authorId,
+    authorName: (authorId ? currentName(authorId) : undefined) ?? webhookName,
+    source: 'relay',
+  };
 }
 
 function currentName(userId: string): string | undefined {
@@ -153,12 +164,17 @@ function currentName(userId: string): string | undefined {
   }
 }
 
-function findIdentityByName(name: string) {
+/** The main account id of the one member whose display or first-seen name is `name` (any of their accounts). */
+function findMemberByWebhookName(name: string): string | undefined {
   try {
-    const needle = name.trim().toLowerCase();
-    return getMemoryStore()
-      .getAllIdentities()
-      .find((i) => i.display_name.toLowerCase() === needle || i.canonical_name.toLowerCase() === needle);
+    const needle = nameKey(name);
+    const owners = new Set(
+      getMemoryStore()
+        .getAllIdentities()
+        .filter((i) => nameKey(i.display_name) === needle || nameKey(i.canonical_name) === needle)
+        .map((i) => canonicalUserId(i.discord_user_id)),
+    );
+    return owners.size === 1 ? [...owners][0] : undefined;
   } catch {
     return undefined;
   }

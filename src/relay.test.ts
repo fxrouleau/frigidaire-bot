@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setMemoryStoreForTesting } from './ai/memory';
 import { MemoryStore } from './ai/memory/memoryStore';
 import { attributeMessage, getRelay, getRelays, recordRelay } from './relay';
@@ -72,5 +72,53 @@ describe('attributeMessage', () => {
     store.upsertIdentity('u1', 'Jason');
     const fake = createFakeMessage({ webhookId: 'wh', authorUsername: 'Jason', applicationId: 'some-other-app' });
     expect(attributeMessage(fake.message)).toBeUndefined();
+  });
+
+  it('does not guess between two members for an unregistered relay', () => {
+    store.upsertIdentity('u1', 'Jason');
+    store.upsertIdentity('u2', 'OldJason');
+    store.upsertIdentity('u2', 'jason');
+    const fake = createFakeMessage({ webhookId: 'wh', authorUsername: 'Jason', applicationId: 'bot-1' });
+    expect(attributeMessage(fake.message)).toEqual({ authorId: undefined, authorName: 'Jason', source: 'relay' });
+  });
+});
+
+describe('attributeMessage with linked side accounts (LINKED_ACCOUNTS)', () => {
+  const MAIN = '100000000000000001';
+  const SIDE = '100000000000000002';
+
+  beforeEach(() => {
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${MAIN}`);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("attributes a side account's message to the main account, under the main account's name", () => {
+    store.upsertIdentity(MAIN, 'Tony');
+    const fake = createFakeMessage({ authorId: SIDE, authorDisplayName: 'Ptoughneigh' });
+    expect(attributeMessage(fake.message)).toEqual({ authorId: MAIN, authorName: 'Tony', source: 'human' });
+  });
+
+  it('keeps the live side-account name when the main account is unknown', () => {
+    const fake = createFakeMessage({ authorId: SIDE, authorDisplayName: 'Ptoughneigh' });
+    expect(attributeMessage(fake.message)).toEqual({ authorId: MAIN, authorName: 'Ptoughneigh', source: 'human' });
+  });
+
+  it("attributes a relay of a side account's message to the main account", () => {
+    store.upsertIdentity(MAIN, 'Tony');
+    recordRelay({ messageId: 'relay-1', channelId: 'c', authorId: SIDE, authorName: 'Ptoughneigh', kind: 'link_fix' });
+    const fake = createFakeMessage({ messageId: 'relay-1', webhookId: 'wh', authorUsername: 'Ptoughneigh' });
+    expect(attributeMessage(fake.message)).toEqual({ authorId: MAIN, authorName: 'Tony', source: 'relay' });
+    // The registry still records the account the original came from.
+    expect(getRelay('relay-1')?.authorId).toBe(SIDE);
+  });
+
+  it("resolves an unregistered relay under the side account's name to the main account", () => {
+    store.upsertIdentity(MAIN, 'Tony');
+    store.upsertIdentity(SIDE, 'Ptoughneigh');
+    const fake = createFakeMessage({ webhookId: 'wh', authorUsername: 'Ptoughneigh', applicationId: 'bot-1' });
+    expect(attributeMessage(fake.message)).toEqual({ authorId: MAIN, authorName: 'Tony', source: 'relay' });
   });
 });

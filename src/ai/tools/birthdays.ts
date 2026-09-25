@@ -11,8 +11,8 @@ import {
   parseBirthdayDate,
   saveBirthday,
 } from '../../scheduling/birthdayStore';
-import { buildDirectory, currentName, resolvePerson } from '../../scheduling/people';
 import { easternDate } from '../../scheduling/time';
+import { buildPeopleDirectory, currentName, requesterOf, resolvePersonRef } from '../people';
 import type { ToolDefinition, ToolHandlerContext } from '../types';
 
 function personArg(raw: unknown): string {
@@ -42,8 +42,9 @@ const setBirthdayTool: ToolDefinition = {
   handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
     const now = new Date();
     const today = easternDate(now);
-    const directory = buildDirectory(ctx.message);
-    const resolved = resolvePerson(personArg(args.person) || 'me', directory);
+    const directory = buildPeopleDirectory(ctx.message);
+    const requesterId = (directory.requester ?? requesterOf(ctx.message)).userId;
+    const resolved = resolvePersonRef(personArg(args.person) || 'me', directory);
     if (!resolved.ok) return `Nothing saved. ${resolved.error}`;
     const person = resolved.person;
 
@@ -62,11 +63,11 @@ const setBirthdayTool: ToolDefinition = {
     saveBirthday({
       userId: person.userId,
       date,
-      setBy: directory.requester.userId,
+      setBy: requesterId,
       now: now.getTime(),
       lastAnnouncedYear,
     });
-    logger.info(`birthdays: ${person.userId}'s birthday set by ${directory.requester.userId}.`);
+    logger.info(`birthdays: ${person.userId}'s birthday set by ${requesterId}.`);
 
     const age = date.year ? today.year - date.year : undefined;
     const next = nextOccurrence(date, today);
@@ -77,7 +78,7 @@ const setBirthdayTool: ToolDefinition = {
       previous && !(sameDate(previous, date) && previous.year === date.year)
         ? ` (was ${formatBirthday(previous)})`
         : '';
-    return `Saved ${person.name}'s birthday: ${formatBirthday(date)}${change}. ${when}`;
+    return `Saved ${person.displayName}'s birthday: ${formatBirthday(date)}${change}. ${when}`;
   },
 };
 
@@ -113,13 +114,14 @@ const forgetBirthdayTool: ToolDefinition = {
     additionalProperties: false,
   },
   handler: async (ctx: ToolHandlerContext, args: Record<string, unknown>) => {
-    const directory = buildDirectory(ctx.message);
-    const resolved = resolvePerson(personArg(args.person) || 'me', directory);
+    const directory = buildPeopleDirectory(ctx.message);
+    const requesterId = (directory.requester ?? requesterOf(ctx.message)).userId;
+    const resolved = resolvePersonRef(personArg(args.person) || 'me', directory);
     if (!resolved.ok) return resolved.error;
     const person = resolved.person;
-    if (!deleteBirthday(person.userId)) return `I didn't have a birthday saved for ${person.name}.`;
-    logger.info(`birthdays: ${person.userId}'s birthday forgotten by ${directory.requester.userId}.`);
-    return `Forgot ${person.name}'s birthday.`;
+    if (!deleteBirthday(person.userId)) return `I didn't have a birthday saved for ${person.displayName}.`;
+    logger.info(`birthdays: ${person.userId}'s birthday forgotten by ${requesterId}.`);
+    return `Forgot ${person.displayName}'s birthday.`;
   },
 };
 

@@ -1836,7 +1836,7 @@ describe('stampSubjectUserIds() (startup link of name-only memories to member id
     const b = await store.save({ category: 'fact', subject: 'oldnick', content: 'Plays bass guitar' });
     const c = await store.save({ category: 'fact', subject: 'JASON', content: 'Works nights at the depot' });
 
-    expect(store.stampSubjectUserIds()).toEqual({ stamped: 3, names: 3, ambiguous: 0 });
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 3, relinked: 0, names: 3, ambiguous: 0 });
     expect(rowOf(a).subject_user_id).toBe('111');
     expect(rowOf(b).subject_user_id).toBe('111');
     expect(rowOf(c).subject_user_id).toBe('222');
@@ -1852,7 +1852,7 @@ describe('stampSubjectUserIds() (startup link of name-only memories to member id
     const irl = await store.save({ category: 'fact', subject: 'Derrick', content: 'Works as an electrician' });
     const alias = await store.save({ category: 'preference', subject: 'wheez', content: 'Hates cilantro' });
 
-    expect(store.stampSubjectUserIds()).toEqual({ stamped: 3, names: 3, ambiguous: 0 });
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 3, relinked: 0, names: 3, ambiguous: 0 });
     expect(rowOf(handle).subject_user_id).toBe('222');
     expect(rowOf(irl).subject_user_id).toBe('111');
     expect(rowOf(alias).subject_user_id).toBe('111');
@@ -1862,7 +1862,7 @@ describe('stampSubjectUserIds() (startup link of name-only memories to member id
     store.updateIdentityMeta('111', { aliases_add: ['Jason'] });
     const row = await store.save({ category: 'fact', subject: 'Jason', content: 'Drives a red Miata' });
 
-    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, names: 0, ambiguous: 1 });
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, relinked: 0, names: 0, ambiguous: 1 });
     expect(rowOf(row).subject_user_id).toBeNull();
   });
 
@@ -1871,7 +1871,7 @@ describe('stampSubjectUserIds() (startup link of name-only memories to member id
     await store.save({ category: 'fact', subject: 'Jason', content: 'Drives a red Miata' });
 
     expect(store.stampSubjectUserIds().stamped).toBe(1);
-    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, names: 0, ambiguous: 0 });
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, relinked: 0, names: 0, ambiguous: 0 });
     expect(rowOf(mismatched).subject_user_id).toBe('999');
   });
 
@@ -1885,7 +1885,7 @@ describe('stampSubjectUserIds() (startup link of name-only memories to member id
     const inactive = await store.save({ category: 'fact', subject: 'Jason', content: 'Used to skate' });
     store.deactivate(inactive);
 
-    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, names: 0, ambiguous: 1 });
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, relinked: 0, names: 0, ambiguous: 1 });
     for (const id of [ambiguous, server, unknown, inactive]) expect(rowOf(id).subject_user_id).toBeNull();
   });
 
@@ -1899,6 +1899,75 @@ describe('stampSubjectUserIds() (startup link of name-only memories to member id
 
     expect(rowOf(id).updated_at).toBe(before);
     expect((await store.search('apartments')).map((m) => m.id)).toEqual([id]);
+  });
+});
+
+describe('stampSubjectUserIds() with linked side accounts (LINKED_ACCOUNTS)', () => {
+  // Fake ids only: a main account and the side account the same person sometimes posts from.
+  const MAIN = '100000000000000001';
+  const SIDE = '100000000000000002';
+  const OTHER = '100000000000000003';
+
+  function idOf(id: number): string | null {
+    // @ts-expect-error accessing private db for verification
+    return (store.db.prepare('SELECT subject_user_id FROM memories WHERE id = ?').get(id) as { subject_user_id: string | null })
+      .subject_user_id;
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${MAIN}`);
+    store.upsertIdentity(MAIN, 'Tony', 'tony_main');
+    store.upsertIdentity(SIDE, 'Ptoughneigh', 'triceclone');
+    store.upsertIdentity(OTHER, 'Simon');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("stamps rows filed under a side account's names with the main account's id", async () => {
+    const byDisplay = await store.save({ category: 'fact', subject: 'Ptoughneigh', content: 'Collects vinyl records' });
+    const byHandle = await store.save({ category: 'fact', subject: 'triceclone', content: 'Mains support in Overwatch' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 2, relinked: 0, names: 2, ambiguous: 0 });
+    expect(idOf(byDisplay)).toBe(MAIN);
+    expect(idOf(byHandle)).toBe(MAIN);
+  });
+
+  it('treats a name the main and the side account share as one person, not an ambiguity', async () => {
+    store.upsertIdentity(SIDE, 'Tony', 'triceclone');
+    const row = await store.save({ category: 'fact', subject: 'tony', content: 'Works at the hardware store' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 1, relinked: 0, names: 1, ambiguous: 0 });
+    expect(idOf(row)).toBe(MAIN);
+  });
+
+  it("moves rows already stamped with the side account's id to the main account", async () => {
+    const row = await store.save({ category: 'fact', subject: 'Ptoughneigh', subject_user_id: SIDE, content: 'Hates pineapple pizza' });
+    const other = await store.save({ category: 'fact', subject: 'Simon', subject_user_id: OTHER, content: 'Lives in Montreal' });
+
+    expect(store.stampSubjectUserIds().relinked).toBe(1);
+    expect(idOf(row)).toBe(MAIN);
+    expect(idOf(other)).toBe(OTHER);
+    expect(store.stampSubjectUserIds().relinked).toBe(0);
+  });
+
+  it('lets compact() dedup the side and main rows on the same start when it runs after the stamp', async () => {
+    await store.save({ category: 'fact', subject: 'Tony', subject_user_id: MAIN, content: 'Owns a black lab named Moose' });
+    await store.save({ category: 'fact', subject: 'Ptoughneigh', content: 'Owns a black lab named Moose' });
+
+    store.stampSubjectUserIds();
+    const { removed } = store.compact();
+
+    expect(removed).toBe(1);
+    expect(store.getAllActive().filter((m) => m.content.includes('Moose'))).toHaveLength(1);
+  });
+
+  it("getForPerson() by the main id also finds rows keyed on the side account's id", async () => {
+    const row = await store.save({ category: 'fact', subject: 'Ptoughneigh', subject_user_id: SIDE, content: 'Plays the cello' });
+
+    expect(store.getForPerson({ userId: MAIN, names: [] }).map((m) => m.id)).toEqual([row]);
+    expect(store.getForPerson({ userId: SIDE, names: [] }).map((m) => m.id)).toEqual([row]);
   });
 });
 

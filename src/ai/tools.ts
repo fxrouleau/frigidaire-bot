@@ -2,13 +2,14 @@ import type { Message } from 'discord.js';
 import { logger } from '../logger';
 import { getMemoryStore } from './memory';
 import {
+  type Identity,
   type Memory,
   type MemoryStore,
   NON_PERSON_SUBJECTS,
   SELF_DIAGNOSIS_CATEGORIES,
   nameKey,
 } from './memory/memoryStore';
-import { type ResolvedPerson, cleanSubject, namesOf, resolvePerson } from './people';
+import { type Member, type ResolvedPerson, cleanSubject, foldMembers, resolvePerson } from './people';
 import { emojiSyntax } from './promptSections';
 import { birthdayTools } from './tools/birthdays';
 import { costTools } from './tools/costs';
@@ -140,21 +141,24 @@ function checkNickname(
   if (NON_PERSON_SUBJECTS.has(key) || ['me', 'i', 'myself'].includes(key)) {
     return { refusal: `"${nickname}" can't be a nickname.` };
   }
-  const identities = store.getAllIdentities().filter((i) => i.active !== 0);
-  const own = identities.find((i) => i.discord_user_id === userId);
-  if (namesOf(own, [displayName]).some((n) => nameKey(n) === key)) {
+  // Members, not accounts: a name one of their own side accounts goes by is theirs already.
+  const members = foldMembers(store.getAllIdentities());
+  const own = members.find((m) => m.userId === userId);
+  if ([displayName, ...(own?.names ?? [])].some((n) => nameKey(n) === key)) {
     return { refusal: `${displayName} already goes by "${nickname}".` };
   }
-  const others = identities.filter((i) => i.discord_user_id !== userId);
-  const owner = others.find((i) => [i.display_name, i.username, i.canonical_name].some((n) => nameKey(n) === key));
+  const others = members.filter((m) => m.userId !== userId);
+  const goesBy = (member: Member, names: (i: Identity) => (string | null | undefined)[]) =>
+    member.rows.some((row) => names(row).some((n) => nameKey(n) === key));
+  const owner = others.find((m) => goesBy(m, (i) => [i.display_name, i.username, i.canonical_name]));
   if (owner) {
     return {
-      refusal: `"${nickname}" is ${owner.display_name}'s own name, so it can't also be ${displayName}'s nickname.`,
+      refusal: `"${nickname}" is ${owner.displayName}'s own name, so it can't also be ${displayName}'s nickname.`,
     };
   }
-  const sharer = others.find((i) => [i.irl_name, ...i.aliases].some((n) => nameKey(n) === key));
+  const sharer = others.find((m) => goesBy(m, (i) => [i.irl_name, ...i.aliases]));
   return sharer
-    ? { note: `${sharer.display_name} also goes by "${nickname}", so that name alone won't tell them apart.` }
+    ? { note: `${sharer.displayName} also goes by "${nickname}", so that name alone won't tell them apart.` }
     : {};
 }
 

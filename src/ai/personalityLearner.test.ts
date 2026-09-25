@@ -192,7 +192,7 @@ describe('buildPersonalityPrompt (memory-quality rules)', () => {
     // Subjects key on the CURRENT display name (consistent with every getBySubject() lookup and all
     // existing prod memories); subject_user_id is the stable identity anchor across name changes.
     expect(prompt).toContain("MUST be the person's CURRENT display name");
-    expect(prompt).toContain('(now: CurrentName)');
+    expect(prompt).toContain('the name their identities entry\n   below starts with (never the "formerly" name)');
     expect(prompt).toContain('"subject_user_id" MUST be their Discord ID');
     // The earlier canonical-name keying is gone — prod canonical names are stale first-seen usernames
     // ('gigacheese', 'chinkichanga'), and keying on them would split the memory keyspace.

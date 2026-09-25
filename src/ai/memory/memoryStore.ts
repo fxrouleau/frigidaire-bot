@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from '../../config';
+import { accountIdsFor, canonicalUserId } from '../../linkedAccounts';
 import { logger } from '../../logger';
 import type { EmbeddingProvider } from './embeddingProvider';
 import { blobToVector, dot, vectorToBlob } from './vectorMath';
@@ -168,15 +169,19 @@ type KeywordHits = { exact: Memory[]; partial: Memory[] };
  */
 export const NON_PERSON_SUBJECTS: ReadonlySet<string> = new Set(['server', 'bot', 'general', 'everyone', 'here']);
 
-/** Case-insensitive comparison key for names (display names are arbitrary Unicode, so no SQL NOCASE). */
+/**
+ * Comparison key for names: case-, accent- and spacing-insensitive ("Mariè" = "marie", "Big  Mike" =
+ * "big mike"). Display names are arbitrary Unicode, so this runs in JS rather than as a SQL collation.
+ */
 export function nameKey(name: string | null | undefined): string {
-  return (name ?? '').trim().toLowerCase();
+  return (name ?? '').normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 // The names a member goes by, strongest claim first: the current display name (what the group sees),
 // the Discord handle, the first-seen display name, the IRL name, then nicknames. Every name lookup
-// (memory tools, learner subjects, the startup stamp, summaries) walks these tiers in this order.
-const IDENTITY_NAME_TIERS: readonly ((identity: Identity) => (string | null | undefined)[])[] = [
+// (memory tools, learner subjects, the startup stamp, summaries) walks these tiers in this order;
+// src/ai/people.ts adds one weaker tier (the first word of an IRL name) for interactive lookups.
+export const IDENTITY_NAME_TIERS: readonly ((identity: Identity) => (string | null | undefined)[])[] = [
   (i) => [i.display_name],
   (i) => [i.username],
   (i) => [i.canonical_name],
@@ -209,11 +214,18 @@ export function matchIdentityByName(identities: Identity[], name: string): Ident
   return hits.length === 1 ? hits[0] : undefined;
 }
 
-/** Every member who goes by a name in ANY form, ignoring tier strength (the startup stamp's strict rule). */
-function everyoneGoingBy(identities: Identity[], name: string): Identity[] {
+/**
+ * The main account ids of every member who goes by a name in ANY form, ignoring tier strength (the
+ * startup stamp's strict rule). A side account (LINKED_ACCOUNTS) counts as its main account, so a name
+ * the main and the side account share is still one person.
+ */
+function everyoneGoingBy(identities: Identity[], name: string): string[] {
   const needle = nameKey(name);
   if (!needle) return [];
-  return identities.filter((i) => IDENTITY_NAME_TIERS.some((tier) => tier(i).some((n) => nameKey(n) === needle)));
+  const owners = identities.filter((i) =>
+    IDENTITY_NAME_TIERS.some((tier) => tier(i).some((n) => nameKey(n) === needle)),
+  );
+  return [...new Set(owners.map((i) => canonicalUserId(i.discord_user_id)))];
 }
 
 /**
@@ -701,17 +713,20 @@ export class MemoryStore {
   /**
    * A person's memories, matched by their stable Discord id OR any of their names (current display name,
    * first-seen name, aliases). Display names change and subject_user_id doesn't, but rows saved before
-   * the id column existed, and by remember_fact, only carry a name.
+   * the id column existed, and by remember_fact, only carry a name. The id counts for every account of
+   * the person (LINKED_ACCOUNTS): a row still stamped with a side account's id is theirs too. Callers
+   * build `person` with memoryKeyFor() (src/ai/people.ts), which collects every name.
    */
   getForPerson(person: { userId?: string; names: string[] }, limit = 20): Memory[] {
     const names = [...new Set(person.names.map((n) => n.trim()).filter((n) => n.length > 0))];
-    if (!person.userId && names.length === 0) return [];
+    const ids = person.userId ? accountIdsFor(person.userId) : [];
+    if (ids.length === 0 && names.length === 0) return [];
     return this.stmt(
       `SELECT * FROM memories
        WHERE active = 1
-         AND (subject_user_id = ? OR subject IN (SELECT value FROM json_each(?)))
+         AND (subject_user_id IN (SELECT value FROM json_each(?)) OR subject IN (SELECT value FROM json_each(?)))
        ORDER BY updated_at DESC LIMIT ?`,
-    ).all(person.userId ?? null, JSON.stringify(names), limit) as Memory[];
+    ).all(JSON.stringify(ids), JSON.stringify(names), limit) as Memory[];
   }
 
   getByCategory(category: string, limit = 20): Memory[] {
@@ -838,24 +853,38 @@ export class MemoryStore {
   }
 
   /**
-   * Links name-only memories to the member they are about: every active memory without a
-   * subject_user_id whose subject is a name exactly one member goes by — display name, Discord handle,
-   * first-seen name, IRL name or nickname, case-insensitively — gets that member's id. (Real case: the
-   * learner filed memories under "cigalefourmi", which is a member's handle, not his display name.)
+   * Links memories to the member they are about, in two idempotent steps:
    *
-   * Stricter than interactive lookups (findIdentitiesByName), which let a display name outrank another
-   * member's nickname: these rows are old and their subject was whatever the name meant back then (a
-   * member's first-seen name may be someone else's display name today), and a wrong id is a silent,
-   * permanent misfiling. So a name that ANY two members go by, in any form, is ambiguous and left
-   * alone, as are 'server'/'bot'/'general' and names nobody has.
+   * 1. Rows stamped with a linked side account's id (LINKED_ACCOUNTS) move to the main account's id,
+   *    so one person's memories are keyed on one id (and dedup together in compact()).
+   * 2. Every active memory without a subject_user_id whose subject is a name exactly one member goes by
+   *    — display name, Discord handle, first-seen name, IRL name or nickname, case-insensitively, on
+   *    any of their accounts — gets that member's MAIN id. (Real case: the learner filed memories under
+   *    "cigalefourmi", which is a member's handle, not his display name.)
    *
-   * Idempotent (it only ever fills NULLs) and cheap, so it simply runs at every startup: rows saved
-   * under a name before the id column existed, by the old remember_fact, or under a name the member
-   * only later became known by, become reachable by id (getForPerson) and dedup with the person's
-   * other rows in compact(). Only subject_user_id changes: the FTS index does not cover it, and
-   * updated_at is deliberately untouched because the TTL sweep measures on it.
+   * Step 2 is stricter than interactive lookups (src/ai/people.ts), which let a display name outrank
+   * another member's nickname: these rows are old and their subject was whatever the name meant back
+   * then (a member's first-seen name may be someone else's display name today), and a wrong id is a
+   * silent, permanent misfiling. So a name that ANY two people go by, in any form, is ambiguous and left
+   * alone, as are 'server'/'bot'/'general' and names nobody has. A name a member's main and side
+   * accounts share is one person, not an ambiguity.
+   *
+   * Cheap, so it simply runs at every startup, BEFORE compact(): rows saved under a name before the id
+   * column existed, by the old remember_fact, or under a name the member only later became known by,
+   * become reachable by id (getForPerson) and dedup with the person's other rows on the same start.
+   * Only subject_user_id changes: the FTS index does not cover it, and updated_at is deliberately
+   * untouched because the TTL sweep measures on it.
    */
-  stampSubjectUserIds(): { stamped: number; names: number; ambiguous: number } {
+  stampSubjectUserIds(): { stamped: number; relinked: number; names: number; ambiguous: number } {
+    const relinked = this.runInTransaction(() => {
+      let changed = 0;
+      const relink = this.stmt('UPDATE memories SET subject_user_id = ? WHERE subject_user_id = ?');
+      for (const [sideId, mainId] of config.server.linkedAccounts) {
+        changed += relink.run(mainId, sideId).changes;
+      }
+      return changed;
+    });
+
     const identities = this.getAllIdentities().filter((i) => i.active !== 0);
     const subjects = this.stmt(
       `SELECT DISTINCT subject FROM memories
@@ -867,9 +896,9 @@ export class MemoryStore {
     for (const { subject } of subjects) {
       const key = nameKey(subject);
       if (!key || NON_PERSON_SUBJECTS.has(key)) continue;
-      const hits = everyoneGoingBy(identities, subject);
-      if (hits.length > 1) ambiguous++;
-      if (hits.length === 1) assignments.push({ subject, userId: hits[0].discord_user_id });
+      const owners = everyoneGoingBy(identities, subject);
+      if (owners.length > 1) ambiguous++;
+      if (owners.length === 1) assignments.push({ subject, userId: owners[0] });
     }
 
     const stamped = this.runInTransaction(() => {
@@ -883,10 +912,11 @@ export class MemoryStore {
       return changed;
     });
 
+    const relinkedPart = relinked > 0 ? `, moved ${relinked} from side accounts to their main account` : '';
     logger.info(
-      `Subject-id stamp: linked ${stamped} memories under ${assignments.length} names to member ids (${ambiguous} ambiguous names skipped)`,
+      `Subject-id stamp: linked ${stamped} memories under ${assignments.length} names to member ids (${ambiguous} ambiguous names skipped)${relinkedPart}`,
     );
-    return { stamped, names: assignments.length, ambiguous };
+    return { stamped, relinked, names: assignments.length, ambiguous };
   }
 
   /**

@@ -9,6 +9,7 @@ import type OpenAI from 'openai';
 import { getMemoryStore } from '../ai/memory';
 import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { getOpenRouterClient } from '../ai/openRouterClient';
+import { memoryKeyFor } from '../ai/people';
 import { featureRequestOptions } from '../ai/usage';
 import { easternParts } from '../ai/utils';
 import { config } from '../config';
@@ -195,13 +196,7 @@ export class BirthdayAnnouncer {
       const identity = this.safeIdentity(userId);
       const name = member?.displayName ?? identity?.display_name ?? (await this.lookupUserName(userId));
       const age = birthday.year ? year - birthday.year : undefined;
-      const memories = this.memoriesFor(userId, [
-        name,
-        identity?.display_name,
-        identity?.canonical_name,
-        identity?.irl_name,
-        ...(identity?.aliases ?? []),
-      ]);
+      const memories = this.memoriesFor(userId, name);
       const botName = this.client.user?.displayName ?? 'Frigidaire';
 
       let written: string | undefined;
@@ -274,10 +269,12 @@ export class BirthdayAnnouncer {
     }
   }
 
-  private memoriesFor(userId: string, names: Array<string | null | undefined>): string[] {
+  /** Their memories by id and every name any of their accounts goes by (display, handle, first-seen, IRL, nicknames). */
+  private memoriesFor(userId: string, liveName: string): string[] {
     try {
-      return getMemoryStore()
-        .getForPerson({ userId, names: names.filter((n): n is string => typeof n === 'string') }, 20)
+      const store = getMemoryStore();
+      return store
+        .getForPerson(memoryKeyFor(store, userId, [liveName]), 20)
         .filter((m) => !EXCLUDED_MEMORY_CATEGORIES.has(m.category))
         .slice(0, MEMORY_CONTEXT_LIMIT)
         .map((m) => m.content);

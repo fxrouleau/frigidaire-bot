@@ -4,10 +4,13 @@
 // in guild text and announcement channels and their threads. Attribution goes through
 // attributeMessage(): link-fix and regret relays count as the member they were posted for, other bots
 // and other integrations' webhooks are skipped, and the bot's own messages are kept as source 'bot'
-// (so "what did you say about X" works) but never count as a member's message in stats.
+// (so "what did you say about X" works) but never count as a member's message in stats. author_id is
+// always the member's MAIN account: a linked side account's messages (LINKED_ACCOUNTS) are stored under
+// the main id (the raw account id is not kept), so stats, search and Wrapped count one person.
 import { ChannelType, type Message, MessageType, type PartialMessage } from 'discord.js';
 import { getCachedTranscript } from '../ai/media';
 import { config } from '../config';
+import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
 import { attributeMessage, getRelay, getRelays } from '../relay';
 import {
@@ -302,7 +305,8 @@ export function reconcileRelays(
   for (const relay of relays.values()) {
     if (
       store.setRelayInfo(relay.messageId, {
-        authorId: relay.authorId,
+        // The registry keeps the account the original came from; the archive keys on the person.
+        authorId: canonicalUserId(relay.authorId),
         authorName: relay.authorName,
         relayKind: relay.kind,
       })

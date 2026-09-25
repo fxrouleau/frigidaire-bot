@@ -11,7 +11,6 @@ import {
   invokerName,
   liveDisplayName,
   mediaAttachments,
-  personNames,
   readableText,
   resolveTargetAuthor,
   transcriptOf,
@@ -189,26 +188,22 @@ describe('resolveTargetAuthor', () => {
       await resolveTargetAuthor(createFakeTargetMessage({ webhookId: 'hook-x', applicationId: 'someone-else' }).message),
     ).toBeUndefined();
   });
-});
 
-describe('personNames', () => {
-  it("collects every name a person's memories may be filed under, without blanks or duplicates", () => {
-    store.upsertIdentity('user-7', 'Jay');
-    store.upsertIdentity('user-7', 'Jason');
-    store.updateIdentityMeta('user-7', { irl_name: 'Jason M', aliases_add: ['JJ', 'Jason'] });
-    const identity = store.getIdentityById('user-7');
-    expect(personNames(identity, 'Jason (live)', '  ', undefined, 'cigalefourmi')).toEqual([
-      'Jason (live)',
-      'cigalefourmi',
-      'Jason',
-      'Jay',
-      'Jason M',
-      'JJ',
-    ]);
-  });
-
-  it('works for someone the bot has no identity for', () => {
-    expect(personNames(undefined, 'newguy', 'newguy', null)).toEqual(['newguy']);
+  it("credits a linked side account's message to the main account, under the main account's live name", async () => {
+    vi.stubEnv('LINKED_ACCOUNTS', '100000000000000002:100000000000000001');
+    try {
+      const { guild, recorders } = createFakeGuild({ members: { '100000000000000001': 'Tony' } });
+      const { message } = createFakeTargetMessage({
+        authorId: '100000000000000002',
+        authorDisplayName: 'Ptoughneigh',
+        authorUsername: 'triceclone',
+        guild,
+      });
+      expect(await resolveTargetAuthor(message)).toEqual({ id: '100000000000000001', name: 'Tony', username: 'triceclone' });
+      expect(recorders.membersFetch.calls).toEqual([['100000000000000001']]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

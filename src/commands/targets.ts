@@ -9,7 +9,6 @@ import {
   MessageFlags,
   escapeMarkdown,
 } from 'discord.js';
-import type { Identity } from '../ai/memory/memoryStore';
 import { logger } from '../logger';
 import { attributeMessage } from '../relay';
 import { LINES } from './respond';
@@ -43,7 +42,10 @@ export async function liveDisplayName(guild: Guild | null, userId: string): Prom
 }
 
 export type TargetAuthor = {
-  /** Discord user id of the real author; undefined for an old relay only known by name. */
+  /**
+   * The real author's MAIN account id (a linked side account's message counts as its member);
+   * undefined for an old relay only known by name.
+   */
   id?: string;
   /** Their current server display name. */
   name: string;
@@ -62,23 +64,6 @@ export async function resolveTargetAuthor(message: Message): Promise<TargetAutho
   const name = await liveDisplayName(message.guild, attribution.authorId);
   const username = attribution.source === 'human' ? message.author.username : undefined;
   return { id: attribution.authorId, name: name ?? attribution.authorName, ...(username ? { username } : {}) };
-}
-
-/**
- * Every name a person's memories may be filed under, for getForPerson(): rows saved before the
- * subject_user_id column existed (and some remember_fact rows) carry only a name, and that name can be an
- * old display name, the first-seen name, an IRL name, an alias or the Discord handle. Blank and duplicate
- * names are dropped.
- */
-export function personNames(identity: Identity | undefined, ...known: Array<string | null | undefined>): string[] {
-  const names = [
-    ...known,
-    identity?.display_name,
-    identity?.canonical_name,
-    identity?.irl_name,
-    ...(identity?.aliases ?? []),
-  ];
-  return [...new Set(names.map((name) => name?.trim() ?? '').filter((name) => name.length > 0))];
 }
 
 /** The display name to credit the invoker with in posts (markdown-escaped: it goes straight into message text). */

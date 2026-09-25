@@ -3,9 +3,9 @@
 // Discord id or any of their known names, since older rows only carry a name.
 import { type APIInteractionGuildMember, ApplicationCommandType, type GuildMember, escapeMarkdown } from 'discord.js';
 import { type Memory, SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
+import { currentName, memoryKeyFor } from '../ai/people';
 import { formatRelativeAge } from '../ai/utils';
 import { DISCORD_MESSAGE_LIMIT, answerPrivately } from './respond';
-import { personNames } from './targets';
 import type { UserCommand } from './types';
 
 export const MAX_LISTED_MEMORIES = 25;
@@ -20,13 +20,15 @@ export const whatDoesFridgeKnow: UserCommand = {
   async run(interaction, deps) {
     const user = interaction.targetUser;
     const store = deps.memoryStore();
-    const identity = store.getIdentityById(user.id);
-    const name = memberName(interaction.targetMember) ?? identity?.display_name ?? user.displayName;
+    const liveName = memberName(interaction.targetMember);
+    const lookup = memoryKeyFor(store, user.id, [liveName, user.displayName, user.username]);
+    // A linked side account (LINKED_ACCOUNTS) shows its member: the main account's name and memories.
+    const name =
+      lookup.userId === user.id
+        ? (liveName ?? store.getIdentityById(user.id)?.display_name ?? user.displayName)
+        : currentName(lookup.userId, liveName ?? user.displayName, store);
 
-    const names = personNames(identity, name, user.displayName, user.username);
-    const memories = store
-      .getForPerson({ userId: user.id, names }, FETCH_LIMIT)
-      .filter((m) => !SELF_DIAGNOSIS.has(m.category));
+    const memories = store.getForPerson(lookup, FETCH_LIMIT).filter((m) => !SELF_DIAGNOSIS.has(m.category));
 
     if (memories.length === 0) {
       await answerPrivately(interaction, `I've got nothing on ${escapeMarkdown(name)} yet`);
