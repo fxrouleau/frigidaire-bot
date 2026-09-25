@@ -323,6 +323,37 @@ describe('reply context', () => {
     expect(textOf(messages.at(-2))).toMatch(/^Current time:/);
   });
 
+  it('runs the paid reference enrichers on an in-window replied-to message and adds only what is new', async () => {
+    // History rendering is cache-only; replying to a message is what makes its paid enrichment worth it.
+    const enricher = (cachedInHistory: boolean): ContentEnricher => ({
+      name: 'voice',
+      enrich: async (msg, role) => {
+        if (msg.id !== '4020') return [];
+        if (role === 'reference' || cachedInHistory) return [{ type: 'text', text: '[voice transcript: meet at 8]' }];
+        return [];
+      },
+    });
+    const ping = (log: Message[]) =>
+      createFakeMessage({
+        ...BASE,
+        messageId: '5000',
+        content: 'what did he say',
+        referencedMessageId: '4020',
+        channelMessages: log,
+      });
+
+    const fresh = new FakeProvider([textResponse('ok')]);
+    await makeAgent(fresh, { enrichers: [enricher(false)] }).handleMention(ping(oldThreadLog()).message);
+    const extra = fresh.calls[0].messages.at(-2);
+    expect(textOf(extra)).toContain(`REPLY CONTEXT — more on the message being replied to (Bob, ${jumpLink('4020')})`);
+    expect(textOf(extra)).toContain('[voice transcript: meet at 8]');
+
+    const cached = new FakeProvider([textResponse('ok')]);
+    await makeAgent(cached, { enrichers: [enricher(true)] }).handleMention(ping(oldThreadLog()).message);
+    expect(countText(cached.calls[0].messages, '[voice transcript: meet at 8]')).toBe(1);
+    expect(indexOfText(cached.calls[0].messages, 'REPLY CONTEXT — more on')).toBe(-1);
+  });
+
   it('degrades to a note when the replied-to message cannot be fetched', async () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => {});
     const provider = new FakeProvider([textResponse('ok')]);

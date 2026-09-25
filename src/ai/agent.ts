@@ -315,8 +315,7 @@ export class AgentOrchestrator {
         state = { entries: initial.entries, injectedMemoryIds: initial.injectedMemoryIds, timestamp: Date.now() };
       }
 
-      const knownIds = collectMessageIds([...state.entries, ...intervening]);
-      const replyContext = await this.buildReplyContext(message, knownIds);
+      const replyContext = await this.buildReplyContext(message, [...state.entries, ...intervening]);
       const userEntry = await this.buildUserEntry(message, 'current', {
         attribution: attributeMessage(message),
         replyHeader: replyContext.header,
@@ -713,8 +712,9 @@ export class AgentOrchestrator {
    * jump link, plus the replied-to message's images and enrichments. Every failure degrades to less
    * context; nothing here can fail the turn.
    */
-  private async buildReplyContext(message: Message, knownIds: Set<string>): Promise<ReplyContext> {
+  private async buildReplyContext(message: Message, window: ConversationEntry[]): Promise<ReplyContext> {
     const channelId = message.channel.id;
+    const knownIds = collectMessageIds(window);
     const referencedId = replyParentId(message, channelId);
     if (!referencedId) return {};
 
@@ -727,7 +727,7 @@ export class AgentOrchestrator {
     }
 
     const header = `(replying to ${this.contextAuthorLabel(referenced)} — ${referenced.url})`;
-    if (knownIds.has(referenced.id)) return { header };
+    if (knownIds.has(referenced.id)) return { header, entry: await this.enrichKnownReference(referenced, window) };
 
     const chain: Message[] = [referenced];
     let cursor = referenced;
@@ -817,6 +817,33 @@ export class AgentOrchestrator {
         messageIds: renderedIds,
       },
     };
+  }
+
+  /**
+   * The replied-to message is already in the window, but it was rendered as history, where enrichers
+   * only read caches. Being replied to makes it worth paid work (a voice note's transcript, a link's
+   * preview), so the 'reference' enrichers run now, and whatever they add that the window doesn't
+   * already show goes in a short entry right before the current message.
+   */
+  private async enrichKnownReference(
+    referenced: Message,
+    window: ConversationEntry[],
+  ): Promise<ConversationEntry | undefined> {
+    const enriched = await runEnrichers(referenced, 'reference', this.enrichers);
+    if (enriched.length === 0) return undefined;
+
+    const key = (part: NormalizedContentPart) => (part.type === 'text' ? `text:${part.text}` : `image:${part.url}`);
+    const shown = new Set<string>();
+    for (const entry of window) {
+      if (entry.kind === 'message' && entry.messageIds?.includes(referenced.id)) {
+        for (const part of entry.content) shown.add(key(part));
+      }
+    }
+    const fresh = enriched.filter((part) => !shown.has(key(part)));
+    if (fresh.length === 0) return undefined;
+
+    const label = `REPLY CONTEXT — more on the message being replied to (${this.contextAuthorLabel(referenced)}, ${referenced.url}), which is already in the history above:`;
+    return { kind: 'message', role: 'user', content: [{ type: 'text', text: label }, ...fresh] };
   }
 
   /** Who wrote a message, for context lines: the real author of a relay, "<bot> (you)", or "<name> [bot]". */
