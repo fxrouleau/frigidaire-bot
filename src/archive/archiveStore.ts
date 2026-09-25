@@ -326,7 +326,8 @@ const SCHEMA = `
 // Upsert. On conflict only the mutable parts change, and only when something actually differs: an
 // unchanged re-ingest (gap-fill overlap, embed-less update) touches nothing, so the FTS trigger doesn't
 // churn. A newer edited_at counts one edit. Deleted rows are never resurrected. Reactions are replaced
-// wholesale: every source of a full message (API fetch, the discord.js cache) carries Discord's counts.
+// wholesale, so callers pass Discord's counts (a new message, an API fetch) or the stored ones (a gateway
+// edit, which carries no reactions; see archiveMessageUpdate).
 const UPSERT_SQL = `
   INSERT INTO messages (
     id, guild_id, channel_id, parent_channel_id, author_id, author_name, source, relay_kind,

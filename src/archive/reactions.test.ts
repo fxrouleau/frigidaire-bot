@@ -52,11 +52,8 @@ function reactionEvent(
       { emoji: { id: r.id ?? null, name: r.name, animated: r.animated ?? false }, count: r.count, me: r.me ?? false },
     ]),
   );
-  return {
-    emoji,
-    message: { id: messageId, partial: opts.partial, reactions: { cache } },
-    client: { user: { id: BOT_USER_ID } },
-  };
+  const message = { id: messageId, partial: opts.partial, reactions: { cache } };
+  return { emoji, message, client: { user: { id: BOT_USER_ID } } };
 }
 
 describe('reactionsOf / ingest', () => {
@@ -122,7 +119,7 @@ describe('reaction events', () => {
     return input.id;
   }
 
-  it('copies the full reaction cache of a cached (non-partial) message', () => {
+  it('applies a delta for a cached (non-partial) message too', () => {
     const id = seed();
     const changed = archiveReactionChange(
       reactionEvent(id, { id: KEKW, name: 'kekw' }, {
@@ -139,6 +136,29 @@ describe('reaction events', () => {
     expect(store.getReactions(id)).toEqual([
       { id: KEKW, name: 'kekw', count: 1 },
       { id: null, name: '😂', count: 2 },
+    ]);
+  });
+
+  it("keeps an older message's archived counts when discord.js rebuilt it from a gateway payload", () => {
+    // A reply to an old message (or an edit/pin of it) makes discord.js cache it as a FULL message with an
+    // empty reaction cache: gateway payloads carry no reactions. The next reaction then shows up alone,
+    // counted from zero; copying that cache used to turn 😂×7 + kekw×3 into 😂×1.
+    const id = seed([
+      { id: null, name: '😂', count: 7 },
+      { id: KEKW, name: 'kekw', count: 3 },
+    ]);
+    const add = reactionEvent(id, { id: null, name: '😂' }, { partial: false, cache: [{ name: '😂', count: 1 }] });
+    expect(archiveReactionChange(add, MEMBER, 1)).toBe(true);
+    expect(store.getReactions(id)).toEqual([
+      { id: KEKW, name: 'kekw', count: 3 },
+      { id: null, name: '😂', count: 8 },
+    ]);
+    // The same member takes it back: discord.js drops the emoji from that cache entirely.
+    const remove = reactionEvent(id, { id: null, name: '😂' }, { partial: false, cache: [] });
+    expect(archiveReactionChange(remove, MEMBER, -1)).toBe(true);
+    expect(store.getReactions(id)).toEqual([
+      { id: KEKW, name: 'kekw', count: 3 },
+      { id: null, name: '😂', count: 7 },
     ]);
   });
 

@@ -226,28 +226,37 @@ export function archiveNewMessage(message: Message, store: ArchiveStore = getArc
 
 /**
  * Applies an edit (MessageUpdate): new content, a newer edited timestamp (counted as one edit), late
- * link previews (Discord adds embeds after the fact), and the current reactions. Only messages already in the archive are updated:
+ * link previews (Discord adds embeds after the fact). Only messages already in the archive are updated:
  * inserting an old message here would break the "archive is contiguous from its oldest message"
  * assumption the backfill and gap fill rely on — the backfill picks those messages up anyway.
+ *
+ * Reactions: a gateway update carries none, and discord.js rebuilds a message it had not cached (posted
+ * before the last restart) from that payload as a full message with an EMPTY reaction cache. So the
+ * archived counts (kept current by the reaction events) stay as they are, unless the message had to be
+ * fetched from the API, whose answer has Discord's real counts.
  */
 export async function archiveMessageUpdate(
   message: Message | PartialMessage,
   store: ArchiveStore = getArchiveStore(),
 ): Promise<boolean> {
   try {
-    if (!store.getMessage(message.id)) return false;
-    let full: Message = message as Message;
+    const archived = store.getMessage(message.id);
+    if (!archived) return false;
     if (message.partial) {
+      let fetched: Message;
       try {
-        full = await message.fetch();
+        fetched = await message.fetch();
       } catch (error) {
         logger.debug(`archive: could not fetch partial message ${message.id} for an edit:`, error);
         return false;
       }
+      const input = toArchiveInput(fetched);
+      return input ? store.upsertMessage(input) : false;
     }
-    const input = toArchiveInput(full);
+    const input = toArchiveInput(message);
     if (!input) return false;
-    return store.upsertMessage(input);
+    // No await since getMessage(): `archived.reactions` are still the stored ones.
+    return store.upsertMessage({ ...input, reactions: archived.reactions });
   } catch (error) {
     logger.warn(`archive: failed to apply an edit to message ${message.id}:`, error);
     return false;
