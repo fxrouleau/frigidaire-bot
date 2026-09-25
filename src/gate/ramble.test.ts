@@ -184,6 +184,16 @@ describe('RambleWatcher decision and nudge', () => {
     expect(h.check.mock.calls[0][0].transcript[0]).toEqual({ author: 'Frigidaire', text: 'bro', self: true });
   });
 
+  it('shows the model readable mentions and emojis instead of raw Discord markup', async () => {
+    const h = harness({ minMessages: 1, minChars: 10 });
+    await h.watcher.observe(
+      post(`<@123456789012345678> listen <:kekw:123456789012345679> ${LONG}`, T0, {
+        mentionedUsers: [{ id: '123456789012345678', displayName: 'Kev' }],
+      }).message,
+    );
+    expect(h.check.mock.calls[0][0].transcript[0].text).toBe(`@Kev listen :kekw: ${LONG}`);
+  });
+
   it('stays quiet when the model says it is a conversation, and asks again only after two more messages', async () => {
     const h = harness({}, 0.3);
     expect((await rant(h, 4)).outcome).toBe('not_ramble');

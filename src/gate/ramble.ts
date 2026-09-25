@@ -12,7 +12,7 @@ import { type DecisionsOptions, type NoulQuestion, askNoul } from '../ai/decisio
 import { config } from '../config';
 import { logger } from '../logger';
 import { getBotDb } from '../storage/botDb';
-import { stripMarkup, truncate } from './text';
+import { readableMarkup, stripMarkup, truncate } from './text';
 
 // In character: a friend telling another friend to take it elsewhere. `{channel}` becomes the channel link.
 export const RAMBLE_LINES: readonly string[] = [
@@ -181,6 +181,16 @@ export function createBotDbRambleCooldowns(): RambleCooldowns {
 
 // ---- The watcher ----
 
+function mentionName(message: Message, id: string, botId: string): string | undefined {
+  if (id === botId) return message.client.user.displayName || 'Frigidaire';
+  return (
+    message.mentions?.members?.get(id)?.displayName ||
+    message.mentions?.users?.get(id)?.displayName ||
+    message.mentions?.users?.get(id)?.username ||
+    undefined
+  );
+}
+
 type Buffered = {
   authorId: string;
   authorName: string;
@@ -252,7 +262,8 @@ export class RambleWatcher {
     buffer.push({
       authorId: message.author.id,
       authorName: message.member?.displayName || message.author.displayName || message.author.username,
-      text: content,
+      // What the decision model reads: `@Name` and `:emoji:` rather than raw ids.
+      text: readableMarkup(content, (id) => mentionName(message, id, botId)),
       chars: stripMarkup(content).length,
       at: message.createdTimestamp,
       self,
