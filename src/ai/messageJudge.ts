@@ -9,6 +9,7 @@
 //
 // The decisions call itself (timeout, retry, ZDR, usage) is shared: see decisions.ts.
 import type OpenAI from 'openai';
+import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 import { config } from '../config';
 import { logger } from '../logger';
 import { askNouls, isDecisionModel } from './decisions';
@@ -39,6 +40,21 @@ export type EdgyJudgeOptions = {
 };
 
 const DEFAULT_THRESHOLD = 0.6;
+// The chat fallback asks for the lowest reasoning effort ('low' is the floor every reasoning family on
+// OpenRouter honors; models without reasoning ignore it): the default chat model (GLM-5.3-Flash) reasons
+// at 'max' by default. Reasoning counts toward max_tokens on most providers, so the budget leaves room
+// for that pass before the few tokens of JSON; a 20-token cap came back reasoning-only, i.e. no verdict.
+const CHAT_REASONING_EFFORT = 'low';
+const CHAT_MAX_TOKENS = 1500;
+
+type ChatJudgeBody = {
+  model: string;
+  max_tokens: number;
+  temperature: number;
+  messages: Array<{ role: 'system'; content: string } | { role: 'user'; content: OpenAI.ChatCompletionContentPart[] }>;
+  reasoning: { effort: string };
+  provider: { zdr: true };
+};
 
 const EDGY_CRITERIA = {
   true: 'Crude, dark, sexual, NSFW, insulting, slurs, politically or religiously charged, provocative, targeted mockery, or anything the author would plausibly delete out of regret or fear of consequences.',
@@ -104,28 +120,35 @@ async function judgeWithChat(model: string, input: JudgeInput, opts: EdgyJudgeOp
     ...input.imageUrls.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
   ];
 
-  try {
-    const response = await client.chat.completions.create(
+  const body: ChatJudgeBody = {
+    model,
+    max_tokens: CHAT_MAX_TOKENS,
+    temperature: 0,
+    messages: [
       {
-        model,
-        max_tokens: 20,
-        temperature: 0,
-        // @ts-expect-error OpenRouter-specific field
-        provider: { zdr: true },
-        messages: [
-          {
-            role: 'system',
-            content: `You judge messages from a private Discord server between close friends. Decide whether a message is "edgy": ${EDGY_CRITERIA.true} Not edgy: ${EDGY_CRITERIA.false} Answer with JSON only: {"edgy": true} or {"edgy": false}.`,
-          },
-          { role: 'user', content },
-        ],
+        role: 'system',
+        content: `You judge messages from a private Discord server between close friends. Decide whether a message is "edgy": ${EDGY_CRITERIA.true} Not edgy: ${EDGY_CRITERIA.false} Answer with JSON only: {"edgy": true} or {"edgy": false}.`,
       },
+      { role: 'user', content },
+    ],
+    reasoning: { effort: CHAT_REASONING_EFFORT },
+    // Members' messages: zero data retention is non-negotiable.
+    provider: { zdr: true },
+  };
+
+  try {
+    // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
+    const response = await client.chat.completions.create(
+      body as unknown as ChatCompletionCreateParamsNonStreaming,
       featureRequestOptions('judge'),
     );
-    const text = response.choices?.[0]?.message?.content ?? '';
+    const choice = response.choices?.[0];
+    const text = choice?.message?.content ?? '';
     const match = text.match(/"edgy"\s*:\s*(true|false)/i);
     if (!match) {
-      logger.warn(`messageJudge: ${model} returned no verdict: ${text.slice(0, 120)}`);
+      logger.warn(
+        `messageJudge: ${model} returned no verdict (finish=${choice?.finish_reason ?? 'none'}): ${text.slice(0, 120)}`,
+      );
       return undefined;
     }
     const verdict = match[1].toLowerCase() === 'true';

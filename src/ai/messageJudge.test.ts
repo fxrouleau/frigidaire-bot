@@ -180,6 +180,45 @@ describe('createEdgyJudge with a chat model', () => {
     expect(headers).toEqual(['judge']);
   });
 
+  it('leaves a reasoning model room to think before the verdict, at the lowest effort', async () => {
+    // Like GLM-5.3-Flash at its default 'max' effort: reasoning counts toward max_tokens, and a tight cap
+    // comes back cut off mid-thought with no content at all.
+    const requests: Array<{ max_tokens: number; reasoning?: { effort: string } }> = [];
+    const client = new OpenAI({
+      apiKey: 'test-key',
+      baseURL: 'https://openrouter.ai/api/v1',
+      maxRetries: 0,
+      fetch: (async (_url: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { max_tokens: number; reasoning?: { effort: string } };
+        requests.push(body);
+        const reasoningTokens = body.reasoning?.effort === 'low' ? 300 : 4000;
+        const starved = body.max_tokens <= reasoningTokens;
+        return new Response(
+          JSON.stringify({
+            id: 'x',
+            object: 'chat.completion',
+            created: 0,
+            model: 'z-ai/glm-5.3-flash',
+            choices: [
+              {
+                index: 0,
+                message: { role: 'assistant', content: starved ? '' : '{"edgy": true}', reasoning: 'Let me think…', refusal: null },
+                finish_reason: starved ? 'length' : 'stop',
+                logprobs: null,
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }) as unknown as typeof globalThis.fetch,
+    });
+    const judge = createEdgyJudge({ model: 'typesafe/jev-1.13', fallbackModel: 'z-ai/glm-5.3-flash', client });
+
+    expect(await judge(IMAGE_ONLY_INPUT)).toBe(true);
+    expect(requests[0].reasoning).toEqual({ effort: 'low' });
+    expect(requests[0].max_tokens).toBeGreaterThanOrEqual(1000);
+  });
+
   it('returns undefined when the model does not answer the question', async () => {
     const { client } = chatClientSaying('I would rather not say.');
     const judge = createEdgyJudge({ model: 'some/chat-model', client });
