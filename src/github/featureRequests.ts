@@ -82,8 +82,9 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_feature_requests_user_time ON feature_requests(user_id, created_at);
 `;
 
-// One row per +1 comment: 'pending' while it is being posted, 'posted' after. Also answers "did this
-// member already back that issue?", so a member cannot +1 the same request twice.
+// One row per +1 comment: 'pending' while it is being posted, 'posted' after, 'uncertain' when the post
+// timed out (it may have landed). Also answers "did this member already back that issue?", so a member
+// cannot +1 the same request twice.
 const COMMENTS_SCHEMA = `
   CREATE TABLE IF NOT EXISTS feature_request_comments (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -349,10 +350,12 @@ export class FeatureRequestService {
     const reservation = this.reserveComment(requester.userId, issue.number);
     if (reservation.kind !== 'reserved') return reservation;
 
-    let posted = false;
+    // Kept unless GitHub certainly rejected the comment. A timeout keeps it too: the comment may have
+    // landed, and a retry then answers "already backed" instead of posting a second +1 as the owner.
+    let keepRow = false;
     try {
       const comment = await this.client.createComment(issue.number, renderSupportComment(requester, details));
-      posted = true;
+      keepRow = true;
       try {
         this.botDb
           .stmt("UPDATE feature_request_comments SET status = 'posted', comment_url = ? WHERE id = ?")
@@ -362,10 +365,14 @@ export class FeatureRequestService {
       }
       return { kind: 'commented', commentUrl: comment.htmlUrl };
     } catch (error) {
-      if (error instanceof GitHubApiError) return { kind: 'failed', error };
-      throw error;
+      if (!(error instanceof GitHubApiError)) throw error;
+      if (error.kind === 'timeout') {
+        keepRow = true;
+        this.botDb.stmt("UPDATE feature_request_comments SET status = 'uncertain' WHERE id = ?").run(reservation.id);
+      }
+      return { kind: 'failed', error };
     } finally {
-      if (!posted) this.botDb.stmt('DELETE FROM feature_request_comments WHERE id = ?').run(reservation.id);
+      if (!keepRow) this.botDb.stmt('DELETE FROM feature_request_comments WHERE id = ?').run(reservation.id);
     }
   }
 

@@ -346,6 +346,18 @@ describe('FeatureRequestService: duplicates of an open issue get a +1 comment', 
     expect(await service.submit(back, requester)).toMatchObject({ support: { kind: 'commented' } });
   });
 
+  it('keeps a timed-out +1 counted, since it may have landed: a retry must not post a second one', async () => {
+    const fake = createFakeGitHub({
+      issues: [{ number: 3, title: 'Voting', labels: [] }],
+      failures: [{ path: '/comments', timeout: true, times: 1 }],
+    });
+    const { service, commentRows } = setup({ fake });
+    const back = request('Add polls', { decision: { kind: 'duplicate_of', issueNumber: 3 } });
+    expect(await service.submit(back, requester)).toMatchObject({ support: { kind: 'failed', error: { kind: 'timeout' } } });
+    expect(commentRows()).toEqual([{ user_id: 'user-1', repo: 'owner/repo', issue_number: 3, status: 'uncertain' }]);
+    expect(await service.submit(back, requester)).toMatchObject({ support: { kind: 'already_backed', ownRequest: false } });
+  });
+
   it('says so when the named issue does not exist or is a pull request', async () => {
     const { fake, service } = setup({ issues: [{ number: 4, title: 'Fix', labels: [], isPullRequest: true }] });
     expect(await service.submit(request('Add polls', { decision: { kind: 'duplicate_of', issueNumber: 99 } }), requester)).toEqual({
