@@ -212,6 +212,17 @@ describe('AudioTranscriber', () => {
     expect((await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip', { durationSecs: 600 })).status).toBe('ok');
     expect(transcoder.calls.probe).toEqual([]);
     expect(requests).toHaveLength(1);
+    // ...and applies the length guards to it, as it would to a probed one.
+    expect(await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip', { durationSecs: 0.4 })).toEqual({
+      status: 'ok',
+      text: '',
+      cached: false,
+    });
+    expect(await transcriber.transcribeBuffer(TRANSCODED_MP3, 'mp3', 'clip', { durationSecs: 900 })).toEqual({
+      status: 'too_long',
+      durationSecs: 900,
+    });
+    expect(requests).toHaveLength(1);
   });
 
   it('uses the source length the transcoder reports for transcoded files', async () => {

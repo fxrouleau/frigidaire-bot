@@ -187,6 +187,11 @@ export class AudioTranscriber {
     label: string,
     opts: { durationSecs?: number } = {},
   ): Promise<TranscriptionOutcome> {
+    // A known length gets the guards a probe would have applied (transcribeData skips the probe then).
+    if (opts.durationSecs !== undefined && opts.durationSecs > this.maxSeconds()) {
+      return { status: 'too_long', durationSecs: opts.durationSecs };
+    }
+    if (tooShort(opts.durationSecs)) return SILENT;
     const client = this.client();
     if (!client) return { status: 'unavailable' };
     const route = await this.route();
