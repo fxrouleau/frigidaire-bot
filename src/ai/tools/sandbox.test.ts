@@ -272,6 +272,17 @@ describe('run_code tool', () => {
     expect(diagnosis).toEqual(['run_code: sandbox unreachable (ECONNREFUSED)']);
   });
 
+  it('suggests one retry with reset_workspace when the sidecar fails to start a run', async () => {
+    const { fetch } = fakeFetch(() => jsonResponse(500, { error: 'could not start the run: Permission denied' }));
+    const tool = createRunCodeTool({ url: 'http://sandbox:8080', fetch });
+
+    const output = await tool.handler(makeCtx(), { language: 'python', code: 'print(1)' });
+
+    expect(output).toContain("isn't working right now, so nothing ran.");
+    expect(output).toContain('It reported: could not start the run: Permission denied.');
+    expect(output).toContain('retry once with reset_workspace: true');
+  });
+
   it('turns an HTTP timeout into an "unknown result" answer', async () => {
     const { fetch } = fakeFetch(() => Promise.reject(new DOMException('The operation timed out.', 'TimeoutError')));
     const tool = createRunCodeTool({ url: 'http://sandbox:8080', fetch });

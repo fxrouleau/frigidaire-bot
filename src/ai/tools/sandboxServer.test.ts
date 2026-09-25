@@ -265,6 +265,18 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     expect(after).toMatchObject({ ok: true, result: { stdout: 'still-fine\n' } });
   });
 
+  it('empties out/ even when a run left a read-only or unreadable directory in it', async () => {
+    // Only meaningful as a non-root user (as in CI and in the container): root ignores the permission bits.
+    await runInSandbox(
+      { language: 'bash', code: 'mkdir -p out/x/y && touch out/x/y/f && chmod 500 out/x/y && chmod 000 out/x', timeoutSeconds: 10 },
+      client(),
+    );
+
+    const next = await runInSandbox({ language: 'bash', code: 'ls -A out | wc -l', timeoutSeconds: 10 }, client());
+
+    expect(next).toMatchObject({ ok: true, result: { exit_code: 0, stdout: '0\n' } });
+  });
+
   it('wipes the whole workspace on reset_workspace, without following symlinks out of it', async () => {
     const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'sandbox-outside-')));
     writeFileSync(path.join(outside, 'keep.txt'), 'not the sandbox');

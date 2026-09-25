@@ -22,8 +22,7 @@ waiting queue; the container is sized for one run at a time.
 A run can't start runs of its own: /run refuses clients on this machine (loopback or the container's own
 addresses; the bot always connects from its own container), and a queued request whose client has hung up
 is dropped when its turn comes. Otherwise a run could POST its own code back before it is killed and keep
-itself going forever. The bearer token alone would not stop that: tini (PID 1) holds SANDBOX_TOKEN in its
-environment, which runs can read.
+itself going forever. The bearer token alone is not relied on for that: runs share this server's uid.
 
 Everything else in the workspace persists between runs on purpose (saved files, `pip install --user`,
 `npm install`), so one run can leave things behind for the next. What a run leaves behind must not change
@@ -99,10 +98,9 @@ LANGUAGES: dict[str, tuple[list[str], str]] = {
     'node': (['node', *NODE_FLAGS], 'main.js'),
 }
 
-# Environment variables a run may inherit from the server. Everything else (SANDBOX_TOKEN, and anything an
-# operator mistakenly passes in) stays out of the run's own environment. That is hygiene, not a seal: tini
-# (PID 1) runs as the same uid and a run can read its /proc/1/environ, so nothing here relies on the token
-# being unknown to runs (see is_local_client).
+# Environment variables a run may inherit from the server. Everything else (notably SANDBOX_TOKEN, and
+# anything an operator mistakenly passes in) never reaches user code; the server's own environment is
+# sealed by harden_self(). Nothing relies on the token staying unknown to runs, though (see is_local_client).
 PASSTHROUGH_ENV = (
     'PATH',
     'LANG',
@@ -270,11 +268,12 @@ def harden_self() -> None:
     """Linux-only protections for the server process itself (no-ops elsewhere).
 
     Runs execute as the same uid as this server (the container drops every capability, so there is no
-    second user to switch to). Non-dumpable keeps user code from reading this process's memory and from
-    ptrace-attaching to it (which would let a run tamper with the server itself). It does not keep
-    SANDBOX_TOKEN secret: tini, PID 1, has it too; see is_local_client for why that is fine. Subreaper makes
-    orphaned descendants of a run reparent here instead of to PID 1, which is what lets the post-run
-    sweep find processes that escaped the run's process group.
+    second user to switch to). Non-dumpable keeps user code from reading this process's memory or
+    /proc/<pid>/environ (where SANDBOX_TOKEN lives) and from ptrace-attaching to it. The container starts
+    this server as PID 1 (no init in front of it), which also makes it immune to a run's `kill -STOP` or
+    `kill -9`: the kernel never delivers those to a PID namespace's init from inside the namespace.
+    Subreaper makes orphaned descendants of a run reparent here (when the server is not PID 1, e.g. in
+    tests), which is what lets the post-run sweep find processes that escaped the run's process group.
     """
     if not sys.platform.startswith('linux'):
         return
@@ -424,14 +423,15 @@ class CappedReader(threading.Thread):
 
 
 def reset_out_dir(out_dir: str) -> None:
-    """Empties <workspace>/out/ (whatever the last run left there, even a symlink or a plain file)."""
+    """Empties <workspace>/out/ (whatever the last run left there, even a symlink, a plain file or a
+    read-only directory: a run must not be able to break every later one by `chmod 500 out/x`)."""
     try:
         info = os.lstat(out_dir)
     except FileNotFoundError:
         info = None
     if info is not None:
         if stat.S_ISDIR(info.st_mode):
-            shutil.rmtree(out_dir)
+            remove_tree(out_dir)
         else:
             os.unlink(out_dir)
     os.mkdir(out_dir, 0o755)
@@ -512,17 +512,31 @@ def _make_owner_writable(path: str) -> None:
             os.chmod(path, stat.S_IMODE(info.st_mode) | 0o700)
 
 
+def _make_tree_owner_writable(root: str) -> None:
+    """_make_owner_writable on `root` and every directory under it (symlinks are never followed).
+
+    A run may have left read-only or unreadable directories behind; it shares this server's uid, so the
+    owner bits can always be put back. os.walk descends only after the chmod, so unreadable ones are walked.
+    """
+    _make_owner_writable(root)
+    for dirpath, dirnames, _files in os.walk(root):
+        for name in dirnames:
+            _make_owner_writable(os.path.join(dirpath, name))
+
+
+def remove_tree(path: str) -> None:
+    """shutil.rmtree that also removes directories a run made read-only or unreadable."""
+    _make_tree_owner_writable(path)
+    shutil.rmtree(path)
+
+
 def wipe_workspace(workspace: str) -> int:
     """Deletes everything inside the workspace (not the directory itself: it is the mounted volume).
 
-    A run may have left read-only or unreadable directories behind; it shares this server's uid, so the owner
-    bits can always be put back first. Symlinks are removed, never followed. Returns how many top-level
-    entries were removed; raises OSError when something could not be.
+    Symlinks are removed, never followed. Returns how many top-level entries were removed; raises OSError
+    when something could not be.
     """
-    _make_owner_writable(workspace)
-    for dirpath, dirnames, _files in os.walk(workspace):
-        for name in dirnames:
-            _make_owner_writable(os.path.join(dirpath, name))
+    _make_tree_owner_writable(workspace)
     removed = 0
     with os.scandir(workspace) as entries:
         paths = [entry.path for entry in entries]
@@ -881,12 +895,10 @@ def make_handler(settings: Settings, gate: RunGate) -> type[BaseHTTPRequestHandl
                         HTTPStatus.INTERNAL_SERVER_ERROR, {'error': f'could not reset the workspace: {error}'}
                     )
                     return
-                except OSError as error:
+                except (OSError, RecursionError) as error:
                     log.exception('run failed to start')
-                    self.send_json(
-                        HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {'error': f'could not start the run: {error.strerror or error}'},
-                    )
+                    reason = (error.strerror if isinstance(error, OSError) else None) or error
+                    self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {'error': f'could not start the run: {reason}'})
                     return
             finally:
                 gate.release()

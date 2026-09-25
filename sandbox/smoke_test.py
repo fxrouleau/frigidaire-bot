@@ -109,7 +109,8 @@ def main() -> int:
     def identity_and_env() -> None:
         code = (
             'id -u; echo "tz=$TZ"; env | grep -c SANDBOX_ || true; '
-            'cat /proc/$PPID/environ >/dev/null 2>&1 && echo leak || echo sealed'
+            'cat /proc/$PPID/environ >/dev/null 2>&1 && echo leak || echo sealed; '
+            'cat /proc/1/environ >/dev/null 2>&1 && echo leak || echo sealed; echo "ppid=$PPID"'
         )
         result = sandbox.run('bash', code)
         lines = result['stdout'].split()
@@ -117,12 +118,14 @@ def main() -> int:
         expect(lines[1] == 'tz=America/New_York', 'TZ should be Eastern', result)
         expect(lines[2] == '0', 'SANDBOX_* variables leaked into the run environment', result)
         expect(lines[3] == 'sealed', "the server's environment is readable from a run", result)
+        expect(lines[4] == 'sealed', "PID 1's environment (SANDBOX_TOKEN) is readable from a run", result)
+        expect(lines[5] == 'ppid=1', 'the server should be PID 1 (a run could SIGSTOP it otherwise)', result)
 
     def run_cannot_start_runs() -> None:
-        # A run can read the token from tini's environment (PID 1), so the refusal must not depend on it:
-        # /run turns away every client on the container's own addresses.
+        # Runs share the server's uid, so the refusal must not depend on the token staying secret: /run turns
+        # away every client on the container's own addresses, token or not.
         code = (
-            "token=$(tr '\\0' '\\n' < /proc/1/environ 2>/dev/null | sed -n 's/^SANDBOX_TOKEN=//p'); "
+            "token=$(tr '\\0' '\\n' 2>/dev/null < /proc/1/environ | sed -n 's/^SANDBOX_TOKEN=//p'); "
             'for host in 127.0.0.1 $(hostname -i); do '
             'curl -s -o /dev/null -w "%{http_code}\\n" -X POST -H "Authorization: Bearer $token" '
             '-H "Content-Type: application/json" --data \'{"language":"bash","code":"touch chained"}\' '
@@ -132,6 +135,17 @@ def main() -> int:
         lines = result['stdout'].split()
         expect(len(lines) >= 3 and set(lines[:-1]) == {'403'}, 'a run could call /run on its own sandbox', result)
         expect(lines[-1] == 'no-chained-run', 'a run started another run', result)
+
+    def server_survives_signals() -> None:
+        # The server is PID 1: a run sharing its uid still can't freeze or kill it.
+        sandbox.run('bash', 'kill -STOP $PPID; kill -KILL $PPID; echo sent', timeout_seconds=5)
+        result = sandbox.run('bash', 'echo alive', timeout_seconds=5)
+        expect(result['stdout'].strip() == 'alive', 'a run froze or killed the server', result)
+
+    def out_dir_locked_by_a_run() -> None:
+        sandbox.run('bash', 'mkdir -p out/x/y && touch out/x/y/f && chmod 500 out/x/y && chmod 000 out/x')
+        result = sandbox.run('bash', 'ls out | wc -l')
+        expect(result['stdout'].strip() == '0', 'a read-only directory in out/ broke the next run', result)
 
     def workspace_persists() -> None:
         sandbox.run('bash', 'echo kept > note.txt')
@@ -197,6 +211,8 @@ def main() -> int:
         ('node', node_runs),
         ('identity and environment', identity_and_env),
         ('a run cannot start runs', run_cannot_start_runs),
+        ('a run cannot freeze or kill the server', server_survives_signals),
+        ('a locked directory in out/ does not break later runs', out_dir_locked_by_a_run),
         ('workspace persists', workspace_persists),
         ('planted files do not shadow stdlib or tools', planted_files_do_not_shadow),
         ('reset_workspace wipes the workspace', reset_workspace_wipes),

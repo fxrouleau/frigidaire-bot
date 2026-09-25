@@ -10,9 +10,8 @@ FROM node:26-trixie-slim AS node
 
 FROM python:3.14-slim-trixie
 
-# tini as PID 1: forwards SIGTERM to the server and reaps anything that slips past it.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends bc ca-certificates curl jq tini \
+ && apt-get install -y --no-install-recommends bc ca-certificates curl jq \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
@@ -56,5 +55,9 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD ["curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/health"]
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python3", "/opt/sandbox/server.py"]
+# The server itself is PID 1, with no init in front of it. Runs share its uid, and the kernel never delivers
+# SIGSTOP/SIGKILL to a PID namespace's init from inside it, so a run can't freeze or kill the server (it
+# could with tini as PID 1: `kill -STOP $PPID` hung every later request). It needs no init's help either:
+# it handles SIGTERM itself and reaps every process a run leaves behind (sweep_descendants in server.py).
+# Being non-dumpable, its /proc/1/environ (SANDBOX_TOKEN) is unreadable from runs.
+ENTRYPOINT ["python3", "/opt/sandbox/server.py"]

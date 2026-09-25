@@ -372,7 +372,13 @@ function describeFailure(outcome: Extract<SandboxOutcome, { ok: false }>): strin
       const hint = outcome.kind === 'unauthorized' ? '; SANDBOX_TOKEN must match on the bot and the sandbox' : '';
       logger.error(`run_code: sandbox ${outcome.kind} (${outcome.detail})${hint}`);
       logFailure('tool_error', `run_code: sandbox ${outcome.kind} (${outcome.detail})`);
-      return "The code sandbox isn't working right now, so nothing ran. Say so, or work it out by hand and say that's what you did; don't present a guess as a computed result.";
+      // The sidecar answered but failed (e.g. something an earlier run left in /workspace): a clean slate
+      // is the one thing the model can try.
+      const retry =
+        outcome.kind === 'server_error'
+          ? ` It reported: ${outcome.detail}. If you haven't yet, retry once with reset_workspace: true (it wipes files from earlier runs).`
+          : '';
+      return `The code sandbox isn't working right now, so nothing ran.${retry} Otherwise say so, or work it out by hand and say that's what you did; don't present a guess as a computed result.`;
     }
   }
 }
