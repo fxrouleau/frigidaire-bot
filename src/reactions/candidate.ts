@@ -51,14 +51,21 @@ function channelMatches(message: Message, channelIds: string[]): boolean {
   return parentId !== null && channelIds.includes(parentId);
 }
 
-function hasSubstance(message: Message): boolean {
-  return (
-    message.content.trim().length > 0 ||
+// A text-only post shorter than this ("ok", "lol", a lone emoji) is never the standout post of the day,
+// and the chat is mostly those: skipping them spares most of the model calls.
+const MIN_TEXT_ONLY_CHARS = 4;
+
+function tooSlight(message: Message): string | undefined {
+  const hasMedia =
     message.attachments.size > 0 ||
     message.stickers.size > 0 ||
     message.embeds.length > 0 ||
-    Boolean(message.poll)
-  );
+    Boolean(message.poll) ||
+    (message.messageSnapshots?.size ?? 0) > 0;
+  if (hasMedia) return undefined;
+  const text = message.content.replace(/<a?:\w+:\d+>/g, '').trim();
+  if (text.length === 0) return message.content.trim().length === 0 ? 'empty' : 'too short';
+  return [...text].length < MIN_TEXT_ONLY_CHARS ? 'too short' : undefined;
 }
 
 function isReplyToBot(message: Message, botId: string): boolean {
@@ -90,8 +97,7 @@ export function intakeSkipReason(message: Message, settings: IntakeSettings): st
   if (botId && message.mentions.users.has(botId)) return 'mentions the bot';
   if (botId && isReplyToBot(message, botId)) return 'replies to the bot';
   if (namesBot(message.content, settings.botNames)) return 'names the bot';
-  if (!hasSubstance(message)) return 'empty';
-  return undefined;
+  return tooSlight(message);
 }
 
 function reactionLabel(emoji: { id: string | null; name: string | null }): string | undefined {

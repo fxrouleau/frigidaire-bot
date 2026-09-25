@@ -67,13 +67,18 @@ describe('intakeSkipReason', () => {
   });
 
   it('accepts a post in a thread under a watched channel', () => {
-    const thread = message({ content: 'lol', channelId: 't1', channelType: ChannelType.PublicThread, parentChannelId: 'main' });
+    const thread = message({
+      content: 'this is so bad',
+      channelId: 't1',
+      channelType: ChannelType.PublicThread,
+      parentChannelId: 'main',
+    });
     expect(intakeSkipReason(thread, SETTINGS)).toBeUndefined();
   });
 
   it.each<[string, FakeMessageOptions, string]>([
-    ['other channels', { channelId: 'elsewhere', content: 'lol' }, 'channel not watched'],
-    ['DMs', { guildId: null, channelType: ChannelType.DM, content: 'lol' }, 'not in a server'],
+    ['other channels', { channelId: 'elsewhere', content: 'lmao what' }, 'channel not watched'],
+    ['DMs', { guildId: null, channelType: ChannelType.DM, content: 'lmao what' }, 'not in a server'],
     ['system messages', { system: true, content: 'joined' }, 'system message'],
     ['its own messages', { authorId: 'bot-1', authorIsBot: true, content: 'hi' }, 'own message'],
     ['other bots', { authorId: 'other-bot', authorIsBot: true, content: 'beep' }, 'bot'],
@@ -82,12 +87,15 @@ describe('intakeSkipReason', () => {
     ['replies to the bot', { referencedMessageId: '999', repliedUserId: 'bot-1', content: 'ok' }, 'replies to the bot'],
     ['posts naming the bot (the gate may answer)', { content: 'fridge what do you think' }, 'names the bot'],
     ['empty posts', { content: '   ' }, 'empty'],
+    ['trivial text-only posts', { content: 'lol' }, 'too short'],
+    ['a lone custom emoji', { content: '<:KEKW:300000000000000001>' }, 'too short'],
   ])('skips %s', (_label, opts, reason) => {
     expect(intakeSkipReason(message(opts), SETTINGS)).toBe(reason);
   });
 
   it("accepts the bot's own relays (link fixes) and replies to other members", () => {
-    expect(intakeSkipReason(message({ webhookId: 'hook', applicationId: 'bot-1', content: 'x' }), SETTINGS)).toBeUndefined();
+    const relay = message({ webhookId: 'hook', applicationId: 'bot-1', content: 'https://fixvx.com/a/status/1' });
+    expect(intakeSkipReason(relay, SETTINGS)).toBeUndefined();
     expect(
       intakeSkipReason(message({ referencedMessageId: '999', repliedUserId: 'dan', content: 'hahaha' }), SETTINGS),
     ).toBeUndefined();
@@ -99,9 +107,13 @@ describe('intakeSkipReason', () => {
     expect(intakeSkipReason(reply, SETTINGS)).toBe('replies to the bot');
   });
 
-  it('accepts a post with only an attachment', () => {
-    const post = message({ attachments: [{ url: 'https://cdn.discordapp.com/a.png', contentType: 'image/png' }] });
-    expect(intakeSkipReason(post, SETTINGS)).toBeUndefined();
+  it('accepts short posts that carry something (an attachment, a link preview, a forward), and 4+ characters', () => {
+    const attachment = [{ url: 'https://cdn.discordapp.com/a.png', contentType: 'image/png' }];
+    expect(intakeSkipReason(message({ attachments: attachment }), SETTINGS)).toBeUndefined();
+    expect(intakeSkipReason(message({ content: 'lol', attachments: attachment }), SETTINGS)).toBeUndefined();
+    expect(intakeSkipReason(message({ content: 'ok', embeds: [{ title: 'x' }] }), SETTINGS)).toBeUndefined();
+    expect(intakeSkipReason(message({ content: '', forwarded: ['a forward'] }), SETTINGS)).toBeUndefined();
+    expect(intakeSkipReason(message({ content: 'LMAO' }), SETTINGS)).toBeUndefined();
   });
 });
 

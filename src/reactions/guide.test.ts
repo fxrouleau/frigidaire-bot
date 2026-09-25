@@ -18,12 +18,12 @@ const KEKW = '300000000000000001';
 const GONE = '300000000000000009';
 const T0 = Date.UTC(2026, 0, 15, 17, 0);
 
-function emojiRow(id: string, name: string): EmojiRow {
+function emojiRow(id: string, name: string, caption: string | null = null): EmojiRow {
   return {
     id,
     name,
     animated: 0,
-    caption: null,
+    caption,
     captioned_at: null,
     active: 1,
     use_count: 0,
@@ -108,10 +108,12 @@ describe('buildReactionGuide', () => {
     expect(guide.builtAt).toBe(T0);
   });
 
-  it('renders the base rate and quoted, readable, clipped examples', () => {
-    const guide = buildReactionGuide(profile, [emojiRow(KEKW, 'KEKW')], T0);
+  it('renders the base rate, captions, and quoted, readable, clipped examples', () => {
+    const guide = buildReactionGuide(profile, [emojiRow(KEKW, 'KEKW', 'laughing face; for big laughs')], T0);
     expect(guide.text).toContain('About 12% of member posts here get any reaction at all (123 of 1000).');
-    expect(guide.text).toContain(`- :KEKW: (40×) — "he parallel parked into a 'hydrant'" · ":KEKW: lmao"`);
+    expect(guide.text).toContain(
+      `- :KEKW: (40×) [laughing face; for big laughs] — "he parallel parked into a 'hydrant'" · ":KEKW: lmao"`,
+    );
     expect(guide.text).not.toContain('(no text)');
     expect(guide.text).not.toContain('trolle');
     const skull = guide.text.split('\n').find((line) => line.startsWith('- 💀'));

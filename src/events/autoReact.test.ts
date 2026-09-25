@@ -14,7 +14,7 @@ function withReactionCache(message: EventMessage): EventMessage {
 }
 
 function post(opts: FakeMessageOptions = {}): EventMessage {
-  return withReactionCache(createFakeMessage({ channelId: 'main', messageId: '1001', content: 'lol', ...opts }).message);
+  return withReactionCache(createFakeMessage({ channelId: 'main', messageId: '1001', content: 'I parallel parked into a hydrant', ...opts }).message);
 }
 
 let reactor: AutoReactor;

@@ -150,6 +150,8 @@ export type UsagePhraseInput = {
   caption: string | null;
   /** Real uses, one prompt line each (see formatUsageSample in src/reactions/emojiUsage.ts). */
   uses: string[];
+  /** The emoji's image; defaults to its Discord CDN URL. */
+  imageUrl?: string;
   model?: string;
   /** Injected in tests; defaults to the shared OpenRouter client. */
   client?: OpenAI;
@@ -190,7 +192,7 @@ OUTPUT: only the meaning half, one line starting with "for ", at most 70 charact
 - for meh, underwhelmed or mildly annoyed
 - for big laughs at someone's expense`,
               },
-              { type: 'image_url', image_url: { url: emojiCdnUrl(params.id, params.animated) } },
+              { type: 'image_url', image_url: { url: params.imageUrl ?? emojiCdnUrl(params.id, params.animated) } },
             ],
           },
         ],

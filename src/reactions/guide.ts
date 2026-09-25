@@ -24,6 +24,8 @@ export type GuideEmoji = {
   name: string;
   uses: number;
   messages: number;
+  /** A server emoji's caption ("<visual>; for <meaning>"): the judge can't see custom emoji images. */
+  caption?: string;
   examples: string[];
 };
 
@@ -106,11 +108,13 @@ export function buildReactionGuide(profile: ReactionProfile, usableEmojis: Emoji
     if (emojis.length >= GUIDE_EMOJIS) break;
     let label: string;
     let name = entry.name;
+    let caption: string | undefined;
     if (entry.id) {
       const row = usable.get(entry.id);
       if (!row) continue;
       name = row.name; // the server's current name: that is what the judge must answer with
       label = `:${row.name}:`;
+      caption = row.caption ?? undefined;
     } else {
       label = entry.name;
     }
@@ -118,7 +122,7 @@ export function buildReactionGuide(profile: ReactionProfile, usableEmojis: Emoji
       .filter((s) => s.snippet !== '(no text)')
       .slice(0, GUIDE_EXAMPLES)
       .map((s) => example(s.snippet));
-    emojis.push({ label, id: entry.id, name, uses: entry.uses, messages: entry.messages, examples });
+    emojis.push({ label, id: entry.id, name, uses: entry.uses, messages: entry.messages, caption, examples });
   }
 
   const lines: string[] = [];
@@ -128,10 +132,13 @@ export function buildReactionGuide(profile: ReactionProfile, usableEmojis: Emoji
     );
   }
   if (emojis.length > 0) {
-    lines.push('Their reactions, most used first — emoji (times used): posts it landed on');
+    lines.push(
+      'Their reactions, most used first — emoji (times used) [what a server emoji shows; for what]: posts it landed on',
+    );
     for (const e of emojis) {
+      const caption = e.caption ? ` [${e.caption}]` : '';
       const examples = e.examples.length > 0 ? ` — ${e.examples.join(' · ')}` : '';
-      lines.push(`- ${e.label} (${e.uses}×)${examples}`);
+      lines.push(`- ${e.label} (${e.uses}×)${caption}${examples}`);
     }
   }
 
