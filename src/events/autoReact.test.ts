@@ -1,5 +1,6 @@
 import { Collection } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TRANSCRIPT_HEADER } from '../ai/media/autoTranscribe';
 import { AutoReactor, setAutoReactorForTesting } from '../reactions';
 import type { Candidate } from '../reactions/autoReactor';
 import { AutoReactLedger } from '../reactions/ledger';
@@ -95,6 +96,23 @@ describe('autoReact event', () => {
     for (const fire of timers.splice(0)) fire();
     await reactor.idle();
     expect(judge).not.toHaveBeenCalled();
+  });
+
+  it('does not count its voice-message transcript as a reply: the voice message is still judged', async () => {
+    await autoReactEvent.execute(post());
+    const transcript = withReactionCache(
+      createFakeBotMessage({
+        channelId: 'main',
+        messageId: '2003',
+        referencedMessageId: '1001',
+        repliedUserId: 'user-1',
+        content: `${TRANSCRIPT_HEADER}\n> on joue ce soir?`,
+      }).message,
+    );
+    await autoReactEvent.execute(transcript);
+    for (const fire of timers.splice(0)) fire();
+    await reactor.idle();
+    expect(judge).toHaveBeenCalledTimes(1);
   });
 
   it('a deleted post is dropped', async () => {

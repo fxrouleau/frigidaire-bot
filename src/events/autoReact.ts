@@ -1,6 +1,7 @@
 // Spontaneous reactions (src/reactions/): member posts in AUTO_REACT_CHANNELS become candidates, and the
 // bot's own replies are noted so a post it is answering never also gets a reaction.
 import { Events } from 'discord.js';
+import { isTranscriptReply } from '../ai/media/autoTranscribe';
 import { config } from '../config';
 import { defineEvent } from '../eventModule';
 import { getAutoReactor } from '../reactions';
@@ -11,6 +12,9 @@ export default defineEvent(Events.MessageCreate, {
     if (config.autoReact.mode === 'off') return;
     const reactor = getAutoReactor(message.client);
     if (message.author.id === message.client.user.id && !message.webhookId) {
+      // A voice-message transcript isn't the bot talking (aiChat's rule too): the voice message stays a
+      // candidate, and its author isn't mid-exchange with the bot.
+      if (isTranscriptReply(message)) return;
       reactor.noteBotMessage(message.channel.id, {
         repliedToId: message.reference?.messageId,
         partnerId: message.mentions.repliedUser?.id,
