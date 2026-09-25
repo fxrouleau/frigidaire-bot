@@ -277,6 +277,23 @@ export const config = {
     get debug(): boolean {
       return envBool('LOG_DEBUG', false);
     },
+    /**
+     * The size-rotated log file in the data volume (src/logFile.ts), so logs survive the container being
+     * recreated on every deploy. `off` (or false/0/no/none) disables it. Never written under Vitest.
+     */
+    get file(): string | undefined {
+      const value = envString('LOG_FILE');
+      if (value !== undefined && ['off', 'false', '0', 'no', 'none'].includes(value.toLowerCase())) return undefined;
+      return value ?? './data/logs/bot.log';
+    },
+    /** Rotate once the current file would pass this size. */
+    get fileMaxBytes(): number {
+      return envInt('LOG_FILE_MAX_BYTES', 5 * 1024 * 1024, { min: 64 * 1024, max: 1024 * 1024 * 1024 });
+    },
+    /** Files kept in total, the current one included (bot.log, bot.log.1, bot.log.2). */
+    get fileMaxFiles(): number {
+      return envInt('LOG_FILE_MAX_FILES', 3, { min: 1, max: 20 });
+    },
   },
 
   /** The server's layout, shared by every feature that posts on its own (reminders, birthdays, Wrapped, …). */

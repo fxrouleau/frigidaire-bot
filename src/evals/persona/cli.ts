@@ -4,7 +4,7 @@
 //
 // Paid and opt-in like the live tests: needs RUN_LIVE=1 and OPENROUTER_API_KEY. Every call goes through
 // the shared client (ZDR routing on every request). The bot's own state is never touched: memory and
-// bot.db are in-memory for the run and error captures are off.
+// bot.db are in-memory for the run, and error captures and the log file are off.
 //
 //   docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... \
 //     -e EVAL_MODELS=deepseek/deepseek-v3.2:nitro,moonshotai/kimi-k2.6 test yarn eval:persona
@@ -39,8 +39,10 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  // Keep the bot's real data out of it. bot.db holds the usage ledger, which prices each run below.
+  // Keep the bot's real data out of it: no error captures, no lines in the bot's log file, and bot.db
+  // in memory (it holds the usage ledger, which prices each run below).
   process.env.DEBUG_CAPTURE = '0';
+  process.env.LOG_FILE = 'off';
   setBotDbForTesting(new BotDb(':memory:'));
 
   const file = loadScenarioFile(DEFAULT_SCENARIOS_PATH);
