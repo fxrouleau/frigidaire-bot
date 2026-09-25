@@ -285,7 +285,28 @@ export const config = {
   media: {},
 
   /** Reading shared links (src/ai/linkReader/). */
-  linkReader: {},
+  linkReader: {
+    /** Master switch: false ⇒ no read_link tool and no link previews. */
+    get enabled(): boolean {
+      return envBool('LINK_READER_ENABLED', true);
+    },
+    /** Automatic previews of links in the message being answered (and the one it replies to). */
+    get previewsEnabled(): boolean {
+      return envBool('LINK_PREVIEWS_ENABLED', true);
+    },
+    /** Per-request timeout for every fetch the link reader makes. */
+    get timeoutMs(): number {
+      return envInt('LINK_READER_TIMEOUT_MS', 8000, { min: 500, max: 60_000 });
+    },
+    /** Body cap for fetched pages (bytes after decompression); longer pages are read up to the cap. */
+    get maxPageBytes(): number {
+      return envInt('LINK_READER_MAX_BYTES', 2 * 1024 * 1024, { min: 64 * 1024, max: 16 * 1024 * 1024 });
+    },
+    /** Longest linked video (seconds) that read_link hands to video understanding; 0 disables it. */
+    get videoMaxSeconds(): number {
+      return envInt('LINK_READER_VIDEO_MAX_SECS', 300, { min: 0, max: 3600 });
+    },
+  },
 
   /** Replying without an explicit @-mention, judged by a decision model (src/gate/). */
   gate: {},
