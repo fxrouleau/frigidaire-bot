@@ -407,7 +407,10 @@ export class AgentOrchestrator {
 
       const budget = await budgetPromise;
       if (estimateTokens(workingEntries) > budget.contextTokens * PREFLIGHT_CONTEXT_RATIO) {
-        workingEntries = this.trimWindow(workingEntries, budget, channelId, 'preflight').entries;
+        const preflight = this.trimWindow(workingEntries, budget, channelId, 'preflight');
+        workingEntries = preflight.entries;
+        // Dropped entries take their memories with them: those may be injected again later in the window.
+        if (preflight.dropped > 0) injectedMemoryIds = collectMemoryIds(workingEntries);
       }
 
       const served = new Set<string>();
