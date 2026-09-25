@@ -961,6 +961,66 @@ describe('tool limits and dangling calls', () => {
     expect(t2?.content).toBe('not executed: that tool is not available');
   });
 
+  it('answers a call to a tool it does not offer and asks again, instead of ending the turn blank', async () => {
+    // run_code has a handler but is gated off (no sandbox), so the provider only offers echo_tool.
+    const gated: ToolDefinition = {
+      name: 'run_code',
+      description: 'gated',
+      parameters: { type: 'object', properties: {} },
+      handler: async () => {
+        executed.push('run_code');
+        return 'ran';
+      },
+    };
+    const provider = new FakeProvider([
+      toolCallResponse([{ id: 'r1', name: 'run_code', arguments: { code: 'print(137.5 * 1.18 / 4)' } }]),
+      textResponse('40.56 each'),
+    ]);
+    const agent = makeAgent(provider, { tools: [echo, gated] });
+    const ping = createFakeMessage({ ...BASE, content: 'split 137.50 four ways with 18% tip', channelMessages: [] });
+
+    await agent.handleMention(ping.message);
+
+    expect(executed).toEqual([]);
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1].toolChoice).toBe('auto');
+    expect(results(provider.calls[1].messages).map((r) => [r.id, r.content])).toEqual([
+      ['r1', 'not executed: that tool is not available'],
+    ]);
+    expect(ping.recorders.reply.calls).toEqual([['40.56 each']]);
+    expect(getMemoryStore().getByCategory('capability_gap').map((m) => m.content)).toEqual([
+      'Tool "run_code" requested but not offered',
+    ]);
+  });
+
+  it('runs the offered calls of a mixed round and answers the rest as not available', async () => {
+    const provider = new FakeProvider([
+      toolCallResponse([call('t1'), { id: 'w1', name: 'web_search', arguments: { query: 'score' } }]),
+      textResponse('done'),
+    ]);
+    const agent = makeAgent(provider, { tools: [echo] });
+
+    await agent.handleMention(createFakeMessage({ ...BASE, content: 'go', channelMessages: [] }).message);
+
+    expect(executed).toEqual(['t1']);
+    expect(results(provider.calls[1].messages).map((r) => [r.id, r.content])).toEqual([
+      ['t1', 'echo t1'],
+      ['w1', 'not executed: that tool is not available'],
+    ]);
+  });
+
+  it('bounds a model that keeps calling a tool it does not offer by the round limit', async () => {
+    const unoffered = (id: string) => toolCallResponse([{ id, name: 'run_code', arguments: {} }]);
+    const provider = new FakeProvider([unoffered('r1'), unoffered('r2'), textResponse('fine, by hand')]);
+    const agent = makeAgent(provider, { tools: [echo], maxToolRounds: 1 });
+    const ping = createFakeMessage({ ...BASE, content: 'go', channelMessages: [] });
+
+    await agent.handleMention(ping.message);
+
+    expect(provider.calls.map((c) => c.toolChoice)).toEqual(['auto', 'auto', 'none']);
+    expect(ping.recorders.reply.calls).toEqual([['fine, by hand']]);
+  });
+
   it('defaults are generous: 25 rounds and 200 invocations', async () => {
     const script: ProviderChatResponse[] = Array.from({ length: 12 }, (_, i) => toolCallResponse([call(`r${i}`)]));
     const provider = new FakeProvider([...script, textResponse('done')]);

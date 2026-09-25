@@ -526,8 +526,16 @@ export class AgentOrchestrator {
     let response = await chat('auto');
     let invocations = 0;
     for (let round = 0; ; round++) {
+      if (response.toolCalls.length === 0) break;
       const calls = hostHandled(response.toolCalls);
-      if (calls.length === 0) break;
+      // A call to a tool that isn't offered (a gated one the prompt names, an invented name) still earns
+      // a round: the next chat() answers it "not available" and the model gets to reply in text, instead
+      // of the turn ending on a bare call with nothing to post. Never executed, even if a handler exists.
+      for (const call of response.toolCalls) {
+        if (calls.includes(call)) continue;
+        logger.warn(`Tool "${call.name}" was called in channel ${channelId} but is not offered this turn.`);
+        logFailure('capability_gap', `Tool "${call.name}" requested but not offered`);
+      }
 
       if (invocations + calls.length > this.maxToolInvocations) {
         logger.warn(
