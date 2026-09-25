@@ -1,13 +1,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
-import { Client, type ClientEvents, Events, GatewayIntentBits } from 'discord.js';
+import { type ClientEvents, Events } from 'discord.js';
 import * as dotenv from 'dotenv';
 import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
 import { getMemoryStore } from './ai/memory';
 import { closeArchiveStore } from './archive/archiveStore';
 import { config, describeEffectiveConfig } from './config';
+import { createDiscordClient } from './discordClient';
 import { resolveEventModule } from './eventModule';
 import { logger } from './logger';
 import { getBotDb } from './storage/botDb';
@@ -23,15 +24,8 @@ process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled promise rejection:', reason);
 });
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildEmojisAndStickers,
-    GatewayIntentBits.GuildMessageReactions,
-  ],
-});
+// Intents + partials live in discordClient.ts (partials: events for messages sent before the last restart).
+const client = createDiscordClient();
 
 // Every file in src/events/ is an event handler (see src/eventModule.ts). Each one runs behind a
 // dispatcher that logs a throwing/rejecting handler instead of letting it crash the bot — a missing

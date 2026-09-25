@@ -4,8 +4,11 @@ import {
   type BuildDigestOptions,
   type CaptureMeta,
   buildDigest,
+  describePeriod,
+  formatSpan,
   summarizeErrorCaptures,
 } from './digest';
+import type { UsageSummary } from './usage';
 
 const WATERMARK = new Date('2026-06-10T00:00:00Z');
 
@@ -126,7 +129,7 @@ describe('buildDigest', () => {
         signals: [{ category: 'capability_gap', content: 'first', updated_at: OLD }],
       }),
     );
-    expect(digest).toContain('Improvement signals — 1 active (1 new this week)');
+    expect(digest).toContain('Improvement signals — 1 active (1 new so far)');
     expect(digest).toContain('   🆕 first');
   });
 
@@ -191,5 +194,133 @@ describe('summarizeErrorCaptures', () => {
 
   it('handles the empty case', () => {
     expect(summarizeErrorCaptures([], SINCE)).toEqual({ total: 0, capped: false, byType: [] });
+  });
+});
+
+describe('buildDigest spend section', () => {
+  const ZERO = { promptTokens: 0, completionTokens: 0, unpricedRequests: 0 };
+  const SPEND: UsageSummary = {
+    fromDay: '2026-06-12',
+    toDay: '2026-06-18',
+    total: { requests: 1234, promptTokens: 2_000_000, completionTokens: 40_000, costUsd: 3.21, unpricedRequests: 0 },
+    byFeature: [
+      { feature: 'chat', requests: 900, costUsd: 2.5, ...ZERO },
+      { feature: 'learner', requests: 300, costUsd: 0.7, ...ZERO },
+      { feature: 'embedding', requests: 34, costUsd: 0.01, ...ZERO },
+    ],
+    byModel: [{ model: 'deepseek/deepseek-v3.2', requests: 900, costUsd: 2.5, ...ZERO }],
+    trackedSince: '2026-06-01',
+  };
+
+  it('appends total, per-feature and top-model spend to the full digest', () => {
+    const digest = buildDigest(
+      baseOpts({ signals: [{ category: 'pain_point', content: 'x', updated_at: NEW }], spend: SPEND }),
+    );
+    const lines = digest.split('\n');
+    const at = lines.findIndex((l) => l.startsWith('Spend'));
+    expect(lines[at]).toBe(
+      'Spend (OpenRouter, 2026-06-12 → 2026-06-18 ET) — $3.21 over 1.2k calls (2M prompt + 40k completion tokens)',
+    );
+    expect(lines[at + 1]).toBe(
+      '  by feature: chat $2.50 (900 calls) · learner $0.70 (300 calls) · embedding $0.01 (34 calls)',
+    );
+    expect(lines[at + 2]).toBe('  top models: deepseek/deepseek-v3.2 $2.50 (900 calls)');
+    expect(at).toBeGreaterThan(lines.findIndex((l) => l.startsWith('Backlog totals')));
+  });
+
+  it('keeps the spend on a quiet week', () => {
+    const digest = buildDigest(baseOpts({ spend: SPEND }));
+    expect(digest).toContain('No new self-diagnosis signals this week.');
+    expect(digest).toContain('Spend (OpenRouter, 2026-06-12 → 2026-06-18 ET) — $3.21');
+  });
+
+  it('says nothing was recorded for an empty ledger, and omits the section when the ledger is unavailable', () => {
+    const empty: UsageSummary = {
+      ...SPEND,
+      total: { ...SPEND.total, requests: 0, costUsd: 0 },
+      byFeature: [],
+      byModel: [],
+    };
+    expect(buildDigest(baseOpts({ spend: empty }))).toContain(
+      'Spend (OpenRouter, 2026-06-12 → 2026-06-18 ET) — nothing recorded',
+    );
+    expect(buildDigest(baseOpts())).not.toContain('Spend');
+  });
+
+  it('handles a digest that runs again before a full day has passed', () => {
+    const inverted: UsageSummary = { ...SPEND, fromDay: '2026-06-19', toDay: '2026-06-18' };
+    expect(buildDigest(baseOpts({ spend: inverted }))).toContain(
+      'Spend (OpenRouter) — no complete day since the last digest.',
+    );
+  });
+});
+
+describe('digest period wording', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const END = new Date('2026-07-17T14:00:00Z');
+  const daysBefore = (days: number) => new Date(END.getTime() - days * DAY);
+
+  it('calls a period of about a week (plus the hourly check slack) "weekly" / "this week"', () => {
+    expect(describePeriod(daysBefore(7), END, daysBefore(7))).toEqual({
+      title: 'Weekly self-diagnosis digest',
+      scope: 'this week',
+    });
+    expect(describePeriod(daysBefore(7.04), END, daysBefore(7.04)).scope).toBe('this week');
+  });
+
+  it('says "since the last digest" and names the real span after a gap (a 5-week period is not "this week")', () => {
+    const start = daysBefore(35);
+    const digest = buildDigest(
+      baseOpts({
+        periodStart: start,
+        periodEnd: END,
+        watermark: start,
+        signals: [{ category: 'pain_point', content: 'slow replies', updated_at: '2026-07-01 10:00:00' }],
+        failures: [{ category: 'tool_error', updated_at: '2026-07-02 10:00:00' }],
+      }),
+    );
+    expect(digest).toContain('🩺 Self-diagnosis digest (5 weeks) · 2026-06-12 → 2026-07-17');
+    expect(digest).toContain('Improvement signals — 1 active (1 new since the last digest)');
+    expect(digest).toContain('Runtime failures logged since the last digest — 1');
+    expect(digest).not.toContain('this week');
+    expect(digest).not.toContain('Weekly');
+  });
+
+  it('uses the same honest scope for a quiet period', () => {
+    const start = daysBefore(20);
+    const digest = buildDigest(baseOpts({ periodStart: start, periodEnd: END, watermark: start }));
+    expect(digest).toContain('🩺 Self-diagnosis digest (20 days)');
+    expect(digest).toContain('No new self-diagnosis signals since the last digest.');
+  });
+
+  it('says "so far" on the first digest, where everything counts as new', () => {
+    expect(describePeriod(daysBefore(7), END, null)).toEqual({ title: 'Weekly self-diagnosis digest', scope: 'so far' });
+    expect(buildDigest(baseOpts({ watermark: null }))).toContain('No new self-diagnosis signals so far.');
+  });
+
+  it('labels a shortened DIGEST_PERIOD_MS honestly too', () => {
+    expect(describePeriod(daysBefore(1), END, daysBefore(1)).title).toBe('Self-diagnosis digest (1 day)');
+    expect(describePeriod(daysBefore(0.25), END, daysBefore(0.25))).toEqual({
+      title: 'Self-diagnosis digest (6 hours)',
+      scope: 'since the last digest',
+    });
+  });
+});
+
+describe('formatSpan', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it('rounds to whole weeks when the span is close to a multiple of 7 days, else days or hours', () => {
+    expect(formatSpan(35 * DAY)).toBe('5 weeks');
+    expect(formatSpan(35.4 * DAY)).toBe('5 weeks');
+    expect(formatSpan(20 * DAY)).toBe('20 days');
+    expect(formatSpan(14 * DAY)).toBe('2 weeks');
+    expect(formatSpan(17 * DAY)).toBe('17 days');
+    expect(formatSpan(10 * DAY)).toBe('10 days');
+    expect(formatSpan(2 * DAY)).toBe('2 days');
+    expect(formatSpan(1.2 * DAY)).toBe('1 day');
+    expect(formatSpan(0.5 * DAY)).toBe('12 hours');
+    expect(formatSpan(60 * 60 * 1000)).toBe('1 hour');
+    expect(formatSpan(0)).toBe('1 hour');
   });
 });

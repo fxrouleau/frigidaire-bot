@@ -1,6 +1,7 @@
 import type OpenAI from 'openai';
 import { config } from '../../config';
 import { requireOpenRouterClient } from '../openRouterClient';
+import { featureRequestOptions } from '../usage';
 import { normalize } from './vectorMath';
 
 /** What the texts will be used for: queries get the model's retrieval instruction prefix, documents do not. */
@@ -42,15 +43,18 @@ export class OpenRouterEmbeddingProvider implements EmbeddingProvider {
 
     const input = kind === 'query' ? texts.map((text) => this.toQueryInput(text)) : texts;
 
-    const response = await this.client.embeddings.create({
-      model: this.model,
-      input,
-      // Explicit float format: the SDK otherwise defaults to base64 (and decodes it itself), which
-      // not every OpenRouter embeddings backend supports and which fixtures couldn't represent readably.
-      encoding_format: 'float',
-      // @ts-expect-error OpenRouter-specific field
-      provider: this.routing,
-    });
+    const response = await this.client.embeddings.create(
+      {
+        model: this.model,
+        input,
+        // Explicit float format: the SDK otherwise defaults to base64 (and decodes it itself), which
+        // not every OpenRouter embeddings backend supports and which fixtures couldn't represent readably.
+        encoding_format: 'float',
+        // @ts-expect-error OpenRouter-specific field
+        provider: this.routing,
+      },
+      featureRequestOptions('embedding'),
+    );
 
     const data = response?.data;
     if (!Array.isArray(data) || data.length === 0) {

@@ -1,6 +1,6 @@
-// Periodically posts a weekly self-diagnosis digest to the report channel. Off unless REPORT_CHANNEL_ID
-// is set; DIGEST_ENABLED=false also disables it. The watermark (digest:last_run_at) gates posting to
-// once per DIGEST_PERIOD_MS regardless of how often the check fires.
+// Periodically posts a weekly self-diagnosis digest (plus the period's OpenRouter spend) to the report
+// channel. Off unless REPORT_CHANNEL_ID is set; DIGEST_ENABLED=false also disables it. The watermark
+// (digest:last_run_at) gates posting to once per DIGEST_PERIOD_MS regardless of how often the check fires.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { type Client, Events } from 'discord.js';
@@ -16,6 +16,7 @@ import {
 import { getMemoryStore } from '../ai/memory';
 import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { getReportChannelId, sendToReportChannel } from '../ai/reportChannel';
+import { type UsageSummary, getUsageSummary, startOfEasternDay } from '../ai/usage';
 import { config } from '../config';
 import { defineEvent } from '../eventModule';
 import { logger } from '../logger';
@@ -65,19 +66,36 @@ export async function runDigestCheck(client: Client): Promise<void> {
 
     // The digest reports on the period that just ENDED: from the last run (or one period back on the
     // very first run) up to now.
+    const periodStart = watermark ?? new Date(now.getTime() - periodMs);
     const digest = buildDigest({
-      periodStart: watermark ?? new Date(now.getTime() - periodMs),
+      periodStart,
       periodEnd: now,
       watermark,
       signals,
       failures,
       captures,
+      spend: readSpend(periodStart, now),
     });
 
     await sendToReportChannel(client, digest);
     store.setState(WATERMARK_KEY, now.toISOString());
   } catch (error) {
     logger.warn('Digest check failed:', error);
+  }
+}
+
+/**
+ * Spend over the complete Eastern days of the period: up to (not including) today, which the next
+ * digest covers. The ledger is day-grained, so this is what keeps consecutive digests from counting
+ * the day a digest runs on twice. Undefined when the ledger is off or unreadable (no Spend section).
+ */
+function readSpend(periodStart: Date, now: Date): UsageSummary | undefined {
+  if (!config.costs.ledgerEnabled) return undefined;
+  try {
+    return getUsageSummary(periodStart.getTime(), startOfEasternDay(now.getTime()));
+  } catch (error) {
+    logger.warn('Digest: reading the usage ledger failed; skipping the Spend section:', error);
+    return undefined;
   }
 }
 

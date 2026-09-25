@@ -90,6 +90,15 @@ export const DEFAULT_REDDIT_FIXERS = ['vxreddit.com', 'rxddit.com'];
 export const DEFAULT_BLUESKY_FIXERS = ['fxbsky.app', 'bskx.app', 'xbsky.app'];
 export const DEFAULT_TWITTER_TRANSLATE_TO = 'en';
 
+// Persona eval judge: a frontier reasoning model with ZDR endpoints (Google Vertex / AI Studio) that
+// OpenRouter does not run through its moderation layer — Anthropic/OpenAI endpoints are moderated,
+// and the transcripts being graded are roasts and dark banter. A different family from the default
+// chat model also avoids a judge grading its own style.
+export const DEFAULT_EVAL_JUDGE_MODEL = 'google/gemini-3.1-pro-preview';
+
+// Env variables that hold channel ids, by name (see config.logging.channelVariables).
+const CHANNEL_VARIABLE_NAME = /(?:^|_)(?:CHANNEL_IDS?|CHANNELS)$|^CHANNEL_NOTES$/;
+
 export const DELETE_REPOST_MODES = ['edgy', 'always'] as const;
 export type DeleteRepostMode = (typeof DELETE_REPOST_MODES)[number];
 
@@ -122,6 +131,17 @@ export const config = {
     /** Required for every AI feature (chat, embeddings, image generation, emoji captions, learner). */
     get apiKey(): string | undefined {
       return envString('OPENROUTER_API_KEY');
+    },
+    /**
+     * Per-attempt timeout of every call through the shared client. The SDK default is 10 minutes, and
+     * chat turns are serialized per channel, so one hung call would stall the bot in that channel.
+     */
+    get timeoutMs(): number {
+      return envInt('OPENROUTER_TIMEOUT_MS', 2 * MINUTE_MS, { min: 1000, max: 30 * MINUTE_MS });
+    },
+    /** SDK retries on connection errors, timeouts, 408/409/429 and 5xx (exponential backoff). */
+    get maxRetries(): number {
+      return envInt('OPENROUTER_MAX_RETRIES', 2, { min: 0, max: 10 });
     },
   },
 
@@ -344,6 +364,37 @@ export const config = {
   logging: {
     get debug(): boolean {
       return envBool('LOG_DEBUG', false);
+    },
+    /**
+     * The size-rotated log file in the data volume (src/logFile.ts), so logs survive the container being
+     * recreated on every deploy. `off` (or false/0/no/none) disables it. Never written under Vitest.
+     */
+    get file(): string | undefined {
+      const value = envString('LOG_FILE');
+      if (value !== undefined && ['off', 'false', '0', 'no', 'none'].includes(value.toLowerCase())) return undefined;
+      return value ?? './data/logs/bot.log';
+    },
+    /** Rotate once the current file would pass this size. */
+    get fileMaxBytes(): number {
+      return envInt('LOG_FILE_MAX_BYTES', 5 * 1024 * 1024, { min: 64 * 1024, max: 1024 * 1024 * 1024 });
+    },
+    /** Files kept in total, the current one included (bot.log, bot.log.1, bot.log.2). */
+    get fileMaxFiles(): number {
+      return envInt('LOG_FILE_MAX_FILES', 3, { min: 1, max: 20 });
+    },
+    /**
+     * Every set variable that names Discord channels, found by naming convention rather than a list
+     * (…_CHANNEL_ID, …_CHANNEL_IDS, …_CHANNELS, CHANNEL_NOTES), so a channel variable added later shows
+     * up in the startup channel report (src/channelEnv.ts) without touching it. Sorted by name.
+     */
+    get channelVariables(): Array<{ name: string; value: string }> {
+      return Object.keys(process.env)
+        .filter((name) => CHANNEL_VARIABLE_NAME.test(name))
+        .sort()
+        .flatMap((name) => {
+          const value = envString(name);
+          return value === undefined ? [] : [{ name, value }];
+        });
     },
   },
 
@@ -578,7 +629,38 @@ export const config = {
   featureRequests: {},
 
   /** OpenRouter usage/cost accounting (src/ai/usage.ts). */
-  costs: {},
+  costs: {
+    /**
+     * Kill switch for the usage ledger (the shared client's response inspection + the bot.db rows).
+     * Off ⇒ requests pass through untouched and query_costs / the digest's Spend section say so.
+     */
+    get ledgerEnabled(): boolean {
+      return envBool('USAGE_LEDGER_ENABLED', true);
+    },
+  },
+
+  /** The persona eval harness (src/evals/persona/, `yarn eval:persona`). Never read by the bot itself. */
+  evals: {
+    /** Paid runs are opt-in, like the live tests. */
+    get runLive(): boolean {
+      return envBool('RUN_LIVE', false);
+    },
+    /** Candidate chat models to compare; defaults to the configured CHAT_MODEL. */
+    get models(): string[] {
+      const fromEnv = envCsv('EVAL_MODELS');
+      return fromEnv.length > 0 ? fromEnv : [config.models.chat];
+    },
+    get judgeModel(): string {
+      return envString('EVAL_JUDGE_MODEL') ?? DEFAULT_EVAL_JUDGE_MODEL;
+    },
+    /** Optional csv of scenario ids to run (default: all). */
+    get scenarioIds(): string[] {
+      return envCsv('EVAL_SCENARIOS');
+    },
+    get outputDir(): string {
+      return envString('EVAL_OUTPUT_DIR') ?? './data/evals';
+    },
+  },
 
   /** Discord application commands: right-click message/user menu entries (src/commands/). */
   commands: {},
