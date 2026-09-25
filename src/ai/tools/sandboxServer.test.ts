@@ -307,11 +307,20 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
   });
 
   it('wipes a workspace left over its file-count limit, even files hidden in an unreadable directory', async () => {
+    // The unreadable directory stays UNDER the 2000-entry limit and `echo made` runs before anything crosses it:
+    // the disk watchdog polls during the run and kills the whole group the moment the workspace is over, so an
+    // echo placed after the crossing raced it (a flake under load). Only the files hidden in the unreadable
+    // directory take the workspace over the limit, so the wipe still proves the walk counts them.
     const outcome = await runInSandbox(
-      { language: 'bash', code: 'mkdir hidden && cd hidden && touch $(seq 2500) && chmod 000 . && echo made', timeoutSeconds: 20 },
+      {
+        language: 'bash',
+        code: 'mkdir hidden filler && (cd hidden && touch $(seq 1500)) && chmod 000 hidden && echo made && cd filler && touch $(seq 1000)',
+        timeoutSeconds: 20,
+      },
       client(),
     );
 
+    // disk_limit_exceeded depends on whether the watchdog or the post-run check saw the crossing first.
     expect(outcome).toMatchObject({ ok: true, result: { stdout: 'made\n', workspace_over_limit: true } });
     expect(existsSync(path.join(workspace, 'hidden'))).toBe(false);
   });
