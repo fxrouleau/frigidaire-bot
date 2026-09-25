@@ -3,7 +3,7 @@
 // modules), so this runs as part of the gate. The full image, with numpy & co and the container hardening,
 // is exercised by sandbox/ci-smoke.sh (Docker) instead.
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -137,6 +137,65 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     expect(outcome).toMatchObject({ ok: true, result: { exit_code: 1, stderr: 'nope\n' } });
   });
 
+  it('never lets a module planted in the workspace shadow the Python stdlib', async () => {
+    // A prompt-injected run could leave this behind to tamper with every later run.
+    writeFileSync(path.join(workspace, 'json.py'), 'print("HIJACKED")\ndumps = lambda value: "forged"\n');
+
+    const direct = await runInSandbox(
+      { language: 'python', code: 'import json, sys\nprint(json.dumps([1]))\nprint(sys.flags.safe_path)', timeoutSeconds: 10 },
+      client(),
+    );
+    // Python started from bash, in the workspace (python -c puts the cwd first on sys.path unless safe_path).
+    const nested = await runInSandbox(
+      { language: 'bash', code: `python3 -c 'import json; print(json.dumps([2]))'`, timeoutSeconds: 10 },
+      client(),
+    );
+
+    expect(direct).toMatchObject({ ok: true, result: { exit_code: 0, stdout: '[1]\nTrue\n' } });
+    expect(nested).toMatchObject({ ok: true, result: { exit_code: 0, stdout: '[2]\n' } });
+    rmSync(path.join(workspace, 'json.py'));
+  });
+
+  it('keeps installed tools usable without letting them shadow system commands', async () => {
+    const bin = path.join(workspace, '.local', 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(path.join(bin, 'cat'), '#!/bin/sh\necho HIJACKED\n', { mode: 0o755 });
+    writeFileSync(path.join(bin, 'frigtool'), '#!/bin/sh\necho installed-tool\n', { mode: 0o755 });
+
+    const outcome = await runInSandbox({ language: 'bash', code: 'echo real | cat; frigtool', timeoutSeconds: 10 }, client());
+
+    expect(outcome).toMatchObject({ ok: true, result: { stdout: 'real\ninstalled-tool\n' } });
+    rmSync(path.join(workspace, '.local'), { recursive: true });
+  });
+
+  it("resolves node packages from the workspace (require and import) and never shadows node's builtins", async () => {
+    const modules = path.join(workspace, 'node_modules');
+    mkdirSync(path.join(modules, 'path'), { recursive: true });
+    writeFileSync(path.join(modules, 'path', 'index.js'), 'module.exports = { sep: "HIJACKED" };\n');
+    mkdirSync(path.join(modules, 'frig-helper'), { recursive: true });
+    writeFileSync(path.join(modules, 'frig-helper', 'package.json'), '{"name":"frig-helper","main":"index.js"}');
+    writeFileSync(path.join(modules, 'frig-helper', 'index.js'), 'module.exports = { answer: 42 };\n');
+
+    const cjs = await runInSandbox(
+      { language: 'node', code: "console.log(require('path').sep, require('frig-helper').answer)", timeoutSeconds: 10 },
+      client(),
+    );
+    // ESM ignores NODE_PATH; the run directory's node_modules link is what makes this work.
+    const esm = await runInSandbox(
+      {
+        language: 'node',
+        code: "import helper from 'frig-helper';\nimport { sep } from 'node:path';\nconsole.log(sep, helper.answer, await Promise.resolve('tla'))",
+        timeoutSeconds: 10,
+      },
+      client(),
+    );
+
+    expect(cjs).toMatchObject({ ok: true, result: { exit_code: 0, stdout: '/ 42\n' } });
+    // stderr stays clean: no "module type not specified" warning for the run directory's typeless package.json.
+    expect(esm).toMatchObject({ ok: true, result: { exit_code: 0, stdout: '/ 42 tla\n', stderr: '' } });
+    rmSync(modules, { recursive: true });
+  });
+
   it('refuses a wrong token and an unknown language', async () => {
     const wrongToken = await runInSandbox(
       { language: 'bash', code: 'true', timeoutSeconds: 5 },
@@ -151,5 +210,61 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     });
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: 'language must be one of: python, bash, node' });
+  });
+
+  it('refuses a reset_workspace that is not a boolean', async () => {
+    const response = await fetch(`${server.baseUrl}/run`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ language: 'bash', code: 'true', reset_workspace: 'yes' }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'reset_workspace must be a boolean' });
+  });
+
+  it('recovers when a run makes the workspace itself read-only', async () => {
+    await runInSandbox({ language: 'bash', code: 'chmod 555 .', timeoutSeconds: 10 }, client());
+
+    const next = await runInSandbox(
+      { language: 'bash', code: 'echo ok > check.txt && cat check.txt', timeoutSeconds: 10 },
+      client(),
+    );
+
+    expect(next).toMatchObject({ ok: true, result: { exit_code: 0, stdout: 'ok\n' } });
+  });
+
+  it('wipes the whole workspace on reset_workspace, without following symlinks out of it', async () => {
+    const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'sandbox-outside-')));
+    writeFileSync(path.join(outside, 'keep.txt'), 'not the sandbox');
+    try {
+      const setup = await runInSandbox(
+        {
+          language: 'bash',
+          code: [
+            'mkdir -p .local/lib/pkg locked/inner out',
+            'echo x > .local/lib/pkg/mod.py; echo y > locked/inner/f; echo z > .hidden; echo o > out/stale.txt',
+            'chmod 000 locked/inner; chmod 500 locked',
+            `ln -s ${outside} escape; ln -s ${outside}/keep.txt escape-file`,
+          ].join('\n'),
+          timeoutSeconds: 10,
+        },
+        client(),
+      );
+      expect(setup).toMatchObject({ ok: true, result: { exit_code: 0, workspace_reset: false } });
+
+      const tool = createRunCodeTool(client());
+      const ctx = { message: createFakeMessage().message, provider: new FakeProvider([]), channelId: 'c1', turn: createTurnEffects() };
+      const output = await tool.handler(ctx, { language: 'bash', code: 'ls -A | wc -l; ls -A', reset_workspace: true });
+
+      // Only out/ (recreated before every run) is left.
+      expect(output).toContain('The workspace was wiped before this run.');
+      expect(output).toMatch(/stdout:\n\s*1\nout$/);
+      expect(readFileSync(path.join(outside, 'keep.txt'), 'utf8')).toBe('not the sandbox');
+      expect(existsSync(path.join(workspace, 'locked'))).toBe(false);
+      expect(server.logs()).toMatch(/workspace reset: removed \d+ entries/);
+      expect(server.logs()).toMatch(/run language=bash exit=0 .* reset=True/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });

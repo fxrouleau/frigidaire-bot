@@ -210,6 +210,19 @@ describe('PersonalityLearner observation cycle', () => {
     expect(requests.map((r) => r.headers.get(FEATURE_HEADER))).toEqual(['learner', 'self_improvement']);
   });
 
+  it("gives the self-improvement pass the bot's mention id and the asked rule", async () => {
+    vi.stubEnv('SELF_IMPROVEMENT_ENABLED', 'true');
+    const { client } = channelServing([jason('a'), wheezer('<@bot-1> can you open this?'), jason('c')]);
+    const { learner, requests } = learnerWith([noObservations(), noObservations()]);
+
+    await learner.observeOnce(client);
+
+    const prompt = textOf(requests[1]);
+    expect(prompt).toContain('it is mentioned as <@bot-1>.');
+    expect(prompt).toContain('6. The asked rule');
+    expect(prompt).toContain('<@bot-1> can you open this?');
+  });
+
   it('files observations under the member: id wins and names the subject, bare names are matched', async () => {
     const output = JSON.stringify({
       observations: [

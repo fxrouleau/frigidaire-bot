@@ -239,6 +239,33 @@ describe('buildSelfImprovementPrompt (anti-junk rules)', () => {
     expect(prompt).toContain('<<EXISTING_SELF_IMPROVEMENT>>');
   });
 
+  it('only counts a capability gap when someone asked the bot and it failed (the asked rule)', () => {
+    expect(prompt).toContain('6. The asked rule: a capability_gap needs BOTH (a) someone asked the bot');
+    expect(prompt).toContain("AND (b) it failed, errored, or said it couldn't");
+    expect(prompt).toContain('Posts nobody asked the bot about are NEVER gaps');
+    expect(prompt).toContain('Gaps inferred from posts nobody asked the bot about');
+    // The digest entry that motivated the rule, as the BAD example.
+    expect(prompt).toContain(
+      'BAD:  {"category":"capability_gap","subject":"bot","content":"Cannot react to shared meme or comic images"}',
+    );
+    // Rule 5 used to suggest exactly that kind of entry as its example.
+    expect(prompt).not.toContain('Cannot react to shared videos');
+  });
+
+  it("warns that the bot's own replies are missing from the transcript", () => {
+    expect(prompt).toContain("The bot's own replies are NOT shown in this transcript");
+  });
+
+  it('tells the model how the bot is mentioned when its id is known', () => {
+    expect(prompt).not.toContain('it is mentioned as');
+    const withId = buildSelfImprovementPrompt({
+      botName: 'TestFridgeName',
+      botUserId: '900000000000000001',
+      existingSelfImprovementSummary: '(none yet)',
+    });
+    expect(withId).toContain('it is mentioned as <@900000000000000001>.');
+  });
+
   it('contains no content-censoring instructions', () => {
     expect(prompt).not.toMatch(/censor/i);
     expect(prompt).not.toMatch(/paraphras/i);

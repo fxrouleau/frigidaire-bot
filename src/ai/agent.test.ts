@@ -95,6 +95,23 @@ describe('AgentOrchestrator.handleMention', () => {
     expect(promptText).not.toContain('SERVER EMOJIS (use sparingly)');
   });
 
+  it('explains the automatic link/voice/video lines and the tools that go further', async () => {
+    const provider = new FakeProvider([textResponse('Hi')]);
+    const orchestrator = makeOrchestrator(provider);
+
+    await orchestrator.handleMention(createFakeMessage({ content: 'hello' }).message);
+
+    const promptText = developerPromptText(provider);
+    expect(promptText).toContain(
+      'added automatically rather than typed by anyone: [link: …] previews of shared links, [voice message …] transcripts and [video msg:<id>: …] descriptions',
+    );
+    expect(promptText).toContain('read_link opens the full page or post and can watch a short linked video');
+    expect(promptText).toContain('watch_video answers a specific question about a video');
+    expect(promptText).toContain('run the numbers with run_code instead of eyeballing them');
+    // run_code and watch_video are only registered when configured: the persona must not promise them.
+    expect(promptText).toContain("only when they're in your tool list");
+  });
+
   it('annotates injected memory lines with their relative age and warns about stale current-state claims', async () => {
     // Default fake author display name is 'Test User', the key buildDeveloperPrompt fetches by.
     await getMemoryStore().save({ category: 'fact', subject: 'Test User', content: 'works as a plumber' });

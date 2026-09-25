@@ -200,21 +200,34 @@ Respond ONLY with a JSON object. If nothing worth saving, respond with {"observa
 
 /**
  * Builds the pass-2 (self-improvement) prompt. Exported as a pure function so tests can assert the
- * dedup/30-day rules are present.
+ * dedup/30-day/asked rules are present.
+ *
+ * The asked rule exists because the digest filled with capability_gap entries like "Cannot react to shared
+ * meme or comic images": nobody had pinged the bot, it stayed quiet as designed, and the learner read the
+ * silence as inability. The transcript also leaves out the bot's own replies, so every ping looks
+ * unanswered; only what people say next can show a real failure.
  */
-export function buildSelfImprovementPrompt(args: { botName: string; existingSelfImprovementSummary: string }): string {
+export function buildSelfImprovementPrompt(args: {
+  botName: string;
+  /** The bot's Discord id, so the model can recognize `<@id>` mentions in the raw message text. */
+  botUserId?: string;
+  existingSelfImprovementSummary: string;
+}): string {
+  const mention = args.botUserId ? `; it is mentioned as <@${args.botUserId}>` : '';
   return `You are looking for bot self-improvement signals in a Discord conversation for a bot called "${args.botName}".
-Messages: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Bot name: "${args.botName}" (also "fridge", "fridge bot", "bot").
+Messages: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Bot name: "${args.botName}" (also "fridge", "fridge bot", "bot")${mention}.
+The bot's own replies are NOT shown in this transcript, so a message without a visible answer tells you nothing about whether the bot answered it.
 
 OUTPUT RULES:
 1. Each "content" MUST be ≤80 characters. One atomic issue per row.
 2. Plain declarative sentences. NO boilerplate like "bot should offer a simple, context-aware fallback response (e.g., '...')". Just state the gap.
 3. STRONG dedup rule: if the issue is already in existing observations with a different example (different URL, different emoji, different GIF), DO NOT save it. A new YouTube link example of an already-documented YouTube-link gap is NOT a new observation. The existing observations are injected below — re-saving anything semantically covered there is the #1 failure mode of this task.
 4. Only save when the issue is NEW or notably more severe than existing entries.
-5. The 30-day test: save lasting gaps and behavior patterns, never single missed messages. "User shared X and got no bot response" is transcription of one moment, not an issue — if there is a real underlying gap, state the gap itself ("Cannot react to shared videos"), and only if it is not already saved.
+5. The 30-day test: save lasting gaps and behavior patterns, never single missed messages. "User shared X and got no bot response" is transcription of one moment, not an issue — if there is a real underlying gap, state the gap itself ("Cannot join voice chat when asked"), and only if it is not already saved.
+6. The asked rule: a capability_gap needs BOTH (a) someone asked the bot to do something — mentioned it, replied to it, or clearly talked to it by name — AND (b) it failed, errored, or said it couldn't. Since its replies aren't shown, (b) comes from what people say next ("fridge can't even open tiktoks", "it said it can't watch videos", someone asking it again because it got it wrong). Posts nobody asked the bot about are NEVER gaps: the bot only talks when it is talked to, so not reacting to a meme, image, comic, video, link or voice message that nobody pointed it at is intended behavior, not an inability.
 
 Categories:
-- capability_gap: Bot couldn't process something users wanted it to (link, attachment, emoji type, etc.)
+- capability_gap: Bot was asked to process something (link, attachment, emoji type, etc.) and couldn't (see rule 6)
 - pain_point: User frustration with bot behavior (too verbose, responds when not asked, forgets context, etc.)
 - feature_request: Explicit user wish for a missing feature
 - improvement_idea: Concrete behavioral tweak (shorter responses in channel X, better emoji use, etc.)
@@ -224,11 +237,17 @@ DO NOT SAVE:
 - Jokey roasting (friends ribbing the bot is not a pain_point)
 - Re-statements of known limitations with new examples (see rule 3)
 - "User shared X but received no bot engagement" entries — that is one missed message, not a lasting issue (see rule 5)
+- Gaps inferred from posts nobody asked the bot about — the bot staying quiet there is by design (see rule 6)
 - Custom emoji interpretation — the bot CAN see custom server emojis (see list injected in the personality prompt). Do NOT log capability_gap entries claiming the bot can't read them.
 
 GOOD vs BAD examples:
   GOOD: {"category":"capability_gap","subject":"bot","content":"Cannot read restaurant receipts for bill splitting."}
   BAD:  {"category":"capability_gap","subject":"bot","content":"Bot cannot interpret or respond to restaurant receipts (e.g., Cocodak receipt) even when users share them for group expense tracking, treating them as unprocessable media instead of acknowledging their financial, culinary, or social relevance."}
+
+  BAD:  {"category":"capability_gap","subject":"bot","content":"Cannot react to shared meme or comic images"}
+        (people posted memes and nobody asked the bot about them: it stays quiet unless talked to, which is not a gap)
+  GOOD: {"category":"capability_gap","subject":"bot","content":"Can't join voice chat when asked to."}
+        (someone pinged it to hop in VC, then said "right, you can't even join voice")
 
   GOOD: {"category":"pain_point","subject":"bot","content":"Responses too long for meme-channel pace."}
   BAD:  {"category":"improvement_idea","subject":"bot","content":"Bot should default to clean, consistent formatting (e.g., bullet points, @mentions, aligned tables) for financial splits unless explicitly overridden, to reduce user frustration and improve usability during group expense coordination."}
@@ -726,7 +745,11 @@ export class PersonalityLearner {
             ? existingSelfImprovement.map((m) => `- [${m.category}] ${m.subject}: ${m.content}`).join('\n')
             : '(none yet)';
 
-        const selfImprovementPrompt = buildSelfImprovementPrompt({ botName, existingSelfImprovementSummary });
+        const selfImprovementPrompt = buildSelfImprovementPrompt({
+          botName,
+          botUserId: discordClient.user?.id,
+          existingSelfImprovementSummary,
+        });
 
         const selfImprovementResult = await this.analyzeAndSave(
           openai,
