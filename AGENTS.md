@@ -19,7 +19,7 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 - **Storage**: `better-sqlite3` — `./data/memory.db` (memories, FTS5, vectors, identities, emojis, learner/bot state) and `./data/conversations.db` (per-channel conversation cache)
 - **Images**: `sharp`
 - **Lint/format**: Biome (120 cols, 2 spaces, single quotes, trailing commas; `noUnusedImports`/`noUnusedVariables` are errors)
-- **Tests**: Vitest 4, ~590 tests colocated as `src/**/*.test.ts`
+- **Tests**: Vitest 5 (with `vite` as an explicit dev dependency: Yarn does not install peers), ~590 tests colocated as `src/**/*.test.ts`
 - **Deployment**: one Docker image; dev/test toolchain fully containerized (host needs only Docker)
 
 ## Project structure
@@ -277,7 +277,7 @@ For tests: `RUN_LIVE=1` enables the live tests (also needs `OPENROUTER_API_KEY`)
 
 ## Testing
 
-- Vitest 4; tests colocated as `src/**/*.test.ts`. Convention: code at the **OpenRouter or Discord boundary ships with fixture/fake-based tests**.
+- Vitest 5; tests colocated as `src/**/*.test.ts`. Convention: code at the **OpenRouter or Discord boundary ships with fixture/fake-based tests**.
 - **Hermeticity**: tests never touch `./data` or the network. `getMemoryStore()` and `getConversationPersistence()` auto-construct in-memory instances under Vitest; `makeDefaultEmbeddingProvider()` returns `undefined` there. Tests needing memory inject `new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() })` via `setMemoryStoreForTesting()`. Anything that can write an error capture stubs `DEBUG_CAPTURE_DIR` (or sets `DEBUG_CAPTURE=0`).
 - `src/test-support/`:
   - `fakeProvider.ts` — scripted `AiProvider` (`textResponse()`, `toolCallResponse()`, `errorStep()`), records every `chat()` input.
