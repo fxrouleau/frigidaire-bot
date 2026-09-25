@@ -132,3 +132,28 @@ describe('forget_birthday', () => {
     expect(await run('forget_birthday', { person: 'jason' })).toBe("I didn't have a birthday saved for Wheezer.");
   });
 });
+
+describe('birthdays with a linked side account (LINKED_ACCOUNTS)', () => {
+  const SIDE = '700000000000000004';
+
+  beforeEach(() => {
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
+    memory.upsertIdentity(SIDE, 'JayAlt', 'jay_alt');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("files a birthday under the main account, whether named by the side account or set as \"me\" from it", async () => {
+    expect(await run('set_birthday', { person: 'JayAlt', date: '12-03' })).toBe(
+      "Saved Wheezer's birthday: December 3. Next one is in 69 day(s).",
+    );
+    expect(getBirthday(JASON)).toMatchObject({ month: 12, day: 3, setBy: FELIX });
+    expect(getBirthday(SIDE)).toBeUndefined();
+
+    await run('set_birthday', { person: 'me', date: '12-04' }, SIDE);
+    expect(getBirthday(JASON)).toMatchObject({ month: 12, day: 4, setBy: JASON });
+    expect(await run('forget_birthday', { person: 'me' }, SIDE)).toBe("Forgot Wheezer's birthday.");
+  });
+});

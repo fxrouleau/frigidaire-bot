@@ -167,6 +167,31 @@ describe('set_reminder', () => {
   });
 });
 
+describe('set_reminder / cancel_reminder with a linked side account (LINKED_ACCOUNTS)', () => {
+  const SIDE = '600000000000000004';
+
+  beforeEach(() => {
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${JASON}`);
+    memory.upsertIdentity(SIDE, 'JayAlt', 'jay_alt');
+  });
+
+  it("targets the main account when the side account's name or mention is used, and for \"me\" from it", async () => {
+    await run('set_reminder', { text: 'ranked', in_minutes: 5, for: ['JayAlt', `<@${SIDE}>`, '@jay_alt'] });
+    expect(getReminder(1)?.targetIds).toEqual([JASON]);
+
+    const result = await run('set_reminder', { text: 'gym', in_minutes: 5 }, { authorId: SIDE, authorDisplayName: 'JayAlt' });
+    expect(result).toContain('set for Wheezer:');
+    expect(getReminder(2)).toMatchObject({ requesterId: JASON, requesterName: 'Wheezer', targetIds: [JASON] });
+  });
+
+  it('lets the person cancel from either account', async () => {
+    await run('set_reminder', { text: 'gym', in_minutes: 30, for: ['Wheezer'] });
+    expect(await run('cancel_reminder', { id: 1 }, { authorId: SIDE, authorDisplayName: 'JayAlt' })).toBe(
+      'Cancelled reminder #1 ("gym").',
+    );
+  });
+});
+
 describe('list_reminders', () => {
   it('lists this channel only, soonest first, with who and when in ET', async () => {
     await run('set_reminder', { text: 'later thing', in_minutes: 120 });
