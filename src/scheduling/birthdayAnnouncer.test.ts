@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { setMemoryStoreForTesting } from '../ai/memory';
+import { getNotesStore, setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
 import { FEATURE_HEADER } from '../ai/usage';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
@@ -37,7 +37,9 @@ const LONG_AGO = '2026-06-01 12:00:00';
 /** Sets a memory's SQLite timestamps (UTC 'YYYY-MM-DD HH:MM:SS'); saves always stamp the real clock. */
 function stamp(id: number, createdAt: string, updatedAt = createdAt): void {
   const db = (memory as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db;
-  db.prepare('UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?').run(createdAt, updatedAt, id);
+  db.prepare(
+    'UPDATE memories SET created_at = ?, updated_at = ?, first_seen_at = ?, last_seen_at = ? WHERE id = ?',
+  ).run(createdAt, updatedAt, createdAt, updatedAt, id);
 }
 
 async function saveOld(input: Parameters<MemoryStore['save']>[0]): Promise<number> {
@@ -235,6 +237,39 @@ describe('BirthdayAnnouncer.run', () => {
     ]);
   });
 
+  it('gives the writer their profile (Earlier left out) and only what was picked up since, once notes exist', async () => {
+    memory.upsertIdentity(ALICE, 'Alice');
+    stamp(
+      await memory.save({ category: 'fact', subject: 'Alice', content: 'is a nurse', subject_user_id: ALICE }),
+      LONG_AGO,
+    );
+    const notes = getNotesStore(memory);
+    notes.writeNotes(
+      { scope: 'person', ownerId: ALICE },
+      [
+        {
+          topic: 'profile',
+          title: 'Alice',
+          content: '## Now\nA nurse who runs the group movie nights.\n\n## Earlier\n- Back in 2017 lived in Quebec City.',
+        },
+      ],
+      { updatedBy: 'dream' },
+    );
+    notes.recordDreamSuccess({ scope: 'person', ownerId: ALICE }, notes.journalHighWater());
+    stamp(
+      await memory.save({ category: 'event', subject: 'Alice', content: 'broke a toe', subject_user_id: ALICE }),
+      '2026-09-23 12:00:00',
+    );
+    birthday(ALICE, 9, 25);
+    const { writer, inputs } = writerSaying('🎂 hbd');
+    const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice' }] });
+
+    await announcer.run(SEPT25_1500);
+
+    expect(inputs[0].profile).toBe('## Now\nA nurse who runs the group movie nights.');
+    expect(inputs[0].memories).toEqual(['broke a toe (noted 2d ago)']);
+  });
+
   it('keeps the oldest 20 and the newest 20 when there are more than 40', async () => {
     memory.upsertIdentity(ALICE, 'Alice');
     for (let i = 0; i < 50; i++) {
@@ -427,6 +462,16 @@ describe('createBirthdayWriter', () => {
     expect(messages[1].content).toMatch(/^Today is Friday, September 25, 2026\.\n/);
     expect(messages[1].content).toContain('What you know about Alice (background only; oldest first');
     expect(messages[1].content).toContain('- Alice hates cilantro (noted 1mo ago)');
+  });
+
+  it('puts the profile first and what was picked up since after it', async () => {
+    const { client, requests } = capturingClient({ status: 200, body: completion(`<@${ALICE}> hbd`) });
+    const writer = createBirthdayWriter({ client, model: 'test-chat-model' });
+    await writer({ ...input, profile: '## Now\nA nurse.', memories: ['broke a toe (noted 2d ago)'] });
+    const messages = requests[0].body.messages as Array<{ role: string; content: string }>;
+    expect(messages[1].content).toContain(
+      "Your notes on who Alice is (background only):\n## Now\nA nurse.\n\nPicked up since those notes (recent, each with when you first noted it):\n- broke a toe (noted 2d ago)",
+    );
   });
 
   it('returns undefined (template time) on an API error or an empty answer', async () => {

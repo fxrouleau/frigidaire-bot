@@ -7,8 +7,9 @@ import { createHash } from 'node:crypto';
 import { type Client, RESTJSONErrorCodes } from 'discord.js';
 import type OpenAI from 'openai';
 import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
-import { getMemoryStore } from '../ai/memory';
-import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
+import { getMemoryStore, getNotesStore } from '../ai/memory';
+import { type Memory, SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
+import { chatExcerpt } from '../ai/memory/notes/context';
 import { getOpenRouterClient } from '../ai/openRouterClient';
 import { memoryKeyFor } from '../ai/people';
 import { featureRequestOptions } from '../ai/usage';
@@ -25,6 +26,8 @@ const MINUTE_MS = 60_000;
 const MEMORY_CONTEXT_LIMIT = 40;
 // Every memory filed under them, before the categories below are dropped.
 const MEMORY_CANDIDATES = 500;
+// The profile the writer sees (memory v2), Earlier footnotes left out.
+const PROFILE_MAX_CHARS = 3_000;
 const MODEL_TIMEOUT_MS = 30_000;
 // The default chat model (z-ai/glm-5.3-flash) reasons at 'max' unless told otherwise, and reasoning counts
 // toward max_tokens: the writer asks for 'low' and leaves room for it before the message (only the tokens
@@ -50,7 +53,15 @@ export type BirthdayMessageInput = {
   name: string;
   /** The age they turn today, when the birth year is known. */
   age?: number;
-  /** What the bot knows about them, oldest first, each tagged with when it was first noted ("… (noted 3mo ago)"). */
+  /**
+   * Your notes on who they are (memory v2: their profile without its dated "Earlier" footnotes), when the
+   * nightly dream has written one. `memories` then holds only what was picked up since.
+   */
+  profile?: string;
+  /**
+   * What the bot knows about them, oldest first, each tagged with when it was first noted ("… (noted 3mo
+   * ago)"): with a profile, the journal rows newer than it; without, everything filed under them.
+   */
   memories: string[];
   botName: string;
   /** Today's Eastern date, e.g. "Friday, September 25, 2026". */
@@ -84,9 +95,14 @@ It's ${input.name}'s birthday today${turning}. Write the birthday message you'd 
 - At most one detail from what you know about them, and only if it fits naturally. Prefer something long-running about them (a trait, a running joke, old lore). Each thing you know says when you first noted it: anything from the last couple of weeks is recent news, so only bring it up as something that just happened, never as history or an old running joke. Never list facts, and never say you have notes or memories.
 - No hashtags, no emojis, no quotation marks around the message.
 Reply with the message text only.`;
-  const known =
-    input.memories.length > 0
-      ? `What you know about ${input.name} (background only; oldest first, each with when you first noted it):\n${input.memories.map((m) => `- ${m}`).join('\n')}`
+  const newer = input.memories.map((m) => `- ${m}`).join('\n');
+  const known = input.profile
+    ? [
+        `Your notes on who ${input.name} is (background only):\n${input.profile}`,
+        ...(newer ? [`Picked up since those notes (recent, each with when you first noted it):\n${newer}`] : []),
+      ].join('\n\n')
+    : input.memories.length > 0
+      ? `What you know about ${input.name} (background only; oldest first, each with when you first noted it):\n${newer}`
       : `You don't know much about ${input.name} beyond their name.`;
   return { system, user: `Today is ${input.today}.\n\n${known}` };
 }
@@ -234,12 +250,20 @@ export class BirthdayAnnouncer {
       const identity = this.safeIdentity(userId);
       const name = member?.displayName ?? identity?.display_name ?? (await this.lookupUserName(userId));
       const age = birthday.year ? year - birthday.year : undefined;
-      const memories = this.memoriesFor(userId, name, nowMs);
+      const { profile, memories } = this.knownAbout(userId, name, nowMs);
       const botName = this.client.user?.displayName ?? 'Frigidaire';
 
       let written: string | undefined;
       try {
-        written = await this.writer({ userId, name, age, memories, botName, today: EASTERN_DATE.format(nowMs) });
+        written = await this.writer({
+          userId,
+          name,
+          age,
+          ...(profile ? { profile } : {}),
+          memories,
+          botName,
+          today: EASTERN_DATE.format(nowMs),
+        });
       } catch (error) {
         logger.warn(`birthdays: writing ${userId}'s message failed; using the template:`, error);
       }
@@ -308,30 +332,44 @@ export class BirthdayAnnouncer {
   }
 
   /**
-   * What the bot knows about them (by id and every name any of their accounts goes by: display, handle,
-   * first-seen, IRL, nicknames), minus image and self-diagnosis rows: oldest first, each tagged with when it was
-   * first noted, capped at MEMORY_CONTEXT_LIMIT (the oldest and the newest halves).
+   * What the bot knows about them: their profile (without its Earlier footnotes) and the journal rows newer
+   * than it once the dream has written one, else every memory filed under them (by id and every name any of
+   * their accounts goes by: display, handle, first-seen, IRL, nicknames). Image and self-diagnosis rows are
+   * left out; rows are oldest first, each tagged with when it was first noted, capped at
+   * MEMORY_CONTEXT_LIMIT (the oldest and the newest halves).
    */
-  private memoriesFor(userId: string, liveName: string, nowMs: number): string[] {
+  private knownAbout(userId: string, liveName: string, nowMs: number): { profile?: string; memories: string[] } {
     try {
       const store = getMemoryStore();
-      // Oldest first by when each was first noted (an unreadable time counts as old); ties by id, for a stable
-      // order. created_at, not updated_at: the learner re-confirming old lore must not make it look new.
-      const dated = store
-        .getForPerson(memoryKeyFor(store, userId, [liveName]), MEMORY_CANDIDATES)
-        .filter((m) => !EXCLUDED_MEMORY_CATEGORIES.has(m.category))
-        .map((m) => ({ memory: m, noted: parseSqliteUtc(m.created_at) ?? Number.NEGATIVE_INFINITY }))
-        .sort((a, b) => (a.noted === b.noted ? a.memory.id - b.memory.id : a.noted < b.noted ? -1 : 1));
-      const half = MEMORY_CONTEXT_LIMIT / 2;
-      const picked = dated.length > MEMORY_CONTEXT_LIMIT ? [...dated.slice(0, half), ...dated.slice(-half)] : dated;
-      const now = new Date(nowMs);
-      return picked.map(({ memory }) => {
-        const age = formatRelativeAge(memory.created_at, now);
-        return age ? `${memory.content} (noted ${age})` : memory.content;
-      });
+      const key = memoryKeyFor(store, userId, [liveName]);
+      const profile = getNotesStore(store).getProfile(userId);
+      if (profile) {
+        const newer = getNotesStore(store).newJournal({ scope: 'person', ownerId: key.userId, names: key.names });
+        return { profile: chatExcerpt(profile.content, PROFILE_MAX_CHARS), memories: this.dated(newer, nowMs) };
+      }
+      return { memories: this.dated(store.getForPerson(key, MEMORY_CANDIDATES), nowMs) };
     } catch (error) {
       logger.warn(`birthdays: couldn't read memories for ${userId}:`, error);
-      return [];
+      return { memories: [] };
     }
+  }
+
+  /** Rows as dated lines, oldest first, image and self-diagnosis rows left out, capped (oldest + newest halves). */
+  private dated(rows: Memory[], nowMs: number): string[] {
+    // Oldest first by when each was first noted (an unreadable time counts as old); ties by id, for a stable
+    // order. First seen (created_at for older rows), not updated_at: the learner re-confirming old lore must
+    // not make it look new, and a backdated row (the bootstrap reading old history) is as old as the history.
+    const firstNoted = (m: Memory) => m.first_seen_at ?? m.created_at;
+    const dated = rows
+      .filter((m) => !EXCLUDED_MEMORY_CATEGORIES.has(m.category))
+      .map((m) => ({ memory: m, noted: parseSqliteUtc(firstNoted(m)) ?? Number.NEGATIVE_INFINITY }))
+      .sort((a, b) => (a.noted === b.noted ? a.memory.id - b.memory.id : a.noted < b.noted ? -1 : 1));
+    const half = MEMORY_CONTEXT_LIMIT / 2;
+    const picked = dated.length > MEMORY_CONTEXT_LIMIT ? [...dated.slice(0, half), ...dated.slice(-half)] : dated;
+    const now = new Date(nowMs);
+    return picked.map(({ memory }) => {
+      const age = formatRelativeAge(firstNoted(memory), now);
+      return age ? `${memory.content} (noted ${age})` : memory.content;
+    });
   }
 }

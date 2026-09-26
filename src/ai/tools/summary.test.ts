@@ -5,7 +5,7 @@ import { recordRelay } from '../../relay';
 import { BotDb, setBotDbForTesting } from '../../storage/botDb';
 import { type CapturedRequest, chatCompletionBody, createCapturingClient } from '../../test-support/capturingClient';
 import { createFakeBotMessage, createFakeMessage, type FakeMessageOptions } from '../../test-support/fakeDiscord';
-import { setMemoryStoreForTesting } from '../memory';
+import { getNotesStore, setMemoryStoreForTesting } from '../memory';
 import { MemoryStore } from '../memory/memoryStore';
 import { FEATURE_HEADER } from '../usage';
 import { runSummaryTool, summarizeChannel, summarizeChannelResult } from './summary';
@@ -275,6 +275,31 @@ describe('summarizeChannel', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("uses the first lines of a person's profile as their background once they have notes", async () => {
+    store.upsertIdentity('u-jasper', 'Jasper', 'lapinlune');
+    await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: 'u-jasper', content: 'Works nights at the depot' });
+    getNotesStore(store).writeNotes(
+      { scope: 'person', ownerId: 'u-jasper' },
+      [
+        {
+          topic: 'profile',
+          title: 'Jasper',
+          content: '## Now\n- **Night-shift** dispatcher, the group\'s alarm clock.\n\n## Earlier\n- Back in 2018 drove a cab.',
+        },
+      ],
+      { updatedBy: 'dream' },
+    );
+    const { trigger } = channelWith([said(30, 'jasper', 'has anyone seen fefe today')]);
+    const { client, requests } = okClient();
+
+    await summarizeChannel({ message: trigger, start: new Date(NOW.getTime() - HOUR), client, now });
+
+    const prompt = userPrompt(requests[0]);
+    expect(prompt).toContain("background: Night-shift dispatcher, the group's alarm clock.");
+    expect(prompt).not.toContain('Works nights at the depot');
+    expect(prompt).not.toContain('drove a cab');
   });
 
   it('caps background at the 8 most active people and 4 memories each, and never throws on a memory failure', async () => {
