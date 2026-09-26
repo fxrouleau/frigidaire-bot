@@ -31,7 +31,7 @@ function birthday(userId: string, month: number, day: number, year: number | nul
   saveBirthday({ userId, date: { month, day, year }, setBy: 'test', now: 0, lastAnnouncedYear });
 }
 
-// Well before the Sept 25 runs below: learned months ago, so not "recent".
+// Well before the Sept 25 runs below: "3mo ago" by then.
 const LONG_AGO = '2026-06-01 12:00:00';
 
 /** Sets a memory's SQLite timestamps (UTC 'YYYY-MM-DD HH:MM:SS'); saves always stamp the real clock. */
@@ -179,7 +179,7 @@ describe('BirthdayAnnouncer.run', () => {
     expect(throwing.target.sent[0].content).toBe(`🎂 Happy 30th birthday <@${ALICE}>!`);
   });
 
-  it('hands the writer their name, age and a few relevant memories', async () => {
+  it("hands the writer their name, age, today's date and what it knows about them, dated", async () => {
     memory.upsertIdentity(ALICE, 'Alice');
     const facts = [
       'works night shifts as an ER nurse',
@@ -199,36 +199,62 @@ describe('BirthdayAnnouncer.run', () => {
     await announcer.run(SEPT25_1500);
 
     expect(inputs).toHaveLength(1);
-    expect(inputs[0]).toMatchObject({ userId: ALICE, name: 'Alice (server nick)', age: 36, botName: 'Frigidaire' });
-    expect(inputs[0].memories).toHaveLength(5);
+    expect(inputs[0]).toMatchObject({
+      userId: ALICE,
+      name: 'Alice (server nick)',
+      age: 36,
+      botName: 'Frigidaire',
+      today: 'Friday, September 25, 2026',
+    });
+    expect(inputs[0].memories).toEqual(facts.map((fact) => `${fact} (noted 3mo ago)`));
     expect(inputs[0].memories.join(' ')).not.toContain('cat gif');
   });
 
-  it('leaves out events and anything learned in the last two weeks, however recently it was touched', async () => {
+  it('lists them oldest first by when they were first noted, recent news and events included, each with its age', async () => {
     memory.upsertIdentity(ALICE, 'Alice');
     const save = (category: string, content: string) =>
       memory.save({ category, subject: 'Alice', content, subject_user_id: ALICE });
-    // Old lore, re-confirmed yesterday: the learner bumped updated_at, created_at is what counts.
+    stamp(await save('fact', 'broke a toe at the climbing gym'), '2026-09-23 12:00:00');
+    // Old lore the learner re-confirmed yesterday: created_at says how old it is, not updated_at.
     stamp(await save('personality', 'is late to everything, famously'), '2025-11-02 20:00:00', '2026-09-24 12:00:00');
-    stamp(await save('fact', 'has cooked the same chili recipe for a decade'), '2026-09-10 18:59:00');
-    stamp(await save('fact', 'broke a toe at the climbing gym yesterday'), '2026-09-24 22:00:00');
-    stamp(await save('fact', 'started a new job two weeks ago'), '2026-09-11 19:00:01');
-    stamp(await save('event', 'is flying to Lisbon for the long weekend'), LONG_AGO);
+    stamp(await save('event', 'is flying to Lisbon for the long weekend'), '2026-09-20 12:00:00');
     stamp(await save('preference', 'only drinks oat milk lattes'), 'not a timestamp');
-    // A wave of fresh memories must not crowd the older ones out of the candidates.
-    for (let i = 0; i < 30; i++) stamp(await save('fact', `recent detail ${i}`), '2026-09-20 12:00:00');
+    stamp(await save('image', 'shared a blurry concert photo'), '2026-09-24 12:00:00');
     birthday(ALICE, 9, 25);
     const { writer, inputs } = writerSaying('🎂 hbd');
     const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice' }] });
 
     await announcer.run(SEPT25_1500);
 
-    // Sept 25 15:00 ET is 19:00 UTC: the 14-day line is Sept 11 19:00:00 UTC.
-    expect([...inputs[0].memories].sort()).toEqual([
-      'has cooked the same chili recipe for a decade',
-      'is late to everything, famously',
+    // An unreadable time counts as old and gets no age; image shares never make it.
+    expect(inputs[0].memories).toEqual([
       'only drinks oat milk lattes',
+      'is late to everything, famously (noted 10mo ago)',
+      'is flying to Lisbon for the long weekend (noted 5d ago)',
+      'broke a toe at the climbing gym (noted 2d ago)',
     ]);
+  });
+
+  it('keeps the oldest 20 and the newest 20 when there are more than 40', async () => {
+    memory.upsertIdentity(ALICE, 'Alice');
+    for (let i = 0; i < 50; i++) {
+      const id = await memory.save({
+        category: 'fact',
+        subject: 'Alice',
+        content: `collects item${i} and thing${i}`,
+        subject_user_id: ALICE,
+      });
+      // Day i of 2025: memory i is older than memory i + 1.
+      stamp(id, new Date(Date.UTC(2025, 0, 1 + i, 12)).toISOString().slice(0, 19).replace('T', ' '));
+    }
+    birthday(ALICE, 9, 25);
+    const { writer, inputs } = writerSaying('🎂 hbd');
+    const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice' }] });
+
+    await announcer.run(SEPT25_1500);
+
+    const items = inputs[0].memories.map((m) => Number(/item(\d+)/.exec(m)?.[1]));
+    expect(items).toEqual([...Array.from({ length: 20 }, (_, i) => i), ...Array.from({ length: 20 }, (_, i) => 30 + i)]);
   });
 
   it("finds memories filed under any name they go by: Discord handle, and a linked side account's names", async () => {
@@ -246,7 +272,10 @@ describe('BirthdayAnnouncer.run', () => {
 
       await announcer.run(SEPT25_1500);
 
-      expect([...inputs[0].memories].sort()).toEqual(['owns two greyhounds', 'works night shifts as an ER nurse']);
+      expect([...inputs[0].memories].sort()).toEqual([
+        'owns two greyhounds (noted 3mo ago)',
+        'works night shifts as an ER nurse (noted 3mo ago)',
+      ]);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -364,8 +393,9 @@ describe('createBirthdayWriter', () => {
     userId: ALICE,
     name: 'Alice',
     age: 30,
-    memories: ['Alice is a nurse', 'Alice hates cilantro'],
+    memories: ['Alice is a nurse (noted 2mo ago)', 'Alice hates cilantro (noted 1mo ago)'],
     botName: 'Frigidaire',
+    today: 'Friday, September 25, 2026',
   };
 
   it('asks the chat model with ZDR routing, tags the call as birthday, and finalizes the text', async () => {
@@ -390,11 +420,13 @@ describe('createBirthdayWriter', () => {
     const messages = requests[0].body.messages as Array<{ role: string; content: string }>;
     expect(messages[0].content).toContain("It's Alice's birthday today (turning 30)");
     expect(messages[0].content).toContain(`<@${ALICE}>`);
+    expect(messages[0].content).toContain('Prefer something long-running about them (a trait, a running joke, old lore)');
     expect(messages[0].content).toContain(
-      'Prefer something long-running about them (a trait, a running joke, old lore), never news from the past couple of weeks',
+      'anything from the last couple of weeks is recent news, so only bring it up as something that just happened',
     );
-    expect(messages[1].content).toContain("Things you've known about Alice for a while");
-    expect(messages[1].content).toContain('- Alice hates cilantro');
+    expect(messages[1].content).toMatch(/^Today is Friday, September 25, 2026\.\n/);
+    expect(messages[1].content).toContain('What you know about Alice (background only; oldest first');
+    expect(messages[1].content).toContain('- Alice hates cilantro (noted 1mo ago)');
   });
 
   it('returns undefined (template time) on an API error or an empty answer', async () => {
