@@ -260,7 +260,7 @@ describe('runBootstrap', () => {
     expect(rows[0].last_seen_at).toBe('2019-04-02 00:00:00');
     expect(JSON.parse(rows[0].evidence ?? '{}').messageIds[0]).toBe(job);
 
-    expect(dream).toHaveBeenCalledWith(1);
+    expect(dream).toHaveBeenCalledTimes(1);
     expect(readProgress(memory)).toMatchObject({ model: MODEL, rows: 2 });
     expect(lines.at(-1)).toContain('dreaming 1 people');
   });
@@ -301,10 +301,10 @@ describe('runBootstrap', () => {
 
     const rest = createCapturingClient([answer([])]);
     const dream = vi.fn(async (): Promise<NightlyDreamResult> => {
-      throw new Error('not implemented: runNightlyDream');
+      throw new Error('the dream model is down');
     });
     const finished = await runBootstrap({ archive, memory, notes, client: rest.client, model: MODEL, dream, log: () => {} });
-    expect(finished.dream).toEqual({ error: 'not implemented: runNightlyDream' });
+    expect(finished.dream).toEqual({ error: 'the dream model is down' });
   });
 
   it('treats an empty answer as a failure', async () => {

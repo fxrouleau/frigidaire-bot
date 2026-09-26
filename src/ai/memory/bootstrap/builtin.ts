@@ -465,10 +465,11 @@ export type BootstrapRunDeps = {
   to?: string;
   segmentTokens?: number;
   /**
-   * Runs the dream for everyone with new journal rows once every segment of the whole archive is done
+   * Dreams everyone with new journal rows until nothing is pending (runDreamsUntilCaughtUp: a person with
+   * more rows than one dream reads gets several passes), once every segment of the whole archive is done
    * (not after a --from/--to range; skipped when absent).
    */
-  dream?: (maxPeople: number) => Promise<NightlyDreamResult>;
+  dream?: () => Promise<NightlyDreamResult>;
   /** Progress lines (the CLI prints them). */
   log?: (line: string) => void;
   /** Stop after this many segments (a trial run); the rest waits for the next run. */
@@ -604,9 +605,9 @@ export async function runBootstrap(deps: BootstrapRunDeps): Promise<BootstrapRun
   // A range (--from/--to) is a partial read: the dream waits for a run over the whole archive.
   if (result.segmentsLeft === 0 && deps.dream && !deps.from && !deps.to) {
     const pending = deps.notes.pendingDreams().people.length;
-    log(`every segment is read: dreaming ${pending} people into notes`);
+    log(`every segment is read: dreaming ${pending} people into notes, until nothing is pending`);
     try {
-      result.dream = await deps.dream(Math.max(1, pending));
+      result.dream = await deps.dream();
     } catch (error) {
       result.dream = { error: error instanceof Error ? error.message : String(error) };
       log(`the dream failed (the nightly dream will pick the journal up): ${result.dream.error}`);

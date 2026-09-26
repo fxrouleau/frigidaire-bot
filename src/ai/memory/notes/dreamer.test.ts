@@ -21,6 +21,7 @@ import {
   planGroupDream,
   previewChanges,
   proposeEdit,
+  runDreamsUntilCaughtUp,
   runNightlyDream,
   summarizePersonChanges,
 } from './dreamer';
@@ -644,6 +645,58 @@ describe('runNightlyDream', () => {
     await saveFact('Works day shifts.');
     expect(await runNightlyDream({ notes, memory, now: () => NOW })).toEqual({ day: '2026-09-26', people: [] });
     expect(notes.getDreamState(remi).lastError).toBeNull();
+  });
+});
+
+describe('runDreamsUntilCaughtUp (the built-in bootstrap)', () => {
+  const insertRows = (count: number, subject: string, subjectUserId: string | null, category = 'fact') => {
+    const insert = memory
+      .sharedDatabase()
+      .prepare('INSERT INTO memories (category, subject, content, source, subject_user_id) VALUES (?, ?, ?, ?, ?)');
+    for (let i = 0; i < count; i++) insert.run(category, subject, `${subject} fact number ${i}.`, 'bootstrap', subjectUserId);
+  };
+
+  it('dreams a person again and again until their whole backlog is folded in, then the group', async () => {
+    insertRows(MAX_JOURNAL_ROWS_PER_DREAM + 40, 'Remi', REMI);
+    insertRows(MAX_JOURNAL_ROWS_PER_DREAM + 1, 'server', null, 'vibe');
+    const { client, requests } = createCapturingClient([
+      reply({ notes: [newProfile()], change_summary: 'first 300' }, { cost: 0.1 }),
+      reply({ notes: [newProfile('## Now\nDay shifts, and the rest.')], change_summary: 'the rest' }, { cost: 0.05 }),
+      reply({ notes: [{ topic: 'lore', title: 'Lore', content: '## Now\nOld lore.' }], change_summary: 'lore' }),
+      reply({ notes: [{ topic: 'lore', title: 'Lore', content: '## Now\nAll the lore.' }], change_summary: 'more lore' }),
+    ]);
+    const result = await runDreamsUntilCaughtUp(deps(client));
+
+    expect(result.people.map((o) => o.status)).toEqual(['updated', 'updated']);
+    expect(result.group).toMatchObject({ status: 'updated', changeSummary: 'more lore' });
+    expect(result).toMatchObject({ passes: 4, caughtUp: true });
+    expect(result.costUsd).toBeCloseTo(0.21);
+    expect(userPrompt(requests[0])).toContain(`NEW JOURNAL (${MAX_JOURNAL_ROWS_PER_DREAM} entries`);
+    expect(userPrompt(requests[1])).toContain('NEW JOURNAL (40 entries');
+    expect(userPrompt(requests[3])).toContain('NEW JOURNAL (1 entry');
+    expect(notes.pendingDreams()).toEqual({ people: [] });
+  });
+
+  it('never retries a failed person in the same run, and stops after three failures in a row', async () => {
+    insertRows(MAX_JOURNAL_ROWS_PER_DREAM + 1, 'Remi', REMI);
+    const outage = { status: 400, body: { error: { message: 'provider unavailable' } } };
+    const once = createCapturingClient([outage, outage]);
+    const result = await runDreamsUntilCaughtUp(deps(once.client));
+    // Remi's dream fails and is not retried (the nightly dream will); the group's first refresh fails too.
+    expect(result.people.map((o) => o.status)).toEqual(['failed']);
+    expect(result.group).toMatchObject({ status: 'failed' });
+    expect(once.requests).toHaveLength(2);
+    expect(result.caughtUp).toBe(false);
+
+    for (const id of ['100000000000000004', '100000000000000005']) {
+      memory.upsertIdentity(id, `Member ${id.slice(-1)}`);
+      insertRows(1, `Member ${id.slice(-1)}`, id);
+    }
+    const down = createCapturingClient([outage, outage, outage, outage]);
+    const stopped = await runDreamsUntilCaughtUp(deps(down.client));
+    expect(stopped.people.map((o) => o.status)).toEqual(['failed', 'failed', 'failed']);
+    expect(stopped.group).toBeUndefined();
+    expect(down.requests).toHaveLength(3);
   });
 });
 

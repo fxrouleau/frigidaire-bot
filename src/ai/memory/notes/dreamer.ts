@@ -45,7 +45,7 @@ import {
   renderRoster,
   repairPrompt,
 } from './dreamPrompts';
-import type { Note, NoteChange, NotesStore, WriteNotesResult } from './notesStore';
+import type { Note, NoteChange, NotesStore, PendingDream, WriteNotesResult } from './notesStore';
 import { type EvidencePassage, type EvidencePassageOptions, loadEvidencePassages } from './passages';
 import {
   type CircleMember,
@@ -652,28 +652,110 @@ export async function runNightlyDream(deps: DreamDeps & { maxPeople?: number }):
   );
 
   const people: DreamOutcome[] = [];
-  let failuresInARow = 0;
-  for (const entry of pending.people) {
+  const run = await dreamPeople(pending.people, withClient, people, 0);
+  const group = run.stopped ? undefined : await dreamGroupIfDue(withClient, now);
+  return nightResult(day, people, group ? [group] : []);
+}
+
+/** A run's result: the outcomes, the last group outcome, and the summed cost. */
+function nightResult(day: string, people: DreamOutcome[], groups: DreamOutcome[]): NightlyDreamResult {
+  const group = groups.at(-1);
+  let costUsd: number | undefined;
+  for (const outcome of [...people, ...groups]) costUsd = addCost(costUsd, outcome);
+  return { day, people, ...(group ? { group } : {}), ...(costUsd !== undefined ? { costUsd } : {}) };
+}
+
+/**
+ * Dreams these people one at a time, pushing each outcome to `into`; stops once MAX_FAILURES_IN_A_ROW
+ * dreams failed in a row (counting on from `failuresInARow`).
+ */
+async function dreamPeople(
+  pending: PendingDream[],
+  deps: DreamDeps,
+  into: DreamOutcome[],
+  failuresInARow: number,
+): Promise<{ failuresInARow: number; stopped: boolean }> {
+  let failures = failuresInARow;
+  for (const entry of pending) {
     if (entry.owner.scope !== 'person') continue;
-    const outcome = await dreamPerson(entry.owner.ownerId, withClient);
-    people.push(outcome);
-    failuresInARow = outcome.status === 'failed' ? failuresInARow + 1 : 0;
-    if (failuresInARow >= MAX_FAILURES_IN_A_ROW) {
-      logger.warn(
-        `dream: ${failuresInARow} people failed in a row; stopping tonight's dream (the rest wait for tomorrow).`,
-      );
-      break;
+    const outcome = await dreamPerson(entry.owner.ownerId, deps);
+    into.push(outcome);
+    failures = outcome.status === 'failed' ? failures + 1 : 0;
+    if (failures >= MAX_FAILURES_IN_A_ROW) {
+      logger.warn(`dream: ${failures} dreams failed in a row; stopping (the rest wait for the next night).`);
+      return { failuresInARow: failures, stopped: true };
     }
   }
+  return { failuresInARow: failures, stopped: false };
+}
 
-  let group: DreamOutcome | undefined;
-  if (failuresInARow < MAX_FAILURES_IN_A_ROW) {
-    group = await dreamGroupIfDue(withClient, now);
+/** Passes runDreamsUntilCaughtUp makes at most (each reads up to MAX_JOURNAL_ROWS_PER_DREAM rows per owner). */
+export const MAX_CATCH_UP_PASSES = 100;
+
+/**
+ * Dreams until nothing is pending (the built-in bootstrap, whose history leaves people thousands of rows
+ * above their watermark, where one night reads MAX_JOURNAL_ROWS_PER_DREAM per person): pass after pass over
+ * everyone still pending (no per-night cap), then the group pass the same way, until no owner has rows
+ * above their watermark. Someone whose dream fails is not retried in this run (they wait for the nightly
+ * dream); MAX_FAILURES_IN_A_ROW failures in a row stop everything, as on a night. Uses only the stores and
+ * client in `deps`, and never touches the nightly schedule's once-a-day claim (dreamSchedule.ts).
+ * Never throws.
+ */
+export async function runDreamsUntilCaughtUp(
+  deps: DreamDeps & { maxPasses?: number },
+): Promise<NightlyDreamResult & { passes: number; caughtUp: boolean }> {
+  const now = (deps.now ?? (() => new Date()))();
+  const day = easternDay(now);
+  const client = deps.client ?? getOpenRouterClient();
+  if (!client) {
+    logger.warn('dream: OPENROUTER_API_KEY is not set; nothing dreamed.');
+    return { day, people: [], passes: 0, caughtUp: false };
   }
-
-  let costUsd: number | undefined;
-  for (const outcome of [...people, group]) costUsd = addCost(costUsd, outcome);
-  return { day, people, ...(group ? { group } : {}), ...(costUsd !== undefined ? { costUsd } : {}) };
+  const withClient: DreamDeps = { ...deps, client };
+  const maxPasses = Math.max(1, deps.maxPasses ?? MAX_CATCH_UP_PASSES);
+  const people: DreamOutcome[] = [];
+  const groups: DreamOutcome[] = [];
+  // Not retried in this run: a failed dream (the nightly dream retries it), or one that found nothing.
+  const settled = new Set<string>();
+  let failuresInARow = 0;
+  let passes = 0;
+  let stopped = false;
+  try {
+    while (!stopped && passes < maxPasses) {
+      const pending = deps.notes
+        .pendingDreams()
+        .people.filter((p) => p.owner.scope === 'person' && !settled.has(p.owner.ownerId));
+      if (pending.length === 0) break;
+      passes++;
+      logger.info(`dream: catch-up pass ${passes}: ${pending.length} ${pending.length === 1 ? 'person' : 'people'}.`);
+      const from = people.length;
+      const run = await dreamPeople(pending, withClient, people, failuresInARow);
+      failuresInARow = run.failuresInARow;
+      stopped = run.stopped;
+      for (const outcome of people.slice(from)) {
+        const done = outcome.status === 'failed' || outcome.status === 'skipped';
+        if (done && outcome.owner.scope === 'person') settled.add(outcome.owner.ownerId);
+      }
+    }
+    while (!stopped && passes < maxPasses) {
+      const outcome = await dreamGroupIfDue(withClient, now);
+      if (outcome.status === 'skipped') break;
+      passes++;
+      groups.push(outcome);
+      if (outcome.status === 'failed') break;
+    }
+  } catch (error) {
+    logger.warn('dream: catching up failed; the nightly dream picks up the rest:', error);
+    stopped = true;
+  }
+  let caughtUp = false;
+  try {
+    const left = deps.notes.pendingDreams();
+    caughtUp = !stopped && left.people.length === 0 && !left.group;
+  } catch {
+    caughtUp = false;
+  }
+  return { ...nightResult(day, people, groups), passes, caughtUp };
 }
 
 // ---- Owner edits ----

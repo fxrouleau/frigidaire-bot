@@ -47,12 +47,14 @@ export type CliDeps = {
   client?: () => OpenAI | undefined;
   /** Per-token prices from the model catalog. */
   priceOf?: (model: string) => Promise<ModelPricing | undefined>;
-  /** The dream after a finished run: runNightlyDream over everyone pending. */
+  /**
+   * The dream after a finished run: dreams everyone pending until nothing is (runDreamsUntilCaughtUp), over
+   * these stores (never the bot's shared ones) and without claiming the nightly schedule's day.
+   */
   dream?: (
-    stores: { memory: MemoryStore; notes: NotesStore },
+    stores: { archive: ArchiveStore; memory: MemoryStore; notes: NotesStore },
     client: OpenAI,
-    maxPeople: number,
-  ) => Promise<NightlyDreamResult>;
+  ) => Promise<NightlyDreamResult & { caughtUp?: boolean }>;
   now?: () => Date;
 };
 
@@ -297,7 +299,7 @@ async function bootstrapCommand(args: Args, deps: CliDeps): Promise<number> {
     log: (line) => deps.io.out(line),
     ...(args.flags.has('no-dream') || !deps.dream
       ? {}
-      : { dream: (maxPeople: number) => (deps.dream as NonNullable<CliDeps['dream']>)(stores, client, maxPeople) }),
+      : { dream: () => (deps.dream as NonNullable<CliDeps['dream']>)(stores, client) }),
   });
   deps.io.out(
     `Done: ${counted(result.segmentsDone, 'segment')} read, ${counted(result.rows, 'journal row')}, ${formatUsd(result.costUsd)}; ${result.segmentsLeft} left${result.segmentsFailed > 0 ? ` (${result.segmentsFailed} failed: run it again to retry them)` : ''}.`,
@@ -305,9 +307,22 @@ async function bootstrapCommand(args: Args, deps: CliDeps): Promise<number> {
   if (result.dream && 'error' in result.dream)
     deps.io.err(`The dream did not run: ${result.dream.error}. The nightly dream will pick the journal up.`);
   else if (result.dream) {
-    const updated = result.dream.people.filter((p) => p.status === 'updated').length;
+    const updated = new Set(
+      result.dream.people.flatMap((p) =>
+        p.status === 'updated' && p.owner.scope === 'person' ? [p.owner.ownerId] : [],
+      ),
+    ).size;
+    const failed = new Set(
+      result.dream.people.flatMap((p) =>
+        p.status === 'failed' && p.owner.scope === 'person' ? [p.owner.ownerId] : [],
+      ),
+    ).size;
+    const left =
+      'caughtUp' in result.dream && result.dream.caughtUp === false
+        ? ' Some journal rows are still waiting: the nightly dream picks them up.'
+        : '';
     deps.io.out(
-      `Dreamed: ${counted(updated, 'person', 'people')} updated${result.dream.costUsd !== undefined ? `, ${formatUsd(result.dream.costUsd)}` : ''}.`,
+      `Dreamed: ${counted(updated, 'person', 'people')} updated${failed > 0 ? `, ${failed} failed` : ''}${result.dream.group?.status === 'updated' ? ', the group updated' : ''}${result.dream.costUsd !== undefined ? `, ${formatUsd(result.dream.costUsd)}` : ''}.${left}`,
     );
   }
   return result.segmentsFailed > 0 ? 1 : 0;

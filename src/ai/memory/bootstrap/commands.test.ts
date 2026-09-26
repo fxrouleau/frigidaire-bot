@@ -164,7 +164,7 @@ describe('runCli', () => {
     const dream = vi.fn(async (): Promise<NightlyDreamResult> => ({ day: '2026-09-26', people: [] }));
     expect(await runCli(['bootstrap', '--run'], deps({ client: () => client, dream }))).toBe(0);
     expect(requests[0].body.model).toBe('test/bootstrap-model');
-    expect(dream).toHaveBeenCalledWith({ archive, memory, notes }, client, 1);
+    expect(dream).toHaveBeenCalledWith({ archive, memory, notes }, client);
     expect(out.join('\n')).toContain('Done: 1 segment read, 1 journal row');
     expect(out.at(-1)).toBe('Dreamed: 0 people updated.');
 

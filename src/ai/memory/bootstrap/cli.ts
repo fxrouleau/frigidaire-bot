@@ -8,7 +8,7 @@ import process from 'node:process';
 import { getModelCatalog } from '../../modelCatalog';
 import { getOpenRouterClient } from '../../openRouterClient';
 import { flushPendingUsage } from '../../usageFetch';
-import { runNightlyDream } from '../notes/dreamer';
+import { runDreamsUntilCaughtUp } from '../notes/dreamer';
 import { DEFAULT_DATA_DIR, openDataStores, runCli } from './commands';
 
 async function main(): Promise<number> {
@@ -25,7 +25,7 @@ async function main(): Promise<number> {
       },
       client: () => getOpenRouterClient(),
       priceOf: (model) => getModelCatalog().pricing(model),
-      dream: ({ memory, notes }, client, maxPeople) => runNightlyDream({ memory, notes, client, maxPeople }),
+      dream: ({ memory, notes }, client) => runDreamsUntilCaughtUp({ memory, notes, client }),
     });
   } finally {
     // The usage ledger records each call's cost in the background: let it land before exiting.
