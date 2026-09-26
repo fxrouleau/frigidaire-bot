@@ -414,12 +414,42 @@ function finishDream(
 }
 
 /**
+ * Problems with a dream's rewrite of a circle that leaves out some of its members. "members" is the full
+ * membership every time (someone who left gets an "until"), and the output is untrusted: saving it would
+ * replace the membership and silently erase the circle (and their dated place in it) from everyone left
+ * out. Only the owner removes a member, with an edit. Ids compare as main accounts (a member stored under
+ * an account linked since counts as listed). Circles merged away are not checked: the kept one may not
+ * have room for everyone.
+ */
+function droppedMemberProblems(
+  notes: NotesStore,
+  output: NotesOutput,
+  nameOf: (userId: string) => string | undefined,
+): string[] {
+  const problems: string[] = [];
+  for (const draft of output.circles) {
+    const existing = notes.getCircle(draft.slug);
+    if (!existing) continue;
+    const listed = new Set(draft.members.map((m) => canonicalUserId(m.id)));
+    const dropped = [...new Set(existing.members.map((m) => canonicalUserId(m.memberId)))].filter(
+      (id) => !listed.has(id),
+    );
+    if (dropped.length === 0) continue;
+    const who = dropped.map((id) => `${nameOf(id) ?? 'a member'} (id:${id})`).join(', ');
+    problems.push(
+      `circle "${draft.slug}" leaves out members it has: keep ${who} in "members" (the full membership every time; give someone who left an "until")`,
+    );
+  }
+  return problems;
+}
+
+/**
  * A dream's answer, checked and saved: parsed (parseNotesOutput with `parse`), refused for good when the
  * notes it was drafted from changed while the model was thinking (see changedSince: saving it would
  * overwrite the newer version, an owner edit say; no repair round, the next night dreams from the new
- * version), refused for a rewrite of an excerpt-only circle, then saved as dream versions. The comparison
- * and the save run in one IMMEDIATE transaction, so no writer (this process or another: a bootstrap's
- * dream) lands in between.
+ * version), refused for a rewrite of an excerpt-only circle or one that leaves members out, then saved as
+ * dream versions. The comparison and the save run in one IMMEDIATE transaction, so no writer (this process
+ * or another: a bootstrap's dream) lands in between.
  */
 function checkAndSaveDream(
   deps: DreamDeps,
@@ -430,6 +460,7 @@ function checkAndSaveDream(
     basis: NotesBasis;
     excerptOnly: ReadonlySet<string>;
     allowedIds: string[];
+    nameOf: (userId: string) => string | undefined;
   },
 ): Checked<Saved> {
   const parsed = parseNotesOutput(text, check.parse);
@@ -445,8 +476,11 @@ function checkAndSaveDream(
       };
     }
     if (!parsed.ok) return parsed;
-    const excerpts = excerptOnlyProblems(parsed.value, check.excerptOnly);
-    if (excerpts.length > 0) return { ok: false, errors: excerpts };
+    const problems = [
+      ...excerptOnlyProblems(parsed.value, check.excerptOnly),
+      ...droppedMemberProblems(deps.notes, parsed.value, check.nameOf),
+    ];
+    if (problems.length > 0) return { ok: false, errors: problems };
     const saved = deps.notes.applyNotesOutput(owner, parsed.value, {
       updatedBy: 'dream',
       allowedIds: check.allowedIds,
@@ -546,6 +580,7 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
           basis,
           excerptOnly: circleView.excerptOnly,
           allowedIds,
+          nameOf,
         }),
     });
     return finishDream(deps, owner, label, watermark, outcome);
@@ -608,6 +643,7 @@ export async function dreamGroup(
           basis,
           excerptOnly: circleView.excerptOnly,
           allowedIds,
+          nameOf,
         }),
     });
     return finishDream(deps, owner, label, watermark, outcome);

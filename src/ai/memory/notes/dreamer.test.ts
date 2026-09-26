@@ -473,6 +473,99 @@ describe('a write that lands while the model is thinking', () => {
   });
 });
 
+describe("a dream keeps every circle member (current and former)", () => {
+  const withNova = () => {
+    const saved = notes.writeCircles(
+      [
+        {
+          slug: 'mtg',
+          title: 'The MTG crew',
+          content: '## Now\nDrafts.',
+          members: [{ id: REMI }, { id: DALE }, { id: NOVA, since: '2021', until: '2023' }],
+        },
+      ],
+      { updatedBy: 'dream' },
+    );
+    if (!saved.ok) throw new Error(saved.errors.join('; '));
+  };
+  const mtg = (members: { id: string; since?: string; until?: string }[]) => ({
+    slug: 'mtg',
+    title: 'The MTG crew',
+    content: '## Now\nFriday drafts.',
+    members,
+  });
+
+  it("refuses a rewrite that drops a former member, and saves the repaired one with them kept", async () => {
+    withNova();
+    await saveFact('Drafts on Fridays with Dale.');
+    const { client, requests } = createCapturingClient([
+      reply({ notes: [newProfile()], circles: [mtg([{ id: REMI }, { id: DALE }])], change_summary: 'fridays' }),
+      reply({
+        notes: [newProfile()],
+        circles: [mtg([{ id: REMI }, { id: DALE }, { id: NOVA, since: '2021', until: '2023' }])],
+        change_summary: 'fridays',
+      }),
+    ]);
+    expect(await dreamPerson(REMI, deps(client))).toMatchObject({ status: 'updated' });
+    expect(requests).toHaveLength(2);
+    const repair = messagesOf(requests[1])[3].content;
+    expect(repair).toContain('circle "mtg"');
+    expect(repair).toContain(`Nova (id:${NOVA})`);
+    const circle = notes.getCircle('mtg');
+    expect(circle?.content).toBe('## Now\nFriday drafts.');
+    expect(circle?.members.find((m) => m.memberId === NOVA)).toMatchObject({ until: '2023' });
+    expect(notes.circlesOf(NOVA, { includeFormer: true }).map((c) => c.circle.topic)).toEqual(['mtg']);
+  });
+
+  it('fails (the circle untouched) when the repair drops them too; the group pass is held to it as well', async () => {
+    withNova();
+    await saveFact('Drafts on Fridays with Dale.');
+    const dropped = reply({ notes: [newProfile()], circles: [mtg([{ id: REMI }, { id: NOVA }])], change_summary: 'x' });
+    const person = createCapturingClient([dropped, dropped]);
+    const outcome = await dreamPerson(REMI, deps(person.client));
+    expect(outcome.status === 'failed' ? outcome.error : '').toContain(`Dale (id:${DALE})`);
+    expect(notes.getCircle('mtg')?.members.map((m) => m.memberId)).toEqual([REMI, DALE, NOVA]);
+
+    await memory.save({ category: 'vibe', subject: 'server', content: 'Friday drafts are sacred.' });
+    const groupAnswer = reply({ notes: [], circles: [mtg([{ id: DALE }, { id: NOVA, until: '2023' }])], change_summary: 'x' });
+    const groupRun = createCapturingClient([groupAnswer, groupAnswer]);
+    const groupOutcome = await dreamGroup(deps(groupRun.client), { personChanges: [] });
+    expect(groupOutcome.status === 'failed' ? groupOutcome.error : '').toContain(`Remi (id:${REMI})`);
+    expect(notes.getCircle('mtg')?.members.map((m) => m.memberId)).toEqual([REMI, DALE, NOVA]);
+  });
+
+  it('counts a member stored under a since-linked side account as listed by their main id', async () => {
+    const saved = notes.writeCircles(
+      [{ slug: 'duo', title: 'The duo', content: 'Old friends.', members: [{ id: REMI_ALT }, { id: NOVA }] }],
+      { updatedBy: 'dream', allowedIds: [REMI_ALT] },
+    );
+    if (!saved.ok) throw new Error(saved.errors.join('; '));
+    vi.stubEnv('LINKED_ACCOUNTS', `${REMI_ALT}:${REMI}`);
+    await memory.save({ category: 'vibe', subject: 'server', content: 'The duo is inseparable.' });
+    const { client } = createCapturingClient([
+      reply({
+        notes: [],
+        circles: [{ slug: 'duo', title: 'The duo', content: 'Inseparable.', members: [{ id: REMI }, { id: NOVA }] }],
+        change_summary: 'duo',
+      }),
+    ]);
+    expect(await dreamGroup(deps(client), { personChanges: [] })).toMatchObject({ status: 'updated' });
+    expect(notes.getCircle('duo')?.members.map((m) => m.memberId).sort()).toEqual([REMI, NOVA].sort());
+  });
+
+  it('leaves the owner free to remove a member with an edit', async () => {
+    withNova();
+    const { client } = createCapturingClient([reply({ circles: [mtg([{ id: REMI }, { id: DALE }])], change_summary: 'x' })]);
+    const proposal = await proposeEdit(
+      { target: { scope: 'circle', slug: 'mtg' }, instruction: 'Nova was never in it', requestedBy: NOVA },
+      deps(client),
+    );
+    if (!proposal.ok) throw new Error(proposal.error);
+    expect(applyEdit(proposal, 'Nova was never in it', notes).ok).toBe(true);
+    expect(notes.getCircle('mtg')?.members.map((m) => m.memberId)).toEqual([REMI, DALE]);
+  });
+});
+
 describe('dreamPerson evidence passages', () => {
   const CHANNEL = '100000000000000050';
   const T0 = Date.UTC(2026, 7, 3, 1, 0); // 2026-08-02 21:00 ET

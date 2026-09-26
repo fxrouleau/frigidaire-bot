@@ -255,8 +255,9 @@ The answer is JSON:
 ```
 
 It is validated (profile present, sizes, slugs, markdown only, no Discord markup, no ids of other people unless
-they were in the input, circle membership shape and dates) and saved all or nothing as new versions
-(`updated_by = 'dream'`). A refused answer (invalid JSON, a broken rule, a write the store refuses, an answer
+they were in the input, circle membership shape and dates; a rewritten circle keeps every member it has, current
+or former, since someone who left gets an `until` and only the owner's edit removes a member) and saved all or
+nothing as new versions (`updated_by = 'dream'`). A refused answer (invalid JSON, a broken rule, a write the store refuses, an answer
 cut off at the length limit) gets one repair round with the errors. The watermark advances only on success
 (an answer that changes nothing still advances it); a failure is logged, kept in `dream_state` and retried the
 next night. A night stops early after three people failed in a row (an outage). Circles past a 60,000-char
