@@ -18,7 +18,14 @@ import { MemoryStore } from '../memoryStore';
 import { type NightlyDreamResult, runDreamsUntilCaughtUp } from '../notes/dreamer';
 import { NotesStore } from '../notes/notesStore';
 import { loadEvidencePassages } from '../notes/passages';
-import { type BootstrapEstimate, estimateBootstrap, planBootstrap, readProgress, runBootstrap } from './builtin';
+import {
+  type BootstrapEstimate,
+  estimateBootstrap,
+  planBootstrap,
+  readProgress,
+  resolveSegmentTokens,
+  runBootstrap,
+} from './builtin';
 import { CHUNK_DEFAULTS } from './chunks';
 import { DEFAULT_EXPORT_DIR, runExport } from './export';
 import {
@@ -336,12 +343,14 @@ async function bootstrapCommand(args: Args, deps: CliDeps): Promise<number> {
   const stores = (deps.openStores ?? (() => openDataStores(deps.dataDir ?? DEFAULT_DATA_DIR)))();
   const from = monthFlag(args, 'from');
   const to = monthFlag(args, 'to');
-  const segmentTokens = intFlag(args, 'segment-tokens', 1_000);
   const model = config.dream.bootstrapModel;
   const priceOf = deps.priceOf ?? (async () => undefined);
 
-  const plan = planBootstrap(stores.archive, stores.memory, { segmentTokens, from, to });
   const progress = readProgress(stores.memory);
+  const size = resolveSegmentTokens(progress, intFlag(args, 'segment-tokens', 1_000));
+  if (!size.ok) throw new UsageError(size.error);
+  const segmentTokens = size.value;
+  const plan = planBootstrap(stores.archive, stores.memory, { segmentTokens, from, to });
   const estimate = estimateBootstrap(plan, {
     model,
     pricing: await priceOf(model),

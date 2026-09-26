@@ -368,6 +368,33 @@ describe('runBootstrap', () => {
     expect(dream).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the segment size the run started with, so a resumed run never reads a stretch twice', async () => {
+    for (let day = 0; day < 20; day++) {
+      for (let i = 0; i < 20; i++) {
+        say(MARCH + day * DAY + i * MIN, i % 2 ? REMI : DALE, i % 2 ? 'Remi' : 'Dale', `message ${day}-${i} ${'x'.repeat(60)}`);
+      }
+    }
+    const small = planBootstrap(archive, memory, { segmentTokens: 2_000 });
+    expect(small.segments.length).toBeGreaterThan(3);
+
+    // A trial with small segments…
+    const trial = createCapturingClient([answer([])]);
+    await runBootstrap({ archive, memory, notes, client: trial.client, model: MODEL, segmentTokens: 2_000, maxSegments: 1, log: () => {} });
+    expect(readProgress(memory)?.segmentTokens).toBe(2_000);
+
+    // …then the rest without the flag: the same cut, so exactly the other segments.
+    const rest = createCapturingClient(small.segments.slice(1).map(() => answer([])));
+    const run = await runBootstrap({ archive, memory, notes, client: rest.client, model: MODEL, log: () => {} });
+    expect(run).toMatchObject({ segmentsDone: small.segments.length - 1, segmentsLeft: 0 });
+    expect(rest.requests).toHaveLength(small.segments.length - 1);
+    expect(readProgress(memory)?.done).toEqual(small.segments.map((s) => s.key));
+
+    // Another size would cut the month anew and read it again: refused.
+    await expect(
+      runBootstrap({ archive, memory, notes, client: rest.client, model: MODEL, segmentTokens: 60_000, log: () => {} }),
+    ).rejects.toThrow('segments of 2000 tokens');
+  });
+
   it('stops after maxSegments for a trial run, and reports a dream failure without throwing', async () => {
     seedHistory();
     const trial = createCapturingClient([answer([])]);

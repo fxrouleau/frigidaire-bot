@@ -209,6 +209,8 @@ export function estimateBootstrap(
 export type BootstrapProgress = {
   version: 1;
   model: string;
+  /** The segment size the run plans with (resolveSegmentTokens): a resumed run cuts the archive the same way. */
+  segmentTokens?: number;
   /** Keys of finished segments. */
   done: string[];
   rows: number;
@@ -226,6 +228,7 @@ export function readProgress(memory: MemoryStore): BootstrapProgress | undefined
     return {
       version: 1,
       model: typeof parsed.model === 'string' ? parsed.model : '',
+      ...(typeof parsed.segmentTokens === 'number' ? { segmentTokens: parsed.segmentTokens } : {}),
       done: parsed.done.filter((k): k is string => typeof k === 'string'),
       rows: typeof parsed.rows === 'number' ? parsed.rows : 0,
       costUsd: typeof parsed.costUsd === 'number' ? parsed.costUsd : 0,
@@ -235,6 +238,26 @@ export function readProgress(memory: MemoryStore): BootstrapProgress | undefined
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The segment size a run plans with: the one asked for, else the one the run under way started with, else
+ * the default. A run keeps the size it started with, since segments are recorded by key: cut differently,
+ * the archive gives new keys for stretches already read, which would be read (and journaled) again. So a
+ * different size is refused once a run has recorded one.
+ */
+export function resolveSegmentTokens(
+  progress: BootstrapProgress | undefined,
+  requested?: number,
+): { ok: true; value: number } | { ok: false; error: string } {
+  const value = Math.max(1_000, requested ?? progress?.segmentTokens ?? BOOTSTRAP_DEFAULTS.segmentTokens);
+  if (progress?.segmentTokens !== undefined && value !== progress.segmentTokens) {
+    return {
+      ok: false,
+      error: `the bootstrap run under way cut the archive into segments of ${progress.segmentTokens} tokens (--segment-tokens ${progress.segmentTokens}); another size would read what it already read again. Leave --segment-tokens out.`,
+    };
+  }
+  return { ok: true, value };
 }
 
 function writeProgress(memory: MemoryStore, progress: BootstrapProgress): void {
@@ -507,6 +530,7 @@ export type BootstrapRunDeps = {
   /** Only these months (YYYY-MM, inclusive). */
   from?: string;
   to?: string;
+  /** Default: the size the run under way started with (resolveSegmentTokens); a different one throws. */
   segmentTokens?: number;
   /**
    * Dreams everyone with new journal rows until nothing is pending (runDreamsUntilCaughtUp: a person with
@@ -697,13 +721,16 @@ async function extractSegment(
 export async function runBootstrap(deps: BootstrapRunDeps): Promise<BootstrapRunResult> {
   const log = deps.log ?? ((line: string) => logger.info(`memory bootstrap: ${line}`));
   const now = deps.now ?? (() => new Date());
+  const recorded = readProgress(deps.memory);
+  const size = resolveSegmentTokens(recorded, deps.segmentTokens);
+  if (!size.ok) throw new Error(size.error);
   const plan = planBootstrap(deps.archive, deps.memory, {
-    segmentTokens: deps.segmentTokens,
+    segmentTokens: size.value,
     from: deps.from,
     to: deps.to,
   });
   const stamp = now().toISOString();
-  const progress = readProgress(deps.memory) ?? {
+  const progress: BootstrapProgress = recorded ?? {
     version: 1 as const,
     model: deps.model,
     done: [],
@@ -712,6 +739,7 @@ export async function runBootstrap(deps: BootstrapRunDeps): Promise<BootstrapRun
     startedAt: stamp,
     updatedAt: stamp,
   };
+  progress.segmentTokens = size.value;
   const done = new Set(progress.done);
   const todo = plan.segments.filter((s) => !done.has(s.key));
   const result: BootstrapRunResult = {

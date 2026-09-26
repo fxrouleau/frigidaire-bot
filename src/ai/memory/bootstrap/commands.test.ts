@@ -272,6 +272,17 @@ describe('runCli', () => {
     });
   });
 
+  it('refuses another --segment-tokens than the run under way started with', async () => {
+    memory.setState(
+      'memory_bootstrap:progress',
+      JSON.stringify({ version: 1, model: 'm', segmentTokens: 20_000, done: [], rows: 0, costUsd: 0 }),
+    );
+    expect(await runCli(['bootstrap', '--dry-run', '--segment-tokens', '5000'], deps())).toBe(2);
+    expect(err.join('\n')).toContain('cut the archive into segments of 20000 tokens');
+    expect(await runCli(['bootstrap', '--dry-run'], deps())).toBe(0);
+    expect(await runCli(['bootstrap', '--dry-run', '--segment-tokens', '20000'], deps())).toBe(0);
+  });
+
   it('refuses a run without a key, and a bootstrap without a mode', async () => {
     expect(await runCli(['bootstrap', '--run'], deps({ client: () => undefined }))).toBe(1);
     expect(err.at(-1)).toContain('OPENROUTER_API_KEY is not set');

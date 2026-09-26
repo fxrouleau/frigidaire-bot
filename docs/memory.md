@@ -485,8 +485,9 @@ given date), evidence (the quoted line's message ids and the quote) and the othe
 whole segment is read (a failure writes nothing of it). Finished
 segments are recorded in memory.db (`bot_state` `memory_bootstrap:progress`), so a stopped run resumes at the
 next one and a failed segment is retried on the next run; `--from`/`--to` and `--max-segments` make a trial
-run. Once the whole archive is read (not after a
-range), it dreams everyone with new journal rows until nothing is pending (`runDreamsUntilCaughtUp`): a
+run. A run keeps the segment size it started with (recorded in its progress): cut differently, the archive
+gives new keys for stretches already read, so another `--segment-tokens` is refused. Once the whole archive
+is read (not after a range), it dreams everyone with new journal rows until nothing is pending (`runDreamsUntilCaughtUp`): a
 night's dream reads at most 300 rows per person, so someone with thousands of history rows gets pass after
 pass, then the group the same way. A person whose dream fails is left for the nightly dream, and three
 failures in a row stop it, as on a night. It uses the CLI's own stores and never claims the nightly
