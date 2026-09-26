@@ -119,10 +119,21 @@ the chunk id, and `{FROM}`/`{TO}` with the chunk's dates from the manifest):
 > Read, in this order:
 > 1. `{EXPORT}/people.json`: transcript names → main ids (use the ids in everything you write), their other
 >    names, real names and nicknames.
-> 2. Every file under `{WORK}/working/` (the working notes so far: profiles, circles, group notes). They are
->    what earlier chunks learned; use them to interpret references.
-> 3. `{EXPORT}/chunks/{N}.md` (chunk {N}, {FROM} → {TO}). Use the Read tool so you see line numbers. The
->    quoted lines under "ALREADY COVERED" are context from the previous chunk: never extract from them.
+> 2. `{EXPORT}/chunks/{N}.md` (chunk {N}, {FROM} → {TO}), ALL of it. It runs to thousands of lines, more
+>    than one Read returns: check its length first (`wc -l`), then read it in pages with the Read tool
+>    (offset/limit, about 1,000 lines at a time) until you have seen its last line. The Read tool shows the
+>    line numbers you cite. The quoted lines under "ALREADY COVERED" are context from the previous chunk:
+>    never extract from them.
+> 3. The working notes this chunk needs (what earlier chunks learned; use them to interpret references),
+>    never the whole `{WORK}/working/` folder (it grows with every chunk and would not fit):
+>    - `{WORK}/cast.md` when it exists (one line per person: who they are);
+>    - the group notes, `{WORK}/working/group/*.md`;
+>    - the profile of everyone who posts in or is named in the chunk,
+>      `{WORK}/working/people/<id>/profile.md`, and their topic notes only for topics the chunk touches;
+>    - the circles those people are in (search `{WORK}/working/circles/` for their ids) or that the chunk
+>      talks about;
+>    - when the chunk calls someone by a name people.json doesn't list, search the working notes for it
+>      (`grep -ril`).
 >
 > Then write, and ONLY write, inside `{WORK}/steps/{N}.tmp/`:
 > - `observations.jsonl`, ALWAYS (an empty file when the chunk has nothing worth keeping): one JSON object
@@ -135,8 +146,8 @@ the chunk id, and `{FROM}`/`{TO}` with the chunk's dates from the manifest):
 > - `working/…`: the FULL new content of every working note you changed or created (same relative paths as
 >   under `{WORK}/working/`, NOTE FORMAT below): merge what this chunk showed into the profiles of the people
 >   it touched, their circles and the group notes, like a small dream (DREAM RULES below). Keep working
->   notes concise: profile ≤ 3,000 characters, circle ≤ 4,000, group topic ≤ 5,000. Do not write notes you
->   didn't change.
+>   notes concise: profile ≤ 3,000 characters, a person's topic note ≤ 2,000, circle ≤ 4,000, group topic
+>   ≤ 5,000 (later chunks read them). Do not write notes you didn't change.
 >
 > When both are written, commit the step as your LAST action: `mv {WORK}/steps/{N}.tmp {WORK}/steps/{N}`.
 > Reply with one line: `chunk {N}: <observations> observations, <notes> notes updated`. Nothing else.
@@ -157,11 +168,13 @@ touched from their FULL observation log, not from the previous notes:
 3. For each id (up to 4 subagents at a time):
 
 > Rebuild the working notes of person `{ID}` from their full observation log. Read `{EXPORT}/people.json`,
-> `{WORK}/cast.md`, and `{WORK}/by-person/{ID}.jsonl` (every observation about them, oldest first, including
-> relationships and shared events from anyone's side). Ignore their current working notes. Write
+> `{WORK}/cast.md`, and ALL of `{WORK}/by-person/{ID}.jsonl` (every observation about them, oldest first,
+> including relationships and shared events from anyone's side; in pages of about 1,000 lines until its
+> last line when it is long). Ignore their current working notes. Write
 > `{WORK}/working/people/{ID}/profile.md` (and topic notes under the same folder when details don't fit the
 > profile), per NOTE FORMAT, following the DREAM RULES and the NOTE SHAPE, weighting by RECENCY × RECURRENCE.
-> Working profile ≤ 3,000 characters. Reply with one line: `{ID}: re-grounded from <n> observations`.
+> Working profile ≤ 3,000 characters, each topic note ≤ 2,000. Reply with one line:
+> `{ID}: re-grounded from <n> observations`.
 
 4. Then one subagent for the circles in `by-circle/` touched in those chunks and one for the group
    (`by-person/group.jsonl`), same instructions with their working files and formats.
@@ -177,7 +190,8 @@ List `work/by-circle/*.jsonl` and `work/working/circles/*.md`; one subagent per 
 
 > Write the final note of circle `{SLUG}`. Read `{EXPORT}/people.json`, `{WORK}/cast.md`,
 > `{WORK}/by-circle/{SLUG}.jsonl` (its observations, oldest first), `{WORK}/working/circles/{SLUG}.md` when it
-> exists, and the by-person logs of its members for observations about the shared thing. For the key and
+> exists, and in the by-person logs of its members only the observations about the shared thing (search them
+> for its names and aliases rather than reading whole logs). For the key and
 > contested points (who is in it and since when, how it started, anything the observations disagree on),
 > read the cited chunk lines ±5 lines in `{EXPORT}/chunks/` (at most 10 passages) and follow what was
 > actually said. Write `{WORK}/final/circles/{SLUG}.md` per CIRCLE FORMAT, following the DREAM RULES: dated
@@ -208,10 +222,11 @@ what it captures from now on. Count them for the hand-over.
 
 > Write the final notes of person `{ID}` (their entry in people.json has this `id`). Read `{EXPORT}/people.json`,
 > `{WORK}/cast.md` (everyone, so relationships read consistently), the final circles they are in
-> (`{WORK}/final/circles/*.md` whose front matter lists `{ID}`), and their full observation log
+> (`{WORK}/final/circles/*.md` whose front matter lists `{ID}`), and ALL of their observation log
 > `{WORK}/by-person/{ID}.jsonl` (oldest first; it includes every relationship and shared event involving
-> them, from either side) [long logs: instead the era summaries in `{WORK}/eras/{ID}/` in date order, plus
-> the raw observations of the most recent era and every `"kind": "relationship"` line].
+> them, from either side; in pages of about 1,000 lines until its last line when it is long) [long logs:
+> instead the era summaries in `{WORK}/eras/{ID}/` in date order, plus the raw observations of the most
+> recent era and every `"kind": "relationship"` line].
 > For the key and contested items (contradictions, low confidence, anything about to become a Now or Traits
 > fact), read the cited chunk lines ±5 lines in `{EXPORT}/chunks/` (at most 15 passages) and follow what was
 > actually said. Write `{WORK}/final/people/{ID}/profile.md` and any topic notes

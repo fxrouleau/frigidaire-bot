@@ -66,6 +66,15 @@ describe.skipIf(!present)('the memory bootstrap playbook', () => {
     expect(DEFAULT_WORK_DIR).toBe('./data/memory-bootstrap/work');
   });
 
+  it("bounds a scan step's reading", () => {
+    const scan = skill.slice(skill.indexOf('## Step 2: scan one chunk'), skill.indexOf('## Step 3'));
+    // The chunk is thousands of lines: read to its end, in pages.
+    expect(scan).toContain('until you have seen its last line');
+    // Only the working notes the chunk needs: the whole folder grows with every chunk.
+    expect(scan).toContain('never the whole `{WORK}/working/` folder');
+    expect(scan).toContain('`{WORK}/cast.md` when it exists');
+  });
+
   it('always leaves a scan step the orchestrator can apply', () => {
     const scan = skill.slice(skill.indexOf('## Step 2: scan one chunk'), skill.indexOf('## Step 3'));
     // A chunk with nothing to keep still leaves observations.jsonl, and applying tolerates a step without one.

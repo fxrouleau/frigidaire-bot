@@ -386,9 +386,12 @@ Token counts are estimates (3.5 ASCII characters per token, one per other charac
 subscription; it holds every format and rule verbatim. An orchestrator that stays lean (it reads only the
 manifest, `progress.json` and the observation index, launches one fresh subagent per step, records each
 finished step, and never reads transcripts, observations or notes) runs, in `data/memory-bootstrap/work/`:
-- **Sequential scan**, chunk by chunk in date order, one fresh subagent each. Input: the chunk,
-  `people.json` and the current working notes (every profile, circle and group note). It appends dated
-  observations to `observations/NNNN.jsonl` (`people`: the main ids involved, one or several, or
+- **Sequential scan**, chunk by chunk in date order, one fresh subagent each. Input: the whole chunk (read
+  in pages to its last line), `people.json`, and the working notes it needs: the cast sheet, the group notes,
+  and the profiles and circles of the people in the chunk (the whole working folder grows with every chunk
+  and would not fit one context; working notes are capped: profile 3,000 characters, a topic note 2,000,
+  circle 4,000, group topic 5,000). It appends dated observations to `observations/NNNN.jsonl` (always
+  written, empty when the chunk has nothing; `people`: the main ids involved, one or several, or
   `["group"]`; `category`; `kind` (`trait` \| `fact` \| `event` \| `joke` \| `relationship` \| `history`);
   `content`; `date`; optional `confidence`; `evidence: [{chunk, lines: [from, to]}]`; an optional `quote`;
   an optional `circle` slug), interpreting references with what the working notes know (a callback to an old
