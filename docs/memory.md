@@ -146,7 +146,9 @@ above, the window's recent participants). Everything is shown once per window pe
 persisted with the window), deduped against what the window already showed.
 
 The static prompt carries a short group section: the group's `vibe` and `lore` notes, Earlier left out, up to
-2,500 chars. It changes at most nightly, so the provider's prefix cache survives within a window.
+2,500 chars. It changes at most nightly, so the provider's prefix cache survives within a window. Corrections
+about the group that no group dream has folded in yet ride in the dynamic context instead (each labelled as the
+speaker's word, once per window), and after the group note in `read_note`.
 
 The hybrid journal search stays (old details, exact wording). The persona: when someone says something the bot
 knows is wrong or outdated, record it; never argue with a self-correction; a correction about someone else is
@@ -157,7 +159,7 @@ Tools:
 | Tool | What it does |
 |---|---|
 | `list_notes({person?})` | A person's topics (size, age) and circles (former ones marked, with spans), plus how many journal rows and corrections are newer than the notes; without a person, everyone with notes, the group's topics and every circle with its current members. |
-| `read_note({person?, topic?, circle?})` | A full note, Earlier included: a person's topic (default `profile`, followed by the rows and corrections newer than it), a group topic (`person: "group"`), or a circle by slug, title or alias. |
+| `read_note({person?, topic?, circle?})` | A full note, Earlier included: a person's topic (default `profile`, followed by the rows and corrections newer than it), a group topic (`person: "group"`, followed by the open corrections about the group), or a circle by slug, title or alias. |
 | `search_notes({query})` | FTS over every note (people, group, circles) with snippets. |
 | `record_correction({person, correction})` | Files a `correction` journal row about a member (or the group): the speaker in `said_by`, the triggering message as evidence. Self-corrections are authoritative; anyone else's is a claim. |
 | `recall_memories`, `remember_fact`, `forget_memory`, `set_member_info` | Unchanged (remember_fact now keeps its message as evidence). |

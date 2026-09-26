@@ -12,6 +12,7 @@ import {
   correctionLine,
   describeMembers,
   formatNoteSize,
+  GROUP_CORRECTIONS_HEADING,
   journalLine,
   membershipSpan,
   renderCorrections,
@@ -279,7 +280,16 @@ const readNoteTool: ToolDefinition = {
         return `No group note "${topic}". Group topics: ${topics.join(', ') || 'none yet'}.`;
       }
       const age = formatRelativeAge(note.updatedAt, now);
-      return `The group · ${note.title} (v${note.version}${age ? `, updated ${age}` : ''} by ${note.updatedBy})\n\n${note.content}`;
+      const lines = [
+        `The group · ${note.title} (v${note.version}${age ? `, updated ${age}` : ''} by ${note.updatedBy})`,
+        '',
+        note.content,
+      ];
+      const corrections = notes.openCorrections({ scope: 'group' }, OPEN_ITEMS_SHOWN);
+      if (corrections.length > 0) {
+        lines.push('', GROUP_CORRECTIONS_HEADING, ...corrections.map((m) => correctionLine(m, nameOf(store), now)));
+      }
+      return lines.join('\n');
     }
     const resolved = resolveMember(ctx, ref);
     if (!resolved.ok) return resolved.error;

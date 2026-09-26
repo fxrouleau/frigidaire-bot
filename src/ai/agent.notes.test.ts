@@ -153,6 +153,26 @@ describe("the speaker's notes", () => {
     expect(text).not.toContain('bakes sourdough');
   });
 
+  it('shows corrections about the group, once per window, until the group dream folds them in', async () => {
+    await store.save({
+      category: 'correction',
+      subject: 'server',
+      content: 'Movie night moved to Saturdays.',
+      said_by: DALE,
+      source: 'correction',
+    });
+    const provider = new FakeProvider([textResponse('one'), textResponse('two')]);
+    const agent = makeAgent(provider);
+
+    await agent.handleMention(createFakeMessage({ ...BASE, messageId: '99001', content: 'yo' }).message);
+    await agent.handleMention(createFakeMessage({ ...BASE, messageId: '99002', content: 'yo again' }).message);
+
+    expect(dynamicText(provider, 0)).toContain(
+      "Corrections about the group not in your notes yet (each is the speaker's word: weigh it against what you know):\n- Dale says: Movie night moved to Saturdays. (today)",
+    );
+    expect(dynamicText(provider, 1)).not.toContain('Movie night');
+  });
+
   it('shows a profile version once per window, a newer version and new journal rows again', async () => {
     writeProfile(REMI, 'Remi runs night shifts at a bakery.');
     const provider = new FakeProvider([textResponse('one'), textResponse('two'), textResponse('three')]);

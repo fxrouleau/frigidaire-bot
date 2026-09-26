@@ -127,6 +127,13 @@ export function categoryLabel(
     : `[${row.category}]`;
 }
 
+/**
+ * The heading of the group's open corrections (chat turns, read_note): the group has no "own word", so each
+ * is the speaker's claim, as the dream reads it.
+ */
+export const GROUP_CORRECTIONS_HEADING =
+  "Corrections about the group not in your notes yet (each is the speaker's word: weigh it against what you know):";
+
 /** The headings of a person's open corrections, one per weight (see renderCorrections). */
 export type CorrectionHeadings = { own: string; claims: string };
 

@@ -189,6 +189,12 @@ describe('record_correction', () => {
       "as Remi's claim about the group",
     );
     expect(notes.openCorrections({ scope: 'group' }).map((m) => m.content)).toEqual(['Movie night moved to Saturdays.']);
+    // It shows next to the group's notes until the group's dream folds it in.
+    expect(await run('read_note', { person: 'group', topic: 'lore' })).toContain(
+      "The great bakery heist of 2022.\n\nCorrections about the group not in your notes yet (each is the speaker's word: weigh it against what you know):\n- Remi says: Movie night moved to Saturdays. (today)",
+    );
+    notes.recordDreamSuccess({ scope: 'group' }, notes.journalHighWater());
+    expect(await run('read_note', { person: 'group', topic: 'lore' })).not.toContain('Corrections about the group');
   });
 
   it('refuses empty, overlong and unknown-person corrections', async () => {
