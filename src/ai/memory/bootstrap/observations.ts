@@ -4,10 +4,12 @@
 // orchestrator never has to read it: it validates every line, then rebuilds by-person/<id>.jsonl (a
 // person's own observations plus every relationship or shared event that names them, from either side),
 // by-person/group.jsonl, by-circle/<slug>.jsonl, and by-person/index.json (counts, estimated tokens and
-// the dated span per person, which decide when a person's final build goes hierarchical).
+// the dated span per person, which decide when a person's final build goes hierarchical). It also writes
+// cast.md, the cast sheet every final build gets: the first paragraph of each working profile.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { normalizeTopic } from '../notes/schema';
+import { parseFrontMatter } from './notesTree';
 import { estimateTokens } from './tokens';
 
 /** One observation line as the scan writes it. */
@@ -124,6 +126,8 @@ export type ObservationIndexEntry = {
   tokens: number;
   first: string;
   last: string;
+  /** Estimated tokens per year of the log (where a hierarchical build cuts its eras). */
+  years: Record<string, number>;
 };
 
 export type SplitResult = {
@@ -148,14 +152,21 @@ function byDate(a: Observation, b: Observation): number {
 
 function writeLog(file: string, observations: Observation[]): ObservationIndexEntry & { text: string } {
   const sorted = [...observations].sort(byDate);
-  const text = sorted.map((o) => JSON.stringify(o)).join('\n');
+  const lines = sorted.map((o) => JSON.stringify(o));
+  const text = lines.join('\n');
   fs.writeFileSync(file, text ? `${text}\n` : '');
+  const years: Record<string, number> = {};
+  sorted.forEach((o, i) => {
+    const year = o.date.slice(0, 4);
+    years[year] = (years[year] ?? 0) + estimateTokens(lines[i]);
+  });
   return {
     owner: path.basename(file, '.jsonl'),
     observations: sorted.length,
     tokens: estimateTokens(text),
     first: sorted[0]?.date ?? '',
     last: sorted.at(-1)?.date ?? '',
+    years,
     text,
   };
 }
@@ -230,4 +241,43 @@ export function splitObservations(workDir: string, known?: ReadonlySet<string>):
     `${JSON.stringify({ observations: count, files: files.length, people, group: group ?? null, circles }, null, 2)}\n`,
   );
   return { observations: count, files: files.length, errors, people, ...(group ? { group } : {}), circles };
+}
+
+const CAST_LINE_MAX_CHARS = 400;
+
+/** A profile's first paragraph (heading lines skipped), as one line. */
+function firstParagraph(markdown: string): string {
+  for (const paragraph of markdown.split(/\n\s*\n/)) {
+    const line = paragraph
+      .split('\n')
+      .filter((l) => !/^#{1,6}\s/.test(l.trim()))
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (line) return line.length > CAST_LINE_MAX_CHARS ? `${line.slice(0, CAST_LINE_MAX_CHARS - 1).trimEnd()}…` : line;
+  }
+  return '';
+}
+
+/**
+ * Writes `<workDir>/cast.md`: one line per person with a working profile (working/people/<id>/profile.md),
+ * `- Title (id:…): first paragraph`, so every final build reads people consistently. Returns how many.
+ */
+export function writeCastSheet(workDir: string): number {
+  const peopleDir = path.join(workDir, 'working', 'people');
+  const lines: string[] = [];
+  const ids = fs.existsSync(peopleDir) ? fs.readdirSync(peopleDir).sort() : [];
+  for (const id of ids) {
+    const file = path.join(peopleDir, id, 'profile.md');
+    if (!fs.existsSync(file)) continue;
+    const parsed = parseFrontMatter(fs.readFileSync(file, 'utf8'));
+    const title = parsed.ok && typeof parsed.value.fields.title === 'string' ? parsed.value.fields.title : id;
+    const summary = parsed.ok ? firstParagraph(parsed.value.body) : '';
+    lines.push(`- ${title} (id:${id})${summary ? `: ${summary}` : ''}`);
+  }
+  fs.writeFileSync(
+    path.join(workDir, 'cast.md'),
+    `# Cast sheet: the first paragraph of every working profile\n\n${lines.join('\n')}\n`,
+  );
+  return lines.length;
 }

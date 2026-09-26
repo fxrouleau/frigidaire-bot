@@ -5,7 +5,7 @@
 //
 //   export        archive.db → data/memory-bootstrap/export/ (transcripts, chunks, people.json, manifest)
 //   import --check  validate a notes tree without loading it (the load itself happens at bot startup)
-//   observations  validate the playbook's observation log and rebuild its per-person views
+//   observations  validate the playbook's observation log; rebuild its per-person views and cast sheet
 //   bootstrap     the built-in bootstrap over OpenRouter: --dry-run (estimate) or --run
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -27,7 +27,7 @@ import {
   knownPeopleFromJson,
   knownPeopleFromStores,
 } from './importer';
-import { splitObservations } from './observations';
+import { splitObservations, writeCastSheet } from './observations';
 import { counted, formatCount, formatUsd } from './tokens';
 
 export const DEFAULT_DATA_DIR = './data';
@@ -67,7 +67,7 @@ export const USAGE = `usage: memory <command> [options]
       without loading it. Known people come from --people, DIR/people.json, or the bot's databases.
 
   observations [WORKDIR] [--people FILE]
-      Validate the playbook's observations/*.jsonl and rebuild by-person/ and by-circle/
+      Validate the playbook's observations/*.jsonl and rebuild by-person/, by-circle/ and cast.md
       (default ${DEFAULT_WORK_DIR}; people.json from --people or the export next to it).
 
   bootstrap --dry-run | --run [--from YYYY-MM] [--to YYYY-MM] [--segment-tokens N]
@@ -244,8 +244,9 @@ async function observationsCommand(args: Args, deps: CliDeps): Promise<number> {
     deps.io.out(`warning: ${peopleFile} not found: ids are checked for shape only`);
   }
   const result = splitObservations(workDir, known);
+  const cast = writeCastSheet(workDir);
   deps.io.out(
-    `${counted(result.observations, 'observation')} in ${counted(result.files, 'file')} → by-person/ (${counted(result.people.length, 'person', 'people')}${result.group ? ' + group' : ''}), by-circle/ (${counted(result.circles.length, 'circle')})`,
+    `${counted(result.observations, 'observation')} in ${counted(result.files, 'file')} → by-person/ (${counted(result.people.length, 'person', 'people')}${result.group ? ' + group' : ''}), by-circle/ (${counted(result.circles.length, 'circle')}); cast.md (${counted(cast, 'profile')})`,
   );
   for (const error of result.errors) deps.io.err(`  - ${error}`);
   return result.errors.length > 0 ? 1 : 0;

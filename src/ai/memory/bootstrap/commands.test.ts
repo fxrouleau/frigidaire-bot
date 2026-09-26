@@ -133,7 +133,7 @@ describe('runCli', () => {
       `${JSON.stringify({ people: [REMI, DALE], category: 'fact', kind: 'relationship', content: 'Best friends since school.', date: '2019-03', evidence: [{ chunk: '0001', lines: [4, 9] }] })}\n`,
     );
     expect(await runCli(['observations', work], deps())).toBe(0);
-    expect(out.at(-1)).toContain('1 observation in 1 file → by-person/ (2 people)');
+    expect(out.at(-1)).toContain('1 observation in 1 file → by-person/ (2 people), by-circle/ (0 circles); cast.md (0 profiles)');
     expect(fs.readFileSync(path.join(work, 'by-person', `${DALE}.jsonl`), 'utf8')).toContain('Best friends');
   });
 

@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { splitObservations, validateObservation } from './observations';
+import { splitObservations, validateObservation, writeCastSheet } from './observations';
 
 // Fictional cast, placeholder snowflakes.
 const REMI = '100000000000000001';
@@ -104,6 +104,7 @@ describe('splitObservations', () => {
     const index = JSON.parse(fs.readFileSync(path.join(work, 'by-person', 'index.json'), 'utf8'));
     expect(index.people[0]).toMatchObject({ owner: REMI, observations: 3, first: '2019-03', last: '2021-06' });
     expect(index.people[0].tokens).toBeGreaterThan(0);
+    expect(Object.keys(index.people[0].years)).toEqual(['2019', '2021']);
     expect(index.group).toMatchObject({ owner: 'group', observations: 1 });
   });
 
@@ -131,5 +132,22 @@ describe('splitObservations', () => {
   it('handles a work folder with no observations yet', () => {
     fs.rmSync(path.join(work, 'observations'), { recursive: true });
     expect(splitObservations(work)).toMatchObject({ observations: 0, files: 0, people: [], circles: [] });
+  });
+});
+
+describe('writeCastSheet', () => {
+  it("lists every working profile's first paragraph", () => {
+    const write = (id: string, text: string) => {
+      fs.mkdirSync(path.join(work, 'working', 'people', id), { recursive: true });
+      fs.writeFileSync(path.join(work, 'working', 'people', id, 'profile.md'), text);
+    };
+    write(REMI, "---\ntitle: Remi\n---\nRemi, the group's night owl.\nRuns the drafts.\n\n## Now\nBakes.");
+    write(DALE, '---\ntitle: Dale\n---\n## Now\nDrives everyone home.');
+    fs.mkdirSync(path.join(work, 'working', 'people', NOVA), { recursive: true });
+    expect(writeCastSheet(work)).toBe(2);
+    expect(fs.readFileSync(path.join(work, 'cast.md'), 'utf8').split('\n').slice(2, 4)).toEqual([
+      `- Remi (id:${REMI}): Remi, the group's night owl. Runs the drafts.`,
+      `- Dale (id:${DALE}): Drives everyone home.`,
+    ]);
   });
 });
