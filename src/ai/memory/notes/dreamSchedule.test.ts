@@ -251,14 +251,29 @@ describe('DreamScheduler.start', () => {
     const check = vi.spyOn(s, 'check').mockResolvedValue(undefined);
     s.start();
     s.start();
-    await vi.advanceTimersByTimeAsync(DREAM_TICK_MS);
+    // Nothing during the startup delay (a bootstrap import and startup maintenance come first).
+    await vi.advanceTimersByTimeAsync(DREAM_FIRST_CHECK_DELAY_MS - 1);
+    expect(check).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(check).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(DREAM_FIRST_CHECK_DELAY_MS - DREAM_TICK_MS);
-    // The first delayed check plus one per tick so far.
-    expect(check).toHaveBeenCalledTimes(DREAM_FIRST_CHECK_DELAY_MS / DREAM_TICK_MS + 1);
+    await vi.advanceTimersByTimeAsync(DREAM_TICK_MS * 2);
+    expect(check).toHaveBeenCalledTimes(3);
     s.stop();
-    const calls = check.mock.calls.length;
     await vi.advanceTimersByTimeAsync(DREAM_TICK_MS * 3);
-    expect(check).toHaveBeenCalledTimes(calls);
+    expect(check).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops before the first check too, and starts again afterwards', async () => {
+    vi.useFakeTimers();
+    const s = new DreamScheduler({ state: memoryState(), run: async () => ({ day: 'd', people: [] }) });
+    const check = vi.spyOn(s, 'check').mockResolvedValue(undefined);
+    s.start();
+    s.stop();
+    await vi.advanceTimersByTimeAsync(DREAM_FIRST_CHECK_DELAY_MS + DREAM_TICK_MS);
+    expect(check).not.toHaveBeenCalled();
+    s.start();
+    await vi.advanceTimersByTimeAsync(DREAM_FIRST_CHECK_DELAY_MS);
+    expect(check).toHaveBeenCalledTimes(1);
+    s.stop();
   });
 });

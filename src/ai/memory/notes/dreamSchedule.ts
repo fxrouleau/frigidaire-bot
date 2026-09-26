@@ -186,13 +186,19 @@ export class DreamScheduler {
     if (!(await this.opts.report(text))) logger.warn('dream: the report-channel line did not go out.');
   }
 
-  /** Checks every DREAM_TICK_MS, the first time after DREAM_FIRST_CHECK_DELAY_MS. Idempotent; unref'd. */
+  /**
+   * Checks once DREAM_FIRST_CHECK_DELAY_MS after starting, then every DREAM_TICK_MS (the ticks only start
+   * after that first check, so nothing runs during the startup delay). Idempotent; unref'd.
+   */
   start(): void {
-    if (this.interval) return;
-    this.firstCheck = setTimeout(() => void this.check(), DREAM_FIRST_CHECK_DELAY_MS);
-    this.interval = setInterval(() => void this.check(), DREAM_TICK_MS);
+    if (this.firstCheck || this.interval) return;
+    this.firstCheck = setTimeout(() => {
+      this.firstCheck = undefined;
+      void this.check();
+      this.interval = setInterval(() => void this.check(), DREAM_TICK_MS);
+      this.interval.unref?.();
+    }, DREAM_FIRST_CHECK_DELAY_MS);
     this.firstCheck.unref?.();
-    this.interval.unref?.();
   }
 
   stop(): void {
