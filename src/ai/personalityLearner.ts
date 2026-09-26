@@ -8,6 +8,7 @@ import { config } from '../config';
 import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
 import { attributeMessage } from '../relay';
+import { type CaptureActivity, type CaptureTrigger, IntervalCaptureTrigger } from './captureTrigger';
 import { getCachedTranscript } from './media';
 import { type Identity, LEARNER_SOURCES, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
 import { getOpenRouterClient } from './openRouterClient';
@@ -359,18 +360,23 @@ type ObservedMessage = {
 };
 
 export type PersonalityLearnerOptions = {
+  /** The default trigger's interval (LEARNING_INTERVAL_MS); ignored when `trigger` is given. */
   intervalMs?: number;
   minMessages?: number;
   /** OpenRouter client; defaults to the shared one (tests inject a replay client). */
   client?: OpenAI;
+  /**
+   * When a channel is read (src/ai/captureTrigger.ts). Defaults to the original fixed interval over every
+   * channel with activity; memory v2's conversation-end capture plugs in here.
+   */
+  trigger?: CaptureTrigger;
 };
 
 export class PersonalityLearner {
   private readonly store: MemoryStore;
-  private readonly intervalMs: number;
+  private readonly trigger: CaptureTrigger;
   private readonly minMessages: number;
   private timer: NodeJS.Timeout | undefined;
-  private readonly activeChannels = new Set<string>();
   private readonly ignoredChannels: Set<string>;
   private client: OpenAI | undefined;
   // A cycle can outlast the interval (slow model, many channels); the next tick must not start a
@@ -379,7 +385,7 @@ export class PersonalityLearner {
 
   constructor(store: MemoryStore, opts: PersonalityLearnerOptions = {}) {
     this.store = store;
-    this.intervalMs = opts.intervalMs ?? config.learner.intervalMs;
+    this.trigger = opts.trigger ?? new IntervalCaptureTrigger(opts.intervalMs ?? config.learner.intervalMs);
     this.minMessages = opts.minMessages ?? config.learner.minMessages;
     this.ignoredChannels = new Set(config.learner.ignoredChannels);
     this.client = opts.client;
@@ -388,11 +394,11 @@ export class PersonalityLearner {
   start(discordClient: Client): void {
     if (this.timer) return;
 
-    logger.info(`PersonalityLearner started (interval: ${this.intervalMs}ms, min messages: ${this.minMessages})`);
+    logger.info(`PersonalityLearner started (capture: ${this.trigger.describe()}, min messages: ${this.minMessages})`);
 
     this.timer = setInterval(() => {
       void this.observeOnce(discordClient);
-    }, this.intervalMs);
+    }, this.trigger.tickMs);
   }
 
   stop(): void {
@@ -403,24 +409,28 @@ export class PersonalityLearner {
     }
   }
 
-  trackActivity(channelId: string): void {
+  /**
+   * A member posted in `channelId` (the learnerActivityTracker event): reported to the capture trigger
+   * unless the channel is in LEARNER_IGNORE_CHANNELS.
+   */
+  trackActivity(channelId: string, activity: Omit<CaptureActivity, 'channelId'> = { at: Date.now() }): void {
     if (this.ignoredChannels.has(channelId)) return;
-    this.activeChannels.add(channelId);
+    this.trigger.noteActivity({ ...activity, channelId });
   }
 
   /**
-   * One observation cycle over the channels that saw activity since the last one. Never throws. When
-   * the previous cycle is still running this one is skipped, and the channels it would have handled
-   * stay queued for the next tick.
+   * One observation cycle over the channels the capture trigger says are due. Never throws. When the
+   * previous cycle is still running this one is skipped and takes nothing, so the pending channels stay
+   * with the trigger for the next tick.
    */
-  async observeOnce(discordClient: Client): Promise<void> {
+  async observeOnce(discordClient: Client, now: number = Date.now()): Promise<void> {
     if (this.cycleInFlight) {
       logger.warn('PersonalityLearner: previous observation cycle still running, skipping this tick');
       return;
     }
     this.cycleInFlight = true;
     try {
-      await this.observe(discordClient);
+      await this.observe(discordClient, this.trigger.takeDue(now));
     } catch (error) {
       logger.error('PersonalityLearner observation failed:', error);
     } finally {
@@ -736,10 +746,7 @@ export class PersonalityLearner {
     return { observations, identityUpdates };
   }
 
-  private async observe(discordClient: Client): Promise<void> {
-    const channelsToProcess = [...this.activeChannels];
-    this.activeChannels.clear();
-
+  private async observe(discordClient: Client, channelsToProcess: string[]): Promise<void> {
     if (channelsToProcess.length === 0) return;
 
     logger.info(`PersonalityLearner: Observation cycle started — ${channelsToProcess.length} active channel(s)`);

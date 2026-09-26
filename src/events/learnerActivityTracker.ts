@@ -7,7 +7,11 @@ export default defineEvent(Events.MessageCreate, {
     if (message.author.bot) return;
     if (message.webhookId) return;
 
-    // Zero-cost Set.add; the learner batches these every LEARNING_INTERVAL_MS.
-    personalityLearner.trackActivity(message.channel.id);
+    // Cheap bookkeeping only: the learner's capture trigger decides when the channel is read.
+    personalityLearner.trackActivity(message.channel.id, {
+      at: message.createdTimestamp,
+      messageId: message.id,
+      authorId: message.author.id,
+    });
   },
 });

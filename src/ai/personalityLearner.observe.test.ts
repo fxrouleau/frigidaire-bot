@@ -11,6 +11,7 @@ import {
   type ScriptedReply,
 } from '../test-support/capturingClient';
 import { createFakeBotMessage, createFakeClient, createFakeMessage, type FakeMessageOptions } from '../test-support/fakeDiscord';
+import type { CaptureActivity, CaptureTrigger } from './captureTrigger';
 import { setMemoryStoreForTesting } from './memory';
 import { MemoryStore } from './memory/memoryStore';
 import { capImageParts, MAX_LEARNER_IMAGES, PersonalityLearner } from './personalityLearner';
@@ -378,6 +379,37 @@ describe('PersonalityLearner observation cycle', () => {
     // The channel queued during the skipped tick is processed on the next one.
     await learner.observeOnce(client);
     expect(fetchCalls).toHaveLength(2);
+  });
+
+  it('reads the channels its capture trigger says are due, and reports activity to it', async () => {
+    const noted: CaptureActivity[] = [];
+    const asked: number[] = [];
+    let due: string[] = [];
+    const trigger: CaptureTrigger = {
+      tickMs: 60_000,
+      describe: () => 'test',
+      noteActivity: (activity) => noted.push(activity),
+      takeDue: (now) => {
+        asked.push(now);
+        const taken = due;
+        due = [];
+        return taken;
+      },
+    };
+    vi.stubEnv('LEARNER_IGNORE_CHANNELS', 'chan-ignored');
+    const { client: openai, requests } = createCapturingClient([noObservations()]);
+    const learner = new PersonalityLearner(store, { client: openai, minMessages: 3, trigger });
+    learner.trackActivity(CHANNEL_ID, { at: 42, messageId: 'm1', authorId: '100000000000000001' });
+    learner.trackActivity('chan-ignored');
+    expect(noted).toEqual([{ channelId: CHANNEL_ID, at: 42, messageId: 'm1', authorId: '100000000000000001' }]);
+
+    const { client, fetchCalls } = channelServing([jasper('a'), wheelie('b'), jasper('c')]);
+    await learner.observeOnce(client, 1_000);
+    expect([asked, fetchCalls.length, requests.length]).toEqual([[1_000], 0, 0]);
+
+    due = [CHANNEL_ID];
+    await learner.observeOnce(client, 2_000);
+    expect([asked, fetchCalls.length, requests.length]).toEqual([[1_000, 2_000], 1, 1]);
   });
 
   it('survives a channel fetch failure and a model failure without throwing', async () => {
