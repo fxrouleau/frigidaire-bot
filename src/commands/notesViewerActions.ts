@@ -16,6 +16,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   type ButtonInteraction,
+  escapeMarkdown,
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
   MessageFlags,
@@ -159,6 +160,8 @@ function describeTarget(target: EditTarget): string {
 /** The longest audit line posted to the report channel, and the longest instruction or summary in it. */
 const AUDIT_MAX_CHARS = 600;
 const AUDIT_TEXT_CHARS = 200;
+/** The longest model text quoted in a notice above the viewer. */
+const NOTICE_TEXT_CHARS = 300;
 
 function oneLine(text: string, max: number): string {
   const line = text.replace(/\s+/g, ' ').trim();
@@ -441,7 +444,12 @@ async function submitEdit(
 
   const changes = previewChanges(notes, proposal.target, proposal.output);
   if (changes.length === 0) {
-    await interaction.editReply(update(await views.render(back, VIEWER_LINES.noChange)));
+    // The edit prompt has the model say why when it can't apply an instruction: pass that on (the model's
+    // own words only: proposal.changeSummary falls back to the instruction itself).
+    const why = oneLine(proposal.output.change_summary, NOTICE_TEXT_CHARS);
+    logger.info(`notes viewer: the draft for ${describeTarget(target)} changed nothing${why ? `: ${why}` : ''}`);
+    const notice = why ? `${VIEWER_LINES.noChange}: ${escapeMarkdown(why)}` : VIEWER_LINES.noChange;
+    await interaction.editReply(update(await views.render(back, notice)));
     return;
   }
   const now = deps.now();

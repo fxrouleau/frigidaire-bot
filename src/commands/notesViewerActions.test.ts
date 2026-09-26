@@ -446,10 +446,23 @@ describe('owner edit', () => {
   });
 
   it('says so when the draft changes nothing', async () => {
-    const same = output({ notes: [{ topic: 'profile', title: 'Remi', content: notes.getProfile(REMI)?.content ?? '' }] });
+    const same = output({
+      notes: [{ topic: 'profile', title: 'Remi', content: notes.getProfile(REMI)?.content ?? '' }],
+      change_summary: '',
+    });
     const fake = fakeDeps(async (target) => proposal(target, same));
     const { responses } = await draft(fake);
     expect(responses[responses.length - 1].content).toBe("that draft didn't change anything");
+    expect(pendingEdits.size).toBe(0);
+  });
+
+  it("passes on the edit model's reason when it changed nothing (the edit prompt asks for one)", async () => {
+    const why = output({ notes: [], change_summary: 'Remi has no *Valorant* paragraph to drop' });
+    const fake = fakeDeps(async (target) => proposal(target, why));
+    const { responses } = await draft(fake, 'drop the Valorant paragraph');
+    expect(responses[responses.length - 1].content).toBe(
+      "that draft didn't change anything: Remi has no \\*Valorant\\* paragraph to drop",
+    );
     expect(pendingEdits.size).toBe(0);
   });
 
