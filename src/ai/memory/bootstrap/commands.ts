@@ -401,6 +401,12 @@ async function bootstrapCommand(args: Args, deps: CliDeps): Promise<number> {
       `Dreamed: ${counted(updated, 'person', 'people')} updated${failed > 0 ? `, ${failed} failed` : ''}${result.dream.group?.status === 'updated' ? ', the group updated' : ''}${result.dream.costUsd !== undefined ? `, ${formatUsd(result.dream.costUsd)}` : ''}.${left}`,
     );
   }
+  if (result.rows > 0) {
+    // The bot keeps its journal's search vectors in memory, write-through for its own writes only.
+    deps.io.out(
+      'The running bot does not see these rows in its memory searches until it restarts: restart it (docker restart frigidaire-bot) once the run is done.',
+    );
+  }
   return result.segmentsFailed > 0 ? 1 : 0;
 }
 

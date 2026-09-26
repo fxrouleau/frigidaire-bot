@@ -184,7 +184,9 @@ describe('runCli', () => {
     expect(requests[0].body.model).toBe('test/bootstrap-model');
     expect(dream).toHaveBeenCalledWith({ archive, memory, notes }, client);
     expect(out.join('\n')).toContain('Done: 1 segment read, 1 journal row');
-    expect(out.at(-1)).toBe('Dreamed: 0 people updated.');
+    expect(out.at(-2)).toBe('Dreamed: 0 people updated.');
+    // The bot's search vectors live in its own process: it needs a restart to see rows written here.
+    expect(out.at(-1)).toContain('restart it (docker restart frigidaire-bot)');
 
     // Resuming a finished run reads nothing new.
     out = [];
@@ -218,7 +220,7 @@ describe('runCli', () => {
     expect(getNotesStore().getProfile(REMI)).toBeUndefined();
     expect(memory.getState(DREAM_NIGHT_KEY)).toBeUndefined();
     expect(getMemoryStore().getState(DREAM_NIGHT_KEY)).toBeUndefined();
-    expect(out.at(-1)).toBe('Dreamed: 1 person updated, the group updated.');
+    expect(out.at(-2)).toBe('Dreamed: 1 person updated, the group updated.');
   });
 
   describe('while the archive is still importing history', () => {

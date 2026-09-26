@@ -490,7 +490,10 @@ range), it dreams everyone with new journal rows until nothing is pending (`runD
 night's dream reads at most 300 rows per person, so someone with thousands of history rows gets pass after
 pass, then the group the same way. A person whose dream fails is left for the nightly dream, and three
 failures in a row stop it, as on a night. It uses the CLI's own stores and never claims the nightly
-schedule's day (`--no-dream` skips it; a failure leaves it to the nightly dream).
+schedule's day (`--no-dream` skips it; a failure leaves it to the nightly dream). The running bot keeps the
+journal's search vectors in memory, in step with its own writes only, so after a run that wrote rows the
+command says to restart it: until then its memory searches don't see the new rows (and fall back to keyword
+search while they are over a fifth of the journal).
 
 ## Configuration
 
