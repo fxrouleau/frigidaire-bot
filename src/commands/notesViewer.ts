@@ -28,7 +28,13 @@ import {
   TextInputStyle,
 } from 'discord.js';
 import { type Memory, type MemoryStore, SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
-import { correctionLine, describeMembers, formatNoteSize, membershipSpan } from '../ai/memory/notes/context';
+import {
+  correctionLine,
+  describeMembers,
+  formatNoteSize,
+  membershipSpan,
+  renderCorrections,
+} from '../ai/memory/notes/context';
 import type { ProposedChange } from '../ai/memory/notes/dreamer';
 import type { CircleMembership, Note, NotesStore } from '../ai/memory/notes/notesStore';
 import { type CircleMember, type NoteUpdatedBy, PROFILE_TOPIC } from '../ai/memory/notes/schema';
@@ -488,10 +494,14 @@ function pendingField(note: Note, ctx: ViewerContext): APIEmbedField | undefined
   const lines: string[] = [];
   if (newer > 0) lines.push(`${newer} newer journal entr${newer === 1 ? 'y' : 'ies'} (the next dream folds them in)`);
   if (corrections.length > 0) {
-    lines.push('Corrections (they win over the note):');
     lines.push(
-      ...corrections.map((row) =>
-        escapeMarkdown(correctionLine(row, nameOf(ctx.memory), ctx.now).replace(/^- /, '• ')),
+      ...renderCorrections(
+        corrections,
+        {
+          own: 'Their own corrections (they win over the note):',
+          claims: "Others' claims (weighed tonight, not settled):",
+        },
+        (row) => escapeMarkdown(correctionLine(row, nameOf(ctx.memory), ctx.now).replace(/^- /, '• ')),
       ),
     );
   }

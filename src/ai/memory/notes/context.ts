@@ -103,6 +103,27 @@ export function correctionLine(
   return `- ${speaker} says: ${row.content}${when}`;
 }
 
+/** The headings of a person's open corrections, one per weight (see renderCorrections). */
+export type CorrectionHeadings = { own: string; claims: string };
+
+/**
+ * A person's open corrections as heading + lines, split by weight: their own first (they win over the
+ * notes), then what others claim about them (their word, weighed by the dream, never settled). A kind with
+ * no rows is left out; each keeps its rows' order.
+ */
+export function renderCorrections<T extends CorrectionRow>(
+  rows: T[],
+  headings: CorrectionHeadings,
+  line: (row: T) => string,
+): string[] {
+  const own = rows.filter(isSelfCorrection);
+  const claims = rows.filter((row) => !isSelfCorrection(row));
+  return [
+    ...(own.length > 0 ? [headings.own, ...own.map(line)] : []),
+    ...(claims.length > 0 ? [headings.claims, ...claims.map(line)] : []),
+  ];
+}
+
 /** A membership span: `since 2021`, `2021–2023-02`, `until 2023`, or ''. */
 export function membershipSpan(member: Pick<CircleMember, 'since' | 'until'>): string {
   if (member.since && member.until) return `${member.since}–${member.until}`;
@@ -169,9 +190,14 @@ export function renderPersonNotes(block: PersonNotesBlock): string {
   }
   if (block.corrections.length > 0) {
     parts.push(
-      `Corrections about ${block.name} newer than your notes (they win over the notes):\n${block.corrections
-        .map((r) => correctionLine(r, block.nameOf, block.now))
-        .join('\n')}`,
+      renderCorrections(
+        block.corrections,
+        {
+          own: `${block.name}'s own corrections, newer than your notes (they win over the notes):`,
+          claims: `What others claim about ${block.name}, newer than your notes (their word, not settled: don't repeat it as fact):`,
+        },
+        (r) => correctionLine(r, block.nameOf, block.now),
+      ).join('\n'),
     );
   }
   if (parts.length === 0) return '';

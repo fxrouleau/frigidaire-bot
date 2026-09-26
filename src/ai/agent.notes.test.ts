@@ -112,9 +112,14 @@ describe("the speaker's notes", () => {
     expect(text).toContain('What you know about the person talking to you right now (Remi):');
     expect(text).toContain('Your notes on Remi (updated today):\nRemi runs night shifts at a bakery.');
     expect(text).toContain('Newer than your notes on Remi:\n- [fact] adopted a cat named Toast (today)');
-    expect(text).toContain('Corrections about Remi newer than your notes (they win over the notes):');
-    expect(text).toContain('- Remi, about themself: Quit Valorant in August 2026. (today)');
-    expect(text).toContain('- Dale says: Works days now, not nights. (today)');
+    // Remi's own word wins over the notes; Dale's claim about Remi is only a claim.
+    expect(text).toContain(
+      "Remi's own corrections, newer than your notes (they win over the notes):\n- Remi, about themself: Quit Valorant in August 2026. (today)",
+    );
+    expect(text).toContain(
+      "What others claim about Remi, newer than your notes (their word, not settled: don't repeat it as fact):\n- Dale says: Works days now, not nights. (today)",
+    );
+    expect(text).not.toContain('Dale says: Works days now, not nights. (today)\n- Remi, about themself');
     // What the notes already hold is not repeated as a raw memory.
     expect(text).not.toContain('bakes sourdough');
   });

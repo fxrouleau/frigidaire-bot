@@ -122,7 +122,15 @@ describe('read_note', () => {
     const text = await run('read_note', { person: 'Remi' });
     expect(text).toContain('Remi · Remi (v1, updated today by dream)');
     expect(text).toContain('Back in 2017 played Overwatch nightly.');
-    expect(text).toContain('Corrections newer than this note (they win over it):\n- Dale says: Works nights again. (today)');
+    // Dale's word about Remi is a claim, never headed as winning over the note.
+    expect(text).toContain(
+      "What others claim about them, newer than this note (their word, not settled: don't repeat it as fact):\n- Dale says: Works nights again. (today)",
+    );
+    expect(text).not.toContain('win over');
+    await run('record_correction', { person: 'me', correction: 'Works days, actually.' });
+    expect(await run('read_note', { person: 'Remi' })).toContain(
+      'Their own corrections, newer than this note (they win over it):\n- Remi, about themself: Works days, actually. (today)',
+    );
   });
 
   it('reads a topic, a group note and a circle by slug, title, alias or as a topic of a member', async () => {

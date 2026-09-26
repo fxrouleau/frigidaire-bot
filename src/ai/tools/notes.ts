@@ -14,6 +14,7 @@ import {
   formatNoteSize,
   journalLine,
   membershipSpan,
+  renderCorrections,
 } from '../memory/notes/context';
 import type { Note, NotesStore } from '../memory/notes/notesStore';
 import { normalizeTopic, PROFILE_TOPIC } from '../memory/notes/schema';
@@ -218,8 +219,15 @@ function readPersonNote(
     if (corrections.length > 0) {
       lines.push(
         '',
-        'Corrections newer than this note (they win over it):',
-        ...corrections.map((m) => correctionLine(m, nameOf(store), now)),
+        ...renderCorrections(
+          corrections,
+          {
+            own: 'Their own corrections, newer than this note (they win over it):',
+            claims:
+              "What others claim about them, newer than this note (their word, not settled: don't repeat it as fact):",
+          },
+          (m) => correctionLine(m, nameOf(store), now),
+        ),
       );
     }
   }

@@ -136,7 +136,8 @@ text (≤ 3 each):
 - their `profile` without its Earlier part (the speaker's up to 3,000 chars, others' up to 1,500), with a line
   listing their current circles and a hint when Earlier history was left out;
 - their journal rows newer than their dream watermark (≤ 10, dated with relative ages);
-- their open corrections (always shown, marked with who said them; they win over the notes).
+- their open corrections (always shown, marked with who said them): their own under a heading saying they win
+  over the notes, what others claim about them under one saying it is their word, not settled.
 
 People without notes yet fall back to their plain memories (corrections labelled as claims). Then circles
 (≤ 3, up to 1,500 chars each, Earlier left out): the ones the message names (title, slug words or alias, as
