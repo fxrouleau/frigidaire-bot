@@ -214,6 +214,12 @@ bootstrap import sets its watermarks first). The day is claimed in memory.db's `
 (`dream:last_night`) before the run starts, so a night that crashes or fails is never retried the same day:
 its people are still above their watermarks and wait for the next night.
 
+One dream at a time: the night and a `memory bootstrap --run` catching up (another process on the same
+memory.db) hold a lease in `bot_state` (`dream:running`: who, since when; renewed every minute, taken over
+after 10 minutes without renewal, so a crashed holder never blocks for long). While the bootstrap holds it the
+day stays unclaimed and the night runs on the first check after it is done (one log line while it waits);
+while the night holds it the bootstrap doesn't dream and says to run it again.
+
 For each person with journal rows above their watermark (most recently active first, at most
 `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`, default 20), one call to `MEMORY_DREAM_MODEL` with:
 - the rules (below), the person's names (identities), ALL their current notes and circles;
@@ -255,12 +261,16 @@ The answer is JSON:
 ```
 
 It is validated (profile present, sizes, slugs, markdown only, no Discord markup, no ids of other people unless
-they were in the input, circle membership shape and dates) and saved all or nothing as new versions
-(`updated_by = 'dream'`). A refused answer (invalid JSON, a broken rule, a write the store refuses, an answer
+they were in the input, circle membership shape and dates; a rewritten circle keeps every member it has, current
+or former, since someone who left gets an `until` and only the owner's edit removes a member) and saved all or
+nothing as new versions (`updated_by = 'dream'`). A refused answer (invalid JSON, a broken rule, a write the store refuses, an answer
 cut off at the length limit) gets one repair round with the errors. The watermark advances only on success
 (an answer that changes nothing still advances it); a failure is logged, kept in `dream_state` and retried the
 next night. A night stops early after three people failed in a row (an outage). Circles past a 60,000-char
-budget are shown as excerpts and may not be rewritten by that call.
+budget are shown as excerpts and may not be rewritten by that call. An answer is never saved over notes that
+changed while the model was thinking (an owner edit or undo of that person's notes, or of a circle the answer
+writes): the save compares the versions the prompt showed in the same transaction, and on a change the dream
+fails without a repair round, so the next night dreams from the new version.
 
 Dream rules (the prompt): merge new facts; resolve contradictions (newer wins; a self-correction beats
 anything; a third-party claim is weighed, never blindly applied); weigh by recency × recurrence; keep dates
@@ -286,7 +296,9 @@ reasons when asked, so calls send no reasoning field and a `max_tokens` of 16,00
 
 Owner edits (`proposeEdit`) show the model the target's notes (a person's with their circles, the group's with
 every circle, or one circle) and the instruction; the draft is checked against the store in a rolled-back
-transaction (one repair round when refused), so the preview never shows something Confirm would refuse.
+transaction (one repair round when refused), so the preview never shows something Confirm would refuse. A draft
+whose notes changed while the model was drafting (a dream saved meanwhile) is refused ("ask again"), so Confirm
+can never put back what the dream replaced.
 
 `record_correction` takes at most 15 corrections from one member in a rolling 24 hours (each one can pull a
 person into the night's dream); at the cap the bot says so in its own voice.
@@ -494,10 +506,12 @@ is read (not after a range), it dreams everyone with new journal rows until noth
 night's dream reads at most 300 rows per person, so someone with thousands of history rows gets pass after
 pass, then the group the same way. A person whose dream fails is left for the nightly dream, and three
 failures in a row stop it, as on a night. It uses the CLI's own stores and never claims the nightly
-schedule's day (`--no-dream` skips it; a failure leaves it to the nightly dream). The running bot keeps the
-journal's search vectors in memory, in step with its own writes only, so after a run that wrote rows the
-command says to restart it: until then its memory searches don't see the new rows (and fall back to keyword
-search while they are over a fifth of the journal).
+schedule's day (`--no-dream` skips it; a failure leaves it to the nightly dream). It holds the dream lease
+while it runs, so the bot's night waits for it; when the read finishes while the bot is dreaming, it doesn't
+dream and says to run `--run` again once the bot is done (every segment is read, so that goes straight to the
+dream). The running bot keeps the journal's search vectors in memory, in step with its own writes only, so
+after a run that wrote rows the command says to restart it: until then its memory searches don't see the new
+rows (and fall back to keyword search while they are over a fifth of the journal).
 
 ## Configuration
 
@@ -557,6 +571,7 @@ Deliberately left out of memory v2, for a later change:
 | `src/ai/memory/notes/dreamer.ts` | the writers: `dreamPerson()`, `dreamGroup()` and `planGroupDream()` (new rows or the weekly refresh), `runNightlyDream()`, `runDreamsUntilCaughtUp()` (the bootstrap), `proposeEdit()`, `previewChanges()`, `applyEdit()` |
 | `src/ai/memory/notes/dreamPrompts.ts` | the dream, group and edit prompts and how their input is rendered |
 | `src/ai/memory/notes/dreamSchedule.ts`, `src/events/memoryDream.ts` | once per Eastern day from `MEMORY_DREAM_HOUR`, the report line, the version trim |
+| `src/ai/memory/notes/dreamLease.ts` | one dream at a time across processes (the night, a bootstrap's catch-up) |
 | `src/ai/captureTrigger.ts` | when the learner reads a channel (`CaptureTrigger`, `ConversationEndTrigger`) |
 | `src/ai/capture/conversation.ts` | reading a whole conversation (paging, the cap) and splitting it into parts with lead-ins |
 | `src/ai/capture/citations.ts` | resolving an observation's cited lines, quote and related members |

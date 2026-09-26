@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '../../../logger';
+import { MemoryStore } from '../memoryStore';
 import type { DreamOutcome, NightlyDreamResult } from './dreamer';
+import { DREAM_LEASE_KEY, takeDreamLease } from './dreamLease';
 import {
   DREAM_FIRST_CHECK_DELAY_MS,
   DREAM_NIGHT_KEY,
@@ -9,6 +12,7 @@ import {
   dueNight,
   formatDreamReport,
   formatUsd,
+  NIGHTLY_DREAM_HOLDER,
 } from './dreamSchedule';
 
 // Fictional cast, placeholder snowflakes.
@@ -37,6 +41,7 @@ function memoryState(initial: Record<string, string> = {}): DreamStateStore & { 
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('dueNight', () => {
@@ -159,6 +164,50 @@ describe('DreamScheduler.check', () => {
     expect(runs).toBe(2);
   });
 
+  it('waits, the day unclaimed, while another process dreams (logged once), then runs holding the lease', async () => {
+    const store = new MemoryStore(':memory:');
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const bootstrap = takeDreamLease(store, 'the memory bootstrap (CLI)', { now: () => clock });
+    if (!bootstrap.ok) throw new Error('lease busy');
+    let heldDuringRun: boolean | undefined;
+    const s = scheduler({
+      lease: () => takeDreamLease(store, NIGHTLY_DREAM_HOLDER, { now: () => clock }),
+      run: async () => {
+        runs++;
+        const other = takeDreamLease(store, 'the memory bootstrap (CLI)', { now: () => clock });
+        heldDuringRun = !other.ok;
+        if (other.ok) other.lease.release();
+        return result;
+      },
+    });
+    expect(await s.check()).toBeUndefined();
+    expect(await s.check()).toBeUndefined();
+    expect(runs).toBe(0);
+    expect(state.values.has(DREAM_NIGHT_KEY)).toBe(false);
+    const waits = info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('has been running since'));
+    expect(waits).toEqual([
+      'dream: the memory bootstrap (CLI) has been running since 2026-09-26 04:30 (Eastern); the night of 2026-09-26 waits until it is done.',
+    ]);
+
+    bootstrap.lease.release();
+    expect(await s.check()).toBe(result);
+    expect(runs).toBe(1);
+    expect(heldDuringRun).toBe(true);
+    expect(state.values.get(DREAM_NIGHT_KEY)).toBe('2026-09-26');
+    // Released after the night, even one that throws.
+    expect(store.getState(DREAM_LEASE_KEY)).toBe('');
+    clock = new Date('2026-09-27T08:30:00Z');
+    const failing = scheduler({
+      lease: () => takeDreamLease(store, NIGHTLY_DREAM_HOLDER, { now: () => clock }),
+      run: async () => {
+        throw new Error('database is locked');
+      },
+    });
+    expect(await failing.check()).toBeUndefined();
+    expect(store.getState(DREAM_LEASE_KEY)).toBe('');
+    store.close();
+  });
+
   it('honours the configured hour', async () => {
     vi.stubEnv('MEMORY_DREAM_HOUR', '6');
     const s = scheduler();
@@ -251,14 +300,29 @@ describe('DreamScheduler.start', () => {
     const check = vi.spyOn(s, 'check').mockResolvedValue(undefined);
     s.start();
     s.start();
-    await vi.advanceTimersByTimeAsync(DREAM_TICK_MS);
+    // Nothing during the startup delay (a bootstrap import and startup maintenance come first).
+    await vi.advanceTimersByTimeAsync(DREAM_FIRST_CHECK_DELAY_MS - 1);
+    expect(check).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(check).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(DREAM_FIRST_CHECK_DELAY_MS - DREAM_TICK_MS);
-    // The first delayed check plus one per tick so far.
-    expect(check).toHaveBeenCalledTimes(DREAM_FIRST_CHECK_DELAY_MS / DREAM_TICK_MS + 1);
+    await vi.advanceTimersByTimeAsync(DREAM_TICK_MS * 2);
+    expect(check).toHaveBeenCalledTimes(3);
     s.stop();
-    const calls = check.mock.calls.length;
     await vi.advanceTimersByTimeAsync(DREAM_TICK_MS * 3);
-    expect(check).toHaveBeenCalledTimes(calls);
+    expect(check).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops before the first check too, and starts again afterwards', async () => {
+    vi.useFakeTimers();
+    const s = new DreamScheduler({ state: memoryState(), run: async () => ({ day: 'd', people: [] }) });
+    const check = vi.spyOn(s, 'check').mockResolvedValue(undefined);
+    s.start();
+    s.stop();
+    await vi.advanceTimersByTimeAsync(DREAM_FIRST_CHECK_DELAY_MS + DREAM_TICK_MS);
+    expect(check).not.toHaveBeenCalled();
+    s.start();
+    await vi.advanceTimersByTimeAsync(DREAM_FIRST_CHECK_DELAY_MS);
+    expect(check).toHaveBeenCalledTimes(1);
+    s.stop();
   });
 });

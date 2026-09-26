@@ -26,12 +26,29 @@ export function chatCompletionBody(content: string, model = 'test-model'): unkno
   };
 }
 
-export function createCapturingClient(replies: ScriptedReply[]): { client: OpenAI; requests: CapturedRequest[] } {
+export type CapturingClientOptions = {
+  /**
+   * Runs when a request arrives, before its reply is served: what happens "while the model is thinking"
+   * (another writer saving meanwhile, say). `index` counts from 0.
+   */
+  onRequest?: (request: CapturedRequest, index: number) => void | Promise<void>;
+};
+
+export function createCapturingClient(
+  replies: ScriptedReply[],
+  opts: CapturingClientOptions = {},
+): { client: OpenAI; requests: CapturedRequest[] } {
   const requests: CapturedRequest[] = [];
   const queue = [...replies];
   const fetchImpl = async (url: unknown, init?: { body?: unknown; headers?: unknown }): Promise<Response> => {
     const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {};
-    requests.push({ url: String(url), body, headers: new Headers(init?.headers as HeadersInit | undefined) });
+    const request: CapturedRequest = {
+      url: String(url),
+      body,
+      headers: new Headers(init?.headers as HeadersInit | undefined),
+    };
+    requests.push(request);
+    await opts.onRequest?.(request, requests.length - 1);
     const reply = queue.shift();
     if (!reply) throw new Error(`capturingClient: no scripted reply left for request #${requests.length}`);
     if ('error' in reply) throw reply.error;

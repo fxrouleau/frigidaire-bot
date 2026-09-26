@@ -7,14 +7,17 @@
 //   (schema.ts, shared by every writer) and is saved with NotesStore.applyNotesOutput(), all or nothing. A
 //   refused answer (invalid JSON, a rule broken, a write the store refuses) gets ONE repair round with the
 //   errors; then the watermark moves (recordDreamSuccess) only after a successful save. A failure is
-//   recorded (recordDreamFailure) and retried the next night. They never throw.
+//   recorded (recordDreamFailure) and retried the next night. They never throw. An answer drafted from
+//   notes that changed while the model was thinking (an owner edit or undo, another writer) is never saved
+//   over them: that dream fails without a repair round and the next night dreams from the new version.
 // - runNightlyDream(): the people with new rows (most recently active first, capped), then the group when
 //   it has new rows, or at least weekly while members' notes keep changing (planGroupDream). The scheduler
 //   that calls it once per Eastern day, and the report line, live in dreamSchedule.ts.
 // - proposeEdit(): the owner's Edit button (MEMORY_EDIT_MODEL, tag memory_edit): the target's notes plus
 //   the instruction, answered as a NotesOutput and dry-run against the store (a savepoint rolled back), so
 //   the preview never shows something Confirm would refuse. Nothing is saved: the viewer shows
-//   previewChanges() and saves with applyEdit() on Confirm.
+//   previewChanges() and saves with applyEdit() on Confirm. A draft whose notes changed while the model was
+//   thinking (the dream saved meanwhile) is refused, so Confirm can't put back what the dream replaced.
 //
 // The dream model (Claude Opus by default) only reasons when asked, so the calls send no reasoning field
 // and leave generous output room (NOTES_MAX_TOKENS): everything generated is the answer.
@@ -29,6 +32,7 @@ import { featureRequestOptions, type UsageFeature } from '../../usage';
 import { extractUsage } from '../../usageFetch';
 import { parseSqliteUtc } from '../../utils';
 import type { Identity, Memory, MemoryStore } from '../memoryStore';
+import { type DreamLeaseHolder, takeDreamLease } from './dreamLease';
 import {
   buildEditPrompt,
   buildGroupDreamPrompt,
@@ -231,12 +235,15 @@ async function askModel(
   };
 }
 
-type Checked<T> = { ok: true; value: T } | { ok: false; errors: string[] };
+type Checked<T> =
+  | { ok: true; value: T }
+  /** `final`: no repair round can fix it (the notes changed meanwhile), so none is asked for. */
+  | { ok: false; errors: string[]; final?: boolean };
 
 /**
  * Asks, checks the answer with `check` (parse, validate, and for the dream the save itself), and on a
- * refusal asks once more with the errors. Model and network errors throw (the callers turn them into
- * failures).
+ * refusal asks once more with the errors (unless the refusal is final). Model and network errors throw (the
+ * callers turn them into failures).
  */
 async function draftWithRepair<T>(args: {
   client: OpenAI;
@@ -261,7 +268,7 @@ async function draftWithRepair<T>(args: {
       : answer.text.trim()
         ? args.check(answer.text)
         : { ok: false, errors: ['the answer was empty'] };
-    if (result.ok || attempt >= MAX_REPAIRS) return { result, costUsd };
+    if (result.ok || result.final || attempt >= MAX_REPAIRS) return { result, costUsd };
     messages.push(
       {
         role: 'assistant',
@@ -270,6 +277,47 @@ async function draftWithRepair<T>(args: {
       { role: 'user', content: repairPrompt(result.errors, answer.truncated) },
     );
   }
+}
+
+// ---- What a writer was shown ----
+
+/**
+ * The versions a writer's prompt was built from, each as `id.version`: the target's notes (a person's or
+ * the group's; none for a circle) by topic, and every active circle by slug. Taken with the prompt,
+ * compared again right before the save (changedSince).
+ */
+type NotesBasis = { notes: Map<string, string>; circles: Map<string, string> };
+
+const versionKey = (note: Note) => `${note.id}.${note.version}`;
+
+function notesBasis(notes: NotesStore, target: EditTarget): NotesBasis {
+  return {
+    notes: new Map(target.scope === 'circle' ? [] : notes.listNotes(target).map((n) => [n.topic, versionKey(n)])),
+    circles: new Map(notes.listCircles().map((c) => [c.topic, versionKey(c)])),
+  };
+}
+
+/**
+ * What changed since `basis` that an answer depends on: any of the target's notes (rewritten, undone, added
+ * or removed meanwhile: an owner edit or undo, a dream, another process's writer) and the circles the
+ * answer writes, merges or removes (plus a circle edit's own circle). Topics, and circles as
+ * `circle:<slug>`; empty when none did. The viewer's Confirm applies the same rule (editFingerprint).
+ */
+function changedSince(notes: NotesStore, target: EditTarget, basis: NotesBasis, output?: NotesOutput): string[] {
+  const current = notesBasis(notes, target);
+  const changed: string[] = [];
+  for (const topic of new Set([...basis.notes.keys(), ...current.notes.keys()])) {
+    if (basis.notes.get(topic) !== current.notes.get(topic)) changed.push(topic);
+  }
+  const slugs = new Set([
+    ...(output?.circles.flatMap((c) => [c.slug, ...c.merged_from]) ?? []),
+    ...(output?.removed_circles ?? []),
+    ...(target.scope === 'circle' ? [target.slug] : []),
+  ]);
+  for (const slug of [...slugs].sort()) {
+    if (basis.circles.get(slug) !== current.circles.get(slug)) changed.push(`circle:${slug}`);
+  }
+  return changed;
 }
 
 // ---- Shared pieces ----
@@ -375,6 +423,83 @@ function finishDream(
   };
 }
 
+/**
+ * Problems with a dream's rewrite of a circle that leaves out some of its members. "members" is the full
+ * membership every time (someone who left gets an "until"), and the output is untrusted: saving it would
+ * replace the membership and silently erase the circle (and their dated place in it) from everyone left
+ * out. Only the owner removes a member, with an edit. Ids compare as main accounts (a member stored under
+ * an account linked since counts as listed). Circles merged away are not checked: the kept one may not
+ * have room for everyone.
+ */
+function droppedMemberProblems(
+  notes: NotesStore,
+  output: NotesOutput,
+  nameOf: (userId: string) => string | undefined,
+): string[] {
+  const problems: string[] = [];
+  for (const draft of output.circles) {
+    const existing = notes.getCircle(draft.slug);
+    if (!existing) continue;
+    const listed = new Set(draft.members.map((m) => canonicalUserId(m.id)));
+    const dropped = [...new Set(existing.members.map((m) => canonicalUserId(m.memberId)))].filter(
+      (id) => !listed.has(id),
+    );
+    if (dropped.length === 0) continue;
+    const who = dropped.map((id) => `${nameOf(id) ?? 'a member'} (id:${id})`).join(', ');
+    problems.push(
+      `circle "${draft.slug}" leaves out members it has: keep ${who} in "members" (the full membership every time; give someone who left an "until")`,
+    );
+  }
+  return problems;
+}
+
+/**
+ * A dream's answer, checked and saved: parsed (parseNotesOutput with `parse`), refused for good when the
+ * notes it was drafted from changed while the model was thinking (see changedSince: saving it would
+ * overwrite the newer version, an owner edit say; no repair round, the next night dreams from the new
+ * version), refused for a rewrite of an excerpt-only circle or one that leaves members out, then saved as
+ * dream versions. The comparison and the save run in one IMMEDIATE transaction, so no writer (this process
+ * or another: a bootstrap's dream) lands in between.
+ */
+function checkAndSaveDream(
+  deps: DreamDeps,
+  owner: NoteOwner,
+  text: string,
+  check: {
+    parse: Parameters<typeof parseNotesOutput>[1];
+    basis: NotesBasis;
+    excerptOnly: ReadonlySet<string>;
+    allowedIds: string[];
+    nameOf: (userId: string) => string | undefined;
+  },
+): Checked<Saved> {
+  const parsed = parseNotesOutput(text, check.parse);
+  const save = (): Checked<Saved> => {
+    const changed = changedSince(deps.notes, owner, check.basis, parsed.ok ? parsed.value : undefined);
+    if (changed.length > 0) {
+      return {
+        ok: false,
+        final: true,
+        errors: [
+          `the notes changed while dreaming (${changed.join(', ')}): not saved over them; the next night dreams from the new version`,
+        ],
+      };
+    }
+    if (!parsed.ok) return parsed;
+    const problems = [
+      ...excerptOnlyProblems(parsed.value, check.excerptOnly),
+      ...droppedMemberProblems(deps.notes, parsed.value, check.nameOf),
+    ];
+    if (problems.length > 0) return { ok: false, errors: problems };
+    const saved = deps.notes.applyNotesOutput(owner, parsed.value, {
+      updatedBy: 'dream',
+      allowedIds: check.allowedIds,
+    });
+    return saved.ok ? { ok: true, value: { output: parsed.value, saved } } : { ok: false, errors: saved.errors };
+  };
+  return deps.memory.sharedDatabase().transaction(save).immediate();
+}
+
 /** A dream that threw (a model or network error, a store error): recorded, never rethrown. */
 function failDream(deps: DreamDeps, owner: NoteOwner, label: string, error: unknown): DreamOutcome {
   const message = describeError(error);
@@ -451,6 +576,7 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
     });
     const allowedIds = allowedIdsFrom(identities, [...accounts, ...circleMemberIds(circles)]);
     const watermark = highestSeq(rows);
+    const basis = notesBasis(deps.notes, owner);
 
     const outcome = await draftWithRepair<Saved>({
       client,
@@ -458,14 +584,14 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
       feature: DREAM_FEATURE,
       system: prompt.system,
       user: prompt.user,
-      check: (text) => {
-        const parsed = parseNotesOutput(text, { scope: 'person', requireProfile: true, allowedIds });
-        if (!parsed.ok) return parsed;
-        const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
-        if (excerpts.length > 0) return { ok: false, errors: excerpts };
-        const saved = deps.notes.applyNotesOutput(owner, parsed.value, { updatedBy: 'dream', allowedIds });
-        return saved.ok ? { ok: true, value: { output: parsed.value, saved } } : { ok: false, errors: saved.errors };
-      },
+      check: (text) =>
+        checkAndSaveDream(deps, owner, text, {
+          parse: { scope: 'person', requireProfile: true, allowedIds },
+          basis,
+          excerptOnly: circleView.excerptOnly,
+          allowedIds,
+          nameOf,
+        }),
     });
     return finishDream(deps, owner, label, watermark, outcome);
   } catch (error) {
@@ -513,6 +639,7 @@ export async function dreamGroup(
     const allowedIds = allowedIdsFrom(identities, circleMemberIds(circles));
     // A refresh reads no rows: the watermark stays where it is.
     const watermark = Math.max(highestSeq(rows), deps.notes.getDreamState(owner).journalWatermark);
+    const basis = notesBasis(deps.notes, owner);
 
     const outcome = await draftWithRepair<Saved>({
       client,
@@ -520,14 +647,14 @@ export async function dreamGroup(
       feature: DREAM_FEATURE,
       system: prompt.system,
       user: prompt.user,
-      check: (text) => {
-        const parsed = parseNotesOutput(text, { scope: 'group', allowedIds });
-        if (!parsed.ok) return parsed;
-        const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
-        if (excerpts.length > 0) return { ok: false, errors: excerpts };
-        const saved = deps.notes.applyNotesOutput(owner, parsed.value, { updatedBy: 'dream', allowedIds });
-        return saved.ok ? { ok: true, value: { output: parsed.value, saved } } : { ok: false, errors: saved.errors };
-      },
+      check: (text) =>
+        checkAndSaveDream(deps, owner, text, {
+          parse: { scope: 'group', allowedIds },
+          basis,
+          excerptOnly: circleView.excerptOnly,
+          allowedIds,
+          nameOf,
+        }),
     });
     return finishDream(deps, owner, label, watermark, outcome);
   } catch (error) {
@@ -635,8 +762,8 @@ async function dreamGroupIfDue(deps: DreamDeps, now: Date): Promise<DreamOutcome
  * One night: NotesStore.pendingDreams({ limit: maxPeople ?? MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT }) people,
  * one at a time (most recently active first), then the group when it is due (planGroupDream: new server
  * rows, or the weekly refresh). Stops early after MAX_FAILURES_IN_A_ROW failed people in a row (an outage:
- * everyone left waits for the next night). Never throws. The scheduler
- * that calls it (once per Eastern day) and the report line are dreamSchedule.ts's.
+ * everyone left waits for the next night). Never throws. The scheduler that calls it (once per Eastern
+ * day, holding the dream lease: dreamLease.ts) and the report line are dreamSchedule.ts's.
  */
 export async function runNightlyDream(deps: DreamDeps & { maxPeople?: number }): Promise<NightlyDreamResult> {
   const now = (deps.now ?? (() => new Date()))();
@@ -700,6 +827,8 @@ async function dreamPeople(
 
 /** Passes runDreamsUntilCaughtUp makes at most (each reads up to MAX_JOURNAL_ROWS_PER_DREAM rows per owner). */
 export const MAX_CATCH_UP_PASSES = 100;
+/** runDreamsUntilCaughtUp's dream-lease holder label by default (what the bot's scheduler logs while it waits). */
+export const CATCH_UP_HOLDER = 'a catch-up dream (memory bootstrap)';
 
 /**
  * Dreams until nothing is pending (the built-in bootstrap, whose history leaves people thousands of rows
@@ -707,12 +836,13 @@ export const MAX_CATCH_UP_PASSES = 100;
  * everyone still pending (no per-night cap), then the group pass the same way, until no owner has rows
  * above their watermark. Someone whose dream fails is not retried in this run (they wait for the nightly
  * dream); MAX_FAILURES_IN_A_ROW failures in a row stop everything, as on a night. Uses only the stores and
- * client in `deps`, and never touches the nightly schedule's once-a-day claim (dreamSchedule.ts).
- * Never throws.
+ * client in `deps`, and never touches the nightly schedule's once-a-day claim (dreamSchedule.ts). It holds
+ * the dream lease (dreamLease.ts, as `holder`) while it runs, so the bot's nightly dream waits for it; when
+ * someone else holds it (the nightly dream is running), nothing is dreamed and `busy` says who. Never throws.
  */
 export async function runDreamsUntilCaughtUp(
-  deps: DreamDeps & { maxPasses?: number },
-): Promise<NightlyDreamResult & { passes: number; caughtUp: boolean }> {
+  deps: DreamDeps & { maxPasses?: number; holder?: string },
+): Promise<NightlyDreamResult & { passes: number; caughtUp: boolean; busy?: DreamLeaseHolder }> {
   const now = (deps.now ?? (() => new Date()))();
   const day = easternDay(now);
   const client = deps.client ?? getOpenRouterClient();
@@ -720,8 +850,33 @@ export async function runDreamsUntilCaughtUp(
     logger.warn('dream: OPENROUTER_API_KEY is not set; nothing dreamed.');
     return { day, people: [], passes: 0, caughtUp: false };
   }
-  const withClient: DreamDeps = { ...deps, client };
-  const maxPasses = Math.max(1, deps.maxPasses ?? MAX_CATCH_UP_PASSES);
+  let taken: ReturnType<typeof takeDreamLease>;
+  try {
+    taken = takeDreamLease(deps.memory, deps.holder ?? CATCH_UP_HOLDER);
+  } catch (error) {
+    logger.warn('dream: taking the dream lease failed; nothing dreamed:', error);
+    return { day, people: [], passes: 0, caughtUp: false };
+  }
+  if (!taken.ok) {
+    logger.warn(
+      `dream: ${taken.heldBy.holder} has been running since ${taken.heldBy.since} (Eastern); not catching up alongside it.`,
+    );
+    return { day, people: [], passes: 0, caughtUp: false, busy: taken.heldBy };
+  }
+  try {
+    return await catchUp({ ...deps, client }, day, now, Math.max(1, deps.maxPasses ?? MAX_CATCH_UP_PASSES));
+  } finally {
+    taken.lease.release();
+  }
+}
+
+/** runDreamsUntilCaughtUp's passes, under the lease. */
+async function catchUp(
+  deps: DreamDeps,
+  day: string,
+  now: Date,
+  maxPasses: number,
+): Promise<NightlyDreamResult & { passes: number; caughtUp: boolean }> {
   const people: DreamOutcome[] = [];
   const groups: DreamOutcome[] = [];
   // Not retried in this run: a failed dream (the nightly dream retries it), or one that found nothing.
@@ -738,7 +893,7 @@ export async function runDreamsUntilCaughtUp(
       passes++;
       logger.info(`dream: catch-up pass ${passes}: ${pending.length} ${pending.length === 1 ? 'person' : 'people'}.`);
       const from = people.length;
-      const run = await dreamPeople(pending, withClient, people, failuresInARow);
+      const run = await dreamPeople(pending, deps, people, failuresInARow);
       failuresInARow = run.failuresInARow;
       stopped = run.stopped;
       for (const outcome of people.slice(from)) {
@@ -747,7 +902,7 @@ export async function runDreamsUntilCaughtUp(
       }
     }
     while (!stopped && passes < maxPasses) {
-      const outcome = await dreamGroupIfDue(withClient, now);
+      const outcome = await dreamGroupIfDue(deps, now);
       if (outcome.status === 'skipped') break;
       passes++;
       groups.push(outcome);
@@ -879,6 +1034,7 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
     });
     const owned = view.target.scope === 'person' ? accountIdsFor(view.target.ownerId) : [];
     const allowedIds = allowedIdsFrom(identities, [...owned, ...circleMemberIds(view.circles)]);
+    const basis = notesBasis(deps.notes, view.target);
 
     const { result, costUsd } = await draftWithRepair<NotesOutput>({
       client,
@@ -889,6 +1045,16 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
       signal: request.signal,
       check: (text) => {
         const parsed = parseNotesOutput(text, { scope: view.scope, allowedIds });
+        // A dream (or another edit) saved while the model drafted: the preview would compare against notes
+        // the draft never saw, and Confirm would put the replaced version back. The owner asks again.
+        const changed = changedSince(deps.notes, view.target, basis, parsed.ok ? parsed.value : undefined);
+        if (changed.length > 0) {
+          return {
+            ok: false,
+            final: true,
+            errors: [`the notes changed while drafting (${changed.join(', ')}): ask again`],
+          };
+        }
         if (!parsed.ok) return parsed;
         const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
         if (excerpts.length > 0) return { ok: false, errors: excerpts };

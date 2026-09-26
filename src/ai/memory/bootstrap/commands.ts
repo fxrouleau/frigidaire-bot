@@ -164,20 +164,29 @@ export function openDataStores(dataDir: string): { archive: ArchiveStore; memory
  * The dream after a finished `bootstrap --run`: runDreamsUntilCaughtUp over the CLI's own stores (its
  * memory.db and notes, and its archive.db for the cited passages), never the bot's shared singletons. It
  * doesn't touch the nightly schedule's once-a-day claim (bot_state `dream:last_night`, which only
- * dreamSchedule.ts sets), so the bot's own dream still runs that night for whatever is new by then.
+ * dreamSchedule.ts sets), so the bot's own dream still runs that night for whatever is new by then. It
+ * holds the dream lease while it runs (the bot's night waits for it), and throws when the bot is dreaming
+ * right now: two dreams at once would pay twice for the same people.
  */
-export function dreamOverStores(
+export async function dreamOverStores(
   stores: { archive: ArchiveStore; memory: MemoryStore; notes: NotesStore },
   client: OpenAI,
   opts: { now?: () => Date } = {},
 ): Promise<NightlyDreamResult & { caughtUp: boolean }> {
-  return runDreamsUntilCaughtUp({
+  const result = await runDreamsUntilCaughtUp({
     memory: stores.memory,
     notes: stores.notes,
     client,
+    holder: 'the memory bootstrap (CLI)',
     ...(opts.now ? { now: opts.now } : {}),
     loadPassages: (ids, passageOpts) => loadEvidencePassages(ids, { ...passageOpts, archive: stores.archive }),
   });
+  if (result.busy) {
+    throw new Error(
+      `${result.busy.holder} has been running since ${result.busy.since} (Eastern). Run \`memory bootstrap --run\` again once it is done: every segment is read, so it goes straight to the dream`,
+    );
+  }
+  return result;
 }
 
 /**

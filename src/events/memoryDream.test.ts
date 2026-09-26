@@ -28,7 +28,8 @@ describe('memoryDream', () => {
     vi.stubEnv('MEMORY_DREAM_ENABLED', 'true');
     memoryDream.execute(client);
     memoryDream.execute(client);
-    expect(vi.getTimerCount()).toBe(2);
+    // One pending timer: the delayed first check (the minute ticks start from it).
+    expect(vi.getTimerCount()).toBe(1);
     resetMemoryDreamForTesting();
     expect(vi.getTimerCount()).toBe(0);
   });
