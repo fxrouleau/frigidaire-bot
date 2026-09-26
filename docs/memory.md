@@ -456,7 +456,8 @@ estimated input and output tokens and cost from the model catalog's per-token pr
 `MEMORY_BOOTSTRAP_MODEL` (default the dream model), plus a rough figure for the dream afterwards.
 
 `--run` reads the segments oldest first, one call each (ZDR, tag `memory_bootstrap`, 8k output tokens, no
-reasoning override: the default model only reasons when asked). The prompt keeps the capture extractor's
+reasoning override: the default model only reasons when asked; the dream's 10-minute timeout and one retry,
+since a segment's answer takes minutes). The prompt keeps the capture extractor's
 rules (the 30-day test, atomic rows, what a message reveals rather than what it did, no censoring) adapted to
 history: notable history is worth keeping and dated, and a fact seen again is repeated with the same
 wording so it merges into the existing row as a recurrence (seen count, first/last seen widened). The

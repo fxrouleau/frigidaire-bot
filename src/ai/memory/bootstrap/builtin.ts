@@ -48,6 +48,11 @@ export const BOOTSTRAP_SOURCE = 'bootstrap';
 // The output room per call. The default model (Opus) only reasons when asked, so this is all JSON; a
 // reasoning model in MEMORY_BOOTSTRAP_MODEL still has room for a pass at its default effort.
 const MAX_OUTPUT_TOKENS = 8_000;
+// A segment's call reads tens of thousands of tokens and writes up to 8,000: minutes, well past the shared
+// client's per-attempt default (OPENROUTER_TIMEOUT_MS, 2 minutes), which would abort a long answer and pay
+// for it again on each retry. The dream's allowance, and like the dream one retry.
+const MODEL_TIMEOUT_MS = 10 * 60_000;
+const MODEL_MAX_RETRIES = 1;
 // A segment whose answer is cut off at that limit is read again in halves, each half the same way, at most
 // this many times over (down to an eighth of it).
 const MAX_SPLIT_DEPTH = 3;
@@ -596,7 +601,11 @@ async function askAboutSegment(
   // The SDK's types don't know OpenRouter's `provider` routing: bridged here, once.
   const response = await deps.client.chat.completions.create(
     body as unknown as ChatCompletionCreateParamsNonStreaming,
-    featureRequestOptions('memory_bootstrap'),
+    {
+      ...featureRequestOptions('memory_bootstrap'),
+      timeout: MODEL_TIMEOUT_MS,
+      maxRetries: MODEL_MAX_RETRIES,
+    },
   );
   const choice = response.choices?.[0];
   return {

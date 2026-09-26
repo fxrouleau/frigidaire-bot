@@ -331,6 +331,15 @@ describe('runBootstrap', () => {
     expect(lines.at(-1)).toContain('dreaming 1 people');
   });
 
+  it("gives each call the dream's long timeout, not the shared client's 2-minute default", async () => {
+    seedHistory();
+    const { client } = createCapturingClient([answer([]), answer([])]);
+    const create = vi.spyOn(client.chat.completions, 'create');
+    await runBootstrap({ archive, memory, notes, client, model: MODEL, log: () => {} });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[0][1]).toMatchObject({ timeout: 600_000, maxRetries: 1 });
+  });
+
   it('reads only the months asked for, and leaves the dream to a run over the whole archive', async () => {
     seedHistory();
     const { client, requests } = createCapturingClient([answer([])]);
@@ -469,10 +478,12 @@ describe('runBootstrap', () => {
     const { client, requests } = createCapturingClient([
       cutOff(),
       answer([{ category: 'fact', subject_user_id: REMI, content: 'Works early shifts at a bakery.' }]),
+      // The second half's call, and its one retry.
+      { error: new Error('socket hang up') },
       { error: new Error('socket hang up') },
     ]);
     const run = await runBootstrap({ archive, memory, notes, client, model: MODEL, maxSegments: 1, log: () => {} });
-    expect(requests).toHaveLength(3);
+    expect(requests).toHaveLength(4);
     expect(run).toMatchObject({ segmentsDone: 0, segmentsFailed: 1, rows: 0 });
     expect(run.costUsd).toBeCloseTo(0.2125);
     expect(memory.getForPerson({ userId: REMI, names: ['Remi'] })).toHaveLength(0);
