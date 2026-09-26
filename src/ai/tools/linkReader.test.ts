@@ -94,9 +94,14 @@ describe('read_link', () => {
     expect(fetch.calls).toHaveLength(0);
   });
 
-  it("doesn't try to open Discord's own links", async () => {
+  it("doesn't try to open Discord's own links, and points an uploaded file at run_code", async () => {
     const { fetch } = installReader();
     expect(await readLink.handler(context(), { url: 'https://discord.com/channels/1/2/3' })).toMatch(/Discord link/);
+    const attachment = await readLink.handler(context(), {
+      url: 'https://cdn.discordapp.com/attachments/1/2/data.csv?ex=abc&is=def&hm=123&',
+    });
+    expect(attachment).toMatch(/Discord link/);
+    expect(attachment).toContain('can be downloaded with run_code');
     expect(fetch.calls).toHaveLength(0);
   });
 

@@ -172,6 +172,13 @@ describe('run_code tool', () => {
     expect(output).not.toContain('was wiped');
   });
 
+  it("tells the model how to work on a file someone uploaded (its Discord link, which expires)", () => {
+    const tool = createRunCodeTool({ url: 'http://sandbox:8080' });
+    expect(tool.description).toContain('[attachment: name (size) link] or [image: name link]');
+    expect(tool.description).toContain('download it from that link first');
+    expect(tool.description).toContain("Discord's links expire after about a day");
+  });
+
   it('describes reset_workspace to the model as opt-in', () => {
     const tool = createRunCodeTool({ url: 'http://sandbox:8080' });
     const properties = tool.parameters.properties as Record<string, { type: string }>;

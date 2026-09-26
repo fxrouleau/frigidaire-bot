@@ -58,7 +58,7 @@ const readLinkTool: ToolDefinition = {
     const url = normalizeUrlArgument(args.url);
     if (!url) return 'read_link needs a single http(s) URL.';
     if (isDiscordLink(url)) {
-      return "That's a Discord link (a message, invite or attachment): read_link can't open Discord itself.";
+      return "That's a Discord link (a message, invite or attachment): read_link can't open Discord itself. An uploaded file's link can be downloaded with run_code, if you have it.";
     }
     const used = readsPerTurn.get(ctx.turn) ?? 0;
     if (used >= MAX_READS_PER_TURN) {

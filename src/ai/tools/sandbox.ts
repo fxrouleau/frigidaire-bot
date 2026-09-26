@@ -529,7 +529,8 @@ function describeTool(runLimitSeconds: number): string {
     "Anything saved to /workspace/out/ is attached to your reply (up to 10 files, 10 MB each, 25 MB in all), e.g. plt.savefig('out/chart.png'); out/ is emptied before every run.",
     'Each run is a fresh process (variables do not carry over), but files in /workspace persist between runs and `pip install` works, within a disk limit (going over it kills the run and wipes /workspace).',
     'Pass reset_workspace: true to wipe /workspace (saved files and installs) before the run, only when leftovers from earlier runs get in the way or look tampered with.',
-    'The sandbox has internet access but no secrets and no Discord access; its clock is Eastern time.',
+    'The sandbox has internet access but no secrets, and it cannot read or post Discord messages; its clock is Eastern time.',
+    "Files people uploaded show up in the chat as [attachment: name (size) link] or [image: name link]: to work on one, download it from that link first (curl -L -o file '<link>', or requests). Discord's links expire after about a day, so an older one may be dead.",
     `Runs are cut off after ${formatDuration(runLimitSeconds)}, and everyone waits on your reply meanwhile; timeout_seconds only cuts a run shorter (when a quick failure beats a long hang).`,
   ].join(' ');
 }
