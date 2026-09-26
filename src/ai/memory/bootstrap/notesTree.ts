@@ -127,8 +127,19 @@ function readText(file: string, errors: string[], label: string): string | undef
   }
 }
 
-function listDir(dir: string): fs.Dirent[] {
-  return fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+/**
+ * A folder's entries by name. Hidden entries (`.DS_Store`, editor swap files) are skipped with a warning:
+ * copying a folder around shouldn't be enough to make a tree refused.
+ */
+function listDir(dir: string, rel: string, warnings: string[]): fs.Dirent[] {
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => {
+      if (!entry.name.startsWith('.')) return true;
+      warnings.push(`${rel}${entry.name}: hidden, ignored`);
+      return false;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** A `<slug>.md` file name's slug, or an error. */
@@ -252,7 +263,7 @@ export function readNotesTree(dir: string): NotesTreeRead {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return { ok: false, errors: [`${dir} is not a folder`] };
   const manifest = readManifest(dir, errors);
 
-  for (const entry of listDir(dir)) {
+  for (const entry of listDir(dir, '', warnings)) {
     if (!TOP_LEVEL.has(entry.name) && !entry.name.startsWith('imported-')) {
       warnings.push(`${entry.name}: not part of a notes tree, ignored`);
     }
@@ -261,7 +272,7 @@ export function readNotesTree(dir: string): NotesTreeRead {
   const people: NotesTree['people'] = [];
   const peopleDir = path.join(dir, 'people');
   if (fs.existsSync(peopleDir)) {
-    for (const entry of listDir(peopleDir)) {
+    for (const entry of listDir(peopleDir, 'people/', warnings)) {
       const label = `people/${entry.name}`;
       if (!entry.isDirectory()) {
         errors.push(`${label}: people/ holds one folder per person, named by their main account id`);
@@ -272,7 +283,7 @@ export function readNotesTree(dir: string): NotesTreeRead {
         continue;
       }
       const notes: NoteDraft[] = [];
-      for (const file of listDir(path.join(peopleDir, entry.name))) {
+      for (const file of listDir(path.join(peopleDir, entry.name), `${label}/`, warnings)) {
         const notePath = path.join(peopleDir, entry.name, file.name);
         const note = readNote(notePath, `${label}/${file.name}`, 'person', errors, entry.name);
         if (note) notes.push(note);
@@ -291,7 +302,7 @@ export function readNotesTree(dir: string): NotesTreeRead {
   const groupDir = path.join(dir, 'group');
   if (fs.existsSync(groupDir)) {
     group = [];
-    for (const file of listDir(groupDir)) {
+    for (const file of listDir(groupDir, 'group/', warnings)) {
       const note = readNote(path.join(groupDir, file.name), `group/${file.name}`, 'group', errors);
       if (note) group.push(note);
     }
@@ -304,7 +315,7 @@ export function readNotesTree(dir: string): NotesTreeRead {
   const circlesDir = path.join(dir, 'circles');
   if (fs.existsSync(circlesDir)) {
     circles = [];
-    for (const file of listDir(circlesDir)) {
+    for (const file of listDir(circlesDir, 'circles/', warnings)) {
       const circle = readCircle(path.join(circlesDir, file.name), `circles/${file.name}`, errors);
       if (circle) circles.push(circle);
     }

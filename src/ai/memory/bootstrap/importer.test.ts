@@ -114,7 +114,12 @@ describe('parseFrontMatter', () => {
 
 describe('readNotesTree', () => {
   it('reads people, group and circles', () => {
-    writeTree(dir, { ...goodTree(), 'NOTES.txt': 'scratch' });
+    writeTree(dir, {
+      ...goodTree(),
+      'NOTES.txt': 'scratch',
+      '.DS_Store': 'junk',
+      [`people/${REMI}/.profile.md.swp`]: 'junk',
+    });
     const read = readNotesTree(dir);
     expect(read.ok).toBe(true);
     if (!read.ok) return;
@@ -124,7 +129,11 @@ describe('readNotesTree', () => {
     ]);
     expect(read.tree.group?.map((n) => n.topic)).toEqual(['lore']);
     expect(read.tree.circles?.[0]).toMatchObject({ slug: 'mtg', aliases: ['the drafters'] });
-    expect(read.warnings).toEqual(['NOTES.txt: not part of a notes tree, ignored']);
+    expect(read.warnings).toEqual([
+      '.DS_Store: hidden, ignored',
+      'NOTES.txt: not part of a notes tree, ignored',
+      `people/${REMI}/.profile.md.swp: hidden, ignored`,
+    ]);
   });
 
   it('lists every problem with the file it is in', () => {
