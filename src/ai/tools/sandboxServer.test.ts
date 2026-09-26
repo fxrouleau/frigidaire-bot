@@ -307,10 +307,11 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
 
   it('kills a run that fills the disk past the workspace limit, then wipes the workspace', async () => {
     // Every file stays under RLIMIT_FSIZE; only the workspace total is over. The sleep would outlast the test.
+    // 8 MiB as a plain byte count: the CI image's coreutils are busybox, whose `head -c` rejects GNU's `8M`.
     const outcome = await runInSandbox(
       {
         language: 'bash',
-        code: 'echo kept > out/result.txt; for i in $(seq 12); do head -c 8M /dev/zero > big$i; done; sleep 30',
+        code: 'echo kept > out/result.txt; for i in $(seq 12); do head -c 8388608 /dev/zero > big$i; done; sleep 30',
         timeoutSeconds: 40,
       },
       client(),
