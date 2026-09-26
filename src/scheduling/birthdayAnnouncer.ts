@@ -8,10 +8,10 @@ import { type Client, RESTJSONErrorCodes } from 'discord.js';
 import type OpenAI from 'openai';
 import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 import { getMemoryStore, getNotesStore } from '../ai/memory';
-import { type Memory, SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
-import { chatExcerpt } from '../ai/memory/notes/context';
+import { CORRECTION_CATEGORY, type Memory, SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
+import { chatExcerpt, correctionSource } from '../ai/memory/notes/context';
 import { getOpenRouterClient } from '../ai/openRouterClient';
-import { memoryKeyFor } from '../ai/people';
+import { currentName, memoryKeyFor } from '../ai/people';
 import { featureRequestOptions } from '../ai/usage';
 import { easternParts, easternWallClockToDate, formatRelativeAge, parseSqliteUtc } from '../ai/utils';
 import { type ArchivedMessage, getArchivedMessages } from '../archive';
@@ -420,7 +420,10 @@ export class BirthdayAnnouncer {
     }
   }
 
-  /** Rows as dated lines, oldest first, image and self-diagnosis rows left out, capped (oldest + newest halves). */
+  /**
+   * Rows as dated lines, oldest first, image and self-diagnosis rows left out, capped (oldest + newest halves).
+   * A correction says whose word it is: someone's claim about the person is never handed over as their fact.
+   */
   private dated(rows: Memory[], nowMs: number): string[] {
     // Oldest first by when each was first noted (an unreadable time counts as old); ties by id, for a stable
     // order. First seen (created_at for older rows), not updated_at: the learner re-confirming old lore must
@@ -433,9 +436,14 @@ export class BirthdayAnnouncer {
     const half = MEMORY_CONTEXT_LIMIT / 2;
     const picked = dated.length > MEMORY_CONTEXT_LIMIT ? [...dated.slice(0, half), ...dated.slice(-half)] : dated;
     const now = new Date(nowMs);
+    const nameOf = (id: string) => currentName(id, '', getMemoryStore()) || undefined;
     return picked.map(({ memory }) => {
       const age = formatRelativeAge(firstNoted(memory), now);
-      return age ? `${memory.content} (noted ${age})` : memory.content;
+      const notes = [
+        ...(memory.category === CORRECTION_CATEGORY ? [`a correction, ${correctionSource(memory, nameOf)}`] : []),
+        ...(age ? [`noted ${age}`] : []),
+      ];
+      return notes.length > 0 ? `${memory.content} (${notes.join('; ')})` : memory.content;
     });
   }
 }

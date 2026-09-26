@@ -272,6 +272,41 @@ describe('BirthdayAnnouncer.run', () => {
     expect(inputs[0].memories).toEqual(['broke a toe (noted 2d ago)']);
   });
 
+  it("marks a correction as whose word it is: someone else's claim never reads as the person's fact", async () => {
+    memory.upsertIdentity(ALICE, 'Alice');
+    memory.upsertIdentity(BOB, 'Bob');
+    stamp(
+      await memory.save({
+        category: 'correction',
+        subject: 'Alice',
+        content: 'Hates cilantro, actually',
+        subject_user_id: ALICE,
+        said_by: BOB,
+      }),
+      '2026-09-23 12:00:00',
+    );
+    stamp(
+      await memory.save({
+        category: 'correction',
+        subject: 'Alice',
+        content: 'Works days now, not nights',
+        subject_user_id: ALICE,
+        said_by: ALICE,
+      }),
+      '2026-09-24 12:00:00',
+    );
+    birthday(ALICE, 9, 25);
+    const { writer, inputs } = writerSaying('🎂 hbd');
+    const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice' }] });
+
+    await announcer.run(SEPT25_1500);
+
+    expect(inputs[0].memories).toEqual([
+      "Hates cilantro, actually (a correction, Bob's claim, not settled; noted 2d ago)",
+      'Works days now, not nights (a correction, their own word; noted 1d ago)',
+    ]);
+  });
+
   it('keeps the oldest 20 and the newest 20 when there are more than 40', async () => {
     memory.upsertIdentity(ALICE, 'Alice');
     for (let i = 0; i < 50; i++) {
