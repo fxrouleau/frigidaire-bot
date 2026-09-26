@@ -25,6 +25,11 @@ import { formatRelativeAge } from '../utils';
 const GROUP_WORDS = new Set(['group', 'the group', 'server', 'the server', 'everyone', 'us', 'all of us', 'the gang']);
 /** The longest correction record_correction files (one or two sentences). */
 export const MAX_CORRECTION_CHARS = 400;
+/**
+ * Corrections one member may file in a rolling 24 hours. Each one can pull a person into the nightly dream
+ * (a strong-model call), so a spammer can't inflate the bill; real corrections are a handful a week.
+ */
+export const MAX_CORRECTIONS_PER_DAY = 15;
 const SEARCH_LIMIT = 8;
 const OPEN_ITEMS_SHOWN = 10;
 
@@ -332,10 +337,25 @@ export async function recordCorrection(args: {
   });
 }
 
+/**
+ * Corrections this speaker (any account; their main id is used) filed or re-filed in the last 24 hours,
+ * forgotten ones included. Measured on SQLite's clock, like the rows' own timestamps; a correction merged
+ * into an earlier one counts once.
+ */
+export function recentCorrectionCount(store: MemoryStore, saidBy: string): number {
+  const row = store
+    .sharedDatabase()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM memories
+       WHERE category = ? AND said_by = ? AND updated_at >= datetime('now', '-1 day')`,
+    )
+    .get(CORRECTION_CATEGORY, canonicalUserId(saidBy)) as { n: number };
+  return row.n;
+}
+
 const recordCorrectionTool: ToolDefinition = {
   name: 'record_correction',
-  description:
-    'Record a correction to what you know about someone (or the group) when a person says your notes are wrong or out of date ("I quit Valorant in August", "Dale moved to Laval, not Montreal"). It shows next to your notes right away and is folded into them tonight. Someone correcting themselves is authoritative; a correction about someone else is recorded as that person\'s claim. Not for jokes or banter.',
+  description: `Record a correction to what you know about someone (or the group) when a person says your notes are wrong or out of date ("I quit Valorant in August", "Dale moved to Laval, not Montreal"). It shows next to your notes right away and is folded into them tonight. Someone correcting themselves is authoritative; a correction about someone else is recorded as that person's claim. Not for jokes or banter. One person can file at most ${MAX_CORRECTIONS_PER_DAY} a day.`,
   parameters: {
     type: 'object',
     properties: {
@@ -367,6 +387,11 @@ const recordCorrectionTool: ToolDefinition = {
       const resolved = resolveMember(ctx, ref);
       if (!resolved.ok) return `Nothing recorded. ${resolved.error}`;
       about = resolved.person;
+    }
+    // Checked right before the save, whose synchronous half (the INSERT) runs before anything else can.
+    if (recentCorrectionCount(store, requester.userId) >= MAX_CORRECTIONS_PER_DAY) {
+      logger.info(`record_correction: ${requester.userId} is at the cap (${MAX_CORRECTIONS_PER_DAY} per 24 h)`);
+      return `Nothing recorded: ${requester.displayName} has already filed ${MAX_CORRECTIONS_PER_DAY} corrections in the last 24 hours, the most you take from one person in a day. Tell them, in your own voice, that you're done taking corrections from them for today and they can try again tomorrow.`;
     }
     let id: number;
     try {

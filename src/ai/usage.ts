@@ -34,6 +34,8 @@ export type UsageFeature =
   | 'birthday'
   | 'ramble'
   | 'auto_react'
+  | 'memory_dream'
+  | 'memory_edit'
   | 'eval'
   | 'other';
 

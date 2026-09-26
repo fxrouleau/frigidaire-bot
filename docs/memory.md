@@ -180,15 +180,24 @@ self-improvement pass keeps `self_improvement`).
 ## Dreaming
 
 Once per Eastern day at `MEMORY_DREAM_HOUR` (4): the first scheduler tick at or after that hour runs it, a bot
-that was down at 4 catches up the same day, never twice a day. `MEMORY_DREAM_ENABLED` switches it off.
+that was down at 4 catches up the same day, never twice a day. `MEMORY_DREAM_ENABLED` switches it off. The
+`memoryDream` ClientReady event starts a one-minute check (the first one five minutes after startup, so a
+bootstrap import sets its watermarks first). The day is claimed in memory.db's `bot_state`
+(`dream:last_night`) before the run starts, so a night that crashes or fails is never retried the same day:
+its people are still above their watermarks and wait for the next night.
 
 For each person with journal rows above their watermark (most recently active first, at most
 `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`, default 20), one call to `MEMORY_DREAM_MODEL` with:
 - the rules (below), the person's names (identities), ALL their current notes and circles;
-- the new journal rows: dated, category, source and speaker, recurrence count and seen span, related members;
+- the new journal rows: dated, category, source and speaker, recurrence count and seen span, related members,
+  the quote; corrections say who made them and whether they are authoritative (about themself) or a
+  third-party claim to weigh. At most the oldest 300 rows per dream; the rest wait for the next night (the
+  watermark moves to the highest row read);
 - for claims that are contested, low-confidence or about to become core profile facts, the cited source
-  passages (± a few messages around them, read from archive.db by id), capped per person per dream;
-- today's date.
+  passages (± a few messages around them, read from archive.db by id), at most 8 per dream, picked in this
+  order: third-party corrections, self-corrections, traits and preferences, rows seen 3+ times, the rest
+  (newest first within each);
+- the server's people (every name and id, for circle membership) and today's date.
 
 The answer is JSON:
 
@@ -219,8 +228,11 @@ The answer is JSON:
 
 It is validated (profile present, sizes, slugs, markdown only, no Discord markup, no ids of other people unless
 they were in the input, circle membership shape and dates) and saved all or nothing as new versions
-(`updated_by = 'dream'`). The watermark advances only on success; a failure is logged, kept in `dream_state`
-and retried the next night.
+(`updated_by = 'dream'`). A refused answer (invalid JSON, a broken rule, a write the store refuses, an answer
+cut off at the length limit) gets one repair round with the errors. The watermark advances only on success
+(an answer that changes nothing still advances it); a failure is logged, kept in `dream_state` and retried the
+next night. A night stops early after three people failed in a row (an outage). Circles past a 60,000-char
+budget are shown as excerpts and may not be rewritten by that call.
 
 Dream rules (the prompt): merge new facts; resolve contradictions (newer wins; a self-correction beats
 anything; a third-party claim is weighed, never blindly applied); weigh by recency × recurrence; keep dates
@@ -231,13 +243,22 @@ create, update and merge circles for recurring shared things; no censoring or pa
 are like; no speculation beyond the journal and its passages; English.
 
 After the people, a group pass: journal rows about the server (no person) plus the night's person change
-summaries become the group notes.
+summaries become the group notes (and any circle). It runs only when the group has new rows: person changes
+alone don't wake the strong model.
 
-Report: one report-channel line after a night with changes, e.g.
-`🌙 dream · updated 4 profiles (Remi: new job; Dale: quit Valorant) · $0.18` (`MEMORY_DREAM_REPORT`, default
-on). Tags `memory_dream` (and `memory_edit` for owner edits, with `MEMORY_EDIT_MODEL`, default the dream
-model). The dream model only reasons when asked, so calls pick a generous `max_tokens` (≥ 8,000 for the output)
-and satisfy the call-site guard.
+Report: one report-channel line after a night with changes or failures, e.g.
+`🌙 dream · updated 2 profiles (Remi: new job; Dale: quit Valorant) · group: new lore · 1 unchanged · $0.18`
+(`MEMORY_DREAM_REPORT`, default on; nothing without a report channel). Tags `memory_dream` (and
+`memory_edit` for owner edits, with `MEMORY_EDIT_MODEL`, default the dream model). The dream model only
+reasons when asked, so calls send no reasoning field and a `max_tokens` of 16,000 (all answer), with a
+10-minute timeout per attempt.
+
+Owner edits (`proposeEdit`) show the model the target's notes (a person's with their circles, the group's with
+every circle, or one circle) and the instruction; the draft is checked against the store in a rolled-back
+transaction (one repair round when refused), so the preview never shows something Confirm would refuse.
+
+`record_correction` takes at most 15 corrections from one member in a rolling 24 hours (each one can pull a
+person into the night's dream); at the cap the bot says so in its own voice.
 
 First night after deploy: everyone's journal is above watermark 0, so the dream builds everyone's first notes
 from the existing memories. When a bootstrap import already created notes, the import sets the watermarks so

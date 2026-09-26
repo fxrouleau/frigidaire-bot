@@ -6,7 +6,7 @@ import { MemoryStore } from '../memory/memoryStore';
 import type { NotesStore } from '../memory/notes/notesStore';
 import { toolDefinitions } from '../tools';
 import { createTurnEffects, type ToolDefinition, type ToolHandlerContext } from '../types';
-import { notesTools } from './notes';
+import { MAX_CORRECTIONS_PER_DAY, notesTools, recentCorrectionCount } from './notes';
 
 // Fictional cast, placeholder snowflakes.
 const REMI = '700000000000000001';
@@ -187,5 +187,32 @@ describe('record_correction', () => {
     expect(await run('record_correction', { person: 'me', correction: '  ' })).toContain('was empty');
     expect(await run('record_correction', { person: 'me', correction: 'x'.repeat(401) })).toContain('under 400');
     expect(await run('record_correction', { person: 'Zebulon', correction: 'x' })).toMatch(/^Nothing recorded\. /);
+  });
+
+  it('takes at most MAX_CORRECTIONS_PER_DAY from one member in a rolling 24 hours', async () => {
+    // Earlier corrections by Remi (a raw insert: distinct rows, stamped with SQLite's clock like save()'s).
+    const insert = memory
+      .sharedDatabase()
+      .prepare(
+        "INSERT INTO memories (category, subject, content, source, subject_user_id, said_by) VALUES ('correction', 'Dale', ?, 'correction', ?, ?)",
+      );
+    for (let i = 0; i < MAX_CORRECTIONS_PER_DAY - 1; i++) insert.run(`Claim number ${i}.`, DALE, REMI);
+    expect(recentCorrectionCount(memory, REMI)).toBe(MAX_CORRECTIONS_PER_DAY - 1);
+
+    expect(await run('record_correction', { person: 'me', correction: 'Quit Valorant in August 2026.' })).toMatch(
+      /^Recorded/,
+    );
+    const capped = await run('record_correction', { person: 'me', correction: 'Plays Deadlock now.' });
+    expect(capped).toMatch(/^Nothing recorded: Remi has already filed 15 corrections in the last 24 hours/);
+    expect(capped).toContain('in your own voice');
+    expect(notes.openCorrections({ scope: 'person', ownerId: REMI }).map((m) => m.content)).toEqual([
+      'Quit Valorant in August 2026.',
+    ]);
+
+    // Someone else is not affected, and a day later Remi can correct again.
+    expect(await run('record_correction', { person: 'Remi', correction: 'Moved to Laval.' }, DALE)).toMatch(/^Recorded/);
+    memory.sharedDatabase().prepare("UPDATE memories SET updated_at = datetime('now', '-25 hours') WHERE said_by = ?").run(REMI);
+    expect(recentCorrectionCount(memory, REMI)).toBe(0);
+    expect(await run('record_correction', { person: 'me', correction: 'Plays Deadlock now.' })).toMatch(/^Recorded/);
   });
 });
