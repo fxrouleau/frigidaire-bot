@@ -1,6 +1,7 @@
 import type { Message } from 'discord.js';
 import { logger } from '../logger';
 import { getMemoryStore } from './memory';
+import { evidenceFromMessage } from './memory/evidence';
 import {
   type Memory,
   type MemoryStore,
@@ -22,6 +23,7 @@ import { costTools } from './tools/costs';
 import { featureRequestTools } from './tools/featureRequest';
 import { linkReaderTools } from './tools/linkReader';
 import { messageSearchTools } from './tools/messageSearch';
+import { notesTools } from './tools/notes';
 import { reactTools } from './tools/react';
 import { reminderTools } from './tools/reminders';
 import { sandboxTools } from './tools/sandbox';
@@ -266,6 +268,8 @@ const rememberFactTool: ToolDefinition = {
       content,
       source: 'conversation',
       subject_user_id: person?.userId,
+      // The message that prompted it: the dream can read the passage back from the archive.
+      evidence: evidenceFromMessage(ctx.message?.id, ctx.message?.content),
     });
     return person ? `Saved to memory (id: ${id}) about ${person.displayName}.` : `Saved to memory (id: ${id}).`;
   },
@@ -446,6 +450,7 @@ export const toolDefinitions: ToolDefinition[] = [
   rememberFactTool,
   recallMemoriesTool,
   forgetMemoryTool,
+  ...notesTools,
   setMemberInfoTool,
   querySelfDiagnosisTool,
   getEmojiTool,

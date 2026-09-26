@@ -16,6 +16,13 @@ export type ConversationEntry =
       messageIds?: string[];
       /** Ids of the long-term memories rendered into this (developer) entry, for cross-turn dedup. */
       memoryIds?: number[];
+      /** Keys (`note:<id>@<version>`) of the notes rendered into this (developer) entry, for cross-turn dedup. */
+      noteKeys?: string[];
+      /**
+       * The member who wrote this user entry (main account id; relays count as their author): who took part
+       * in the window, for circle notes (a circle shows when several of its members are in the conversation).
+       */
+      authorId?: string;
     }
   | {
       kind: 'tool_call';
@@ -36,7 +43,9 @@ export type ConversationEntry =
 // v2: dropped the multi-provider era fields (providerId, thoughts, thoughtSignature).
 // v3: message entries carry their Discord `messageIds` / rendered `memoryIds`; the state carries
 // `lastSeenMessageId`.
-export const CONVERSATION_STATE_SCHEMA_VERSION = 3;
+// v4: entries carry rendered `noteKeys` and user entries their `authorId`; the state carries `injectedNoteKeys`
+// (memory v2 notes).
+export const CONVERSATION_STATE_SCHEMA_VERSION = 4;
 
 export type ProviderToolType = 'function' | 'web_search';
 

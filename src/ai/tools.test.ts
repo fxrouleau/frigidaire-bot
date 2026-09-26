@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeMessage, type FakeMessageOptions } from '../test-support/fakeDiscord';
 import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
 import { getMemoryStore, setMemoryStoreForTesting } from './memory';
+import { parseEvidence } from './memory/evidence';
 import { MemoryStore } from './memory/memoryStore';
 import { toolDefinitions } from './tools';
 import type { ToolHandlerContext } from './types';
@@ -364,11 +365,14 @@ describe('memories keyed by stable member id', () => {
   });
 
   it('remember_fact files a memory about "me" under the speaker’s id and current display name', async () => {
-    const result = await rememberFactTool!.handler(ctxFor(), { category: 'fact', subject: 'me', content: 'Works nights' });
+    const ctx = ctxFor({ messageId: '1300000000000000001', content: 'i work nights now' });
+    const result = await rememberFactTool!.handler(ctx, { category: 'fact', subject: 'me', content: 'Works nights' });
     expect(result).toMatch(/^Saved to memory \(id: \d+\) about Jasper\.$/);
     const [row] = getMemoryStore().getAllActive();
     expect(row.subject).toBe('Jasper');
     expect(row.subject_user_id).toBe('222222222222222222');
+    // The triggering message is kept as evidence (memory v2): the dream can read the passage back.
+    expect(parseEvidence(row.evidence)).toEqual({ messageIds: ['1300000000000000001'], quote: 'i work nights now' });
   });
 
   it('remember_fact resolves a real name, nickname or old name to the member', async () => {

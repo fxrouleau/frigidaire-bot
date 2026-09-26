@@ -920,7 +920,9 @@ describe('memories by person', () => {
     const agent = makeAgent(provider);
     await agent.handleMention(createFakeMessage({ ...BASE, content: 'hi', channelMessages: [] }).message);
 
-    expect(textOf(provider.calls[0].messages[0])).toContain('call recall_memories for them before answering');
+    expect(textOf(provider.calls[0].messages[0])).toContain(
+      'look them up (read_note for their profile, recall_memories for details) before answering',
+    );
   });
 });
 
