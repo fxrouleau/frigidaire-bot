@@ -300,6 +300,35 @@ describe('owner edit', () => {
     expect(after.embeds?.[0].footer?.text).toBe('v2 · updated today by an owner edit');
     expect(labels(after)).toEqual(['select', 'Edit', 'Undo v2']);
     expect(pendingEdits.size).toBe(0);
+    // The audit line for the report channel (sendToReportChannel sends it with parse: []).
+    expect(fake.recorders.report.calls.map(([, text]) => text)).toEqual([
+      `✏️ notes edit · Invoker edited Remi's notes: saved profile v2 · moved to Laval · asked: "Remi moved to Laval in August"`,
+    ]);
+  });
+
+  it('keeps the audit line to one capped line, posts none for a cancelled draft, and survives a failed post', async () => {
+    const long = 'Remi moved to Laval\n\nin August. '.repeat(40);
+    const fake = createFakeCommandDeps({
+      store: memory,
+      notes,
+      owners: [OWNER],
+      now: () => clock,
+      proposeEdit: async (request) => proposal(request.target),
+      report: async () => {
+        throw new Error('Missing Access');
+      },
+    });
+    const cancelled = await draft(fake);
+    await click(componentId(cancelled.preview, 'Cancel'), fake);
+    expect(fake.recorders.report.calls).toHaveLength(0);
+
+    const { preview } = await draft(fake, long);
+    const confirmed = await click(componentId(preview, 'Confirm'), fake);
+    expect(confirmed[0]).toMatchObject({ method: 'update', content: 'done, saved profile v2' });
+    const [[, text]] = fake.recorders.report.calls;
+    expect(text).not.toContain('\n');
+    expect(text.length).toBeLessThanOrEqual(600);
+    expect(text).toContain('asked: "Remi moved to Laval in August. Remi moved');
   });
 
   it('edits the circle on screen as that circle', async () => {
@@ -530,6 +559,9 @@ describe('undo', () => {
     expect(profile).toMatchObject({ version: 3, updatedBy: 'undo' });
     expect(profile?.content).toContain('Verdun');
     expect(sentOf(responses[0]).embeds?.[0].footer?.text).toBe('v3 · updated today by an undo');
+    expect(fake.recorders.report.calls.map(([, text]) => text)).toEqual([
+      `↩️ notes undo · Invoker undid v2 of Remi's "profile" note: back to v1's text (saved as v3)`,
+    ]);
   });
 
   it('never undoes twice from one button (a double click)', async () => {
@@ -539,6 +571,7 @@ describe('undo', () => {
     const again = await click(button, fake);
     expect(again[0].content).toBe("that note changed since you opened it, so I didn't undo anything. here's the latest");
     expect(notes.getProfile(REMI)?.version).toBe(3);
+    expect(fake.recorders.report.calls).toHaveLength(1);
   });
 });
 

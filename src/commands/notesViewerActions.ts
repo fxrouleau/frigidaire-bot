@@ -155,6 +155,44 @@ function describeTarget(target: EditTarget): string {
   return target.scope === 'group' ? 'the group' : `person ${target.ownerId}`;
 }
 
+/** The longest audit line posted to the report channel, and the longest instruction or summary in it. */
+const AUDIT_MAX_CHARS = 600;
+const AUDIT_TEXT_CHARS = 200;
+
+function oneLine(text: string, max: number): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line;
+}
+
+/**
+ * Posts the audit line of an owner edit or undo to the report channel (sendToReportChannel: `parse: []`),
+ * after the viewer was redrawn. Never throws; a line that did not go out is only logged (the INFO log line
+ * already has it).
+ */
+async function postAudit(interaction: ViewerInteraction, deps: CommandDeps, line: string): Promise<void> {
+  try {
+    const text = oneLine(line, AUDIT_MAX_CHARS);
+    if (!(await deps.report(interaction.client, text))) {
+      logger.info(`notes viewer: no report-channel audit line (none set, or the send failed): ${text}`);
+    }
+  } catch (error) {
+    logger.warn('notes viewer: posting the audit line failed:', error);
+  }
+}
+
+/** Whose notes a target is, in words: "Remi's notes", "the group's notes", "circle The MTG crew". */
+function targetLabel(target: EditTarget, notes: NotesStore, views: Views): string {
+  if (target.scope === 'circle') return `circle "${notes.getCircle(target.slug)?.title ?? target.slug}"`;
+  if (target.scope === 'group') return "the group's notes";
+  return `${views.name({ kind: 'person', id: target.ownerId })}'s notes`;
+}
+
+/** Who pressed the button, by the name the server shows. */
+function clickerName(interaction: ViewerInteraction): string {
+  const member = interaction.member as { displayName?: string } | null;
+  return member?.displayName ?? interaction.user.displayName ?? interaction.user.username;
+}
+
 function update(payload: ViewerPayload): InteractionUpdateOptions {
   return {
     content: payload.content,
@@ -476,6 +514,13 @@ async function confirmEdit(
       await views.render({ subject: edit.subject, screen, page: 0 }, `done, ${summary || 'nothing needed saving'}`),
     ),
   );
+  if (saved.length > 0 || removed.length > 0) {
+    await postAudit(
+      interaction,
+      deps,
+      `✏️ notes edit · ${clickerName(interaction)} edited ${targetLabel(target, notes, views)}: ${summary} · ${oneLine(edit.changeSummary, AUDIT_TEXT_CHARS)} · asked: "${oneLine(edit.instruction, AUDIT_TEXT_CHARS)}"`,
+    );
+  }
 }
 
 async function undoNote(
@@ -509,4 +554,13 @@ async function undoNote(
     : `undone: "${restored.title}" is removed again, as it was in v${version - 1} (saved as v${restored.version})`;
   const screen: ViewerScreen = restored.active ? { kind: 'note', noteId } : { kind: 'home' };
   await interaction.update(update(await views.render({ subject, screen, page: 0 }, notice)));
+  const what =
+    restored.scope === 'circle'
+      ? `circle "${restored.title}"`
+      : `${subject.kind === 'group' ? "the group's" : `${views.name(subject)}'s`} "${restored.topic}" note`;
+  await postAudit(
+    interaction,
+    deps,
+    `↩️ notes undo · ${clickerName(interaction)} undid v${version} of ${what}: ${restored.active ? `back to v${version - 1}'s text` : `removed again, as in v${version - 1}`} (saved as v${restored.version})`,
+  );
 }

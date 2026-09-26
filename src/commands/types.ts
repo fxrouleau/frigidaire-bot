@@ -43,6 +43,11 @@ export type CommandDeps = {
   isOwner: (client: Client, userId: string) => Promise<boolean>;
   /** Drafts an owner edit of someone's notes with MEMORY_EDIT_MODEL; nothing is saved (dreamer.ts). */
   proposeEdit: (request: EditRequest) => Promise<EditProposal>;
+  /**
+   * Posts one line to the report channel (sendToReportChannel: `parse: []`, false when none is set or the
+   * send failed): the audit line of the owner's note edits and undos.
+   */
+  report: (client: Client, text: string) => Promise<boolean>;
   now: () => Date;
 };
 

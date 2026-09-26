@@ -495,6 +495,7 @@ export type FakeCommandDeps = {
     complete: Recorder<[CompletionRequest], Promise<string | undefined>>;
     isOwner: Recorder<[Client, string], Promise<boolean>>;
     proposeEdit: Recorder<[EditRequest], Promise<EditProposal>>;
+    report: Recorder<[Client, string], Promise<boolean>>;
   };
 };
 
@@ -520,6 +521,7 @@ export function createFakeCommandDeps(
     watchVideo?: CommandDeps['watchVideo'];
     complete?: CommandDeps['complete'];
     proposeEdit?: CommandDeps['proposeEdit'];
+    report?: CommandDeps['report'];
     now?: Date | (() => Date);
   } = {},
 ): FakeCommandDeps {
@@ -544,6 +546,7 @@ export function createFakeCommandDeps(
     proposeEdit: createRecorder<[EditRequest], Promise<EditProposal>>(
       opts.proposeEdit ?? (async () => ({ ok: false, error: 'this test scripted no edit' })),
     ),
+    report: createRecorder<[Client, string], Promise<boolean>>(opts.report ?? (async () => true)),
   };
   const memoryStore = () => {
     if (!opts.store) throw new Error('This test did not provide a memory store');

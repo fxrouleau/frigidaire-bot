@@ -317,6 +317,9 @@ members; a linked side account counts):
   on a circle edits that circle; anywhere else it edits the person's (or the group's) notes.
 - **Undo vN**: restores the version before the shown one as a new version (membership included for a circle).
   The button carries the version it was shown for, so a double click never undoes twice.
+- Every saved edit and undo also posts one audit line to the report channel (who, whose notes, the versions
+  saved, the change summary and the instruction, each capped, one line, `parse: []`), besides the INFO log
+  line: e.g. `✏️ notes edit · Ozzie edited Remi's notes: saved profile v6 · moved to Laval · asked: "…"`.
 
 Safety:
 - Owner actions are re-checked on every click; a button being there proves nothing. The owner check is bounded

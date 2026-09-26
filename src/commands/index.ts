@@ -21,6 +21,7 @@ import { agent } from '../ai/agentInstance';
 import { getCachedTranscript, transcribeAudio, watchVideo } from '../ai/media';
 import { getMemoryStore, getNotesStore } from '../ai/memory';
 import { proposeEdit } from '../ai/memory/notes/dreamer';
+import { sendToReportChannel } from '../ai/reportChannel';
 import { isBotOwner } from '../botOwner';
 import { config } from '../config';
 import { logger } from '../logger';
@@ -126,6 +127,7 @@ export function defaultCommandDeps(): CommandDeps {
     notesStore: () => getNotesStore(),
     isOwner: isBotOwner,
     proposeEdit: (request) => proposeEdit(request, { notes: getNotesStore(), memory: getMemoryStore() }),
+    report: sendToReportChannel,
     now: () => new Date(),
   };
   return defaultDeps;
