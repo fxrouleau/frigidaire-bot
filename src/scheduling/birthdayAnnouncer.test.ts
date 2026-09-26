@@ -31,6 +31,21 @@ function birthday(userId: string, month: number, day: number, year: number | nul
   saveBirthday({ userId, date: { month, day, year }, setBy: 'test', now: 0, lastAnnouncedYear });
 }
 
+// Well before the Sept 25 runs below: learned months ago, so not "recent".
+const LONG_AGO = '2026-06-01 12:00:00';
+
+/** Sets a memory's SQLite timestamps (UTC 'YYYY-MM-DD HH:MM:SS'); saves always stamp the real clock. */
+function stamp(id: number, createdAt: string, updatedAt = createdAt): void {
+  const db = (memory as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db;
+  db.prepare('UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?').run(createdAt, updatedAt, id);
+}
+
+async function saveOld(input: Parameters<MemoryStore['save']>[0]): Promise<number> {
+  const id = await memory.save(input);
+  stamp(id, LONG_AGO);
+  return id;
+}
+
 function writerSaying(text: string | undefined) {
   const inputs: BirthdayMessageInput[] = [];
   const writer: BirthdayWriter = async (input) => {
@@ -175,8 +190,8 @@ describe('BirthdayAnnouncer.run', () => {
       'collects vintage film cameras',
       'is training for a half marathon',
     ];
-    for (const content of facts) await memory.save({ category: 'fact', subject: 'Alice', content });
-    await memory.save({ category: 'image', subject: 'Alice', content: 'shared a cat gif', subject_user_id: ALICE });
+    for (const content of facts) await saveOld({ category: 'fact', subject: 'Alice', content });
+    await saveOld({ category: 'image', subject: 'Alice', content: 'shared a cat gif', subject_user_id: ALICE });
     birthday(ALICE, 9, 25, 1990);
     const { writer, inputs } = writerSaying('🎂 hbd');
     const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice (server nick)' }] });
@@ -189,15 +204,42 @@ describe('BirthdayAnnouncer.run', () => {
     expect(inputs[0].memories.join(' ')).not.toContain('cat gif');
   });
 
+  it('leaves out events and anything learned in the last two weeks, however recently it was touched', async () => {
+    memory.upsertIdentity(ALICE, 'Alice');
+    const save = (category: string, content: string) =>
+      memory.save({ category, subject: 'Alice', content, subject_user_id: ALICE });
+    // Old lore, re-confirmed yesterday: the learner bumped updated_at, created_at is what counts.
+    stamp(await save('personality', 'is late to everything, famously'), '2025-11-02 20:00:00', '2026-09-24 12:00:00');
+    stamp(await save('fact', 'has cooked the same chili recipe for a decade'), '2026-09-10 18:59:00');
+    stamp(await save('fact', 'broke a toe at the climbing gym yesterday'), '2026-09-24 22:00:00');
+    stamp(await save('fact', 'started a new job two weeks ago'), '2026-09-11 19:00:01');
+    stamp(await save('event', 'is flying to Lisbon for the long weekend'), LONG_AGO);
+    stamp(await save('preference', 'only drinks oat milk lattes'), 'not a timestamp');
+    // A wave of fresh memories must not crowd the older ones out of the candidates.
+    for (let i = 0; i < 30; i++) stamp(await save('fact', `recent detail ${i}`), '2026-09-20 12:00:00');
+    birthday(ALICE, 9, 25);
+    const { writer, inputs } = writerSaying('🎂 hbd');
+    const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice' }] });
+
+    await announcer.run(SEPT25_1500);
+
+    // Sept 25 15:00 ET is 19:00 UTC: the 14-day line is Sept 11 19:00:00 UTC.
+    expect([...inputs[0].memories].sort()).toEqual([
+      'has cooked the same chili recipe for a decade',
+      'is late to everything, famously',
+      'only drinks oat milk lattes',
+    ]);
+  });
+
   it("finds memories filed under any name they go by: Discord handle, and a linked side account's names", async () => {
     const SIDE = '400000000000000003';
     vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${ALICE}`);
     try {
       memory.upsertIdentity(ALICE, 'Alice', 'alice_handle');
       memory.upsertIdentity(SIDE, 'AliceAlt', 'alice_alt');
-      await memory.save({ category: 'fact', subject: 'alice_handle', content: 'works night shifts as an ER nurse' });
-      await memory.save({ category: 'fact', subject: 'AliceAlt', content: 'owns two greyhounds' });
-      await memory.save({ category: 'fact', subject: 'Bob', content: 'mains Thresh in League' });
+      await saveOld({ category: 'fact', subject: 'alice_handle', content: 'works night shifts as an ER nurse' });
+      await saveOld({ category: 'fact', subject: 'AliceAlt', content: 'owns two greyhounds' });
+      await saveOld({ category: 'fact', subject: 'Bob', content: 'mains Thresh in League' });
       birthday(ALICE, 9, 25);
       const { writer, inputs } = writerSaying('🎂 hbd');
       const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice' }] });
@@ -348,6 +390,10 @@ describe('createBirthdayWriter', () => {
     const messages = requests[0].body.messages as Array<{ role: string; content: string }>;
     expect(messages[0].content).toContain("It's Alice's birthday today (turning 30)");
     expect(messages[0].content).toContain(`<@${ALICE}>`);
+    expect(messages[0].content).toContain(
+      'Prefer something long-running about them (a trait, a running joke, old lore), never news from the past couple of weeks',
+    );
+    expect(messages[1].content).toContain("Things you've known about Alice for a while");
     expect(messages[1].content).toContain('- Alice hates cilantro');
   });
 

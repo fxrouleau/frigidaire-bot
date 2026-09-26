@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { easternParts, formatRelativeAge, parseEasternDateTime } from './utils';
+import { easternParts, formatRelativeAge, parseEasternDateTime, parseSqliteUtc } from './utils';
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
@@ -16,6 +16,19 @@ function sqliteUtc(date: Date): string {
 function ago(ms: number): string {
   return sqliteUtc(new Date(NOW.getTime() - ms));
 }
+
+describe('parseSqliteUtc', () => {
+  it("reads SQLite's datetime('now') text as UTC, whatever the host's zone", () => {
+    expect(parseSqliteUtc('2026-09-11 19:00:00')).toBe(Date.UTC(2026, 8, 11, 19, 0, 0));
+    expect(parseSqliteUtc(' 2026-01-02 03:04:05 ')).toBe(Date.UTC(2026, 0, 2, 3, 4, 5));
+  });
+
+  it('returns undefined for missing or unreadable text', () => {
+    for (const bad of [undefined, null, '', 'not a timestamp', '2026-13-45 99:99:99']) {
+      expect(parseSqliteUtc(bad)).toBeUndefined();
+    }
+  });
+});
 
 describe('formatRelativeAge', () => {
   it('returns "today" for anything under 24h', () => {

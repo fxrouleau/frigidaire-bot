@@ -12,14 +12,21 @@ import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { getOpenRouterClient } from '../ai/openRouterClient';
 import { memoryKeyFor } from '../ai/people';
 import { featureRequestOptions } from '../ai/usage';
-import { easternParts } from '../ai/utils';
+import { easternParts, parseSqliteUtc } from '../ai/utils';
 import { config } from '../config';
 import { logger } from '../logger';
 import { type Birthday, claimAnnouncement, isBirthdayOn, listBirthdays, releaseAnnouncement } from './birthdayStore';
 import { describeError, discordErrorCode, fetchPostableChannel, type PostableChannel } from './discord';
 
 const MINUTE_MS = 60_000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
 const MEMORY_CONTEXT_LIMIT = 5;
+// Candidates read before filtering: the newest memories are the ones filtered out, and they must not crowd
+// out the older ones.
+const MEMORY_CANDIDATES = 100;
+// A memory learned this recently is news (yesterday's story), not who someone is: the owner saw one become
+// the whole birthday message. Measured on created_at, so an old memory the learner re-confirmed still counts.
+const RECENT_MEMORY_DAYS = 14;
 const MODEL_TIMEOUT_MS = 30_000;
 // The default chat model (z-ai/glm-5.3-flash) reasons at 'max' unless told otherwise, and reasoning counts
 // toward max_tokens: the writer asks for 'low' and leaves room for it before the message (only the tokens
@@ -28,8 +35,9 @@ const MODEL_MAX_TOKENS = 1500;
 const MAX_MESSAGE_CHARS = 600;
 /** Waits between failed attempts for the same birthday (the last one repeats until the day ends). */
 const RETRY_DELAYS_MS = [MINUTE_MS, 5 * MINUTE_MS, 15 * MINUTE_MS, 30 * MINUTE_MS, 60 * MINUTE_MS];
-// Image shares expire within a day and self-diagnosis rows are about the bot; neither belongs in a toast.
-const EXCLUDED_MEMORY_CATEGORIES = new Set<string>(['image', ...SELF_DIAGNOSIS_CATEGORIES]);
+// Events are time-bound by design (plans, what happened this week), image shares expire within a day and
+// self-diagnosis rows are about the bot: none of them belongs in a toast.
+const EXCLUDED_MEMORY_CATEGORIES = new Set<string>(['event', 'image', ...SELF_DIAGNOSIS_CATEGORIES]);
 
 export type BirthdayMessageInput = {
   userId: string;
@@ -65,12 +73,12 @@ function buildPrompt(input: BirthdayMessageInput): { system: string; user: strin
 It's ${input.name}'s birthday today${turning}. Write the birthday message you'd drop in the group chat:
 - 1 or 2 short sentences, casual group-chat texting, lowercase is fine. Warm underneath, but in the group's voice — a light roast is welcome, nothing actually mean.
 - Address them with the exact token ${mention} (it becomes a ping); don't @ anyone else.
-- At most one detail from what you know about them, and only if it fits naturally — never list facts, and never say you have notes or memories.
+- At most one detail from what you know about them, and only if it fits naturally. Prefer something long-running about them (a trait, a running joke, old lore), never news from the past couple of weeks; never list facts, and never say you have notes or memories.
 - No hashtags, no emojis, no quotation marks around the message.
 Reply with the message text only.`;
   const known =
     input.memories.length > 0
-      ? `Things you know about ${input.name} (background only):\n${input.memories.map((m) => `- ${m}`).join('\n')}`
+      ? `Things you've known about ${input.name} for a while (background only):\n${input.memories.map((m) => `- ${m}`).join('\n')}`
       : `You don't know much about ${input.name} beyond their name.`;
   return { system, user: known };
 }
@@ -218,7 +226,7 @@ export class BirthdayAnnouncer {
       const identity = this.safeIdentity(userId);
       const name = member?.displayName ?? identity?.display_name ?? (await this.lookupUserName(userId));
       const age = birthday.year ? year - birthday.year : undefined;
-      const memories = this.memoriesFor(userId, name);
+      const memories = this.memoriesFor(userId, name, nowMs);
       const botName = this.client.user?.displayName ?? 'Frigidaire';
 
       let written: string | undefined;
@@ -291,13 +299,22 @@ export class BirthdayAnnouncer {
     }
   }
 
-  /** Their memories by id and every name any of their accounts goes by (display, handle, first-seen, IRL, nicknames). */
-  private memoriesFor(userId: string, liveName: string): string[] {
+  /**
+   * A few of their memories (by id and every name any of their accounts goes by: display, handle, first-seen,
+   * IRL, nicknames), most recently confirmed first, minus events, images, self-diagnosis rows and anything
+   * learned in the last RECENT_MEMORY_DAYS (an unreadable created_at counts as old).
+   */
+  private memoriesFor(userId: string, liveName: string, nowMs: number): string[] {
+    const cutoff = nowMs - RECENT_MEMORY_DAYS * DAY_MS;
+    const isRecent = (createdAt: string) => {
+      const created = parseSqliteUtc(createdAt);
+      return created !== undefined && created > cutoff;
+    };
     try {
       const store = getMemoryStore();
       return store
-        .getForPerson(memoryKeyFor(store, userId, [liveName]), 20)
-        .filter((m) => !EXCLUDED_MEMORY_CATEGORIES.has(m.category))
+        .getForPerson(memoryKeyFor(store, userId, [liveName]), MEMORY_CANDIDATES)
+        .filter((m) => !EXCLUDED_MEMORY_CATEGORIES.has(m.category) && !isRecent(m.created_at))
         .slice(0, MEMORY_CONTEXT_LIMIT)
         .map((m) => m.content);
     } catch (error) {
