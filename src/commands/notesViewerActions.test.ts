@@ -19,7 +19,7 @@ import {
   type RecordedResponse,
 } from '../test-support/fakeInteraction';
 import { renderViewer, type ViewerState, VIEWER_TTL_MS } from './notesViewer';
-import { editFingerprint, handleViewerInteraction, PendingEdits } from './notesViewerActions';
+import { EDIT_DRAFT_DEADLINE_MS, editFingerprint, handleViewerInteraction, PendingEdits } from './notesViewerActions';
 import { LINES } from './respond';
 
 // Fictional cast, placeholder snowflakes.
@@ -277,8 +277,17 @@ describe('owner edit', () => {
 
     expect(modal.title).toBe('Edit notes on Remi');
     expect(fake.recorders.proposeEdit.calls).toEqual([
-      [{ target: { scope: 'person', ownerId: REMI }, instruction: 'Remi moved to Laval in August', requestedBy: OWNER }],
+      [
+        {
+          target: { scope: 'person', ownerId: REMI },
+          instruction: 'Remi moved to Laval in August',
+          requestedBy: OWNER,
+          signal: expect.any(AbortSignal),
+        },
+      ],
     ]);
+    // The deadline never fired: the draft answered in time.
+    expect(fake.recorders.proposeEdit.calls[0][0].signal?.aborted).toBe(false);
     // Acknowledged at once (the draft takes a while), then the preview replaces the viewer.
     expect(responses.map((r) => r.method)).toEqual(['update', 'editReply']);
     expect(responses[0].content).toBe('✏️ drafting that edit… give me a minute');
@@ -446,11 +455,79 @@ describe('owner edit', () => {
   });
 
   it('says so when the draft changes nothing', async () => {
-    const same = output({ notes: [{ topic: 'profile', title: 'Remi', content: notes.getProfile(REMI)?.content ?? '' }] });
+    const same = output({
+      notes: [{ topic: 'profile', title: 'Remi', content: notes.getProfile(REMI)?.content ?? '' }],
+      change_summary: '',
+    });
     const fake = fakeDeps(async (target) => proposal(target, same));
     const { responses } = await draft(fake);
     expect(responses[responses.length - 1].content).toBe("that draft didn't change anything");
     expect(pendingEdits.size).toBe(0);
+  });
+
+  it("passes on the edit model's reason when it changed nothing (the edit prompt asks for one)", async () => {
+    const why = output({ notes: [], change_summary: 'Remi has no *Valorant* paragraph to drop' });
+    const fake = fakeDeps(async (target) => proposal(target, why));
+    const { responses } = await draft(fake, 'drop the Valorant paragraph');
+    expect(responses[responses.length - 1].content).toBe(
+      "that draft didn't change anything: Remi has no \\*Valorant\\* paragraph to drop",
+    );
+    expect(pendingEdits.size).toBe(0);
+  });
+
+  it("stops a draft that would outlive Discord's 15 minutes, aborts its model call and says so while it can", async () => {
+    const fake = fakeDeps();
+    // The edit model never answers; like the real proposeEdit, the draft ends when its signal aborts.
+    fake.deps.proposeEdit = (request) =>
+      new Promise<EditProposal>((resolve) => {
+        request.signal?.addEventListener('abort', () => resolve({ ok: false, error: 'the draft was stopped' }), {
+          once: true,
+        });
+      });
+    const opened = await click(componentId(view(), 'Edit'), fake);
+    const modal = opened[0].options as APIModalInteractionResponseCallbackData;
+    const { interaction, responses } = createFakeModalSubmitInteraction({
+      customId: modal.custom_id,
+      fields: { instruction: 'rewrite everything about Remi' },
+      invokerId: OWNER,
+    });
+    await handleViewerInteraction(interaction, fake.deps, { pendingEdits, editDeadlineMs: 5 });
+    expect(responses.map((r) => r.method)).toEqual(['update', 'editReply']);
+    expect(responses[1].content).toBe(
+      'that draft was taking forever (Discord only waits 15 minutes on me), so I dropped it. try a smaller ask',
+    );
+    expect(labels(sentOf(responses[1]))).toEqual(['select', 'Edit']);
+    expect(pendingEdits.size).toBe(0);
+    expect(notes.getProfile(REMI)?.version).toBe(1);
+  });
+
+  it('gives a draft 12 minutes by default, inside the 15 Discord allows', async () => {
+    expect(EDIT_DRAFT_DEADLINE_MS).toBe(12 * 60_000);
+    const fake = fakeDeps();
+    let signal: AbortSignal | undefined;
+    fake.deps.proposeEdit = (request) => {
+      signal = request.signal;
+      return new Promise<EditProposal>(() => {});
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { interaction, responses } = createFakeModalSubmitInteraction({
+        customId: `nv:m:p${REMI}:h`,
+        fields: { instruction: 'Remi moved to Laval' },
+        invokerId: OWNER,
+      });
+      const done = handleViewerInteraction(interaction, fake.deps, { pendingEdits });
+      await vi.advanceTimersByTimeAsync(EDIT_DRAFT_DEADLINE_MS - 1);
+      expect(responses.map((r) => r.method)).toEqual(['update']);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await done;
+      expect(signal?.aborted).toBe(true);
+      expect(responses.map((r) => r.method)).toEqual(['update', 'editReply']);
+      expect(responses[1].content).toMatch(/^that draft was taking forever/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('drops a draft that came back for someone other than who was asked about', async () => {
@@ -571,6 +648,51 @@ describe('owner edit through the real proposeEdit (dreamer.ts)', () => {
     expect((await click(componentId(groupDraft.preview, 'Confirm'), fake))[0].content).toBe('done, saved vibe v2');
     expect(notes.getNote({ scope: 'group' }, 'vibe')).toMatchObject({ updatedBy: 'edit' });
     expect(requests.map((r) => r.headers.get('X-Frigidaire-Feature'))).toEqual(['memory_edit', 'memory_edit']);
+  });
+});
+
+describe('the group before its first notes (circles already exist)', () => {
+  const GROUP_HOME: ViewerState = { subject: { kind: 'group' }, screen: { kind: 'home' }, page: 0 };
+
+  function menu(sent: Sent): string[] {
+    for (const row of sent.components ?? []) {
+      for (const c of row.components) if (c.type === ComponentType.StringSelect) return c.options.map((o) => o.label);
+    }
+    return [];
+  }
+
+  it('opens on the empty group notes, with the circles one pick away, for anyone', () => {
+    const sent = view(GROUP_HOME, false);
+    expect(sent.embeds?.[0]).toMatchObject({
+      author: { name: "The group's notes" },
+      description: 'no group notes yet, the nightly dream writes them',
+    });
+    expect(menu(sent)).toEqual(['Group notes', 'The MTG crew']);
+    expect(selected(sent)).toBe('Group notes');
+    expect(labels(sent)).toEqual(['select']);
+  });
+
+  it("lets the owner start the group's notes with Edit, even after opening a circle", async () => {
+    const lore = output({
+      notes: [{ topic: 'lore', title: 'Lore', content: '## Now\nThe server started as a study group.' }],
+      change_summary: 'first lore',
+    });
+    const fake = fakeDeps(async (target) => proposal(target, lore));
+    const home = view(GROUP_HOME);
+    const onCircle = sentOf((await choose(componentId(home, 'select'), `n${notes.getCircle('mtg')?.id}`, fake, OWNER))[0]);
+    expect(onCircle.embeds?.[0].author?.name).toBe('Circle');
+    const back = sentOf((await choose(componentId(onCircle, 'select'), 'h', fake, OWNER))[0]);
+    expect(back.embeds?.[0].description).toBe('no group notes yet, the nightly dream writes them');
+
+    const { modal, preview } = await draft(fake, 'start the lore: we began as a study group', back);
+    expect(modal.title).toBe("Edit the group's notes");
+    expect(fake.recorders.proposeEdit.calls[0][0].target).toEqual({ scope: 'group' });
+    const confirmed = await click(componentId(preview, 'Confirm'), fake);
+    expect(confirmed[0].content).toBe('done, saved lore v1');
+    expect(notes.getNote({ scope: 'group' }, 'lore')).toMatchObject({ version: 1, updatedBy: 'edit' });
+    expect(notes.getCircle('mtg')?.version).toBe(1);
+    // With a group note, the placeholder entry is gone.
+    expect(menu(sentOf(confirmed[0]))).toEqual(['Lore', 'The MTG crew']);
   });
 });
 

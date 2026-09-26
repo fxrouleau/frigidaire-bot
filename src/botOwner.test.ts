@@ -1,4 +1,4 @@
-import { Collection, type Client } from 'discord.js';
+import { type Client, Collection, TeamMemberMembershipState } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { applicationOwnerSource, BotOwners, isBotOwner } from './botOwner';
 
@@ -65,13 +65,28 @@ describe('applicationOwnerSource', () => {
   it('reads a user owner and a team', async () => {
     expect(await applicationOwnerSource(clientWithOwner({ id: OWNER }).client)()).toEqual([OWNER]);
     const team = {
+      ownerId: OWNER,
       members: new Collection([
-        [OWNER, { user: { id: OWNER } }],
-        [TEAMMATE, { user: { id: TEAMMATE } }],
+        [OWNER, { user: { id: OWNER }, membershipState: TeamMemberMembershipState.Accepted }],
+        [TEAMMATE, { user: { id: TEAMMATE }, membershipState: TeamMemberMembershipState.Accepted }],
       ]),
     };
     expect(await applicationOwnerSource(clientWithOwner(team).client)()).toEqual([OWNER, TEAMMATE]);
     expect(await applicationOwnerSource(clientWithOwner(null).client)()).toEqual([]);
+  });
+
+  it("leaves out someone only invited to the team (they haven't accepted), never the team's owner", async () => {
+    const team = {
+      ownerId: OWNER,
+      members: new Collection([
+        [OWNER, { user: { id: OWNER }, membershipState: TeamMemberMembershipState.Accepted }],
+        [MEMBER, { user: { id: MEMBER }, membershipState: TeamMemberMembershipState.Invited }],
+      ]),
+    };
+    expect(await applicationOwnerSource(clientWithOwner(team).client)()).toEqual([OWNER]);
+    // Should Discord stop sending membership states, the team's owner still counts.
+    const unstated = { ownerId: OWNER, members: new Collection([[TEAMMATE, { user: { id: TEAMMATE } }]]) };
+    expect(await applicationOwnerSource(clientWithOwner(unstated).client)()).toEqual([OWNER]);
   });
 });
 

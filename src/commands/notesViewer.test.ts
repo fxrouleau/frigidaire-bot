@@ -242,6 +242,16 @@ describe('renderViewer limits', () => {
       expect(o.label.length).toBeLessThanOrEqual(100);
       expect(o.description.length).toBeLessThanOrEqual(100);
     }
+
+    // The group with 25 circles and no notes of its own: its empty screen first, then 24 circles.
+    notes.writeCircles(
+      [{ slug: 'extra', title: 'Extra', content: '## Now\nMore.', aliases: [], members: [{ id: DALE }, { id: NOVA }], merged_from: [] }],
+      { updatedBy: 'dream' },
+    );
+    const group = viewerOptions({ kind: 'group' }, ctx());
+    expect(group).toHaveLength(DISCORD_LIMITS.selectOptions);
+    expect(group[0]).toMatchObject({ label: 'Group notes', screen: { kind: 'home' } });
+    expect(group.slice(1).every((o) => o.screen.kind === 'note')).toBe(true);
   });
 
   it('says so when the shown note is gone and falls back to the profile', () => {

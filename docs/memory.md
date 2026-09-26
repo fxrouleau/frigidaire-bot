@@ -306,11 +306,12 @@ the dream only processes rows added after it.
 - A footer with the version, its age and who last changed it (the nightly dream, an owner edit, the bootstrap,
   an import, an undo). A circle also shows its members (dated, with roles) and its other names.
 
-Right-clicking the bot shows the group's notes, then every circle. People without notes see their raw
+Right-clicking the bot shows the group's notes, then every circle (before the group has notes of its own, it
+opens on an empty **Group notes** entry, where the owner's Edit starts them). People without notes see their raw
 memories; someone the bot knows nothing about gets one plain line. Everyone can view everyone.
 
 Owner-only buttons (the owner: `BOT_OWNER_USER_IDS`, else the Discord application's owner or its team's
-members; a linked side account counts):
+accepted members, not people only invited; a linked side account counts):
 - **Edit**: a modal ("What should change?", ≤ 4,000 chars) → the edit model gets the target's notes (a
   person's with their circles) and the instruction → the message becomes a before/after preview, one change
   per page: a line diff (`-` before, `+` after) and, for a circle, its membership and other names before and
@@ -328,7 +329,9 @@ Safety:
   action says to try again.
 - A drafted edit is held in memory for 15 minutes (not across restarts). Confirm refuses it when a note it
   covers changed since the draft (the dream, another edit, an undo), and a draft that comes back for another
-  target than the one asked about is dropped.
+  target than the one asked about is dropped. Drafting gets 12 minutes: Discord takes the answer to the
+  modal for 15 only, so a slower draft is stopped (its model call aborted) and the viewer says so while it can.
+  A draft that changes nothing says so, with the model's reason when it gave one.
 - A component's `custom_id` (≤ 100 chars) carries everything a click needs: the action, the subject (a
   person's main id or the group), the screen (a note id or the raw memories), the page and when it was
   issued. The viewer holds no state between clicks. Its buttons expire 15 minutes after the render that

@@ -11,11 +11,14 @@
 // - A viewer's buttons expire 15 minutes after the render that issued them (custom_id carries the time);
 //   a drafted edit is held in memory for 15 minutes (not across restarts) and is refused on Confirm when
 //   the notes it would overwrite changed meanwhile (the nightly dream, another edit, an undo).
+// - Drafting is stopped after 12 minutes (EDIT_DRAFT_DEADLINE_MS, the model call aborted): Discord takes the
+//   answer to the modal submit for 15 minutes only, and the viewer has to say what happened within them.
 // - Undo carries the version it was shown for, so a double click never undoes twice.
 // - Every failure is an in-character private line; nothing escapes as an unhandled rejection.
 import { randomBytes } from 'node:crypto';
 import {
   type ButtonInteraction,
+  escapeMarkdown,
   type InteractionReplyOptions,
   type InteractionUpdateOptions,
   MessageFlags,
@@ -117,7 +120,45 @@ export class PendingEdits {
 
 const sharedPendingEdits = new PendingEdits();
 
-export type ViewerActionOptions = { pendingEdits?: PendingEdits };
+/**
+ * How long an owner edit's draft may take. Discord takes the answer to the modal submit (the preview, or
+ * any error) for 15 minutes only; a draft still running at 12 is stopped (its model call aborted) and the
+ * viewer says so while it still can.
+ */
+export const EDIT_DRAFT_DEADLINE_MS = 12 * 60_000;
+
+export type ViewerActionOptions = {
+  pendingEdits?: PendingEdits;
+  /** EDIT_DRAFT_DEADLINE_MS by default. */
+  editDeadlineMs?: number;
+};
+
+/**
+ * `draft(signal)`'s proposal, or undefined when it didn't come within `ms`: the signal then aborts the
+ * draft, and a failure caused by that abort counts as no answer too.
+ */
+async function draftWithin(
+  ms: number,
+  draft: (signal: AbortSignal) => Promise<EditProposal>,
+): Promise<EditProposal | undefined> {
+  const deadline = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => {
+      deadline.abort();
+      resolve(undefined);
+    }, ms);
+  });
+  try {
+    const proposal = await Promise.race([draft(deadline.signal), late]);
+    return proposal && !proposal.ok && deadline.signal.aborted ? undefined : proposal;
+  } catch (error) {
+    if (deadline.signal.aborted) return undefined;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * The versions an edit is drafted against: the target's notes (a person's or the group's topics, or the one
@@ -159,6 +200,8 @@ function describeTarget(target: EditTarget): string {
 /** The longest audit line posted to the report channel, and the longest instruction or summary in it. */
 const AUDIT_MAX_CHARS = 600;
 const AUDIT_TEXT_CHARS = 200;
+/** The longest model text quoted in a notice above the viewer. */
+const NOTICE_TEXT_CHARS = 300;
 
 function oneLine(text: string, max: number): string {
   const line = text.replace(/\s+/g, ' ').trim();
@@ -229,14 +272,24 @@ export async function handleViewerInteraction(
   opts: ViewerActionOptions = {},
 ): Promise<void> {
   try {
-    await dispatch(interaction, deps, opts.pendingEdits ?? sharedPendingEdits);
+    await dispatch(
+      interaction,
+      deps,
+      opts.pendingEdits ?? sharedPendingEdits,
+      opts.editDeadlineMs ?? EDIT_DRAFT_DEADLINE_MS,
+    );
   } catch (error) {
     logger.warn(`notes viewer: ${interaction.customId} failed:`, error);
     await tellPrivately(interaction, LINES.failed);
   }
 }
 
-async function dispatch(interaction: ViewerInteraction, deps: CommandDeps, pending: PendingEdits): Promise<void> {
+async function dispatch(
+  interaction: ViewerInteraction,
+  deps: CommandDeps,
+  pending: PendingEdits,
+  editDeadlineMs: number,
+): Promise<void> {
   if (!config.commands.enabled) {
     await tellPrivately(interaction, LINES.disabled);
     return;
@@ -256,7 +309,9 @@ async function dispatch(interaction: ViewerInteraction, deps: CommandDeps, pendi
     return;
   }
   if (action.action === 'modal') {
-    if (interaction.isModalSubmit()) await submitEdit(interaction, action.subject, action.screen, views, pending);
+    if (interaction.isModalSubmit()) {
+      await submitEdit(interaction, action.subject, action.screen, views, pending, editDeadlineMs);
+    }
     return;
   }
   if (interaction.isModalSubmit()) return;
@@ -388,6 +443,7 @@ async function submitEdit(
   screen: ViewerScreen,
   views: Views,
   pending: PendingEdits,
+  editDeadlineMs: number,
 ): Promise<void> {
   if (await refuseNonOwner(interaction, views, 'an edit')) return;
   const instruction = interaction.fields.getTextInputValue(INSTRUCTION_INPUT_ID).trim().slice(0, MAX_INSTRUCTION_CHARS);
@@ -414,12 +470,21 @@ async function submitEdit(
   }
   logger.info(`notes viewer: ${interaction.user.username} asked for an edit of ${describeTarget(target)}`);
 
-  let proposal: EditProposal;
+  let proposal: EditProposal | undefined;
   try {
-    proposal = await deps.proposeEdit({ target, instruction, requestedBy });
+    proposal = await draftWithin(editDeadlineMs, (signal) =>
+      deps.proposeEdit({ target, instruction, requestedBy, signal }),
+    );
   } catch (error) {
     logger.warn(`notes viewer: drafting an edit of ${describeTarget(target)} failed:`, error);
     await interaction.editReply(update(await views.render(back, VIEWER_LINES.draftFailed)));
+    return;
+  }
+  if (!proposal) {
+    logger.warn(
+      `notes viewer: drafting an edit of ${describeTarget(target)} took over ${Math.round(editDeadlineMs / 1000)} s, stopped`,
+    );
+    await interaction.editReply(update(await views.render(back, VIEWER_LINES.draftTooSlow)));
     return;
   }
   if (!proposal.ok) {
@@ -441,7 +506,12 @@ async function submitEdit(
 
   const changes = previewChanges(notes, proposal.target, proposal.output);
   if (changes.length === 0) {
-    await interaction.editReply(update(await views.render(back, VIEWER_LINES.noChange)));
+    // The edit prompt has the model say why when it can't apply an instruction: pass that on (the model's
+    // own words only: proposal.changeSummary falls back to the instruction itself).
+    const why = oneLine(proposal.output.change_summary, NOTICE_TEXT_CHARS);
+    logger.info(`notes viewer: the draft for ${describeTarget(target)} changed nothing${why ? `: ${why}` : ''}`);
+    const notice = why ? `${VIEWER_LINES.noChange}: ${escapeMarkdown(why)}` : VIEWER_LINES.noChange;
+    await interaction.editReply(update(await views.render(back, notice)));
     return;
   }
   const now = deps.now();

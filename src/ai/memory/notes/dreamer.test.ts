@@ -1,4 +1,5 @@
 import { ChannelType } from 'discord.js';
+import OpenAI from 'openai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArchiveStore, setArchiveStoreForTesting } from '../../../archive/archiveStore';
 import { config } from '../../../config';
@@ -797,6 +798,25 @@ describe('proposeEdit', () => {
     const failed = await proposeEdit(edit(remi), deps(failing.client));
     expect(failed.ok).toBe(false);
     expect(failed.ok ? '' : failed.error).toMatch(/^400 /);
+  });
+
+  it("stops the model call when the caller gives up (the viewer's deadline), without a repair round", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    // A provider that never answers: the request only ends when its signal aborts.
+    const hanging = (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+      calls++;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason ?? new Error('aborted')), { once: true });
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const client = new OpenAI({ apiKey: 'test-key', baseURL: 'https://openrouter.ai/api/v1', maxRetries: 0, fetch: hanging });
+    const pending = proposeEdit({ ...edit(remi), signal: controller.signal }, deps(client));
+    await vi.waitFor(() => expect(calls).toBe(1));
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, error: 'the draft was stopped: it took too long' });
+    expect(calls).toBe(1);
+    expect(notes.getProfile(REMI)?.version).toBe(1);
   });
 });
 

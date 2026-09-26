@@ -575,7 +575,7 @@ export const config = {
     },
     /**
      * The bot's owner(s): who may edit notes (and anything else owner-only). BOT_OWNER_USER_IDS (csv) when
-     * set; empty ⇒ the Discord application's owner, or its team's members (src/botOwner.ts).
+     * set; empty ⇒ the Discord application's owner, or its team's accepted members (src/botOwner.ts).
      */
     get ownerUserIds(): string[] {
       return envCsv('BOT_OWNER_USER_IDS');
