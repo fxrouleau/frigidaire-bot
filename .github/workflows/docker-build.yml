@@ -17,6 +17,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v7
+      with:
+        # Gitleaks scans the PR's commit range (`<first>^..<last>`), which a depth-1 checkout doesn't have.
+        fetch-depth: 0
 
     - uses: docker/setup-buildx-action@v4
 
