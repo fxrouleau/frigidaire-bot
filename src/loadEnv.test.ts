@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 // Entry points and the relative path each one uses for ./loadEnv.
 const ENTRY_POINTS: Array<[file: string, specifier: string]> = [
   ['app.ts', './loadEnv'],
+  ['ai/memory/bootstrap/cli.ts', '../../../loadEnv'],
   ['evals/persona/cli.ts', '../../loadEnv'],
   ['gate/eval/runEval.ts', '../../loadEnv'],
 ];

@@ -17,7 +17,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ArchiveStore } from '../../../archive/archiveStore';
-import { logger } from '../../../logger';
 import type { MemoryStore } from '../memoryStore';
 import type { NotesStore } from '../notes/notesStore';
 import { CHUNK_DEFAULTS, type ChunkRange, lineCosts, planChunks } from './chunks';
@@ -262,8 +261,5 @@ export function runExport(opts: ExportOptions): ExportManifest {
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(outDir), { recursive: true });
   fs.renameSync(tmpDir, outDir);
-  logger.info(
-    `memory export: ${manifest.totals.messages} messages in ${months.length} months and ${chunks.length} chunks (~${manifest.totals.tokens} tokens) → ${outDir}`,
-  );
   return manifest;
 }

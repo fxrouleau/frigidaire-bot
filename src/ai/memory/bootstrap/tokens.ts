@@ -21,6 +21,11 @@ export function formatCount(n: number): string {
   return Math.round(n).toLocaleString('en-US');
 }
 
+/** "1 person", "3 people", "12,345 messages": a count with its noun (the plural is the noun + "s" unless given). */
+export function counted(n: number, singular: string, plural = `${singular}s`): string {
+  return `${formatCount(n)} ${n === 1 ? singular : plural}`;
+}
+
 /** "$1.23", or "$0.0042" below a cent. */
 export function formatUsd(usd: number): string {
   return usd >= 0.01 || usd === 0 ? `$${usd.toFixed(2)}` : `$${usd.toPrecision(2)}`;
