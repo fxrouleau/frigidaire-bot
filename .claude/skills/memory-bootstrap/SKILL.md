@@ -88,7 +88,7 @@ You stay lean so your context never fills up:
 
 ### The loop (also how to resume)
 
-1. No `work/progress.json` → **init**: create `work/` and its subfolders (`steps`, `observations`,
+1. No `work/progress.json` → **init** (step 1): create `work/` and its subfolders (`steps`, `observations`,
    `working/people`, `working/group`, `working/circles`, `eras`, `final`, `critic`) and write
    progress.json from `export/manifest.json` (`exported_at`, the number of chunks, `journal_high_water`).
 2. **Scan** every chunk listed in the manifest, in order. For the first chunk `N` not in `scan.done`:
@@ -201,7 +201,7 @@ their journal rows will reach the dream anyway):
 
 - Then one subagent per person:
 
-> Write the final notes of person `{ID}` ({NAME} in people.json). Read `{EXPORT}/people.json`,
+> Write the final notes of person `{ID}` (their entry in people.json has this `id`). Read `{EXPORT}/people.json`,
 > `{WORK}/cast.md` (everyone, so relationships read consistently), the final circles they are in
 > (`{WORK}/final/circles/*.md` whose front matter lists `{ID}`), and their full observation log
 > `{WORK}/by-person/{ID}.jsonl` (oldest first; it includes every relationship and shared event involving
@@ -252,8 +252,9 @@ Set `critic` to true.
    subagent ("fix these problems in these files, change nothing else, reply with one line") and check again.
    When it passes, set `check` to true.
 3. Hand over to the owner, in these words or close: the tree in `data/memory-bootstrap/work/final/` passed
-   the check; to load it, copy it into the bot's data volume as `data/memory-import/` (for example
-   `docker cp data/memory-bootstrap/work/final frigidaire-bot:/app/data/memory-import` and
+   the check; to load it, copy its contents into the bot's data volume as `data/memory-import/`, so that
+   `manifest.json` sits right in that folder (for example
+   `docker cp data/memory-bootstrap/work/final/. frigidaire-bot:/app/data/memory-import/` and
    `docker exec frigidaire-bot chown -R node:node /app/data/memory-import`) and restart the bot. At startup
    the bot validates it again, loads it as the notes' first version, moves it to
    `data/memory-import/imported-<timestamp>/` and posts one line in the report channel; a tree with any
