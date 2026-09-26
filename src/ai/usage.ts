@@ -21,7 +21,7 @@ export type UsageFeature =
   | 'chat'
   | 'summary'
   | 'image'
-  | 'learner'
+  | 'memory_capture'
   | 'self_improvement'
   | 'emoji_caption'
   | 'embedding'

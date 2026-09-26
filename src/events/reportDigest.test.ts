@@ -209,7 +209,7 @@ describe('runDigestCheck spend', () => {
     process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
     store.setState(WATERMARK_KEY, new Date(Date.now() - 8 * DAY).toISOString());
     recordUsage({ feature: 'chat', model: 'deepseek/deepseek-v3.2', cost: 0.25, at: Date.now() - 2 * DAY });
-    recordUsage({ feature: 'learner', model: 'qwen/qwen3-vl', cost: 0.1, at: Date.now() - 3 * DAY });
+    recordUsage({ feature: 'memory_capture', model: 'qwen/qwen3-vl', cost: 0.1, at: Date.now() - 3 * DAY });
     recordUsage({ feature: 'image', model: 'gemini-image', cost: 7, at: Date.now() }); // today
     recordUsage({ feature: 'image', model: 'gemini-image', cost: 9, at: Date.now() - 30 * DAY }); // before the period
 
@@ -217,7 +217,7 @@ describe('runDigestCheck spend', () => {
 
     const sent = fakeChannel.recorders.send.calls.map((c) => sentContent(c[0])).join('\n');
     expect(sent).toContain('— $0.35 over 2 calls');
-    expect(sent).toContain('by feature: chat $0.25 (1 call) · learner $0.10 (1 call)');
+    expect(sent).toContain('by feature: chat $0.25 (1 call) · memory_capture $0.10 (1 call)');
     expect(sent).not.toContain('gemini-image');
   });
 

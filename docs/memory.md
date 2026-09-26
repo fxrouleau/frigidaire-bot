@@ -167,15 +167,42 @@ it, dated by first sighting; summaries' WHO'S WHO uses the first lines of each p
 
 The learner's extraction stays (the 30-day test, event/image categories, no re-saves, subject normalization,
 identity updates, attribution through `attributeMessage`, cached voice transcripts, the image cap, the
-self-improvement pass). Only the trigger changes: per channel, once at least `MIN_MESSAGES_FOR_OBSERVATION`
-new member messages exist and the channel has been quiet for `CAPTURE_IDLE_MINUTES` (20), or its oldest
-uncaptured message is `CAPTURE_MAX_SPAN_MINUTES` (120) old. A 1-minute tick; `LEARNER_IGNORE_CHANNELS` is
-respected. `LEARNING_INTERVAL_MS` keeps parsing and only drives the original interval trigger.
+self-improvement pass). What changes is when it reads a channel, how much it reads, and what it keeps.
 
-The extractor's "what you already know" context becomes the participants' profiles (short) and recent journal
-rows. Capture fills `evidence` (the message ids and a short quote of the key passage) and `related_user_ids`
-(the other members a relationship or shared event is about). Usage tag `memory_capture` (the
-self-improvement pass keeps `self_improvement`).
+**When** (`ConversationEndTrigger`): per channel, once at least `MIN_MESSAGES_FOR_OBSERVATION` new member
+messages exist and the channel has been quiet for `CAPTURE_IDLE_MINUTES` (20), or its oldest uncaptured
+message is `CAPTURE_MAX_SPAN_MINUTES` (120) old. A 1-minute tick, oldest conversation first;
+`LEARNER_IGNORE_CHANNELS` is respected. Activity lives in memory, so at startup every channel captured in the
+last two weeks is reported as a possible backlog: each is read once it has been quiet (the learner counts what
+it finds against the minimum), and a deploy never strands a conversation. `LEARNING_INTERVAL_MS` still parses
+and only drives the old interval trigger, which the bot no longer uses.
+
+**How much**: everything after the channel's watermark, paged past Discord's 100-message fetch, up to 2,000
+messages per capture (the rest is reported as a backlog and read once the channel is quiet). A channel never
+captured is read back to the start of its last conversation; older history is the bootstrap's job. A
+conversation longer than one request (~48k characters of transcript) is split into parts at its longest quiet
+gap once a part is at least 60% full, and each later part opens with the end of the previous one (~2k
+characters) under `## ALREADY COVERED — context only, do not extract`. The watermark moves after each part, so
+a failure part-way neither loses nor repeats anything.
+
+**Evidence and related members**: the transcript's lines are numbered (`#N [time] [Name (id:…)] text`), and each
+observation cites `evidence: {lines, quote}` plus, for a relationship or something shared, `related_user_ids`.
+All of it is untrusted model output:
+- line numbers resolve only to lines the request showed, so the model never types a message id;
+- a quote is kept only when it occurs in the cited messages (case, spacing, quote marks and "…" elisions
+  tolerated); one found in another shown line cites that line too, and an invented one is dropped;
+- related members must be known members (ids or unique names; a side account counts as its main).
+
+A row's first and last seen are when the newest message it cites was posted.
+
+**What it already knows**: for a part's authors and up to 5 members it talks about, their profile without
+Earlier (≤ 1,000 chars), their circles, and the journal rows (≤ 12) and open corrections (≤ 5) newer than
+their notes; a person without notes yet gets their 25 most recent memories. For the server, its notes
+(≤ 1,500 chars together) and the server rows newer than them (without notes, the 25 most recent).
+
+Usage tag `memory_capture` (it replaces `learner`; the self-improvement pass keeps `self_improvement` and runs
+once per part). Each capture logs one line:
+`capture: channel=… messages=… parts=… observations=… identity_updates=… capped=yes|no`.
 
 ## Dreaming
 
@@ -383,7 +410,10 @@ Spend section and `query_costs` automatically; the dream's report line carries t
 | `src/ai/memory/notes/context.ts` | how notes render into prompts (chat turn, circles, group section, summaries) |
 | `src/ai/memory/notes/passages.ts` | cited passages from archive.db for the dream |
 | `src/ai/memory/notes/dreamer.ts` | the dream and edit contract; `previewChanges()`, `applyEdit()` |
-| `src/ai/captureTrigger.ts` | when the learner reads a channel (`CaptureTrigger`) |
+| `src/ai/captureTrigger.ts` | when the learner reads a channel (`CaptureTrigger`, `ConversationEndTrigger`) |
+| `src/ai/capture/conversation.ts` | reading a whole conversation (paging, the cap) and splitting it into parts with lead-ins |
+| `src/ai/capture/citations.ts` | resolving an observation's cited lines, quote and related members |
+| `src/ai/capture/knowledge.ts` | what the extractor already knows about the people in a conversation |
 | `src/ai/tools/notes.ts` | `list_notes`, `read_note`, `search_notes`, `record_correction` |
 | `src/botOwner.ts` | the owner resolution |
 

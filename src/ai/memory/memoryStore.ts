@@ -1458,6 +1458,14 @@ export class MemoryStore {
     ).run(channelId, messageId, messageId);
   }
 
+  /** Channels the learner captured at or after `since`, most recent first (its startup resume). */
+  observedChannelsSince(since: Date): string[] {
+    const rows = this.stmt(
+      'SELECT channel_id FROM learner_state WHERE last_observed_at >= ? ORDER BY last_observed_at DESC, channel_id',
+    ).all(toSqliteUtc(since)) as { channel_id: string }[];
+    return rows.map((row) => row.channel_id);
+  }
+
   // ---- Generic key/value state (digest watermark, last-announced deploy sha, etc.) ----
 
   getState(key: string): string | undefined {
