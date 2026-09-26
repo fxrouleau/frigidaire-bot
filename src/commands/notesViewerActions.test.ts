@@ -19,7 +19,7 @@ import {
   type RecordedResponse,
 } from '../test-support/fakeInteraction';
 import { renderViewer, type ViewerState, VIEWER_TTL_MS } from './notesViewer';
-import { editFingerprint, handleViewerInteraction, PendingEdits } from './notesViewerActions';
+import { EDIT_DRAFT_DEADLINE_MS, editFingerprint, handleViewerInteraction, PendingEdits } from './notesViewerActions';
 import { LINES } from './respond';
 
 // Fictional cast, placeholder snowflakes.
@@ -277,8 +277,17 @@ describe('owner edit', () => {
 
     expect(modal.title).toBe('Edit notes on Remi');
     expect(fake.recorders.proposeEdit.calls).toEqual([
-      [{ target: { scope: 'person', ownerId: REMI }, instruction: 'Remi moved to Laval in August', requestedBy: OWNER }],
+      [
+        {
+          target: { scope: 'person', ownerId: REMI },
+          instruction: 'Remi moved to Laval in August',
+          requestedBy: OWNER,
+          signal: expect.any(AbortSignal),
+        },
+      ],
     ]);
+    // The deadline never fired: the draft answered in time.
+    expect(fake.recorders.proposeEdit.calls[0][0].signal?.aborted).toBe(false);
     // Acknowledged at once (the draft takes a while), then the preview replaces the viewer.
     expect(responses.map((r) => r.method)).toEqual(['update', 'editReply']);
     expect(responses[0].content).toBe('✏️ drafting that edit… give me a minute');
@@ -464,6 +473,61 @@ describe('owner edit', () => {
       "that draft didn't change anything: Remi has no \\*Valorant\\* paragraph to drop",
     );
     expect(pendingEdits.size).toBe(0);
+  });
+
+  it("stops a draft that would outlive Discord's 15 minutes, aborts its model call and says so while it can", async () => {
+    const fake = fakeDeps();
+    // The edit model never answers; like the real proposeEdit, the draft ends when its signal aborts.
+    fake.deps.proposeEdit = (request) =>
+      new Promise<EditProposal>((resolve) => {
+        request.signal?.addEventListener('abort', () => resolve({ ok: false, error: 'the draft was stopped' }), {
+          once: true,
+        });
+      });
+    const opened = await click(componentId(view(), 'Edit'), fake);
+    const modal = opened[0].options as APIModalInteractionResponseCallbackData;
+    const { interaction, responses } = createFakeModalSubmitInteraction({
+      customId: modal.custom_id,
+      fields: { instruction: 'rewrite everything about Remi' },
+      invokerId: OWNER,
+    });
+    await handleViewerInteraction(interaction, fake.deps, { pendingEdits, editDeadlineMs: 5 });
+    expect(responses.map((r) => r.method)).toEqual(['update', 'editReply']);
+    expect(responses[1].content).toBe(
+      'that draft was taking forever (Discord only waits 15 minutes on me), so I dropped it. try a smaller ask',
+    );
+    expect(labels(sentOf(responses[1]))).toEqual(['select', 'Edit']);
+    expect(pendingEdits.size).toBe(0);
+    expect(notes.getProfile(REMI)?.version).toBe(1);
+  });
+
+  it('gives a draft 12 minutes by default, inside the 15 Discord allows', async () => {
+    expect(EDIT_DRAFT_DEADLINE_MS).toBe(12 * 60_000);
+    const fake = fakeDeps();
+    let signal: AbortSignal | undefined;
+    fake.deps.proposeEdit = (request) => {
+      signal = request.signal;
+      return new Promise<EditProposal>(() => {});
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { interaction, responses } = createFakeModalSubmitInteraction({
+        customId: `nv:m:p${REMI}:h`,
+        fields: { instruction: 'Remi moved to Laval' },
+        invokerId: OWNER,
+      });
+      const done = handleViewerInteraction(interaction, fake.deps, { pendingEdits });
+      await vi.advanceTimersByTimeAsync(EDIT_DRAFT_DEADLINE_MS - 1);
+      expect(responses.map((r) => r.method)).toEqual(['update']);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await done;
+      expect(signal?.aborted).toBe(true);
+      expect(responses.map((r) => r.method)).toEqual(['update', 'editReply']);
+      expect(responses[1].content).toMatch(/^that draft was taking forever/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('drops a draft that came back for someone other than who was asked about', async () => {

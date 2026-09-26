@@ -329,7 +329,9 @@ Safety:
   action says to try again.
 - A drafted edit is held in memory for 15 minutes (not across restarts). Confirm refuses it when a note it
   covers changed since the draft (the dream, another edit, an undo), and a draft that comes back for another
-  target than the one asked about is dropped.
+  target than the one asked about is dropped. Drafting gets 12 minutes: Discord takes the answer to the
+  modal for 15 only, so a slower draft is stopped (its model call aborted) and the viewer says so while it can.
+  A draft that changes nothing says so, with the model's reason when it gave one.
 - A component's `custom_id` (≤ 100 chars) carries everything a click needs: the action, the subject (a
   person's main id or the group), the screen (a note id or the raw memories), the page and when it was
   issued. The viewer holds no state between clicks. Its buttons expire 15 minutes after the render that

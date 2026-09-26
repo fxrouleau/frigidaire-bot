@@ -80,6 +80,8 @@ export const VIEWER_LINES = {
   ownerUnknown: "couldn't check who's asking just now, try that again in a sec",
   drafting: '✏️ drafting that edit… give me a minute',
   draftFailed: "couldn't draft that edit, my pen broke. try again in a bit",
+  draftTooSlow:
+    'that draft was taking forever (Discord only waits 15 minutes on me), so I dropped it. try a smaller ask',
   draftExpired: 'that draft went stale (I only hold them for 15 minutes, and not across restarts). hit Edit again',
   changedSince: 'those notes changed since I drafted that, so I saved nothing. hit Edit again for a fresh draft',
   noChange: "that draft didn't change anything",

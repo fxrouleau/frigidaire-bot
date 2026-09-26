@@ -169,6 +169,11 @@ export type EditRequest = {
   instruction: string;
   /** Who asked (the owner's main id), for the log. */
   requestedBy: string;
+  /**
+   * Aborts the draft's model calls (the viewer's deadline: Discord takes its answer for 15 minutes only).
+   * An aborted draft comes back as { ok: false }.
+   */
+  signal?: AbortSignal;
 };
 
 /** A drafted edit, ready for the before/after preview and Confirm. */
@@ -203,6 +208,7 @@ async function askModel(
   model: string,
   feature: UsageFeature,
   messages: ChatMessage[],
+  signal?: AbortSignal,
 ): Promise<ModelAnswer> {
   const body: NotesRequestBody = {
     model,
@@ -215,6 +221,7 @@ async function askModel(
     ...featureRequestOptions(feature),
     timeout: MODEL_TIMEOUT_MS,
     maxRetries: 1,
+    ...(signal ? { signal } : {}),
   });
   const choice = response.choices?.[0];
   return {
@@ -238,6 +245,8 @@ async function draftWithRepair<T>(args: {
   system: string;
   user: string;
   check: (text: string) => Checked<T>;
+  /** Aborts the calls (the SDK then throws, like any model error). */
+  signal?: AbortSignal;
 }): Promise<{ result: Checked<T>; costUsd?: number }> {
   const messages: ChatMessage[] = [
     { role: 'system', content: args.system },
@@ -245,7 +254,7 @@ async function draftWithRepair<T>(args: {
   ];
   let costUsd: number | undefined;
   for (let attempt = 0; ; attempt++) {
-    const answer = await askModel(args.client, args.model, args.feature, messages);
+    const answer = await askModel(args.client, args.model, args.feature, messages, args.signal);
     if (answer.costUsd !== undefined) costUsd = (costUsd ?? 0) + answer.costUsd;
     const result: Checked<T> = answer.truncated
       ? { ok: false, errors: ['the answer was cut off at the length limit'] }
@@ -877,6 +886,7 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
       feature: EDIT_FEATURE,
       system: prompt.system,
       user: prompt.user,
+      signal: request.signal,
       check: (text) => {
         const parsed = parseNotesOutput(text, { scope: view.scope, allowedIds });
         if (!parsed.ok) return parsed;
@@ -899,6 +909,10 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
     );
     return { ok: true, target: view.target, output: result.value, allowedIds, changeSummary };
   } catch (error) {
+    if (request.signal?.aborted) {
+      logger.info(`memory edit: drafting for ${request.requestedBy} was stopped (the caller gave up waiting)`);
+      return { ok: false, error: 'the draft was stopped: it took too long' };
+    }
     const message = describeError(error);
     logger.warn(`memory edit: drafting failed: ${message}`);
     return { ok: false, error: message };
