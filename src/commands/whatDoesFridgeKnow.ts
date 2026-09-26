@@ -6,7 +6,7 @@
 import { type APIInteractionGuildMember, ApplicationCommandType, type GuildMember, MessageFlags } from 'discord.js';
 import { currentName } from '../ai/people';
 import { canonicalUserId } from '../linkedAccounts';
-import { renderViewer, type ViewerPayload, type ViewerSubject } from './notesViewer';
+import { ownerWithin, renderViewer, type ViewerPayload, type ViewerSubject } from './notesViewer';
 import type { UserCommand } from './types';
 
 export const whatDoesFridgeKnow: UserCommand = {
@@ -16,7 +16,8 @@ export const whatDoesFridgeKnow: UserCommand = {
     const user = interaction.targetUser;
     const memory = deps.memoryStore();
     const notes = deps.notesStore();
-    const owner = await deps.isOwner(interaction.client, interaction.user.id);
+    // Viewing never waits long on the owner check: past its timeout the owner buttons are simply left out.
+    const owner = (await ownerWithin(deps.isOwner(interaction.client, interaction.user.id))) === true;
     const now = deps.now();
 
     if (user.id === interaction.client.user.id) {

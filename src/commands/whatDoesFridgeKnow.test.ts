@@ -229,6 +229,26 @@ describe('What does Fridge know? (notes)', () => {
     expect(undo).toMatchObject({ action: 'undo', noteId: notes.getProfile(REMI)?.id, version: 2 });
   });
 
+  it("shows the notes without owner buttons when the owner check doesn't answer in time", async () => {
+    const { interaction, responses } = createFakeUserCommandInteraction(
+      { id: REMI, memberDisplayName: 'Remi' },
+      { commandName: COMMAND, botUserId: BOT, invokerId: DALE },
+    );
+    const fake = createFakeCommandDeps({ store: memory, notes, owners: [DALE] });
+    fake.deps.isOwner = () => new Promise<boolean>(() => {});
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const done = handleContextMenuCommand(interaction, fake.deps);
+      await vi.advanceTimersByTimeAsync(1_500);
+      await done;
+    } finally {
+      vi.useRealTimers();
+    }
+    const sent = responses[0].options as Sent;
+    expect(sent.embeds?.[0].title).toBe('Remi');
+    expect(buttonsOf(sent)).toEqual([]);
+  });
+
   it("lists what the notes don't reflect yet on the profile: newer journal rows and open corrections", async () => {
     const seq = notes.journalHighWater();
     notes.recordDreamSuccess({ scope: 'person', ownerId: REMI }, seq);

@@ -479,6 +479,25 @@ describe('owner-only', () => {
     expect(notes.getProfile(REMI)?.version).toBe(2);
   });
 
+  it("says to try again (and does nothing) when the owner check doesn't answer in time", async () => {
+    const fake = fakeDeps(async (target) => proposal(target));
+    fake.deps.isOwner = () => new Promise<boolean>(() => {});
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const pending = click(componentId(view(), 'Edit'), fake);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(await pending).toEqual([
+        expect.objectContaining({
+          method: 'reply',
+          ephemeral: true,
+          content: "couldn't check who's asking just now, try that again in a sec",
+        }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("refuses a non-owner's Confirm even with the draft's token", async () => {
     const fake = fakeDeps(async (target) => proposal(target));
     const { preview } = await draft(fake);

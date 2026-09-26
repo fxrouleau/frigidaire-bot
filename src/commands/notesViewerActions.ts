@@ -35,6 +35,7 @@ import {
   INSTRUCTION_INPUT_ID,
   isExpired,
   MAX_INSTRUCTION_CHARS,
+  ownerWithin,
   parseViewerCustomId,
   renderPreview,
   renderViewer,
@@ -276,15 +277,16 @@ async function dispatch(interaction: ViewerInteraction, deps: CommandDeps, pendi
 
 /** Renders viewer states for one interaction (the clicker's owner status looked up once). */
 class Views {
-  private owner: Promise<boolean> | undefined;
+  private owner: Promise<boolean | undefined> | undefined;
 
   constructor(
     readonly interaction: ViewerInteraction,
     readonly deps: CommandDeps,
   ) {}
 
-  isOwner(): Promise<boolean> {
-    this.owner ??= this.deps.isOwner(this.interaction.client, this.interaction.user.id);
+  /** Whether the clicker is the owner; undefined when the check didn't answer in time (ownerWithin). */
+  isOwner(): Promise<boolean | undefined> {
+    this.owner ??= ownerWithin(this.deps.isOwner(this.interaction.client, this.interaction.user.id));
     return this.owner;
   }
 
@@ -299,7 +301,7 @@ class Views {
       memory: this.deps.memoryStore(),
       notes: this.deps.notesStore(),
       now: this.deps.now(),
-      owner: await this.isOwner(),
+      owner: (await this.isOwner()) === true,
       fallbackName: this.fallbackName(state.subject),
     };
     return renderViewer(state, ctx, notice);
@@ -311,7 +313,13 @@ class Views {
 }
 
 async function refuseNonOwner(interaction: ViewerInteraction, views: Views, what: string): Promise<boolean> {
-  if (await views.isOwner()) return false;
+  const owner = await views.isOwner();
+  if (owner === true) return false;
+  if (owner === undefined) {
+    logger.warn(`notes viewer: the owner check for ${interaction.user.username} timed out, refused ${what} for now`);
+    await tellPrivately(interaction, VIEWER_LINES.ownerUnknown);
+    return true;
+  }
   logger.info(`notes viewer: ${interaction.user.username} is not the owner, refused ${what}`);
   await tellPrivately(interaction, VIEWER_LINES.ownerOnly);
   return true;

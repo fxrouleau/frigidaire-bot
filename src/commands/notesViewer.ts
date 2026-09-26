@@ -77,6 +77,7 @@ const WRITERS: Record<NoteUpdatedBy, string> = {
 export const VIEWER_LINES = {
   expired: "this viewer's gone stale (they only last 15 minutes), right-click them again",
   ownerOnly: 'hands off, only the boss edits my notes',
+  ownerUnknown: "couldn't check who's asking just now, try that again in a sec",
   drafting: '✏️ drafting that edit… give me a minute',
   draftFailed: "couldn't draft that edit, my pen broke. try again in a bit",
   draftExpired: 'that draft went stale (I only hold them for 15 minutes, and not across restarts). hit Edit again',
@@ -90,6 +91,28 @@ export const VIEWER_LINES = {
 } as const;
 
 export const nothingKnownLine = (name: string) => `I've got nothing on ${escapeMarkdown(name)} yet`;
+
+/**
+ * How long the owner check may take before the viewer answers without it: Discord wants a response within
+ * 3 seconds, and the first check after startup fetches the application's owner.
+ */
+export const OWNER_CHECK_TIMEOUT_MS = 1_500;
+
+/**
+ * The owner check's answer, or undefined when it doesn't come in time (the check keeps running and its
+ * result is cached for the next click). A failing check reads as "not the owner".
+ */
+export async function ownerWithin(check: Promise<boolean>, ms = OWNER_CHECK_TIMEOUT_MS): Promise<boolean | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  try {
+    return await Promise.race([check.catch(() => false), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ---- State and custom ids ----
 
@@ -291,20 +314,20 @@ export function paginate(text: string, max = PAGE_CHARS): string[] {
   let rest = text.trim();
   while (rest.length > max) {
     const head = rest.slice(0, max + 1);
-    let cut = -1;
-    for (const separator of ['\n#', '\n\n', '\n', ' ']) {
-      const at = head.lastIndexOf(separator);
+    let cut = max;
+    let separator = '';
+    for (const candidate of ['\n#', '\n\n', '\n', ' ']) {
+      const at = head.lastIndexOf(candidate);
       if (at > max / 2 && at <= max) {
         cut = at;
+        separator = candidate;
         break;
       }
     }
-    if (cut <= 0) cut = max;
     pages.push(rest.slice(0, cut).trimEnd());
-    rest = rest
-      .slice(cut)
-      .replace(/^\s*\n/, '')
-      .replace(/^ +/, '');
+    const next = rest.slice(cut);
+    // Drop only the break itself: a nested list's indentation on the next page stays.
+    rest = separator === ' ' ? next.replace(/^ +/, '') : separator ? next.replace(/^\n+/, '') : next;
   }
   if (rest.length > 0 || pages.length === 0) pages.push(rest);
   return pages;

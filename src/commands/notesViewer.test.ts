@@ -9,6 +9,7 @@ import {
   editModal,
   embedLength,
   isExpired,
+  ownerWithin,
   PAGE_CHARS,
   paginate,
   parseViewerCustomId,
@@ -129,6 +130,23 @@ describe('paginate', () => {
   it('hard-cuts a page with no break in it', () => {
     const pages = paginate('x'.repeat(9000), PAGE_CHARS);
     expect(pages.map((p) => p.length)).toEqual([PAGE_CHARS, PAGE_CHARS, 9000 - 2 * PAGE_CHARS]);
+  });
+
+  it("keeps a nested list item's indentation when a page starts with it", () => {
+    const text = `- ${'a'.repeat(60)}\n  - nested item`;
+    expect(paginate(text, 70)).toEqual([`- ${'a'.repeat(60)}`, '  - nested item']);
+  });
+});
+
+describe('ownerWithin', () => {
+  it("passes the check's answer through, and reads a failing check as not the owner", async () => {
+    expect(await ownerWithin(Promise.resolve(true))).toBe(true);
+    expect(await ownerWithin(Promise.resolve(false))).toBe(false);
+    expect(await ownerWithin(Promise.reject(new Error('Discord is down')))).toBe(false);
+  });
+
+  it("answers undefined when the check doesn't come back in time", async () => {
+    expect(await ownerWithin(new Promise<boolean>(() => {}), 5)).toBeUndefined();
   });
 });
 
