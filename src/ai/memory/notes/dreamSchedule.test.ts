@@ -220,6 +220,24 @@ describe('DreamScheduler.check', () => {
     expect(await scheduler({ report: undefined }).check()).toBe(result);
   });
 
+  it("trims the notes' version history after each night, and survives a failed trim", async () => {
+    let prunes = 0;
+    const s = scheduler({
+      prune: () => {
+        prunes++;
+        if (prunes > 1) throw new Error('database is locked');
+        return 12;
+      },
+    });
+    expect(await s.check()).toBe(result);
+    expect(prunes).toBe(1);
+    expect(await s.check()).toBeUndefined(); // same day: no night, no trim
+    expect(prunes).toBe(1);
+    clock = new Date('2026-09-27T08:30:00Z');
+    expect(await s.check()).toBe(result);
+    expect(prunes).toBe(2);
+  });
+
   it('survives a report that did not go out', async () => {
     const s = scheduler({ report: async () => false });
     expect(await s.check()).toBe(result);

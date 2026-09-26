@@ -232,6 +232,37 @@ describe('undo', () => {
   });
 });
 
+describe('pruneVersions', () => {
+  it("keeps each note's newest versions, and every bootstrap and owner-edit version", () => {
+    notes.writeNotes(remi, [profile('imported')], { updatedBy: 'bootstrap' });
+    notes.writeNotes(remi, [profile('edited by the owner')], { updatedBy: 'edit' });
+    for (let night = 1; night <= 8; night++) notes.writeNotes(remi, [profile(`night ${night}`)], { updatedBy: 'dream' });
+    notes.writeNotes(group, [{ topic: 'vibe', title: 'Vibe', content: 'Roasts.' }], { updatedBy: 'dream' });
+    const id = notes.getProfile(REMI)?.id ?? 0;
+    expect(notes.getVersions(id)).toHaveLength(10);
+
+    expect(notes.pruneVersions({ keep: 3 })).toBe(5);
+    expect(notes.getVersions(id).map((v) => [v.version, v.updatedBy])).toEqual([
+      [10, 'dream'],
+      [9, 'dream'],
+      [8, 'dream'],
+      [2, 'edit'],
+      [1, 'bootstrap'],
+    ]);
+    expect(notes.getVersions(notes.getNote(group, 'vibe')?.id ?? 0)).toHaveLength(1);
+    // Undo still has the version before the current one.
+    const undone = notes.undo(id);
+    expect(undone.ok && undone.note.content).toBe('night 7');
+    expect(notes.pruneVersions()).toBe(0);
+  });
+
+  it('never keeps fewer than two versions', () => {
+    for (let night = 1; night <= 4; night++) notes.writeNotes(remi, [profile(`night ${night}`)], { updatedBy: 'dream' });
+    expect(notes.pruneVersions({ keep: 0 })).toBe(2);
+    expect(notes.getVersions(notes.getProfile(REMI)?.id ?? 0).map((v) => v.version)).toEqual([4, 3]);
+  });
+});
+
 describe('searchNotes', () => {
   beforeEach(() => {
     notes.writeNotes(remi, [profile(), { topic: 'work', title: 'Work', content: 'Night shifts at the bakery.' }], {

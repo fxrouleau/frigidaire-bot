@@ -214,6 +214,13 @@ type MemberRow = {
 };
 
 const SELF_DIAGNOSIS_NOT_IN = SELF_DIAGNOSIS_CATEGORIES.map((c) => `'${c}'`).join(', ');
+/** Versions pruneVersions() keeps per note by default (the current one included). */
+export const NOTE_VERSIONS_KEPT = 50;
+/**
+ * Writers whose versions pruneVersions() never removes: the bootstrap's notes (the history a rebuild starts
+ * from) and the owner's hand edits (the owner's own words).
+ */
+const KEPT_WRITERS: readonly NoteUpdatedBy[] = ['bootstrap', 'import', 'edit'];
 // The group's journal: rows about the server as a whole ('bot' rows are about the bot itself).
 const GROUP_SUBJECTS = JSON.stringify([...NON_PERSON_SUBJECTS].filter((s) => s !== 'bot'));
 const MAX_REASON_CHARS = 4_000;
@@ -961,6 +968,27 @@ export class NotesStore {
       if (error instanceof WriteRefused) return { ok: false, error: error.errors.join('; ') };
       throw error;
     }
+  }
+
+  /**
+   * Trims each note's version history to its newest `keep` versions (the current one included; never
+   * fewer than 2, so undo always has the version before), except the bootstrap's and the owner's edits,
+   * which are always kept. Returns how many versions were removed. The nightly dream writes a new profile
+   * version for most active people every night, so the history would otherwise grow without end.
+   */
+  pruneVersions(opts: { keep?: number } = {}): number {
+    const keep = Math.max(2, Math.floor(opts.keep ?? NOTE_VERSIONS_KEPT));
+    const kept = KEPT_WRITERS.map((w) => `'${w}'`).join(', ');
+    return this.stmt(
+      `DELETE FROM note_versions
+       WHERE updated_by NOT IN (${kept})
+         AND id IN (
+           SELECT id FROM (
+             SELECT id, ROW_NUMBER() OVER (PARTITION BY note_id ORDER BY version DESC) AS newest
+             FROM note_versions
+           ) WHERE newest > ?
+         )`,
+    ).run(keep).changes;
   }
 
   /** Rebuilds the notes FTS index from the active notes (belt and braces; the triggers keep it right). */

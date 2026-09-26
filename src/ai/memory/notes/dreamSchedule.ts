@@ -7,8 +7,9 @@
 //
 //   🌙 dream · updated 2 profiles (Remi: new job at the bakery; Dale: quit Valorant) · group: new lore · $0.18
 //
-// The check is one bot_state read, so it simply runs every minute (unref'd timers, started by the
-// memoryDream ClientReady event).
+// After each night the notes' version history is trimmed to the newest 50 versions per note (bootstrap and
+// owner-edit versions are always kept). The check is one bot_state read, so it simply runs every minute
+// (unref'd timers, started by the memoryDream ClientReady event).
 import type { Client } from 'discord.js';
 import { config } from '../../../config';
 import { canonicalUserId } from '../../../linkedAccounts';
@@ -18,6 +19,7 @@ import { easternParts } from '../../utils';
 import { getMemoryStore, getNotesStore } from '../index';
 import { type DreamOutcome, type NightlyDreamResult, runNightlyDream } from './dreamer';
 import { easternDay } from './dreamPrompts';
+import { NOTE_VERSIONS_KEPT } from './notesStore';
 
 /** bot_state key: the Eastern day (YYYY-MM-DD) whose dream last ran (or started). */
 export const DREAM_NIGHT_KEY = 'dream:last_night';
@@ -104,6 +106,11 @@ function summaryLine(result: NightlyDreamResult): string {
 export type DreamSchedulerOptions = {
   /** Runs one night (runNightlyDream over the shared stores by default). */
   run?: () => Promise<NightlyDreamResult>;
+  /**
+   * After the night: trims the notes' version history (NotesStore.pruneVersions on the shared store by
+   * default); resolves how many versions went.
+   */
+  prune?: () => number;
   /** Posts the report line; resolves whether it went out. Without one, nothing is posted. */
   report?: (text: string) => Promise<boolean>;
   state?: DreamStateStore;
@@ -148,12 +155,27 @@ export class DreamScheduler {
       const result = await run();
       logger.info(summaryLine(result));
       await this.report(result);
+      this.prune();
       return result;
     } catch (error) {
       logger.warn('dream: the nightly check failed:', error);
       return undefined;
     } finally {
       this.running = false;
+    }
+  }
+
+  /** Trims the notes' version history after the night; a failure is only logged. */
+  private prune(): void {
+    try {
+      const removed = (this.opts.prune ?? (() => getNotesStore().pruneVersions()))();
+      if (removed > 0) {
+        logger.info(
+          `dream: pruned ${removed} old note version(s) (each note keeps its newest ${NOTE_VERSIONS_KEPT}; bootstrap and owner-edit versions always).`,
+        );
+      }
+    } catch (error) {
+      logger.warn('dream: pruning old note versions failed:', error);
     }
   }
 
