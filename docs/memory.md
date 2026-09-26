@@ -1,16 +1,17 @@
 # Memory v2: per-person notes, circles, conversation-end capture, nightly dreaming
 
-This is the design of the bot's long-term memory from memory v2 on. It replaces the "atomic facts + retrieval
-injection" architecture described in AGENTS.md ("Long-term memory & learning"). Names in examples are the
-test suite's fictional cast (Remi, Dale, Nova); ids are placeholders.
+This is the design of the bot's long-term memory from memory v2 on. It replaced the "atomic facts + retrieval
+injection" architecture of memory v1; AGENTS.md ("Long-term memory & learning") has the summary. Names in
+examples are the test suite's fictional cast (Remi, Dale, Nova, Ozzie); ids are placeholders.
 
-> **Status.** The foundation is in (data model, chat-time use, tools, config, the interfaces below). The
-> conversation-end capture trigger, the nightly dream, the viewer/owner edit and the bootstrap tooling are
-> being built on top of it; see [Code map](#code-map).
+> **Status: built.** Every part below is in: the data model, chat-time use and tools, capture at
+> conversation end, the nightly dream (with the weekly group refresh), the viewer with the owner's edit and
+> undo, and the bootstrap tooling (export, playbook, startup import, built-in bootstrap). What is deliberately
+> left for later is under [Not yet](#not-yet). Code: [Code map](#code-map).
 
 ## Why
 
-Memory v1 is a few hundred one-sentence rows (the `memories` table) filled by a 30-minute learner and
+Memory v1 was a few hundred one-sentence rows (the `memories` table) filled by a 30-minute learner and
 injected per turn as a handful of relevance-picked rows. Nothing ever synthesizes them: the bot never sees
 "who is this person" as a whole, contradictions ("plays Valorant" / "quit Valorant") and stale facts pile up,
 and people are isolated from each other. Memory v2 is what modern agents do: per-person markdown notes (a
@@ -467,9 +468,10 @@ matched to its line by `citedEvidence()` (kept only when it occurs in the segmen
 resolved by `relatedMembers()`. The answer is untrusted: rows about people outside the export, unknown
 categories (only fact, preference, personality and vibe), Discord markup, ids or over-long content are
 dropped. Rows are saved with source `bootstrap`, `first_seen_at` backdated to the quoted line's time (or the
-given date), evidence (the quoted line's message ids and the quote) and the other members involved. Finished segments are recorded in memory.db (`bot_state`
-`memory_bootstrap:progress`), so a stopped run resumes at the next one and a failed segment is retried on the
-next run; `--from`/`--to` and `--max-segments` make a trial run. Once the whole archive is read (not after a
+given date), evidence (the quoted line's message ids and the quote) and the other members involved. Finished
+segments are recorded in memory.db (`bot_state` `memory_bootstrap:progress`), so a stopped run resumes at the
+next one and a failed segment is retried on the next run; `--from`/`--to` and `--max-segments` make a trial
+run. Once the whole archive is read (not after a
 range), it dreams everyone with new journal rows until nothing is pending (`runDreamsUntilCaughtUp`): a
 night's dream reads at most 300 rows per person, so someone with thousands of history rows gets pass after
 pass, then the group the same way. A person whose dream fails is left for the nightly dream, and three
@@ -491,7 +493,10 @@ schedule's day (`--no-dream` skips it; a failure leaves it to the nightly dream)
 | `CAPTURE_MAX_SPAN_MINUTES` | 120 | …or once its oldest uncaptured message is this old |
 | `BOT_OWNER_USER_IDS` | empty ⇒ application owner | who may edit and undo notes |
 
-`LEARNING_INTERVAL_MS` still parses (the original interval trigger). Startup summary tokens:
+`MIN_MESSAGES_FOR_OBSERVATION` (5) is how many new member messages a conversation needs before it is
+captured; `LEARNER_IGNORE_CHANNELS` and `SELF_IMPROVEMENT_ENABLED` keep their meaning. `LEARNING_INTERVAL_MS`
+still parses, so an old `.env` never breaks startup, but nothing uses it any more (it only fed the old
+interval trigger). Startup summary tokens:
 `dream=on(model:…,hour:4,max:20,report:on|off|no-channel[,edit:…][,bootstrap:…])`,
 `learning=idle:20m,span:2h,min:5,…`, `owners=app|N`.
 
@@ -499,6 +504,23 @@ schedule's day (`--no-dream` skips it; a failure leaves it to the nightly dream)
 
 Usage tags `memory_capture`, `memory_dream`, `memory_edit`, `memory_bootstrap` land in the weekly digest's
 Spend section and `query_costs` automatically; the dream's report line carries the night's cost.
+
+## Not yet
+
+Deliberately left out of memory v2, for a later change:
+- **Threads and announcement channels aren't captured.** The learner reads text channels only, as before
+  memory v2; a conversation in a thread never reaches the journal (the archive and the bootstrap export do
+  include threads).
+- **No confidence field on journal rows.** The dream's choice of which cited passages to reread is a
+  heuristic (contested claims, self-corrections, traits and preferences, rows seen 3+ times, then the rest).
+- **Drafted edits live in memory** (15 minutes, at most 20): a restart drops a draft awaiting Confirm.
+- **An outage at the dream hour costs that night**: the day is claimed before the run, so nothing retries the
+  same day; nothing is lost (watermarks don't move) and the next night catches up.
+- **The import refuses a manifest whose `journal_high_water` is above the live journal's** (an export of
+  another database); there is no override flag.
+- **Token counts are estimates** (export sizes, chunking, the dry run's cost), said as such where printed.
+- **Recurrence starts at deploy**: rows written before memory v2 start with `seen_count` 1 and their
+  created/updated times as first/last seen.
 
 ## Code map
 
@@ -511,7 +533,9 @@ Spend section and `query_costs` automatically; the dream's report line carries t
 | `src/ai/memory/notes/sections.ts` | the Now / Traits / Circles & people / Earlier shape |
 | `src/ai/memory/notes/context.ts` | how notes render into prompts (chat turn, circles, group section, summaries) |
 | `src/ai/memory/notes/passages.ts` | cited passages from archive.db for the dream |
-| `src/ai/memory/notes/dreamer.ts` | the dream and edit contract; `previewChanges()`, `applyEdit()` |
+| `src/ai/memory/notes/dreamer.ts` | the writers: `dreamPerson()`, `dreamGroup()` and `planGroupDream()` (new rows or the weekly refresh), `runNightlyDream()`, `runDreamsUntilCaughtUp()` (the bootstrap), `proposeEdit()`, `previewChanges()`, `applyEdit()` |
+| `src/ai/memory/notes/dreamPrompts.ts` | the dream, group and edit prompts and how their input is rendered |
+| `src/ai/memory/notes/dreamSchedule.ts`, `src/events/memoryDream.ts` | once per Eastern day from `MEMORY_DREAM_HOUR`, the report line, the version trim |
 | `src/ai/captureTrigger.ts` | when the learner reads a channel (`CaptureTrigger`, `ConversationEndTrigger`) |
 | `src/ai/capture/conversation.ts` | reading a whole conversation (paging, the cap) and splitting it into parts with lead-ins |
 | `src/ai/capture/citations.ts` | resolving an observation's cited lines, quote and related members |
