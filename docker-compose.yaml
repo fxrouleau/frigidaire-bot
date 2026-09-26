@@ -11,9 +11,48 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      # run_code posts to the sandbox sidecar below; set SANDBOX_URL= (empty) in .env to turn it off.
+      SANDBOX_URL: "${SANDBOX_URL-http://sandbox:8080}"
+    depends_on:
+      - sandbox
     restart: unless-stopped
     volumes:
       - ./data:/app/data
+
+  # Code-execution sidecar for the run_code tool (sandbox/). It gets no env_file on purpose: code the model
+  # writes runs in here, so nothing secret may live here. No published ports either: only the bot reaches it,
+  # at http://sandbox:8080 on the compose network.
+  # Egress is open (pip install, curl, APIs), and on this default bridge network "open" means more than the
+  # internet: a run can also reach whatever the Docker host listens on (through the network's gateway address:
+  # Portainer, other stacks' published ports) and, on a cloud VPS, the metadata endpoint at 169.254.169.254.
+  # Code in here is model-written and reachable by prompt injection; nothing inside the container can filter
+  # its traffic (every capability is dropped), and safeFetch's SSRF rules only cover the bot's own requests.
+  # Pick one:
+  #   - cut egress (pip/npm installs and web requests from runs stop working): an internal network shared
+  #     with the bot:  networks: { sandbox-net: { internal: true } }
+  #                    sandbox: networks: [sandbox-net]      frigidaire-bot: networks: [default, sandbox-net]
+  #   - keep it and firewall the host: drop traffic from this network's subnet to the host itself (INPUT
+  #     chain) and to 169.254.0.0/16 and the private ranges (DOCKER-USER chain).
+  sandbox:
+    build: ./sandbox
+    restart: unless-stopped
+    environment:
+      # Optional shared bearer token; the bot reads the same variable from .env.
+      SANDBOX_TOKEN: "${SANDBOX_TOKEN:-}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777,exec
+    volumes:
+      - sandbox-workspace:/workspace
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 1
+    pids_limit: 256
 
   test:
     profiles: [dev]
@@ -29,3 +68,10 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - RUN_LIVE=${RUN_LIVE:-}
       - DEBUG_CAPTURE=${DEBUG_CAPTURE:-}
+
+volumes:
+  # Files the sandbox's runs keep between calls (pip --user installs, downloads, scratch data). A fresh named
+  # volume inherits the image's /workspace ownership (uid 10001); a host bind mount would need a chown.
+  # It lives on the host's disk, so the sidecar caps it (SANDBOX_WORKSPACE_MAX_MB, default 2048; a run that
+  # goes over is killed and the workspace wiped).
+  sandbox-workspace:

@@ -47,7 +47,7 @@ describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, 
 
       let vectors: Float32Array[];
       try {
-        vectors = await provider.embed(['Felix: Felix loves pizza and hot dogs'], 'document');
+        vectors = await provider.embed(['Remi: Remi loves pizza and hot dogs'], 'document');
       } catch (error) {
         const original = error instanceof Error ? error.message : String(error);
         throw new Error(
@@ -68,7 +68,7 @@ describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, 
     'returns a finite, unit-norm Float32Array for a document embed',
     async () => {
       const provider = new OpenRouterEmbeddingProvider();
-      const [vector] = await provider.embed(['Felix: Felix loves pizza and hot dogs'], 'document');
+      const [vector] = await provider.embed(['Remi: Remi loves pizza and hot dogs'], 'document');
 
       // Sizing data for the memory_embeddings table: each vector BLOB is dims * 4 bytes.
       console.log(`CALIBRATION model=${provider.model} dims=${vector.length} blob_bytes=${vector.length * 4}`);
@@ -87,8 +87,8 @@ describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, 
     async () => {
       const provider = new OpenRouterEmbeddingProvider();
       const texts = [
-        'Felix: Felix loves pizza and hot dogs',
-        'Jason: Jason mains Yasuo in League of Legends',
+        'Remi: Remi loves pizza and hot dogs',
+        'Jasper: Jasper mains Yasuo in League of Legends',
         'server culture: movie night happens every Friday',
       ];
 
@@ -117,9 +117,9 @@ describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, 
     async () => {
       const provider = new OpenRouterEmbeddingProvider();
 
-      const [query] = await provider.embed(['what does felix like to eat'], 'query');
+      const [query] = await provider.embed(['what does remi like to eat'], 'query');
       const [relatedDoc, unrelatedDoc] = await provider.embed(
-        ['Felix: Felix loves pizza and hot dogs', 'Jason: Jason mains Yasuo in League of Legends'],
+        ['Remi: Remi loves pizza and hot dogs', 'Jasper: Jasper mains Yasuo in League of Legends'],
         'document',
       );
 
@@ -135,14 +135,14 @@ describe.skipIf(!RUN_LIVE)('OpenRouter embeddings live calibration tests (paid, 
     async () => {
       const provider = new OpenRouterEmbeddingProvider();
 
-      const queryText = 'what does felix like to eat';
+      const queryText = 'what does remi like to eat';
       const docTexts = [
-        'Felix: Felix loves pizza and hot dogs', // 0: related to the query
-        'Jason: Jason mains Yasuo in League of Legends', // 1: unrelated to the query
-        'Felix loves pizza', // 2: dedup pair anchor
-        'Felix really likes pizza', // 3: near-duplicate of 2 (should merge at save time)
-        'Felix loves pasta', // 4: related to 2 but a DISTINCT fact (should NOT merge)
-        'Felix: Felix went to a restaurant with Jason last week', // 5: marginally related to the query
+        'Remi: Remi loves pizza and hot dogs', // 0: related to the query
+        'Jasper: Jasper mains Yasuo in League of Legends', // 1: unrelated to the query
+        'Remi loves pizza', // 2: dedup pair anchor
+        'Remi really likes pizza', // 3: near-duplicate of 2 (should merge at save time)
+        'Remi loves pasta', // 4: related to 2 but a DISTINCT fact (should NOT merge)
+        'Remi: Remi went to a restaurant with Jasper last week', // 5: marginally related to the query
       ];
 
       const [query] = await provider.embed([queryText], 'query');

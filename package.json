@@ -1,37 +1,41 @@
 {
   "name": "frigidaire-bot",
   "private": true,
-  "packageManager": "yarn@4.7.0",
+  "packageManager": "yarn@4.18.1",
   "engines": {
     "node": ">=26"
   },
   "dependencies": {
-    "better-sqlite3": "^12.6.2",
-    "discord.js": "^14.25.1",
-    "dotenv": "^17.2.4",
-    "openai": "6.18.0",
-    "sharp": "^0.34.5"
+    "better-sqlite3": "^13.0.3",
+    "discord.js": "^14.27.0",
+    "dotenv": "^18.0.4",
+    "openai": "7.23.0",
+    "sharp": "^0.35.4"
   },
   "devDependencies": {
-    "@biomejs/biome": "1.9.4",
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^24",
-    "lefthook": "^1.13.6",
-    "nodemon": "^3.1.11",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "@biomejs/biome": "2.5.14",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26",
+    "@typescript/typescript6": "^6.0.2",
+    "lefthook": "^2.1.14",
+    "nodemon": "^3.1.14",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
   },
   "scripts": {
     "dev": "nodemon",
     "build": "tsc",
     "prod": "node dist/app.js",
-    "check": "yarn biome check --fix",
-    "check:ci": "yarn biome check",
+    "check": "biome check --fix src biome.json package.json tsconfig.json tsconfig.test.json nodemon.json vitest.config.ts",
+    "check:ci": "biome check src biome.json package.json tsconfig.json tsconfig.test.json nodemon.json vitest.config.ts",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:live": "vitest run .live.test",
-    "replay": "ts-node src/test-support/replayCli.ts"
+    "replay": "tsx src/test-support/replayCli.ts",
+    "eval:gate": "tsx src/gate/eval/runEval.ts",
+    "eval:persona": "tsx src/evals/persona/cli.ts"
   }
 }

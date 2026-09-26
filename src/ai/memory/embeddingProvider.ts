@@ -1,6 +1,8 @@
 import type OpenAI from 'openai';
+import type { EmbeddingCreateParams } from 'openai/resources/embeddings';
 import { config } from '../../config';
 import { requireOpenRouterClient } from '../openRouterClient';
+import { featureRequestOptions } from '../usage';
 import { normalize } from './vectorMath';
 
 /** What the texts will be used for: queries get the model's retrieval instruction prefix, documents do not. */
@@ -42,15 +44,17 @@ export class OpenRouterEmbeddingProvider implements EmbeddingProvider {
 
     const input = kind === 'query' ? texts.map((text) => this.toQueryInput(text)) : texts;
 
-    const response = await this.client.embeddings.create({
+    // A typed variable rather than an inline literal: OpenRouter's `provider` routing field is not in the
+    // SDK's params type, and only a fresh object literal gets the excess-property check.
+    const body: EmbeddingCreateParams & { provider: Record<string, unknown> } = {
       model: this.model,
       input,
       // Explicit float format: the SDK otherwise defaults to base64 (and decodes it itself), which
       // not every OpenRouter embeddings backend supports and which fixtures couldn't represent readably.
       encoding_format: 'float',
-      // @ts-expect-error OpenRouter-specific field
       provider: this.routing,
-    });
+    };
+    const response = await this.client.embeddings.create(body, featureRequestOptions('embedding'));
 
     const data = response?.data;
     if (!Array.isArray(data) || data.length === 0) {

@@ -1,15 +1,38 @@
 import {
   type Channel,
   ChannelType,
+  type ForumChannel,
+  type MediaChannel,
   type Message,
+  MessageFlags,
   type NewsChannel,
+  PermissionFlagsBits,
   type TextChannel,
+  type VoiceChannel,
+  type Webhook,
   type WebhookMessageCreateOptions,
+  type WebhookType,
 } from 'discord.js';
+import { config } from './config';
+import { downloadAttachments, formatSize } from './links/attachments';
+import { replyContextLine } from './links/replyContext';
 import { logger } from './logger';
+import { recordRelay } from './relay';
 
 /** A guild channel that can own a webhook: regular text channels and announcement channels. */
 export type WebhookCapableChannel = TextChannel | NewsChannel;
+
+/** Every channel type a webhook can be created on. Threads and forum posts post through their parent's. */
+export type WebhookParentChannel = TextChannel | NewsChannel | VoiceChannel | ForumChannel | MediaChannel;
+
+/** Where a webhook post for a channel goes: the webhook's channel, plus the thread for threads and forum posts. */
+export type WebhookTarget = { channel: WebhookParentChannel; threadId?: string };
+
+// Discord's limit for a webhook message's content (Nitro members can send up to 4000 themselves).
+export const MAX_WEBHOOK_CONTENT = 2000;
+
+// Creating the one-time webhook, and deleting the original once the repost is up.
+const REPOST_PERMISSIONS = [PermissionFlagsBits.ManageWebhooks, PermissionFlagsBits.ManageMessages];
 
 /**
  * Splits a string into multiple chunks of a specified size.
@@ -61,9 +84,44 @@ export function splitMessage(text: string, maxLength = 2000): string[] {
 /** Who a webhook post should appear to come from. */
 export type WebhookIdentity = { name: string; avatar?: string };
 
-/** Channels that can own a webhook (threads and DMs cannot). */
+/** Channels that can own a webhook themselves: text and announcement channels (threads and DMs cannot). */
 export function isWebhookCapableChannel(channel: Channel): channel is WebhookCapableChannel {
   return channel.type === ChannelType.GuildText || channel.type === ChannelType.GuildAnnouncement;
+}
+
+/**
+ * Where a webhook repost of a message in `channel` goes, or undefined when it can't have one. Text,
+ * announcement and voice-channel chats own the webhook themselves; a thread or forum post is reached
+ * through a webhook on its parent plus `threadId`. Archived threads are skipped (a webhook post would
+ * silently unarchive them) and so are locked ones (closed on purpose).
+ */
+export function webhookTargetOf(channel: Channel): WebhookTarget | undefined {
+  switch (channel.type) {
+    case ChannelType.GuildText:
+    case ChannelType.GuildAnnouncement:
+    case ChannelType.GuildVoice:
+      return { channel };
+    case ChannelType.PublicThread:
+    case ChannelType.PrivateThread:
+    case ChannelType.AnnouncementThread: {
+      if (channel.archived || channel.locked) return undefined;
+      const parent = channel.parent;
+      return parent ? { channel: parent, threadId: channel.id } : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Whether the message @-mentions this user in its text. `mentions.users` alone can't tell: a reply that
+ * pings (Discord's default) puts the replied-to author there too, so replying to someone's post would
+ * count as mentioning them.
+ */
+export function mentionsInText(message: Message, userId: string): boolean {
+  if (!message.mentions.users.has(userId)) return false;
+  if (message.mentions.repliedUser?.id !== userId) return true;
+  return message.content.includes(`<@${userId}>`) || message.content.includes(`<@!${userId}>`);
 }
 
 /** The identity a message's author would have as a webhook: server nickname first, then display name. */
@@ -74,20 +132,38 @@ export function identityOf(message: Message): WebhookIdentity {
   };
 }
 
+// Webhook names are 1-80 characters and may not contain "clyde" or "discord" (any case); a hair space
+// (U+200A) inside the word gets past the check without visibly changing the name (the PluralKit fix).
+const MAX_WEBHOOK_NAME = 80;
+const HAIR_SPACE = '\u200A';
+const FALLBACK_WEBHOOK_NAME = 'someone';
+
+/** A member's name as Discord will accept it for a webhook, reading the same. */
+export function webhookName(name: string): string {
+  const safe = name
+    .trim()
+    .replace(/(c)(lyde)|(d)(iscord)/gi, (_match, c, lyde, d, iscord) =>
+      c !== undefined ? `${c}${HAIR_SPACE}${lyde}` : `${d}${HAIR_SPACE}${iscord}`,
+    );
+  const chars = [...safe].slice(0, MAX_WEBHOOK_NAME);
+  if (chars.length === 0) return FALLBACK_WEBHOOK_NAME;
+  // Single-character webhook names are refused too.
+  return chars.length === 1 ? `${chars[0]}${HAIR_SPACE}` : chars.join('');
+}
+
 /**
- * Posts as `identity` through a one-time webhook. The webhook is created for this post and always
- * deleted afterwards — including when the send fails — so a failure can never leak one of the 15
- * webhooks a channel may hold.
+ * Runs `use` with a one-time webhook wearing `identity`. The webhook is always deleted afterwards —
+ * including when `use` throws — so a failure can never leak one of the 15 webhooks a channel may hold.
  */
-export async function sendViaWebhook(
-  channel: WebhookCapableChannel,
+export async function withTemporaryWebhook<T>(
+  channel: WebhookParentChannel,
   identity: WebhookIdentity,
-  payload: string | WebhookMessageCreateOptions,
-): Promise<void> {
-  const webhook = await channel.createWebhook({ name: identity.name, avatar: identity.avatar });
+  use: (webhook: Webhook<WebhookType.Incoming>) => Promise<T>,
+): Promise<T> {
+  const webhook = await channel.createWebhook({ name: webhookName(identity.name), avatar: identity.avatar });
   logger.info(`Created webhook ${webhook.id} in #${channel.id}.`);
   try {
-    await webhook.send(payload);
+    return await use(webhook);
   } finally {
     try {
       await webhook.delete();
@@ -99,16 +175,168 @@ export async function sendViaWebhook(
 }
 
 /**
- * Reposts a message via a webhook to impersonate the original author, then deletes the original.
- * The repost goes out first: if it fails, the user's message is left in place rather than lost.
- * @param message The original message object.
- * @param newContent The content to send in the new message.
+ * Posts `payloads` in order as `identity` through one one-time webhook (deleted afterwards, also on
+ * failure), so a long text split into chunks shares a single webhook. Resolves to the posted messages.
+ * Nothing pings unless a payload sets its own `allowedMentions`: a webhook post never fires @everyone,
+ * role or user mentions by default. To post into a thread, pass its parent as `channel` and the thread's
+ * id as each payload's `threadId`.
  */
-export async function repostMessage(message: Message, newContent: string): Promise<void> {
-  const channel = message.channel;
-  if (!isWebhookCapableChannel(channel)) {
-    throw new Error(`Channel ${channel.id} (type ${channel.type}) cannot own a webhook.`);
+export async function sendViaWebhook(
+  channel: WebhookParentChannel,
+  identity: WebhookIdentity,
+  payloads: WebhookMessageCreateOptions[],
+): Promise<Message[]> {
+  return withTemporaryWebhook(channel, identity, async (webhook) => {
+    const sent: Message[] = [];
+    for (const payload of payloads) {
+      sent.push(await webhook.send({ allowedMentions: { parse: [] }, ...payload }));
+    }
+    return sent;
+  });
+}
+
+/**
+ * Why a message can't be reposted faithfully, or undefined when it can. Everything here is checked
+ * before any network work: a message the bot can't carry over whole is left exactly as it is.
+ */
+export function repostBlocker(
+  message: Message,
+  maxAttachmentBytes = config.links.maxRepostAttachmentBytes,
+): string | undefined {
+  const target = webhookTargetOf(message.channel);
+  if (!target) return "its channel can't host a webhook repost (DM, archived or locked thread)";
+  if (target.threadId === message.id) return 'it opens a forum post (deleting it would delete the post)';
+  // Without these the repost either fails outright or flashes up and is taken back (see repostMessage).
+  // Threads inherit the parent's permissions, so the parent answers for both.
+  const me = message.guild?.members.me;
+  if (me) {
+    const missing = target.channel.permissionsFor(me).missing(REPOST_PERMISSIONS);
+    if (missing.length > 0) return `the bot lacks ${missing.join(' and ')} in #${target.channel.name}`;
   }
-  await sendViaWebhook(channel, identityOf(message), newContent);
-  await message.delete();
+  if (message.stickers.size > 0) return "it has a sticker (webhooks can't send stickers)";
+  if (message.poll) return 'it has a poll';
+  if (message.content.length > MAX_WEBHOOK_CONTENT) {
+    return `it is ${message.content.length} characters, over the ${MAX_WEBHOOK_CONTENT} a webhook can post`;
+  }
+  const attachmentBytes = [...message.attachments.values()].reduce((sum, a) => sum + a.size, 0);
+  if (attachmentBytes > maxAttachmentBytes) {
+    return `its attachments total ${formatSize(attachmentBytes)}, over the ${formatSize(maxAttachmentBytes)} repost cap`;
+  }
+  return undefined;
+}
+
+export type RepostOptions = {
+  /** Downloads the attachments to carry over (injectable for tests). */
+  fetch?: typeof globalThis.fetch;
+  /** Total attachment bytes the repost may carry; defaults to LINK_REPOST_MAX_ATTACHMENT_BYTES. */
+  maxAttachmentBytes?: number;
+  /** Runs right before the original is deleted (the deleted-message reposter must not see a "regret"). */
+  onBeforeDelete?: () => void;
+  /**
+   * Whether `newContent` still matches the message (it was not edited). Checked again after the slow
+   * part (attachment downloads, reply lookup, webhook creation) and right before the post goes out: a
+   * message edited meanwhile is left alone rather than reposted as its pre-edit text and deleted.
+   */
+  stillCurrent?: () => boolean;
+};
+
+export type RepostOutcome =
+  /** Posted as the author; the original is gone. */
+  | { status: 'reposted'; repostId: string }
+  /** Nothing was posted; the original is untouched. */
+  | { status: 'skipped'; reason: string }
+  /** Posted, but the original couldn't be deleted (the author deleted it meanwhile, or permissions),
+   * so the repost was taken back instead of leaving the message twice. */
+  | { status: 'rolled-back'; reason: string };
+
+/** The repost text: the reply-context line when it fits, else just the body; undefined when nothing fits. */
+function composeRepostContent(context: string | undefined, body: string): string | undefined {
+  if (context) {
+    const withContext = `${context}\n${body}`;
+    if (withContext.length <= MAX_WEBHOOK_CONTENT) return withContext;
+  }
+  return body.length <= MAX_WEBHOOK_CONTENT ? body : undefined;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Reposts a message via a webhook wearing the author's name and avatar, then deletes the original.
+ *
+ * The repost is faithful or doesn't happen: attachments are downloaded and re-uploaded (all of them,
+ * within the size cap), a reply gets a `-# ↪ replying to …` context line (webhooks can't reply),
+ * `@silent` stays silent, and mentions never ping twice (`allowedMentions: { parse: [] }` — the
+ * original already pinged). Messages that can't be carried over whole (stickers, polls, oversized
+ * attachments, a failed download) are left untouched.
+ *
+ * Order matters: the repost goes out first, so a failed send never loses the user's message.
+ */
+export async function repostMessage(
+  message: Message,
+  newContent: string,
+  options: RepostOptions = {},
+): Promise<RepostOutcome> {
+  const target = webhookTargetOf(message.channel);
+  const blocker = repostBlocker(message, options.maxAttachmentBytes);
+  if (!target || blocker) return { status: 'skipped', reason: blocker ?? "its channel can't host a webhook repost" };
+
+  const carried = await downloadAttachments(
+    [...message.attachments.values()].map((a) => ({
+      url: a.url,
+      name: a.name,
+      size: a.size,
+      description: a.description,
+    })),
+    {
+      fetch: options.fetch ?? ((input, init) => globalThis.fetch(input, init)),
+      maxTotalBytes: options.maxAttachmentBytes ?? config.links.maxRepostAttachmentBytes,
+    },
+  );
+  if (!carried.ok) return { status: 'skipped', reason: carried.reason };
+
+  const content = composeRepostContent(await replyContextLine(message), newContent);
+  if (content === undefined) {
+    return { status: 'skipped', reason: `the rewritten text is over the ${MAX_WEBHOOK_CONTENT} a webhook can post` };
+  }
+  const stillCurrent = options.stillCurrent ?? (() => true);
+  const edited: RepostOutcome = { status: 'skipped', reason: 'it was edited while the repost was being prepared' };
+  if (!stillCurrent()) return edited;
+
+  const identity = identityOf(message);
+  const payload: WebhookMessageCreateOptions = {
+    content,
+    files: carried.files,
+    allowedMentions: { parse: [] },
+    ...(target.threadId ? { threadId: target.threadId } : {}),
+    ...(message.flags.has(MessageFlags.SuppressNotifications) ? { flags: MessageFlags.SuppressNotifications } : {}),
+  };
+
+  return withTemporaryWebhook(target.channel, identity, async (webhook): Promise<RepostOutcome> => {
+    if (!stillCurrent()) return edited;
+    const repost = await webhook.send(payload);
+    recordRelay({
+      messageId: repost.id,
+      channelId: message.channel.id,
+      authorId: message.author.id,
+      authorName: identity.name,
+      kind: 'link_fix',
+      originalId: message.id,
+    });
+
+    options.onBeforeDelete?.();
+    try {
+      await message.delete();
+    } catch (error) {
+      logger.warn(`Could not delete message ${message.id} after reposting it; taking the repost back:`, error);
+      try {
+        await webhook.deleteMessage(repost, target.threadId);
+      } catch (cleanupError) {
+        logger.warn(`Failed to delete repost ${repost.id}; the message now appears twice:`, cleanupError);
+      }
+      return { status: 'rolled-back', reason: `the original could not be deleted (${errorText(error)})` };
+    }
+    return { status: 'reposted', repostId: repost.id };
+  });
 }

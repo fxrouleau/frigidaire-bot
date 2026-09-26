@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "description": "Gemini transcribing a (fictional) French voice message through input_audio: verbatim transcript in the language spoken, no translation. Response shape as OpenRouter returns it for google/gemini-* on Google Vertex.",
+  "status": 200,
+  "request": {
+    "model": "google/gemini-3.5-flash-lite",
+    "max_tokens": 8192,
+    "messages": [
+      { "role": "system", "content": "You are a speech-to-text engine. You output transcripts only, never commentary." },
+      {
+        "role": "user",
+        "content": [
+          { "type": "input_audio", "input_audio": { "data": "<base64 mp3>", "format": "mp3" } },
+          { "type": "text", "text": "Transcribe this recording. ..." }
+        ]
+      }
+    ],
+    "provider": { "zdr": true }
+  },
+  "response": {
+    "id": "gen-test-transcription-001",
+    "provider": "Google",
+    "model": "google/gemini-3.5-flash-lite-20260721",
+    "object": "chat.completion",
+    "created": 1790000000,
+    "choices": [
+      {
+        "logprobs": null,
+        "finish_reason": "stop",
+        "native_finish_reason": "STOP",
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "salut tout le monde, on se fait une game ce soir?",
+          "refusal": null,
+          "reasoning": null
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 268,
+      "completion_tokens": 31,
+      "total_tokens": 299,
+      "cost": 0.0001579,
+      "prompt_tokens_details": { "cached_tokens": 0, "audio_tokens": 160 },
+      "completion_tokens_details": { "reasoning_tokens": 0 }
+    }
+  }
+}

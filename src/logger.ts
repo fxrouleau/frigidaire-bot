@@ -1,9 +1,20 @@
+import { format } from 'node:util';
 import { config } from './config';
+import { getLogFile } from './logFile';
 
 const getTimestamp = () => new Date().toISOString();
 
 const log = (level: string, message: string, ...args: unknown[]) => {
-  console.log(`[${getTimestamp()}] [${level.toUpperCase()}] ${message}`, ...args);
+  const line = `[${getTimestamp()}] [${level.toUpperCase()}] ${message}`;
+  console.log(line, ...args);
+  // The same text console.log printed (util.format is what it uses), into the rotated file in the data
+  // volume so it outlives the container (src/logFile.ts). The sink never throws; the guard is for the
+  // formatting of exotic arguments.
+  try {
+    getLogFile()?.write(`${format(line, ...args)}\n`);
+  } catch (error) {
+    console.error('[logFile] could not format a log line:', error);
+  }
 };
 
 export const logger = {

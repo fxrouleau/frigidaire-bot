@@ -1,5 +1,5 @@
 // A tiny hand-rolled call recorder so test-support modules stay free of any test-runner imports
-// (they're imported by both vitest tests AND the ts-node replay CLI).
+// (they're imported by both vitest tests AND the tsx-run replay CLI).
 export type Recorder<Args extends unknown[], Return> = ((...args: Args) => Return) & { calls: Args[] };
 
 export function createRecorder<Args extends unknown[], Return>(

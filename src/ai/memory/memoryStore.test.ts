@@ -1,3 +1,7 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeEmbeddingProvider } from '../../test-support/fakeEmbeddings';
 import type { EmbeddingKind } from './embeddingProvider';
@@ -18,20 +22,20 @@ afterEach(() => {
 
 describe('CRUD basics', () => {
   it('save() returns a positive integer id', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
     expect(id).toBeGreaterThan(0);
     expect(Number.isInteger(id)).toBe(true);
   });
 
   it('save() stores source as "conversation" by default', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
     const all = store.getAllActive();
     const mem = all.find((m) => m.id === id);
     expect(mem?.source).toBe('conversation');
   });
 
   it('save() stores custom source when provided', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats', source: 'observation' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats', source: 'observation' });
     const all = store.getAllActive();
     const mem = all.find((m) => m.id === id);
     expect(mem?.source).toBe('observation');
@@ -42,36 +46,36 @@ describe('CRUD basics', () => {
   });
 
   it('getAllActive() excludes deactivated memories', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
     store.deactivate(id);
     expect(store.getAllActive()).toEqual([]);
   });
 
   it('getBySubject() filters by exact subject', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
     await store.save({ category: 'fact', subject: 'Alex', content: 'Likes dogs' });
-    const results = store.getBySubject('Felix');
+    const results = store.getBySubject('Remi');
     expect(results).toHaveLength(1);
-    expect(results[0].subject).toBe('Felix');
+    expect(results[0].subject).toBe('Remi');
   });
 
   it('getBySubject() respects limit param', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
-    await store.save({ category: 'preference', subject: 'Felix', content: 'Prefers tea' });
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Lives in Toronto' });
-    const results = store.getBySubject('Felix', 2);
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
+    await store.save({ category: 'preference', subject: 'Remi', content: 'Prefers tea' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Lives in Toronto' });
+    const results = store.getBySubject('Remi', 2);
     expect(results).toHaveLength(2);
   });
 
   it('getBySubject() excludes inactive', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
     store.deactivate(id);
-    expect(store.getBySubject('Felix')).toEqual([]);
+    expect(store.getBySubject('Remi')).toEqual([]);
   });
 
   it('getByCategory() filters by category', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
-    await store.save({ category: 'preference', subject: 'Felix', content: 'Prefers tea' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
+    await store.save({ category: 'preference', subject: 'Remi', content: 'Prefers tea' });
     const results = store.getByCategory('fact');
     expect(results).toHaveLength(1);
     expect(results[0].category).toBe('fact');
@@ -83,9 +87,9 @@ describe('FTS5 search', () => {
   it('search() matches message-length queries on any keyword (partial tier), not only when every word matches', async () => {
     // Regression: the keyword leg used to AND every query term, so a whole chat message as the query
     // matched nothing — the FTS-only fallback returned [] for any real message.
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Drives a red Miata' });
-    await store.save({ category: 'fact', subject: 'Jason', content: 'Plays League ranked' });
-    const results = await store.search('what does felix drive these days');
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Drives a red Miata' });
+    await store.save({ category: 'fact', subject: 'Jasper', content: 'Plays League ranked' });
+    const results = await store.search('what does remi drive these days');
     expect(results.map((m) => m.content)).toEqual(['Drives a red Miata']);
   });
 
@@ -103,20 +107,20 @@ describe('FTS5 search', () => {
   });
 
   it('search() finds by content keyword', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Loves programming in TypeScript' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Loves programming in TypeScript' });
     const results = await store.search('TypeScript');
     expect(results).toHaveLength(1);
     expect(results[0].content).toContain('TypeScript');
   });
 
   it('search() finds by subject', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
-    const results = await store.search('Felix');
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
+    const results = await store.search('Remi');
     expect(results).toHaveLength(1);
   });
 
   it('search() returns only active memories', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
     store.deactivate(id);
     expect(await store.search('cats')).toEqual([]);
   });
@@ -129,52 +133,52 @@ describe('FTS5 search', () => {
   });
 
   it('search() returns empty for no matches', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
     expect(await store.search('dinosaurs')).toEqual([]);
   });
 
   it('search() stays in sync after deactivate', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes pangolins' });
     store.deactivate(id);
     expect(await store.search('pangolins')).toEqual([]);
   });
 
   it('search() stays in sync after remove', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes pangolins' });
     store.remove(id);
     expect(await store.search('pangolins')).toEqual([]);
   });
 
   it('search() handles commas in query', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Felix likes cats' });
-    const results = await store.search('Felix, cats');
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Remi likes cats' });
+    const results = await store.search('Remi, cats');
     expect(results).toHaveLength(1);
     expect(results[0].content).toContain('cats');
   });
 
   it('search() handles quotes in query', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Felix has a nickname' });
-    const results = await store.search('Felix "nickname"');
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Remi has a nickname' });
+    const results = await store.search('Remi "nickname"');
     expect(results).toHaveLength(1);
   });
 
   it('search() handles parentheses in query', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Felix likes cats' });
-    const results = await store.search('(Felix)');
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Remi likes cats' });
+    const results = await store.search('(Remi)');
     expect(results).toHaveLength(1);
   });
 
   it('search() returns empty for query that is all special characters', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Felix likes cats' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Remi likes cats' });
     const results = await store.search(',,,');
     expect(results).toEqual([]);
   });
 
   it('search() handles mixed valid and special chars', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Felix has cats and dogs' });
-    const results = await store.search("Felix's cats, dogs");
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Remi has cats and dogs' });
+    const results = await store.search("Remi's cats, dogs");
     expect(results).toHaveLength(1);
-    expect(results[0].content).toContain('Felix');
+    expect(results[0].content).toContain('Remi');
   });
 });
 
@@ -182,44 +186,44 @@ describe('dedup on save (word overlap)', () => {
   it('updates existing row when same category+subject and >60% word overlap', async () => {
     const id1 = await store.save({
       category: 'fact',
-      subject: 'Felix',
-      content: 'Felix lives in Toronto Canada downtown',
+      subject: 'Remi',
+      content: 'Remi lives in Toronto Canada downtown',
     });
     const id2 = await store.save({
       category: 'fact',
-      subject: 'Felix',
-      content: 'Felix lives in Montreal Canada downtown',
+      subject: 'Remi',
+      content: 'Remi lives in Montreal Canada downtown',
     });
     expect(id2).toBe(id1);
     const all = store.getAllActive();
     expect(all).toHaveLength(1);
-    expect(all[0].content).toBe('Felix lives in Montreal Canada downtown');
+    expect(all[0].content).toBe('Remi lives in Montreal Canada downtown');
   });
 
   it('creates a new row when overlap <= 60%', async () => {
-    const id1 = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats very much' });
-    const id2 = await store.save({ category: 'fact', subject: 'Felix', content: 'Works as a plumber downtown' });
+    const id1 = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats very much' });
+    const id2 = await store.save({ category: 'fact', subject: 'Remi', content: 'Works as a plumber downtown' });
     expect(id2).not.toBe(id1);
     expect(store.getAllActive()).toHaveLength(2);
   });
 
   it('does NOT dedup across different subjects', async () => {
-    const id1 = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats very much indeed' });
+    const id1 = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats very much indeed' });
     const id2 = await store.save({ category: 'fact', subject: 'Alex', content: 'Likes cats very much indeed' });
     expect(id2).not.toBe(id1);
     expect(store.getAllActive()).toHaveLength(2);
   });
 
   it('does NOT dedup across different categories', async () => {
-    const id1 = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats very much indeed' });
-    const id2 = await store.save({ category: 'preference', subject: 'Felix', content: 'Likes cats very much indeed' });
+    const id1 = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats very much indeed' });
+    const id2 = await store.save({ category: 'preference', subject: 'Remi', content: 'Likes cats very much indeed' });
     expect(id2).not.toBe(id1);
     expect(store.getAllActive()).toHaveLength(2);
   });
 
   it('FTS index reflects updated content after dedup merge', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Felix lives in Toronto Canada downtown' });
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Felix lives in Montreal Canada downtown' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Remi lives in Toronto Canada downtown' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Remi lives in Montreal Canada downtown' });
     // Old content should not be findable
     expect(await store.search('Toronto')).toEqual([]);
     // New content should be findable
@@ -227,23 +231,23 @@ describe('dedup on save (word overlap)', () => {
   });
 
   it('does NOT dedup against deactivated memories', async () => {
-    const id1 = await store.save({ category: 'fact', subject: 'Felix', content: 'Felix lives in Toronto Canada downtown' });
+    const id1 = await store.save({ category: 'fact', subject: 'Remi', content: 'Remi lives in Toronto Canada downtown' });
     store.deactivate(id1);
-    const id2 = await store.save({ category: 'fact', subject: 'Felix', content: 'Felix lives in Montreal Canada downtown' });
+    const id2 = await store.save({ category: 'fact', subject: 'Remi', content: 'Remi lives in Montreal Canada downtown' });
     expect(id2).not.toBe(id1);
   });
 });
 
 describe('deactivate() and remove()', () => {
   it('deactivate() sets active=0 and memory disappears from active queries', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
     store.deactivate(id);
     expect(store.getAllActive()).toEqual([]);
-    expect(store.getBySubject('Felix')).toEqual([]);
+    expect(store.getBySubject('Remi')).toEqual([]);
   });
 
   it('deactivate() removes from FTS index', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes pangolins' });
     store.deactivate(id);
     expect(await store.search('pangolins')).toEqual([]);
   });
@@ -253,7 +257,7 @@ describe('deactivate() and remove()', () => {
   });
 
   it('remove() permanently deletes the row', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
     store.remove(id);
     expect(store.getAllActive()).toEqual([]);
     // @ts-expect-error accessing private db to verify row is gone
@@ -262,7 +266,7 @@ describe('deactivate() and remove()', () => {
   });
 
   it('remove() removes from FTS index', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes pangolins' });
     store.remove(id);
     expect(await store.search('pangolins')).toEqual([]);
   });
@@ -277,8 +281,8 @@ describe('compact()', () => {
 
   it('deactivates older overlapping memories when same subject+category', async () => {
     // Insert two memories that are BELOW 60% overlap at save time
-    const id1 = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats and dogs very much' });
-    const id2 = await store.save({ category: 'fact', subject: 'Felix', content: 'Enjoys swimming every weekend morning' });
+    const id1 = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats and dogs very much' });
+    const id2 = await store.save({ category: 'fact', subject: 'Remi', content: 'Enjoys swimming every weekend morning' });
     expect(store.getAllActive()).toHaveLength(2);
 
     // Manually update one via raw SQL to make them overlap >60%
@@ -296,8 +300,8 @@ describe('compact()', () => {
   });
 
   it('keeps the newer memory (by updated_at)', async () => {
-    const id1 = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats and dogs very much' });
-    const id2 = await store.save({ category: 'fact', subject: 'Felix', content: 'Enjoys swimming every weekend morning' });
+    const id1 = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats and dogs very much' });
+    const id2 = await store.save({ category: 'fact', subject: 'Remi', content: 'Enjoys swimming every weekend morning' });
 
     // Make id2 older so id1 is newer
     // @ts-expect-error accessing private db for test setup
@@ -312,9 +316,9 @@ describe('compact()', () => {
   });
 
   it('does not touch memories with different subjects or categories', async () => {
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats and dogs very much' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats and dogs very much' });
     await store.save({ category: 'fact', subject: 'Alex', content: 'Likes cats and dogs very much' });
-    await store.save({ category: 'preference', subject: 'Felix', content: 'Likes cats and dogs very much' });
+    await store.save({ category: 'preference', subject: 'Remi', content: 'Likes cats and dogs very much' });
 
     const result = store.compact();
     expect(result.removed).toBe(0);
@@ -378,7 +382,7 @@ describe('new self-improvement categories', () => {
   it('getBySubject("bot") returns self-diagnosis entries', async () => {
     await store.save({ category: 'tool_error', subject: 'bot', content: 'Error in image tool' });
     await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot read links' });
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Likes cats' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Likes cats' });
 
     const botResults = store.getBySubject('bot');
     expect(botResults).toHaveLength(2);
@@ -471,7 +475,7 @@ describe('bot_state (generic key/value)', () => {
 
 describe('subject_user_id (soft-FK to identities)', () => {
   it('save() defaults subject_user_id to null when omitted', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Wheezer', content: 'Likes cats' });
+    const id = await store.save({ category: 'fact', subject: 'Wheelie', content: 'Likes cats' });
     const row = store.getAllActive().find((m) => m.id === id);
     expect(row?.subject_user_id).toBeNull();
   });
@@ -479,12 +483,40 @@ describe('subject_user_id (soft-FK to identities)', () => {
   it('save() persists subject_user_id when provided', async () => {
     const id = await store.save({
       category: 'fact',
-      subject: 'Wheezer',
+      subject: 'Wheelie',
       content: 'Likes cats',
       subject_user_id: '123',
     });
     const row = store.getAllActive().find((m) => m.id === id);
     expect(row?.subject_user_id).toBe('123');
+  });
+
+  it('getForPerson() matches the stable id and every known name, newest first', async () => {
+    await store.save({ category: 'fact', subject: 'OldNick', content: 'Plays bass', subject_user_id: '123' });
+    await store.save({ category: 'fact', subject: 'Wheelie', content: 'Owns a husky' });
+    await store.save({ category: 'fact', subject: 'Someone Else', content: 'Hates cilantro' });
+    const rows = store.getForPerson({ userId: '123', names: ['Wheelie', ' ', 'Wheelie'] });
+    expect(rows.map((r) => r.content).sort()).toEqual(['Owns a husky', 'Plays bass']);
+  });
+
+  it('getForPerson() with neither an id nor a name returns nothing', () => {
+    expect(store.getForPerson({ names: [] })).toEqual([]);
+  });
+
+  it("getForPerson() never claims another member's id-stamped row through a shared name", async () => {
+    // Member 111 is displayed as "Alex"; member 222's IRL name or nickname is also "Alex".
+    await store.save({ category: 'fact', subject: 'Alex', content: 'Works at the depot', subject_user_id: '111' });
+    await store.save({ category: 'fact', subject: 'Alex', content: 'Played hockey as a kid' });
+    await store.save({ category: 'fact', subject: 'Sam', content: 'Collects vinyl', subject_user_id: '222' });
+
+    const forSam = store.getForPerson({ userId: '222', names: ['Sam', 'Alex'] }).map((m) => m.content);
+    expect(forSam.sort()).toEqual(['Collects vinyl', 'Played hockey as a kid']);
+
+    const forAlex = store.getForPerson({ userId: '111', names: ['Alex'] }).map((m) => m.content);
+    expect(forAlex.sort()).toEqual(['Played hockey as a kid', 'Works at the depot']);
+
+    // A name-only lookup (no id known) still takes every row filed under the name.
+    expect(store.getForPerson({ names: ['Alex'] })).toHaveLength(2);
   });
 });
 
@@ -494,31 +526,31 @@ describe('identities', () => {
   });
 
   it('upsertIdentity() creates a new row with canonical_name equal to display_name', () => {
-    store.upsertIdentity('123', 'Wheezer');
+    store.upsertIdentity('123', 'Wheelie');
     const identity = store.getIdentityById('123');
     expect(identity).toBeDefined();
-    expect(identity?.display_name).toBe('Wheezer');
-    expect(identity?.canonical_name).toBe('Wheezer');
+    expect(identity?.display_name).toBe('Wheelie');
+    expect(identity?.canonical_name).toBe('Wheelie');
     expect(identity?.irl_name).toBeNull();
     expect(identity?.aliases).toEqual([]);
   });
 
   it('upsertIdentity() updates display_name but preserves canonical_name on rename', () => {
-    store.upsertIdentity('123', 'Wheezer');
-    store.upsertIdentity('123', 'wheezyboy2');
+    store.upsertIdentity('123', 'Wheelie');
+    store.upsertIdentity('123', 'wheelieboy2');
 
     const identity = store.getIdentityById('123');
-    expect(identity?.display_name).toBe('wheezyboy2');
-    expect(identity?.canonical_name).toBe('Wheezer');
+    expect(identity?.display_name).toBe('wheelieboy2');
+    expect(identity?.canonical_name).toBe('Wheelie');
   });
 
   it('upsertIdentity() is idempotent when display_name unchanged', () => {
-    store.upsertIdentity('123', 'Wheezer');
+    store.upsertIdentity('123', 'Wheelie');
     const first = store.getIdentityById('123');
     const firstUpdated = first?.updated_at;
 
     // Same name — should not bump updated_at
-    store.upsertIdentity('123', 'Wheezer');
+    store.upsertIdentity('123', 'Wheelie');
     const second = store.getIdentityById('123');
     expect(second?.updated_at).toBe(firstUpdated);
   });
@@ -528,41 +560,41 @@ describe('identities', () => {
   });
 
   it('updateIdentityMeta() sets irl_name on a known identity', () => {
-    store.upsertIdentity('123', 'Wheezer');
-    const changed = store.updateIdentityMeta('123', { irl_name: 'Derrick' });
+    store.upsertIdentity('123', 'Wheelie');
+    const changed = store.updateIdentityMeta('123', { irl_name: 'Dorian' });
     expect(changed).toBe(true);
-    expect(store.getIdentityById('123')?.irl_name).toBe('Derrick');
+    expect(store.getIdentityById('123')?.irl_name).toBe('Dorian');
   });
 
   it('updateIdentityMeta() returns false when irl_name is identical', () => {
-    store.upsertIdentity('123', 'Wheezer');
-    store.updateIdentityMeta('123', { irl_name: 'Derrick' });
-    expect(store.updateIdentityMeta('123', { irl_name: 'Derrick' })).toBe(false);
+    store.upsertIdentity('123', 'Wheelie');
+    store.updateIdentityMeta('123', { irl_name: 'Dorian' });
+    expect(store.updateIdentityMeta('123', { irl_name: 'Dorian' })).toBe(false);
   });
 
   it('updateIdentityMeta() ignores empty irl_name strings', () => {
-    store.upsertIdentity('123', 'Wheezer');
+    store.upsertIdentity('123', 'Wheelie');
     const changed = store.updateIdentityMeta('123', { irl_name: '   ' });
     expect(changed).toBe(false);
     expect(store.getIdentityById('123')?.irl_name).toBeNull();
   });
 
   it('updateIdentityMeta() appends aliases and dedupes', () => {
-    store.upsertIdentity('123', 'Wheezer');
+    store.upsertIdentity('123', 'Wheelie');
 
-    store.updateIdentityMeta('123', { aliases_add: ['Derek', 'D'] });
-    expect(store.getIdentityById('123')?.aliases).toEqual(['Derek', 'D']);
+    store.updateIdentityMeta('123', { aliases_add: ['Dory', 'D'] });
+    expect(store.getIdentityById('123')?.aliases).toEqual(['Dory', 'D']);
 
     // Duplicate alias should not re-append
-    const changed = store.updateIdentityMeta('123', { aliases_add: ['Derek', 'D-man'] });
+    const changed = store.updateIdentityMeta('123', { aliases_add: ['Dory', 'D-man'] });
     expect(changed).toBe(true);
-    expect(store.getIdentityById('123')?.aliases).toEqual(['Derek', 'D', 'D-man']);
+    expect(store.getIdentityById('123')?.aliases).toEqual(['Dory', 'D', 'D-man']);
   });
 
   it('updateIdentityMeta() returns false when no meaningful aliases are added', () => {
-    store.upsertIdentity('123', 'Wheezer');
-    store.updateIdentityMeta('123', { aliases_add: ['Derek'] });
-    expect(store.updateIdentityMeta('123', { aliases_add: ['Derek'] })).toBe(false);
+    store.upsertIdentity('123', 'Wheelie');
+    store.updateIdentityMeta('123', { aliases_add: ['Dory'] });
+    expect(store.updateIdentityMeta('123', { aliases_add: ['Dory'] })).toBe(false);
     expect(store.updateIdentityMeta('123', { aliases_add: ['   '] })).toBe(false);
   });
 
@@ -577,10 +609,61 @@ describe('identities', () => {
 
   it('getAllIdentities() returns parsed aliases', () => {
     store.upsertIdentity('1', 'Anna');
-    store.updateIdentityMeta('1', { aliases_add: ['Annie', 'A'] });
+    store.updateIdentityMeta('1', { aliases_add: ['Agathe', 'A'] });
 
     const [identity] = store.getAllIdentities();
-    expect(identity.aliases).toEqual(['Annie', 'A']);
+    expect(identity.aliases).toEqual(['Agathe', 'A']);
+  });
+
+  it('upsertIdentity() records the Discord handle, keeps it when a caller has none, and follows a change', () => {
+    store.upsertIdentity('123', 'Jasper');
+    expect(store.getIdentityById('123')?.username).toBeNull();
+
+    store.upsertIdentity('123', 'Jasper', 'lapinlune');
+    expect(store.getIdentityById('123')?.username).toBe('lapinlune');
+
+    // Fetched history / relays only know a name: the handle survives.
+    store.upsertIdentity('123', 'Jay', '  ');
+    store.upsertIdentity('123', 'Jay');
+    expect(store.getIdentityById('123')).toMatchObject({ display_name: 'Jay', username: 'lapinlune' });
+
+    store.upsertIdentity('123', 'Jay', 'lapin2');
+    expect(store.getIdentityById('123')?.username).toBe('lapin2');
+  });
+
+  it('upsertIdentity() bumps updated_at when only the handle changes', () => {
+    store.upsertIdentity('123', 'Jasper', 'old_handle');
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE identities SET updated_at = datetime('now', '-1 day') WHERE discord_user_id = '123'").run();
+    const before = store.getIdentityById('123')?.updated_at;
+
+    store.upsertIdentity('123', 'Jasper', 'old_handle');
+    expect(store.getIdentityById('123')?.updated_at).toBe(before);
+
+    store.upsertIdentity('123', 'Jasper', 'new_handle');
+    expect(store.getIdentityById('123')?.updated_at).not.toBe(before);
+  });
+
+  it('adds the username column to an existing identities table (additive migration)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-migration-'));
+    const file = path.join(dir, 'memory.db');
+    try {
+      const legacy = new Database(file);
+      legacy.exec(`CREATE TABLE identities (
+        discord_user_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, canonical_name TEXT NOT NULL, irl_name TEXT,
+        aliases TEXT NOT NULL DEFAULT '[]', first_seen_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')), active INTEGER DEFAULT 1)`);
+      legacy.prepare("INSERT INTO identities (discord_user_id, display_name, canonical_name) VALUES ('1', 'Jasper', 'Jasper')").run();
+      legacy.close();
+
+      const migrated = new MemoryStore(file);
+      expect(migrated.getIdentityById('1')).toMatchObject({ display_name: 'Jasper', username: null });
+      migrated.upsertIdentity('1', 'Jasper', 'lapinlune');
+      expect(migrated.getIdentityById('1')?.username).toBe('lapinlune');
+      migrated.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -840,28 +923,28 @@ class FailNthCallFakeEmbeddingProvider extends FakeEmbeddingProvider {
 describe('semantic search (hybrid vector + FTS)', () => {
   it('finds memories by meaning when FTS keyword search misses', async () => {
     const { store: semStore } = makeSemanticStore({ relevanceThreshold: 0.3 });
-    const pizzaMemory = { category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' };
+    const pizzaMemory = { category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' };
     const id = await semStore.save(pizzaMemory);
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
 
     // Precondition (verified value 0.5774): the query is semantically close to the pizza memory.
-    expect(fakeCosine('felix favorite pizza', pizzaMemory)).toBeGreaterThan(0.3);
+    expect(fakeCosine('remi favorite pizza', pizzaMemory)).toBeGreaterThan(0.3);
 
     // No memory contains every query word ('favorite' appears nowhere), so the exact keyword tier is
     // empty; the semantic leg is what carries this query class.
-    const results = await semStore.search('felix favorite pizza');
+    const results = await semStore.search('remi favorite pizza');
     expect(results.map((m) => m.id)).toEqual([id]);
   });
 
   it('ranks results by semantic similarity and gates out unrelated memories', async () => {
     const { store: semStore } = makeSemanticStore({ relevanceThreshold: 0.3 });
-    const idPizza = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    const idPasta = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pasta' });
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    const idPizza = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    const idPasta = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pasta' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
 
     // Verified cosines vs the query: pizza 0.5963, pasta 0.5477, league 0.1240 (below the 0.3 gate).
     // No memory contains 'likes', so the FTS leg is empty and the order is pure vector ranking.
-    const results = await semStore.search('felix likes pizza and pasta');
+    const results = await semStore.search('remi likes pizza and pasta');
 
     expect(results.map((m) => m.id)).toEqual([idPizza, idPasta]);
   });
@@ -870,16 +953,16 @@ describe('semantic search (hybrid vector + FTS)', () => {
     const { store: semStore } = makeSemanticStore({ relevanceThreshold: 0.3 });
     const bothLegsMemory = {
       category: 'fact',
-      subject: 'Felix',
-      content: 'Felix hobby photography lessons every Saturday morning downtown',
+      subject: 'Remi',
+      content: 'Remi hobby photography lessons every Saturday morning downtown',
     };
-    const vectorOnlyMemory = { category: 'fact', subject: 'Felix', content: 'Felix hobby' };
+    const vectorOnlyMemory = { category: 'fact', subject: 'Remi', content: 'Remi hobby' };
     const idBoth = await semStore.save(bothLegsMemory);
     const idVectorOnly = await semStore.save(vectorOnlyMemory);
 
     // Preconditions (verified: 0.7746 vs 0.6963): the vector-only memory is semantically CLOSER to the
     // query, but only bothLegsMemory contains every query keyword (so only it gets the FTS-leg boost).
-    const query = 'felix hobby photography';
+    const query = 'remi hobby photography';
     expect(fakeCosine(query, vectorOnlyMemory)).toBeGreaterThan(fakeCosine(query, bothLegsMemory));
     expect(fakeCosine(query, bothLegsMemory)).toBeGreaterThan(0.3);
 
@@ -895,8 +978,8 @@ describe('semantic gate (anti-pollution rule)', () => {
     const { store: semStore } = makeSemanticStore({ relevanceThreshold: 0.4 });
     const linkMemory = {
       category: 'fact',
-      subject: 'Felix',
-      content: 'Felix shared a link about cooking pasta recipes yesterday evening',
+      subject: 'Remi',
+      content: 'Remi shared a link about cooking pasta recipes yesterday evening',
     };
     await semStore.save(linkMemory);
 
@@ -916,10 +999,10 @@ describe('semantic gate (anti-pollution rule)', () => {
 
     // 1 of 5 memories saved during an outage → vector coverage 4/5 = exactly 80% (the gate boundary).
     fake.failWith = new Error('outage');
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix went kayaking last weekend' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi went kayaking last weekend' });
     fake.failWith = undefined;
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
     await semStore.save({ category: 'fact', subject: 'Alex', content: 'Alex collects vintage vinyl records' });
     await semStore.save({ category: 'fact', subject: 'Sam', content: 'Sam runs marathons every spring season' });
 
@@ -932,8 +1015,8 @@ describe('semantic gate (anti-pollution rule)', () => {
 describe('save-time semantic dedup', () => {
   it('merges a semantic near-duplicate into the EXISTING memory id', async () => {
     const { store: semStore } = makeSemanticStore({ dedupThreshold: 0.65, relevanceThreshold: 0.3 });
-    const original = { category: 'fact', subject: 'Felix', content: 'Felix loves eating pizza with extra cheese on top' };
-    const paraphrase = { category: 'fact', subject: 'Felix', content: 'Felix loves eating pizza with mushrooms' };
+    const original = { category: 'fact', subject: 'Remi', content: 'Remi loves eating pizza with extra cheese on top' };
+    const paraphrase = { category: 'fact', subject: 'Remi', content: 'Remi loves eating pizza with mushrooms' };
 
     // Preconditions (verified: overlap 0.5714, cosine 0.8018): lexical dedup misses, semantic dedup hits.
     expect(wordOverlap(original.content, paraphrase.content)).toBeLessThanOrEqual(0.6);
@@ -956,8 +1039,8 @@ describe('save-time semantic dedup', () => {
 
   it('keeps semantically distinct memories as separate rows', async () => {
     const { store: semStore } = makeSemanticStore({ dedupThreshold: 0.65 });
-    const pizza = { category: 'fact', subject: 'Felix', content: 'Felix loves eating pizza with extra cheese on top' };
-    const job = { category: 'fact', subject: 'Felix', content: 'Felix works as a software engineer at a bank' };
+    const pizza = { category: 'fact', subject: 'Remi', content: 'Remi loves eating pizza with extra cheese on top' };
+    const job = { category: 'fact', subject: 'Remi', content: 'Remi works as a software engineer at a bank' };
 
     // Precondition (verified value 0.4286): well below the dedup threshold.
     expect(fakeDocCosine(pizza, job)).toBeLessThan(0.65);
@@ -972,13 +1055,13 @@ describe('save-time semantic dedup', () => {
 
   it('never merges across different subjects even at near-duplicate cosine', async () => {
     const { store: semStore } = makeSemanticStore({ dedupThreshold: 0.65 });
-    const felixVersion = { category: 'fact', subject: 'Felix', content: 'Felix loves eating pizza with extra cheese on top' };
-    const alexVersion = { category: 'fact', subject: 'Alex', content: 'Felix loves eating pizza with extra cheese on top' };
+    const remiVersion = { category: 'fact', subject: 'Remi', content: 'Remi loves eating pizza with extra cheese on top' };
+    const alexVersion = { category: 'fact', subject: 'Alex', content: 'Remi loves eating pizza with extra cheese on top' };
 
     // Precondition (verified value 0.9258): far above the threshold — only subject scoping keeps them apart.
-    expect(fakeDocCosine(felixVersion, alexVersion)).toBeGreaterThan(0.65);
+    expect(fakeDocCosine(remiVersion, alexVersion)).toBeGreaterThan(0.65);
 
-    const id1 = await semStore.save(felixVersion);
+    const id1 = await semStore.save(remiVersion);
     const id2 = await semStore.save(alexVersion);
 
     expect(id2).not.toBe(id1);
@@ -987,11 +1070,11 @@ describe('save-time semantic dedup', () => {
 
   it('never merges across different categories even for identical text', async () => {
     const { store: semStore } = makeSemanticStore({ dedupThreshold: 0.65 });
-    const asFact = { category: 'fact', subject: 'Felix', content: 'Felix loves eating pizza with extra cheese on top' };
+    const asFact = { category: 'fact', subject: 'Remi', content: 'Remi loves eating pizza with extra cheese on top' };
     const asPreference = {
       category: 'preference',
-      subject: 'Felix',
-      content: 'Felix loves eating pizza with extra cheese on top',
+      subject: 'Remi',
+      content: 'Remi loves eating pizza with extra cheese on top',
     };
 
     // Identical embedding input → cosine 1.0 — only category scoping keeps them apart.
@@ -1006,8 +1089,8 @@ describe('save-time semantic dedup', () => {
 
   it('refreshes the stored vector when a lexical (word-overlap) merge updates content', async () => {
     const { store: semStore, fake } = makeSemanticStore();
-    const original = { category: 'fact', subject: 'Felix', content: 'Felix lives in Toronto Canada downtown' };
-    const updated = { category: 'fact', subject: 'Felix', content: 'Felix lives in Montreal Canada downtown' };
+    const original = { category: 'fact', subject: 'Remi', content: 'Remi lives in Toronto Canada downtown' };
+    const updated = { category: 'fact', subject: 'Remi', content: 'Remi lives in Montreal Canada downtown' };
 
     const id = await semStore.save(original);
     expect(getVectorInputText(semStore, id)).toBe(buildEmbeddingInput(original));
@@ -1027,7 +1110,7 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
     const { store: semStore, fake } = makeSemanticStore();
     fake.failWith = new Error('embeddings API down');
 
-    const id = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    const id = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
 
     expect(id).toBeGreaterThan(0);
     expect(semStore.getAllActive()).toHaveLength(1);
@@ -1040,8 +1123,8 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
     // This memory's cosine vs the query 'pasta' is 0.2774 — below the 0.4 gate.
     await semStore.save({
       category: 'fact',
-      subject: 'Felix',
-      content: 'Felix shared a link about cooking pasta recipes yesterday evening',
+      subject: 'Remi',
+      content: 'Remi shared a link about cooking pasta recipes yesterday evening',
     });
 
     // Gated search drops it...
@@ -1059,8 +1142,8 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
 
     // 4 of 5 memories saved during an outage → vector coverage 1/5 = 20%.
     fake.failWith = new Error('outage');
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix went kayaking last weekend' });
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi went kayaking last weekend' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
     await semStore.save({ category: 'fact', subject: 'Alex', content: 'Alex collects vintage vinyl records' });
     await semStore.save({ category: 'fact', subject: 'Sam', content: 'Sam runs marathons every spring season' });
     fake.failWith = undefined;
@@ -1080,7 +1163,7 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
 
   it('returns [] for empty, whitespace, or punctuation-only queries without calling the embeddings API', async () => {
     const { store: semStore, fake } = makeSemanticStore({ relevanceThreshold: 0.3 });
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
     const callsBefore = fake.calls.length;
 
     expect(await semStore.search('')).toEqual([]);
@@ -1098,10 +1181,10 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
     try {
       // No DI threshold → constructor falls back to the env var.
       const { store: semStore } = makeSemanticStore();
-      await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+      await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
 
       // Cosine 0.5774 < 0.99 → gated out under the env-provided threshold.
-      expect(await semStore.search('felix favorite pizza')).toEqual([]);
+      expect(await semStore.search('remi favorite pizza')).toEqual([]);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1111,7 +1194,7 @@ describe('search fallbacks (embedding failure / low vector coverage)', () => {
 describe('vector storage lifecycle and integrity', () => {
   it('deactivate() deletes the stored vectors of the memory', async () => {
     const { store: semStore } = makeSemanticStore();
-    const id = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    const id = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
     expect(countVectorRows(semStore, id)).toBe(1);
 
     semStore.deactivate(id);
@@ -1121,7 +1204,7 @@ describe('vector storage lifecycle and integrity', () => {
 
   it('remove() deletes the stored vectors of the memory', async () => {
     const { store: semStore } = makeSemanticStore();
-    const id = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    const id = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
     expect(countVectorRows(semStore, id)).toBe(1);
 
     semStore.remove(id);
@@ -1131,7 +1214,7 @@ describe('vector storage lifecycle and integrity', () => {
 
   it('stores vectors that decode back to the exact embedded vector (round-trip integrity)', async () => {
     const { store: semStore } = makeSemanticStore();
-    const memory = { category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' };
+    const memory = { category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' };
     const id = await semStore.save(memory);
 
     // @ts-expect-error accessing private db for verification
@@ -1148,7 +1231,7 @@ describe('vector storage lifecycle and integrity', () => {
 
   it('rejects vector blobs whose byte length does not match dims (CHECK constraint)', async () => {
     const { store: semStore } = makeSemanticStore();
-    const id = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    const id = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
     const vec = FakeEmbeddingProvider.vectorFor('some text'); // 128 dims → 512-byte blob
 
     // @ts-expect-error accessing private db to attempt corrupt inserts
@@ -1171,8 +1254,8 @@ describe('backfillEmbeddings()', () => {
     const { store: semStore, fake } = makeSemanticStore({ relevanceThreshold: 0.3 });
 
     fake.failWith = new Error('outage');
-    const id = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    const id = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
     fake.failWith = undefined;
 
     // Before the backfill nothing has a vector, so search runs in ungated keyword mode: a query that
@@ -1184,14 +1267,14 @@ describe('backfillEmbeddings()', () => {
     expect(result).toEqual({ embedded: 2, reembedded: 0, failed: 0 });
     expect(countVectorRows(semStore)).toBe(2);
     // Semantic recall now works for the healed memories.
-    expect((await semStore.search('felix favorite pizza')).map((m) => m.id)).toEqual([id]);
+    expect((await semStore.search('remi favorite pizza')).map((m) => m.id)).toEqual([id]);
   });
 
   it('is idempotent: a second run embeds nothing and makes no API calls', async () => {
     const { store: semStore, fake } = makeSemanticStore();
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
     fake.failWith = new Error('outage');
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
     fake.failWith = undefined;
 
     // Only the vector-less memory gets embedded; the already-embedded one is untouched.
@@ -1206,15 +1289,15 @@ describe('backfillEmbeddings()', () => {
 
   it('returns zero counts when no embedding provider is configured', async () => {
     // The file-level legacy store has no embedder.
-    await store.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    await store.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
     expect(await store.backfillEmbeddings()).toEqual({ embedded: 0, reembedded: 0, failed: 0 });
   });
 
   it('counts failed batches and heals them on the next run', async () => {
     const { store: semStore, fake } = makeSemanticStore();
     fake.failWith = new Error('outage');
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
 
     // The API is still down during the backfill itself.
     const failedRun = await semStore.backfillEmbeddings();
@@ -1231,8 +1314,8 @@ describe('backfillEmbeddings()', () => {
   it('processes memories in batches of the requested size', async () => {
     const { store: semStore, fake } = makeSemanticStore();
     fake.failWith = new Error('outage');
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
     await semStore.save({ category: 'fact', subject: 'Alex', content: 'Alex collects vintage vinyl records' });
     fake.failWith = undefined;
     const callsBefore = fake.calls.length;
@@ -1250,8 +1333,8 @@ describe('backfillEmbeddings()', () => {
     const fake = new FailNthCallFakeEmbeddingProvider();
     const { store: semStore } = makeSemanticStore({ fake });
     fake.failWith = new Error('outage');
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
     await semStore.save({ category: 'fact', subject: 'Alex', content: 'Alex collects vintage vinyl records' });
     fake.failWith = undefined;
 
@@ -1270,8 +1353,8 @@ describe('backfillEmbeddings()', () => {
     const fake = new FakeEmbeddingProvider('fake-model-v1');
     const { store: semStore } = makeSemanticStore({ fake, relevanceThreshold: 0.3 });
 
-    const id1 = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    const id2 = await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    const id1 = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    const id2 = await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
 
     // The store reads the provider's model at call time, so mutating the fake simulates an
     // EMBEDDING_MODEL change without restarting (same DB, new model string).
@@ -1293,14 +1376,14 @@ describe('backfillEmbeddings()', () => {
     ]);
 
     // And search works under the new model.
-    expect((await semStore.search('felix favorite pizza')).map((m) => m.id)).toEqual([id1]);
+    expect((await semStore.search('remi favorite pizza')).map((m) => m.id)).toEqual([id1]);
   });
 
   it('prevents overlapping runs: a concurrent backfill is a no-op (in-flight guard)', async () => {
     const { store: semStore, fake } = makeSemanticStore();
     fake.failWith = new Error('outage');
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
     await semStore.save({ category: 'fact', subject: 'Alex', content: 'Alex collects vintage vinyl records' });
     fake.failWith = undefined;
     const callsBefore = fake.calls.length;
@@ -1321,12 +1404,12 @@ describe('backfillEmbeddings()', () => {
 
     // A memory saved during an outage: no vector yet.
     fake.failWith = new Error('outage');
-    const id = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix lives in Toronto Canada downtown' });
+    const id = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi lives in Toronto Canada downtown' });
     fake.failWith = undefined;
 
     // While the backfill awaits the embeddings API, a concurrent save() updates the same memory
     // (word overlap 0.8 → lexical merge keeps the id) and embeds the NEW content itself.
-    const updated = { category: 'fact', subject: 'Felix', content: 'Felix lives in Montreal Canada downtown' };
+    const updated = { category: 'fact', subject: 'Remi', content: 'Remi lives in Montreal Canada downtown' };
     fake.onNextEmbed = async () => {
       await semStore.save(updated);
     };
@@ -1342,8 +1425,8 @@ describe('backfillEmbeddings()', () => {
   it('skips deactivated memories', async () => {
     const { store: semStore, fake } = makeSemanticStore();
     fake.failWith = new Error('outage');
-    const idKeep = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    const idGone = await semStore.save({ category: 'fact', subject: 'Jason', content: 'Jason plays League of Legends ranked' });
+    const idKeep = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    const idGone = await semStore.save({ category: 'fact', subject: 'Jasper', content: 'Jasper plays League of Legends ranked' });
     fake.failWith = undefined;
     semStore.deactivate(idGone);
 
@@ -1359,7 +1442,7 @@ describe('backfillEmbeddings()', () => {
     fake.failWith = new Error('outage');
     // Saved first (older), but self-diagnosis → embedded last.
     await semStore.save({ category: 'tool_error', subject: 'bot', content: 'Image generation failed badly' });
-    await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
     fake.failWith = undefined;
     const callsBefore = fake.calls.length;
 
@@ -1368,7 +1451,7 @@ describe('backfillEmbeddings()', () => {
 
     const backfillCalls = fake.calls.slice(callsBefore);
     expect(backfillCalls.map((c) => c.texts[0])).toEqual([
-      'Felix: Felix loves pizza and hot dogs',
+      'Remi: Remi loves pizza and hot dogs',
       'bot: Image generation failed badly',
     ]);
   });
@@ -1383,13 +1466,13 @@ describe('compact() with stored vectors', () => {
     fake.failWith = new Error('outage');
     const idOlder = await semStore.save({
       category: 'fact',
-      subject: 'Felix',
-      content: 'Felix loves eating pizza with extra cheese on top',
+      subject: 'Remi',
+      content: 'Remi loves eating pizza with extra cheese on top',
     });
     const idNewer = await semStore.save({
       category: 'fact',
-      subject: 'Felix',
-      content: 'Felix loves eating pizza with mushrooms',
+      subject: 'Remi',
+      content: 'Remi loves eating pizza with mushrooms',
     });
     fake.failWith = undefined;
     expect(idNewer).not.toBe(idOlder);
@@ -1417,14 +1500,14 @@ describe('compact() with stored vectors', () => {
     const { store: semStore } = makeSemanticStore({ dedupThreshold: 0.65 });
 
     // Two genuinely different memories — both get vectors encoding these contents at save time.
-    const idA = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    const idB = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix enjoys watching anime shows' });
+    const idA = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    const idB = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi enjoys watching anime shows' });
 
     // A raw edit makes their CONTENTS overlap 0.8333 (the lexical rule would call them duplicates), but
     // their stored VECTORS still encode the original distinct meanings (cosine 0.4714 < 0.65).
     // @ts-expect-error accessing private db for test setup
     const db = semStore.db;
-    db.prepare('UPDATE memories SET content = ? WHERE id = ?').run('Felix loves pizza and hot dogs indeed', idB);
+    db.prepare('UPDATE memories SET content = ? WHERE id = ?').run('Remi loves pizza and hot dogs indeed', idB);
 
     const result = semStore.compact();
 
@@ -1438,13 +1521,13 @@ describe('compact() with stored vectors', () => {
 
     // Same shape as the test above, but vectors never exist (outage at save, no backfill run).
     fake.failWith = new Error('outage');
-    const idA = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
-    const idB = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix enjoys watching anime shows' });
+    const idA = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
+    const idB = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi enjoys watching anime shows' });
     fake.failWith = undefined;
 
     // @ts-expect-error accessing private db for test setup
     const db = semStore.db;
-    db.prepare('UPDATE memories SET content = ? WHERE id = ?').run('Felix loves pizza and hot dogs indeed', idB);
+    db.prepare('UPDATE memories SET content = ? WHERE id = ?').run('Remi loves pizza and hot dogs indeed', idB);
     db.prepare("UPDATE memories SET updated_at = datetime('now', '-1 hour') WHERE id = ?").run(idA);
 
     const result = semStore.compact();
@@ -1456,7 +1539,7 @@ describe('compact() with stored vectors', () => {
 
   it('sweeps orphaned vector rows', async () => {
     const { store: semStore } = makeSemanticStore();
-    const id = await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix loves pizza and hot dogs' });
+    const id = await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi loves pizza and hot dogs' });
     semStore.deactivate(id); // also deletes its vectors
     expect(countVectorRows(semStore)).toBe(0);
 
@@ -1500,7 +1583,7 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
 
   it('expires image memories past their TTL and reports the count', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: { image: 24, event: 336 } });
-    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    const id = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' });
     ageMemory(semStore, id, '-25 hours');
 
     expect(semStore.sweepExpiredMemories()).toEqual({ expired: 1 });
@@ -1509,8 +1592,8 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
 
   it('keeps memories within their TTL and expires them once past it (boundary bracket)', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: { image: 24 } });
-    const keptId = await semStore.save({ category: 'image', subject: 'Felix', content: 'Shared a cat picture from the shelter' });
-    const expiredId = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    const keptId = await semStore.save({ category: 'image', subject: 'Remi', content: 'Shared a cat picture from the shelter' });
+    const expiredId = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' });
 
     // The exact-second boundary (contract: strict <, exactly-TTL is kept) cannot be asserted
     // deterministically against a moving clock, so these margins bracket it to within 61 seconds:
@@ -1536,9 +1619,9 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
   it('never expires non-ephemeral categories regardless of age', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: { image: 24, event: 336 } });
     const ids = [
-      await semStore.save({ category: 'fact', subject: 'Felix', content: 'Felix works as a software engineer' }),
-      await semStore.save({ category: 'preference', subject: 'Felix', content: 'Felix prefers tea over coffee' }),
-      await semStore.save({ category: 'personality', subject: 'Jason', content: 'Jason has dry sarcastic humor' }),
+      await semStore.save({ category: 'fact', subject: 'Remi', content: 'Remi works as a software engineer' }),
+      await semStore.save({ category: 'preference', subject: 'Remi', content: 'Remi prefers tea over coffee' }),
+      await semStore.save({ category: 'personality', subject: 'Jasper', content: 'Jasper has dry sarcastic humor' }),
       await semStore.save({ category: 'vibe', subject: 'server', content: 'Server loves absurdist in-jokes' }),
       await semStore.save({ category: 'tool_error', subject: 'bot', content: 'Image generation failed once' }),
     ];
@@ -1550,8 +1633,8 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
 
   it('is idempotent: a second sweep expires nothing', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: { image: 24 } });
-    const id1 = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
-    const id2 = await semStore.save({ category: 'image', subject: 'Felix', content: 'Shared a cat picture from the shelter' });
+    const id1 = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' });
+    const id2 = await semStore.save({ category: 'image', subject: 'Remi', content: 'Shared a cat picture from the shelter' });
     ageMemory(semStore, id1, '-25 hours');
     ageMemory(semStore, id2, '-25 hours');
 
@@ -1561,12 +1644,12 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
 
   it('expiry removes the memory from semantic search, FTS, and the vector store', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: { image: 24 }, relevanceThreshold: 0.3 });
-    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked anxiety' });
+    const id = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked anxiety' });
 
     // Findable everywhere before expiry.
     expect(countVectorRows(semStore, id)).toBe(1);
     expect((await semStore.search('league meme')).map((m) => m.id)).toEqual([id]);
-    expect(semStore.getBySubject('Jason')).toHaveLength(1);
+    expect(semStore.getBySubject('Jasper')).toHaveLength(1);
 
     ageMemory(semStore, id, '-25 hours');
     semStore.sweepExpiredMemories();
@@ -1574,12 +1657,12 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
     // Invisible everywhere after expiry — vectors, FTS, and subject lookup all cleaned.
     expect(countVectorRows(semStore, id)).toBe(0);
     expect(await semStore.search('league meme')).toEqual([]);
-    expect(semStore.getBySubject('Jason')).toEqual([]);
+    expect(semStore.getBySubject('Jasper')).toEqual([]);
   });
 
   it('a dedup-merge re-observation refreshes the TTL clock (updated_at, not created_at)', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: { image: 24 } });
-    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked anxiety' });
+    const id = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked anxiety' });
 
     // The memory is past its TTL (both timestamps aged)...
     ageMemory(semStore, id, '-25 hours');
@@ -1588,7 +1671,7 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
     // merges into the same id and refreshes updated_at to now. created_at stays 25 hours old.
     const mergedId = await semStore.save({
       category: 'image',
-      subject: 'Jason',
+      subject: 'Jasper',
       content: 'Shared a meme about League ranked anxiety again',
     });
     expect(mergedId).toBe(id);
@@ -1602,13 +1685,13 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
   it('an expired memory does not block re-observation (new row, fresh TTL)', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: { image: 24 }, dedupThreshold: 0.65 });
     const content = 'Shared a meme about League ranked anxiety';
-    const originalId = await semStore.save({ category: 'image', subject: 'Jason', content });
+    const originalId = await semStore.save({ category: 'image', subject: 'Jasper', content });
     ageMemory(semStore, originalId, '-25 hours');
     expect(semStore.sweepExpiredMemories()).toEqual({ expired: 1 });
 
     // The identical observation arrives again later: neither lexical nor semantic dedup may resurrect
     // the expired row — it gets a brand-new id and a fresh TTL window.
-    const newId = await semStore.save({ category: 'image', subject: 'Jason', content });
+    const newId = await semStore.save({ category: 'image', subject: 'Jasper', content });
 
     expect(newId).not.toBe(originalId);
     const active = semStore.getAllActive();
@@ -1618,7 +1701,7 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
 
   it('ttls: {} disables all expiry (DI replaces the defaults entirely)', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: {} });
-    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    const id = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' });
     ageMemory(semStore, id, '-87600 hours'); // ~10 years
 
     expect(semStore.sweepExpiredMemories()).toEqual({ expired: 0 });
@@ -1627,7 +1710,7 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
 
   it('a DI TTL of 0 disables expiry for that category only', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: { image: 0, event: 336 } });
-    const imageId = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    const imageId = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' });
     const eventId = await semStore.save({ category: 'event', subject: 'server', content: 'Game night planned for Friday' });
     ageMemory(semStore, imageId, '-87600 hours');
     ageMemory(semStore, eventId, '-87600 hours');
@@ -1641,7 +1724,7 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
     vi.stubEnv('MEMORY_TTL_EVENT_DAYS', '1'); // 1 day = 24 hours
     try {
       const { store: semStore } = makeSemanticStore(); // no ttls DI → env values apply
-      const imageId = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+      const imageId = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' });
       const eventId = await semStore.save({ category: 'event', subject: 'server', content: 'Game night planned for Friday' });
       ageMemory(semStore, imageId, '-3660 seconds'); // 1h + 60s → past the 1-hour image TTL
       ageMemory(semStore, eventId, '-86460 seconds'); // 24h + 60s → past the 1-day event TTL
@@ -1657,7 +1740,7 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
     vi.stubEnv('MEMORY_TTL_IMAGE_HOURS', '0');
     try {
       const { store: semStore } = makeSemanticStore();
-      const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+      const id = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' });
       ageMemory(semStore, id, '-87600 hours'); // ~10 years
 
       expect(semStore.sweepExpiredMemories()).toEqual({ expired: 0 });
@@ -1669,7 +1752,7 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
 
   it('compact() runs the TTL sweep first and reports expired counts', async () => {
     const { store: semStore } = makeSemanticStore({ ttls: { image: 24 } });
-    const id = await semStore.save({ category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' });
+    const id = await semStore.save({ category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' });
     ageMemory(semStore, id, '-25 hours');
 
     const result = semStore.compact();
@@ -1681,15 +1764,15 @@ describe('ephemeral memory TTL (sweepExpiredMemories)', () => {
 
 describe('deactivate() idempotence and FTS index integrity', () => {
   it('deactivate() returns true once and false on a repeat call', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Likes pangolins' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Likes pangolins' });
     expect(store.deactivate(id)).toBe(true);
     expect(store.deactivate(id)).toBe(false);
     expect(store.deactivate(999_999)).toBe(false);
   });
 
   it('a repeated deactivate() does not corrupt the FTS index (regression: "database disk image is malformed")', async () => {
-    const keep = await store.save({ category: 'fact', subject: 'Felix', content: 'Collects vintage synthesizers' });
-    const gone = await store.save({ category: 'fact', subject: 'Jason', content: 'Likes pangolins' });
+    const keep = await store.save({ category: 'fact', subject: 'Remi', content: 'Collects vintage synthesizers' });
+    const gone = await store.save({ category: 'fact', subject: 'Jasper', content: 'Likes pangolins' });
 
     store.deactivate(gone);
     store.deactivate(gone); // the model calling forget_memory twice with the same id
@@ -1702,10 +1785,10 @@ describe('deactivate() idempotence and FTS index integrity', () => {
   it('compact() survives a three-way duplicate group and leaves the index searchable', async () => {
     // Three mutual duplicates: the old i/j loop deactivated the third one twice (once against each of
     // the others), corrupting the index.
-    const a = await store.save({ category: 'fact', subject: 'Felix', content: 'Enjoys swimming every weekend morning' });
-    const b = await store.save({ category: 'fact', subject: 'Felix', content: 'Collects rare stamps from Europe' });
-    const c = await store.save({ category: 'fact', subject: 'Felix', content: 'Reads science fiction novels nightly' });
-    const jason = await store.save({ category: 'fact', subject: 'Jason', content: 'Plays League of Legends ranked' });
+    const a = await store.save({ category: 'fact', subject: 'Remi', content: 'Enjoys swimming every weekend morning' });
+    const b = await store.save({ category: 'fact', subject: 'Remi', content: 'Collects rare stamps from Europe' });
+    const c = await store.save({ category: 'fact', subject: 'Remi', content: 'Reads science fiction novels nightly' });
+    const jasper = await store.save({ category: 'fact', subject: 'Jasper', content: 'Plays League of Legends ranked' });
     // @ts-expect-error accessing private db for test setup
     const db = store.db;
     db.prepare("UPDATE memories SET content = 'Likes cats and dogs very much indeed' WHERE id = ?").run(a);
@@ -1715,14 +1798,14 @@ describe('deactivate() idempotence and FTS index integrity', () => {
     const result = store.compact();
 
     expect(result.removed).toBe(2);
-    expect(store.getAllActive().map((m) => m.id).sort((x, y) => x - y)).toEqual([a, jason]);
+    expect(store.getAllActive().map((m) => m.id).sort((x, y) => x - y)).toEqual([a, jasper]);
     const results = await store.search('League');
     expect(results).toHaveLength(1);
   });
 
   it('rebuildFtsIndex() restores a searchable index from the active rows', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Brews kombucha at home' });
-    const inactive = await store.save({ category: 'fact', subject: 'Jason', content: 'Drinks kombucha daily' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Brews kombucha at home' });
+    const inactive = await store.save({ category: 'fact', subject: 'Jasper', content: 'Drinks kombucha daily' });
     store.deactivate(inactive);
 
     // Simulate a corrupted / stale index: wipe it behind the store's back.
@@ -1737,12 +1820,273 @@ describe('deactivate() idempotence and FTS index integrity', () => {
   });
 
   it('compact() rebuilds the index, so a corrupted index heals on the next startup', async () => {
-    const id = await store.save({ category: 'fact', subject: 'Felix', content: 'Restores old arcade cabinets' });
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'Restores old arcade cabinets' });
     // @ts-expect-error accessing private db for test setup
     store.db.exec("INSERT INTO memories_fts(memories_fts) VALUES('delete-all')");
 
     store.compact();
 
     expect((await store.search('arcade')).map((m) => m.id)).toEqual([id]);
+  });
+});
+
+describe('stampSubjectUserIds() (startup link of name-only memories to member ids)', () => {
+  function rowOf(id: number) {
+    // @ts-expect-error accessing private db for verification
+    return store.db.prepare('SELECT subject, subject_user_id, updated_at, active FROM memories WHERE id = ?').get(id) as {
+      subject: string;
+      subject_user_id: string | null;
+      updated_at: string;
+      active: number;
+    };
+  }
+
+  beforeEach(() => {
+    store.upsertIdentity('111', 'OldNick');
+    store.upsertIdentity('111', 'Wheelie'); // display Wheelie, canonical OldNick
+    store.upsertIdentity('222', 'Jasper');
+  });
+
+  it('stamps rows whose subject is a member’s current or first-seen name, case-insensitively', async () => {
+    const a = await store.save({ category: 'fact', subject: 'Wheelie', content: 'Owns a husky' });
+    const b = await store.save({ category: 'fact', subject: 'oldnick', content: 'Plays bass guitar' });
+    const c = await store.save({ category: 'fact', subject: 'JASPER', content: 'Works nights at the depot' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 3, relinked: 0, names: 3, ambiguous: 0 });
+    expect(rowOf(a).subject_user_id).toBe('111');
+    expect(rowOf(b).subject_user_id).toBe('111');
+    expect(rowOf(c).subject_user_id).toBe('222');
+    // Subjects are left as written (the FTS index covers them); getForPerson now finds every row by id.
+    expect(rowOf(b).subject).toBe('oldnick');
+    expect(store.getForPerson({ userId: '111', names: [] }).map((m) => m.id).sort()).toEqual([a, b].sort());
+  });
+
+  it('also stamps Discord handles, IRL names and nicknames that only one member goes by', async () => {
+    store.upsertIdentity('222', 'Jasper', 'lapinlune');
+    store.updateIdentityMeta('111', { irl_name: 'Dorian', aliases_add: ['Wheels'] });
+    const handle = await store.save({ category: 'fact', subject: 'lapinlune', content: 'Mains Jhin in ranked' });
+    const irl = await store.save({ category: 'fact', subject: 'Dorian', content: 'Works as an electrician' });
+    const alias = await store.save({ category: 'preference', subject: 'wheels', content: 'Hates cilantro' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 3, relinked: 0, names: 3, ambiguous: 0 });
+    expect(rowOf(handle).subject_user_id).toBe('222');
+    expect(rowOf(irl).subject_user_id).toBe('111');
+    expect(rowOf(alias).subject_user_id).toBe('111');
+  });
+
+  it('treats a name two members go by in any form as ambiguous (a display name does not outrank a nickname here)', async () => {
+    store.updateIdentityMeta('111', { aliases_add: ['Jasper'] });
+    const row = await store.save({ category: 'fact', subject: 'Jasper', content: 'Drives a red Miata' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, relinked: 0, names: 0, ambiguous: 1 });
+    expect(rowOf(row).subject_user_id).toBeNull();
+  });
+
+  it("is idempotent and never overwrites a known member's id", async () => {
+    store.upsertIdentity('999', 'Silas');
+    const mismatched = await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: '999', content: 'Has a twin' });
+    await store.save({ category: 'fact', subject: 'Jasper', content: 'Drives a red Miata' });
+
+    expect(store.stampSubjectUserIds().stamped).toBe(1);
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, relinked: 0, names: 0, ambiguous: 0 });
+    expect(rowOf(mismatched).subject_user_id).toBe('999');
+  });
+
+  it('treats an id no member has (copied from a prompt example, garbled) like no id', async () => {
+    // The old learner stored whatever id the model wrote.
+    const copied = await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: '456', content: 'Still plays on PS4' });
+    const stranger = await store.save({ category: 'fact', subject: 'Stranger', subject_user_id: '456', content: 'Lives in Laval' });
+    // An inactive identity (a member who left) is still somebody: their rows keep their id.
+    store.upsertIdentity('444', 'Wheelie');
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE identities SET active = 0 WHERE discord_user_id = '444'").run();
+    const departed = await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: '444', content: 'Moved to Calgary' });
+    expect(store.getForPerson({ userId: '222', names: ['Jasper'] }).map((m) => m.id)).toEqual([]);
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 1, relinked: 0, names: 1, ambiguous: 0 });
+    expect(rowOf(copied).subject_user_id).toBe('222');
+    expect(rowOf(stranger).subject_user_id).toBe('456');
+    expect(rowOf(departed).subject_user_id).toBe('444');
+    expect(store.getForPerson({ userId: '222', names: ['Jasper'] }).map((m) => m.id)).toEqual([copied]);
+    expect(store.stampSubjectUserIds().stamped).toBe(0);
+  });
+
+  it("keeps a real account's id that has no identities row (remember_fact, Remember this), whatever the subject", async () => {
+    // A lurker who never posted: remember_fact resolved them through the message's @-mention, and
+    // "Remember this" saved under an old message's author. Neither creates an identities row, and
+    // their display name "Alex" happens to be Jasper's real name.
+    const LURKER = '300000000000000003';
+    store.updateIdentityMeta('222', { irl_name: 'Alex' });
+    const fromChat = await store.save({ category: 'preference', subject: 'Alex', subject_user_id: LURKER, content: 'Hates cilantro', source: 'conversation' });
+    const fromCommand = await store.save({ category: 'fact', subject: 'Alex', subject_user_id: LURKER, content: 'Works at the airport', source: 'command' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, relinked: 0, names: 0, ambiguous: 0 });
+    expect(rowOf(fromChat).subject_user_id).toBe(LURKER);
+    expect(rowOf(fromCommand).subject_user_id).toBe(LURKER);
+    expect(store.getForPerson({ userId: LURKER, names: [] }).map((m) => m.id).sort()).toEqual([fromChat, fromCommand].sort());
+    expect(store.getForPerson({ userId: '222', names: [] })).toEqual([]);
+  });
+
+  it('treats a snowflake no member has as no id on rows the old learner wrote (a garbled copy of a member id)', async () => {
+    const garbled = await store.save({ category: 'fact', subject: 'Jasper', subject_user_id: '300000000000000009', content: 'Still plays on PS4', source: 'observation' });
+    const selfImprovement = await store.save({ category: 'feature_request', subject: 'Jasper', subject_user_id: '300000000000000009', content: 'Wants a trivia game', source: 'self-improvement' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 2, relinked: 0, names: 1, ambiguous: 0 });
+    expect(rowOf(garbled).subject_user_id).toBe('222');
+    expect(rowOf(selfImprovement).subject_user_id).toBe('222');
+  });
+
+  it('skips names shared by two members, server-wide subjects, unknown names and inactive rows', async () => {
+    // Someone else was first seen as "Wheelie" too: the name is ambiguous.
+    store.upsertIdentity('333', 'Wheelie');
+    store.upsertIdentity('333', 'Silas');
+    const ambiguous = await store.save({ category: 'fact', subject: 'Wheelie', content: 'Likes cats a lot' });
+    const server = await store.save({ category: 'vibe', subject: 'server', content: 'Movie night on Fridays' });
+    const unknown = await store.save({ category: 'fact', subject: 'Stranger', content: 'Nobody knows them' });
+    const inactive = await store.save({ category: 'fact', subject: 'Jasper', content: 'Used to skate' });
+    store.deactivate(inactive);
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 0, relinked: 0, names: 0, ambiguous: 1 });
+    for (const id of [ambiguous, server, unknown, inactive]) expect(rowOf(id).subject_user_id).toBeNull();
+  });
+
+  it('does not refresh updated_at (the TTL clock) or disturb search', async () => {
+    const id = await store.save({ category: 'event', subject: 'Jasper', content: 'Moving apartments next week' });
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE memories SET updated_at = datetime('now', '-3 days') WHERE id = ?").run(id);
+    const before = rowOf(id).updated_at;
+
+    store.stampSubjectUserIds();
+
+    expect(rowOf(id).updated_at).toBe(before);
+    expect((await store.search('apartments')).map((m) => m.id)).toEqual([id]);
+  });
+});
+
+describe('stampSubjectUserIds() with linked side accounts (LINKED_ACCOUNTS)', () => {
+  // Fake ids only: a main account and the side account the same person sometimes posts from.
+  const MAIN = '100000000000000001';
+  const SIDE = '100000000000000002';
+  const OTHER = '100000000000000003';
+
+  function idOf(id: number): string | null {
+    // @ts-expect-error accessing private db for verification
+    return (store.db.prepare('SELECT subject_user_id FROM memories WHERE id = ?').get(id) as { subject_user_id: string | null })
+      .subject_user_id;
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('LINKED_ACCOUNTS', `${SIDE}:${MAIN}`);
+    store.upsertIdentity(MAIN, 'Toby', 'toby_main');
+    store.upsertIdentity(SIDE, 'Tohbee', 'tobyclone');
+    store.upsertIdentity(OTHER, 'Silas');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("stamps rows filed under a side account's names with the main account's id", async () => {
+    const byDisplay = await store.save({ category: 'fact', subject: 'Tohbee', content: 'Collects vinyl records' });
+    const byHandle = await store.save({ category: 'fact', subject: 'tobyclone', content: 'Mains support in Overwatch' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 2, relinked: 0, names: 2, ambiguous: 0 });
+    expect(idOf(byDisplay)).toBe(MAIN);
+    expect(idOf(byHandle)).toBe(MAIN);
+  });
+
+  it('treats a name the main and the side account share as one person, not an ambiguity', async () => {
+    store.upsertIdentity(SIDE, 'Toby', 'tobyclone');
+    const row = await store.save({ category: 'fact', subject: 'toby', content: 'Works at the hardware store' });
+
+    expect(store.stampSubjectUserIds()).toEqual({ stamped: 1, relinked: 0, names: 1, ambiguous: 0 });
+    expect(idOf(row)).toBe(MAIN);
+  });
+
+  it("moves rows already stamped with the side account's id to the main account", async () => {
+    const row = await store.save({ category: 'fact', subject: 'Tohbee', subject_user_id: SIDE, content: 'Hates pineapple pizza' });
+    const other = await store.save({ category: 'fact', subject: 'Silas', subject_user_id: OTHER, content: 'Lives in Montreal' });
+
+    expect(store.stampSubjectUserIds().relinked).toBe(1);
+    expect(idOf(row)).toBe(MAIN);
+    expect(idOf(other)).toBe(OTHER);
+    expect(store.stampSubjectUserIds().relinked).toBe(0);
+  });
+
+  it('lets compact() dedup the side and main rows on the same start when it runs after the stamp', async () => {
+    await store.save({ category: 'fact', subject: 'Toby', subject_user_id: MAIN, content: 'Owns a black lab named Moose' });
+    await store.save({ category: 'fact', subject: 'Tohbee', content: 'Owns a black lab named Moose' });
+
+    store.stampSubjectUserIds();
+    const { removed } = store.compact();
+
+    expect(removed).toBe(1);
+    expect(store.getAllActive().filter((m) => m.content.includes('Moose'))).toHaveLength(1);
+  });
+
+  it("getForPerson() by the main id also finds rows keyed on the side account's id", async () => {
+    const row = await store.save({ category: 'fact', subject: 'Tohbee', subject_user_id: SIDE, content: 'Plays the cello' });
+
+    expect(store.getForPerson({ userId: MAIN, names: [] }).map((m) => m.id)).toEqual([row]);
+    expect(store.getForPerson({ userId: SIDE, names: [] }).map((m) => m.id)).toEqual([row]);
+  });
+});
+
+describe('save-time dedup never merges two different people who share a name', () => {
+  it('lexical dedup skips a row with another member id, and a merge adopts the incoming id', async () => {
+    const first = await store.save({ category: 'fact', subject: 'Alex', subject_user_id: '111', content: 'Likes cats and dogs very much' });
+    const other = await store.save({ category: 'fact', subject: 'Alex', subject_user_id: '222', content: 'Likes cats and dogs very much indeed' });
+    expect(other).not.toBe(first);
+
+    const nameOnly = await store.save({ category: 'fact', subject: 'Sam', content: 'Plays the drums every weekend' });
+    const merged = await store.save({ category: 'fact', subject: 'Sam', subject_user_id: '333', content: 'Plays the drums every weekend now' });
+    expect(merged).toBe(nameOnly);
+    expect(store.getAllActive().find((m) => m.id === nameOnly)?.subject_user_id).toBe('333');
+  });
+
+  it('semantic dedup skips a near-duplicate that belongs to another member id', async () => {
+    const { store: semStore } = makeSemanticStore({ dedupThreshold: 0.65 });
+    // Word overlap 0.5714 (≤ 0.6, lexical keeps both) but cosine ≈ 0.80 (≥ 0.65, semantic would merge).
+    const a = await semStore.save({ category: 'fact', subject: 'Alex', subject_user_id: '111', content: 'Alex loves eating pizza with extra cheese on top' });
+    const b = await semStore.save({ category: 'fact', subject: 'Alex', subject_user_id: '222', content: 'Alex loves eating pizza with mushrooms' });
+    expect(b).not.toBe(a);
+    expect(semStore.getAllActive()).toHaveLength(2);
+
+    const c = await semStore.save({ category: 'fact', subject: 'Alex', subject_user_id: '111', content: 'Alex loves eating pizza with mushrooms' });
+    expect(c).toBe(a);
+  });
+});
+
+describe('compact() dedup groups by person (subject_user_id, else subject)', () => {
+  it('deduplicates one person’s memories filed under two different names', async () => {
+    const older = await store.save({ category: 'fact', subject: 'OldNick', subject_user_id: '111', content: 'Likes cats and dogs very much' });
+    const newer = await store.save({ category: 'fact', subject: 'Wheelie', subject_user_id: '111', content: 'Likes cats and dogs very much indeed' });
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE memories SET updated_at = datetime('now', '-1 hour') WHERE id = ?").run(older);
+
+    const result = store.compact();
+
+    expect(result.removed).toBe(1);
+    expect(store.getAllActive().map((m) => m.id)).toEqual([newer]);
+    // The FTS index stays consistent: the survivor is searchable, the duplicate is gone.
+    expect((await store.search('cats dogs')).map((m) => m.id)).toEqual([newer]);
+  });
+
+  it('keeps two different people apart even when they share a display name', async () => {
+    await store.save({ category: 'fact', subject: 'Alex', subject_user_id: '111', content: 'Likes cats and dogs very much' });
+    await store.save({ category: 'fact', subject: 'Alex', subject_user_id: '222', content: 'Likes cats and dogs very much indeed' });
+
+    expect(store.compact().removed).toBe(0);
+    expect(store.getAllActive()).toHaveLength(2);
+  });
+
+  it('still groups name-only rows by subject', async () => {
+    const a = await store.save({ category: 'fact', subject: 'server', content: 'Likes cats and dogs very much' });
+    const b = await store.save({ category: 'fact', subject: 'server', content: 'Enjoys swimming every weekend morning' });
+    // @ts-expect-error accessing private db for test setup
+    store.db.prepare("UPDATE memories SET content = 'Likes cats and dogs very much indeed', updated_at = datetime('now', '-1 hour') WHERE id = ?").run(b);
+
+    expect(store.compact().removed).toBe(1);
+    expect(store.getAllActive().map((m) => m.id)).toEqual([a]);
   });
 });

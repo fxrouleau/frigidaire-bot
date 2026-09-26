@@ -10,12 +10,14 @@ on:
         - '.github/workflows/**'
         - 'package.json'
         - 'yarn.lock'
+        - '.yarnrc.yml'
         - '.dockerignore'
         - 'src/**'
         - 'tsconfig.json'
         - 'tsconfig.test.json'
         - 'vitest.config.ts'
         - 'biome.json'
+        - 'sandbox/**'
     branches:
       - master
 
@@ -31,12 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Run lint, typecheck, build, and tests in container
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: ci
@@ -54,7 +56,7 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ vars.DOCKER_USERNAME }}/frigidaire-bot
           tags: |
@@ -63,13 +65,13 @@ jobs:
             type=raw,value=latest
 
       - name: DockerHub Login
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ vars.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: Build and Push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -79,3 +81,72 @@ jobs:
             GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The code-execution sidecar image. Rebuilt only when this sandbox/ content has not been published yet (or on a
+  # manual run): a new digest makes watchtower restart the sidecar, so an unchanged sandbox must not be re-pushed on
+  # every bot deploy. The key is the content (sandbox/'s git tree hash, pushed as a `tree-<hash>` tag), not this
+  # push's diff: a run cancelled while pending (the concurrency group keeps only the newest) or a failed smoke test
+  # would otherwise skip that sandbox change for good, since the next push's diff no longer contains it.
+  sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: DockerHub Login
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Is this sandbox/ already published?
+        id: changed
+        env:
+          IMAGE: ${{ vars.DOCKER_USERNAME }}/frigidaire-sandbox
+          EVENT: ${{ github.event_name }}
+        run: |
+          TREE_TAG="tree-$(git rev-parse HEAD:sandbox)"
+          echo "tree_tag=${TREE_TAG}" >> "$GITHUB_OUTPUT"
+          # Any inspect failure (not published, registry hiccup) builds: a spare rebuild beats a skipped change.
+          if [ "$EVENT" = "push" ] && docker buildx imagetools inspect "${IMAGE}:${TREE_TAG}" > /dev/null 2>&1; then
+            echo "sandbox=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "sandbox=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build sandbox image
+        if: steps.changed.outputs.sandbox == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: sandbox
+          load: true
+          tags: frigidaire-sandbox:ci
+          cache-from: type=gha,scope=sandbox
+          cache-to: type=gha,mode=max,scope=sandbox
+
+      - name: Smoke-test the sandbox
+        if: steps.changed.outputs.sandbox == 'true'
+        run: sh sandbox/ci-smoke.sh frigidaire-sandbox:ci
+
+      - name: Generate tags
+        if: steps.changed.outputs.sandbox == 'true'
+        id: tags
+        run: |
+          echo "date_tag=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+          echo "sha_tag=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Push sandbox image
+        if: steps.changed.outputs.sandbox == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: sandbox
+          push: true
+          tags: |
+            ${{ vars.DOCKER_USERNAME }}/frigidaire-sandbox:latest
+            ${{ vars.DOCKER_USERNAME }}/frigidaire-sandbox:${{ steps.tags.outputs.date_tag }}
+            ${{ vars.DOCKER_USERNAME }}/frigidaire-sandbox:sha-${{ steps.tags.outputs.sha_tag }}
+            ${{ vars.DOCKER_USERNAME }}/frigidaire-sandbox:${{ steps.changed.outputs.tree_tag }}
+          cache-from: type=gha,scope=sandbox
+          cache-to: type=gha,mode=max,scope=sandbox

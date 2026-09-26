@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from '../../config';
+import { accountIdsFor, canonicalUserId } from '../../linkedAccounts';
 import { logger } from '../../logger';
 import type { EmbeddingProvider } from './embeddingProvider';
 import { blobToVector, dot, vectorToBlob } from './vectorMath';
@@ -34,6 +35,12 @@ export type Identity = {
   discord_user_id: string;
   display_name: string;
   canonical_name: string;
+  /**
+   * Discord handle (`user.username`, e.g. "lapinlune"): NULL until the member is next seen after the
+   * column was added. Optional in the type so hand-built identities (tests, fakes) need not name it;
+   * rows read from the table always carry the key.
+   */
+  username?: string | null;
   irl_name: string | null;
   aliases: string[];
   first_seen_at: string;
@@ -140,7 +147,7 @@ export function buildEmbeddingInput(memory: Pick<MemoryInput, 'subject' | 'conte
 
 /**
  * Default per-category ephemeral-memory TTLs (in hours), env-overridable. Ephemeral observations
- * ("Jason shared a photo of a hotdog", "movie night happened on Saturday") should be retrievable
+ * ("Jasper shared a photo of a hotdog", "movie night happened on Saturday") should be retrievable
  * while fresh and then expire — they're moments, not durable facts. A TTL of 0 disables expiry
  * for that category.
  */
@@ -155,6 +162,72 @@ function defaultTtls(): Record<string, number> {
 
 /** One ranked list of keyword hits: rows matching every query term first, then rows matching only some. */
 type KeywordHits = { exact: Memory[]; partial: Memory[] };
+
+/**
+ * Subjects (lowercased) that name the group or the bot rather than a person. A member whose display
+ * name happens to be one of these must never capture every server-wide memory.
+ */
+export const NON_PERSON_SUBJECTS: ReadonlySet<string> = new Set(['server', 'bot', 'general', 'everyone', 'here']);
+
+/** The `source` of the rows the personality learner writes (its observation and self-improvement passes). */
+export const LEARNER_SOURCES = { observation: 'observation', selfImprovement: 'self-improvement' } as const;
+
+// SQL literal list, same reasoning as SELF_DIAGNOSIS_NOT_IN: compile-time constants only.
+const LEARNER_SOURCES_IN = Object.values(LEARNER_SOURCES)
+  .map((s) => `'${s}'`)
+  .join(', ');
+
+/** The shape of a Discord id (snowflake). The old learner also stored ids like "456" from its prompt examples. */
+const SNOWFLAKE = /^\d{15,21}$/;
+
+/**
+ * Comparison key for names: case-, accent- and spacing-insensitive ("Mariè" = "marie", "Big  Mike" =
+ * "big mike"). Display names are arbitrary Unicode, so this runs in JS rather than as a SQL collation.
+ */
+export function nameKey(name: string | null | undefined): string {
+  return (name ?? '').normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// The names a member goes by, strongest claim first: the current display name (what the group sees),
+// the Discord handle, the first-seen display name, the IRL name, then nicknames. Interactive lookups
+// (src/ai/people.ts: memory tools, learner subjects, summaries, reminders) walk these tiers in this
+// order, plus one weaker tier (the first word of an IRL name); the startup stamp checks all of them at
+// once (everyoneGoingBy below).
+export const IDENTITY_NAME_TIERS: readonly ((identity: Identity) => (string | null | undefined)[])[] = [
+  (i) => [i.display_name],
+  (i) => [i.username],
+  (i) => [i.canonical_name],
+  (i) => [i.irl_name],
+  (i) => i.aliases,
+];
+
+/**
+ * The main account ids of every member who goes by a name in ANY form, ignoring tier strength (the
+ * startup stamp's strict rule). A side account (LINKED_ACCOUNTS) counts as its main account, so a name
+ * the main and the side account share is still one person.
+ */
+function everyoneGoingBy(identities: Identity[], name: string): string[] {
+  const needle = nameKey(name);
+  if (!needle) return [];
+  const owners = identities.filter((i) =>
+    IDENTITY_NAME_TIERS.some((tier) => tier(i).some((n) => nameKey(n) === needle)),
+  );
+  return [...new Set(owners.map((i) => canonicalUserId(i.discord_user_id)))];
+}
+
+/**
+ * Whether two rows with the same subject may be merged as duplicates: only when they cannot be about
+ * two different members — two people can share a display name, and their ids tell them apart.
+ */
+function samePerson(a: string | null | undefined, b: string | null | undefined): boolean {
+  return !a || !b || a === b;
+}
+
+/** The compact() dedup group of a memory: one person's rows group together whatever name they were filed under. */
+function dedupGroupKey(memory: Pick<Memory, 'subject' | 'subject_user_id' | 'category'>): string {
+  const who = memory.subject_user_id ? `id:${memory.subject_user_id}` : `name:${memory.subject}`;
+  return `${who}::${memory.category}`;
+}
 
 export class MemoryStore {
   private readonly db: Database.Database;
@@ -255,6 +328,7 @@ export class MemoryStore {
 
     // Additive migrations for existing databases
     this.addColumnIfMissing('memories', 'subject_user_id', 'TEXT');
+    this.addColumnIfMissing('identities', 'username', 'TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject_user_id ON memories(subject_user_id);');
     this.addColumnIfMissing('emojis', 'use_count', 'INTEGER NOT NULL DEFAULT 0');
     this.addColumnIfMissing('emojis', 'last_used_at', 'TEXT');
@@ -324,13 +398,15 @@ export class MemoryStore {
   private lexicalSave(memory: MemoryInput): LexicalSaveResult {
     return this.runInTransaction(() => {
       const existing = this.stmt(
-        'SELECT id, content FROM memories WHERE category = ? AND subject = ? AND active = 1',
-      ).all(memory.category, memory.subject) as Pick<Memory, 'id' | 'content'>[];
+        'SELECT id, content, subject_user_id FROM memories WHERE category = ? AND subject = ? AND active = 1',
+      ).all(memory.category, memory.subject) as Pick<Memory, 'id' | 'content' | 'subject_user_id'>[];
 
       for (const row of existing) {
+        if (!samePerson(row.subject_user_id, memory.subject_user_id)) continue;
         if (wordOverlap(row.content, memory.content) > 0.6) {
           // Update existing record instead of creating a duplicate
           this.updateMemoryContent(row.id, row.content, memory);
+          this.adoptSubjectUserId(row.id, row.subject_user_id, memory.subject_user_id);
           logger.info(`Updated existing memory #${row.id} (dedup match)`);
           return { id: row.id, merged: true };
         }
@@ -386,11 +462,7 @@ export class MemoryStore {
       const current = this.stmt('SELECT content, active FROM memories WHERE id = ?').get(phase1.id) as
         | Pick<Memory, 'content' | 'active'>
         | undefined;
-      if (
-        !current ||
-        current.active !== 1 ||
-        buildEmbeddingInput({ ...memory, content: current.content }) !== inputText
-      ) {
+      if (current?.active !== 1 || buildEmbeddingInput({ ...memory, content: current.content }) !== inputText) {
         return phase1.id;
       }
 
@@ -404,23 +476,26 @@ export class MemoryStore {
       // Semantic dedup against the same (category, subject) group, via the vector cache.
       // Vectors are L2-normalized, so dot product == cosine similarity.
       const cache = this.getVectorCache(embeddings.model);
-      let bestId: number | undefined;
-      let bestScore = Number.NEGATIVE_INFINITY;
+      const candidates: { id: number; score: number }[] = [];
       for (const [id, entry] of cache) {
         if (id === phase1.id) continue;
         if (entry.category !== memory.category || entry.subject !== memory.subject) continue;
         // Dimension mismatch (e.g. a model changed its output size under the same id) — skip, don't blow up.
         if (entry.vec.length !== vector.length) continue;
         const score = dot(vector, entry.vec);
-        if (score > bestScore) {
-          bestScore = score;
-          bestId = id;
-        }
+        if (score >= this.dedupThreshold) candidates.push({ id, score });
       }
+      candidates.sort((a, b) => b.score - a.score);
 
-      if (bestId !== undefined && bestScore >= this.dedupThreshold) {
-        const existing = this.stmt('SELECT content FROM memories WHERE id = ?').get(bestId) as Pick<Memory, 'content'>;
+      for (const { id: bestId, score: bestScore } of candidates) {
+        const existing = this.stmt('SELECT content, subject_user_id FROM memories WHERE id = ?').get(bestId) as Pick<
+          Memory,
+          'content' | 'subject_user_id'
+        >;
+        // subject_user_id is not in the cache (the startup stamp can change it): checked per candidate.
+        if (!samePerson(existing.subject_user_id, memory.subject_user_id)) continue;
         this.updateMemoryContent(bestId, existing.content, memory);
+        this.adoptSubjectUserId(bestId, existing.subject_user_id, memory.subject_user_id);
         this.removeInCurrentTransaction(phase1.id);
         this.upsertVector(bestId, embeddings.model, inputText, vector, meta);
         logger.info(`Memory #${phase1.id} merged into #${bestId} (semantic dedup, cosine ${bestScore.toFixed(3)})`);
@@ -430,6 +505,12 @@ export class MemoryStore {
       this.upsertVector(phase1.id, embeddings.model, inputText, vector, meta);
       return phase1.id;
     });
+  }
+
+  /** A merge target without a member id takes the id of the re-observation merged into it. */
+  private adoptSubjectUserId(id: number, existingUserId: string | null, incomingUserId: string | undefined): void {
+    if (existingUserId || !incomingUserId) return;
+    this.stmt('UPDATE memories SET subject_user_id = ? WHERE id = ?').run(incomingUserId, id);
   }
 
   /** Updates a memory's content + updated_at and keeps the FTS index in sync. Caller provides the OLD content. */
@@ -589,7 +670,7 @@ export class MemoryStore {
 
   /** The distinct searchable terms of a query: FTS5 operators/punctuation stripped, single characters dropped. */
   private ftsTerms(query: string): string[] {
-    const stripped = query.replace(/["',()\{\}\*:^~@!#$%&+\-]/g, ' ');
+    const stripped = query.replace(/["',(){}*:^~@!#$%&+-]/g, ' ');
     return [...new Set(stripped.split(/\s+/).filter((t) => t.length > 1))];
   }
 
@@ -612,6 +693,37 @@ export class MemoryStore {
     ) as Memory[];
   }
 
+  /**
+   * A person's memories, matched by their stable Discord id OR any of their names (current display name,
+   * first-seen name, aliases). Display names change and subject_user_id doesn't, but rows saved before
+   * the id column existed, and by remember_fact, only carry a name. The id counts for every account of
+   * the person (LINKED_ACCOUNTS): a row still stamped with a side account's id is theirs too. Callers
+   * build `person` with memoryKeyFor() (src/ai/people.ts), which collects every name.
+   *
+   * With an id, a name only claims rows that carry no id: two members can share a name (someone's IRL
+   * name or nickname is another member's display name), and a row stamped with the other member's id
+   * is about them (see samePerson()). Without an id, every row filed under one of the names matches.
+   */
+  getForPerson(person: { userId?: string; names: string[] }, limit = 20): Memory[] {
+    const names = [...new Set(person.names.map((n) => n.trim()).filter((n) => n.length > 0))];
+    const ids = person.userId ? accountIdsFor(person.userId) : [];
+    if (ids.length === 0 && names.length === 0) return [];
+    if (ids.length === 0) {
+      return this.stmt(
+        `SELECT * FROM memories
+         WHERE active = 1 AND subject IN (SELECT value FROM json_each(?))
+         ORDER BY updated_at DESC LIMIT ?`,
+      ).all(JSON.stringify(names), limit) as Memory[];
+    }
+    return this.stmt(
+      `SELECT * FROM memories
+       WHERE active = 1
+         AND (subject_user_id IN (SELECT value FROM json_each(?))
+              OR (subject_user_id IS NULL AND subject IN (SELECT value FROM json_each(?))))
+       ORDER BY updated_at DESC LIMIT ?`,
+    ).all(JSON.stringify(ids), JSON.stringify(names), limit) as Memory[];
+  }
+
   getByCategory(category: string, limit = 20): Memory[] {
     return this.stmt('SELECT * FROM memories WHERE category = ? AND active = 1 ORDER BY updated_at DESC LIMIT ?').all(
       category,
@@ -632,7 +744,7 @@ export class MemoryStore {
       const row = this.stmt('SELECT content, subject, category, active FROM memories WHERE id = ?').get(id) as
         | Pick<Memory, 'content' | 'subject' | 'category' | 'active'>
         | undefined;
-      if (!row || row.active !== 1) return false;
+      if (row?.active !== 1) return false;
 
       this.stmt('UPDATE memories SET active = 0 WHERE id = ?').run(id);
       this.stmt(
@@ -736,11 +848,116 @@ export class MemoryStore {
   }
 
   /**
+   * Links memories to the member they are about, in two idempotent steps:
+   *
+   * 1. Rows stamped with a linked side account's id (LINKED_ACCOUNTS) move to the main account's id,
+   *    so one person's memories are keyed on one id (and dedup together in compact()).
+   * 2. Every active memory without a subject_user_id whose subject is a name exactly one member goes by
+   *    — display name, Discord handle, first-seen name, IRL name or nickname, case-insensitively, on
+   *    any of their accounts — gets that member's MAIN id. (Real case: the learner filed memories under
+   *    "lapinlune", which is a member's handle, not his display name.) A row whose id is junk counts as
+   *    having none: the old learner stored whatever id the model wrote, e.g. one copied from its
+   *    prompt's examples ("456") or a garbled snowflake, and such a row is otherwise found by no lookup
+   *    (getForPerson only takes id-less rows by name) and never dedups with the member's rows. Junk means
+   *    an id nobody the bot knows has (no identities row, not in LINKED_ACCOUNTS) that is either not
+   *    shaped like a Discord id or on a learner row. Other writers (remember_fact, "Remember this") file
+   *    rows under real accounts that may have no identities row yet, so their ids are kept, as is a
+   *    known member's id.
+   *
+   * Step 2 is stricter than interactive lookups (src/ai/people.ts), which let a display name outrank
+   * another member's nickname: these rows are old and their subject was whatever the name meant back
+   * then (a member's first-seen name may be someone else's display name today), and a wrong id is a
+   * silent, permanent misfiling. So a name that ANY two people go by, in any form, is ambiguous and left
+   * alone, as are 'server'/'bot'/'general' and names nobody has. A name a member's main and side
+   * accounts share is one person, not an ambiguity.
+   *
+   * Cheap, so it simply runs at every startup, BEFORE compact(): rows saved under a name before the id
+   * column existed, by the old remember_fact, or under a name the member only later became known by,
+   * become reachable by id (getForPerson) and dedup with the person's other rows on the same start.
+   * Only subject_user_id changes: the FTS index does not cover it, and updated_at is deliberately
+   * untouched because the TTL sweep measures on it.
+   */
+  stampSubjectUserIds(): { stamped: number; relinked: number; names: number; ambiguous: number } {
+    const relinked = this.runInTransaction(() => {
+      let changed = 0;
+      const relink = this.stmt('UPDATE memories SET subject_user_id = ? WHERE subject_user_id = ?');
+      for (const [sideId, mainId] of config.server.linkedAccounts) {
+        changed += relink.run(mainId, sideId).changes;
+      }
+      return changed;
+    });
+
+    const allIdentities = this.getAllIdentities();
+    const identities = allIdentities.filter((i) => i.active !== 0);
+    // Ids of nobody the bot knows. Inactive identities and every LINKED_ACCOUNTS id still count as known.
+    const knownIds = new Set([
+      ...allIdentities.map((i) => i.discord_user_id),
+      ...config.server.linkedAccounts.keys(),
+      ...config.server.linkedAccounts.values(),
+    ]);
+    const storedIds = this.stmt(
+      'SELECT DISTINCT subject_user_id AS id FROM memories WHERE active = 1 AND subject_user_id IS NOT NULL',
+    ).all() as { id: string }[];
+    const unknownIds = storedIds.map((r) => r.id).filter((id) => !knownIds.has(id));
+    // Which unknown ids are junk: one that is not even shaped like a Discord id, on any row; a snowflake
+    // only on a row the learner wrote (only the old learner stored ids unchecked). remember_fact and
+    // "Remember this" legitimately file rows under real accounts that have no identities row (a member
+    // @-mentioned before they ever posted, an old message's author): those ids are never taken away.
+    const strangers = {
+      junk: JSON.stringify(unknownIds.filter((id) => !SNOWFLAKE.test(id))),
+      unknown: JSON.stringify(unknownIds),
+    };
+    const stranger = `(subject_user_id IN (SELECT value FROM json_each(@junk))
+      OR (source IN (${LEARNER_SOURCES_IN}) AND subject_user_id IN (SELECT value FROM json_each(@unknown))))`;
+
+    const subjects = this.stmt(
+      `SELECT DISTINCT subject FROM memories
+       WHERE active = 1 AND (subject_user_id IS NULL OR ${stranger}) AND subject IS NOT NULL`,
+    ).all(strangers) as { subject: string }[];
+
+    let ambiguous = 0;
+    const assignments: { subject: string; userId: string }[] = [];
+    for (const { subject } of subjects) {
+      const key = nameKey(subject);
+      if (!key || NON_PERSON_SUBJECTS.has(key)) continue;
+      const owners = everyoneGoingBy(identities, subject);
+      if (owners.length > 1) ambiguous++;
+      if (owners.length === 1) assignments.push({ subject, userId: owners[0] });
+    }
+
+    let restamped = 0;
+    const stamped = this.runInTransaction(() => {
+      let changed = 0;
+      const stampNameOnly = this.stmt(
+        'UPDATE memories SET subject_user_id = ? WHERE subject = ? AND active = 1 AND subject_user_id IS NULL',
+      );
+      const restampStrangers = this.stmt(
+        `UPDATE memories SET subject_user_id = @userId WHERE subject = @subject AND active = 1 AND ${stranger}`,
+      );
+      for (const { subject, userId } of assignments) {
+        changed += stampNameOnly.run(userId, subject).changes;
+        const moved = restampStrangers.run({ userId, subject, ...strangers }).changes;
+        restamped += moved;
+        changed += moved;
+      }
+      return changed;
+    });
+
+    const relinkedPart = relinked > 0 ? `, moved ${relinked} from side accounts to their main account` : '';
+    const restampedPart = restamped > 0 ? `, ${restamped} of them had an id no member has` : '';
+    logger.info(
+      `Subject-id stamp: linked ${stamped} memories under ${assignments.length} names to member ids (${ambiguous} ambiguous names skipped)${restampedPart}${relinkedPart}`,
+    );
+    return { stamped, relinked, names: assignments.length, ambiguous };
+  }
+
+  /**
    * Startup maintenance: expires ephemeral memories, sweeps orphaned vectors, deduplicates active
-   * memories within each (subject, category) group — semantically (cosine) when both sides have
+   * memories within each (person, category) group — semantically (cosine) when both sides have
    * current-model vectors, lexically (word overlap) otherwise — and refreshes the query planner's
-   * statistics. Stays synchronous: it only ever uses vectors that are already stored, never the
-   * embeddings API.
+   * statistics. A person is their subject_user_id when the row has one, else the subject name, so
+   * one member's rows filed under an old and a new display name are compared with each other. Stays
+   * synchronous: it only ever uses vectors that are already stored, never the embeddings API.
    */
   compact(): { removed: number; expired: number } {
     // 0. Make the FTS index correct by construction before anything below touches it.
@@ -767,10 +984,12 @@ export class MemoryStore {
     // Cosine dedup reads stored vectors via the cache (loads it once; no API calls).
     const cache = this.embeddings ? this.getVectorCache(this.embeddings.model) : null;
 
-    // 2. Group by subject + category
+    // 2. Group by person (stable id, else subject name) + category. Deactivation stays per row through
+    //    deactivate(), which reads each row's own values for the FTS delete — so grouping rows with
+    //    different subject strings together cannot desync the index.
     const groups = new Map<string, Memory[]>();
     for (const mem of allActive) {
-      const key = `${mem.subject}::${mem.category}`;
+      const key = dedupGroupKey(mem);
       const group = groups.get(key);
       if (group) {
         group.push(mem);
@@ -881,7 +1100,7 @@ export class MemoryStore {
               const current = this.stmt('SELECT category, subject, content, active FROM memories WHERE id = ?').get(
                 row.id,
               ) as Pick<Memory, 'category' | 'subject' | 'content' | 'active'> | undefined;
-              if (!current || current.active !== 1) continue;
+              if (current?.active !== 1) continue;
               if (buildEmbeddingInput(current) !== inputs[j]) continue;
 
               this.upsertVector(row.id, embeddings.model, inputs[j], vectors[j], {
@@ -1021,15 +1240,24 @@ export class MemoryStore {
 
   // ---- Identity methods ----
 
-  upsertIdentity(discordUserId: string, displayName: string): void {
-    // Insert if new (canonical_name = displayName at time of first seen); otherwise refresh display_name.
+  /**
+   * Records a member's current display name (and Discord handle, when the caller has it). Inserts with
+   * canonical_name = the first-seen display name; afterwards refreshes display_name, and the username
+   * only when one is given: callers that only know a name (fetched history, relays) never erase it.
+   */
+  upsertIdentity(discordUserId: string, displayName: string, username?: string): void {
+    const handle = username?.trim() || null;
     this.stmt(
-      `INSERT INTO identities (discord_user_id, display_name, canonical_name, first_seen_at, updated_at)
-       VALUES (?, ?, ?, datetime('now'), datetime('now'))
+      `INSERT INTO identities (discord_user_id, display_name, canonical_name, username, first_seen_at, updated_at)
+       VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
        ON CONFLICT(discord_user_id) DO UPDATE SET
          display_name = excluded.display_name,
-         updated_at = CASE WHEN identities.display_name = excluded.display_name THEN identities.updated_at ELSE datetime('now') END`,
-    ).run(discordUserId, displayName, displayName);
+         username = COALESCE(excluded.username, identities.username),
+         updated_at = CASE
+           WHEN identities.display_name = excluded.display_name
+             AND identities.username IS COALESCE(excluded.username, identities.username)
+           THEN identities.updated_at ELSE datetime('now') END`,
+    ).run(discordUserId, displayName, displayName, handle);
   }
 
   updateIdentityMeta(discordUserId: string, update: IdentityMetaUpdate): boolean {

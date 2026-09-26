@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "description": "POST /audio/transcriptions with response_format verbose_json (openai/whisper-large-v3), synthetic French voice note in the documented response shape. Segment 2 is the classic outro hallucination over trailing silence; segment 3 is filler Whisper emits over silence (no_speech_prob 0.86, avg_logprob -1.31: Whisper's own skip rule). usage.cost is the call's USD cost; the response has no `model` field.",
+  "status": 200,
+  "request": {
+    "model": "openai/whisper-large-v3",
+    "input_audio": { "data": "<base64 ogg>", "format": "ogg" },
+    "response_format": "verbose_json",
+    "timestamp_granularities": ["segment"]
+  },
+  "response": {
+    "task": "transcribe",
+    "language": "french",
+    "duration": 9.42,
+    "text": " Salut tout le monde, on se fait une game ce soir ? Genre vers 21 h, j'amène les chips. Merci d'avoir regardé ! you",
+    "segments": [
+      {
+        "id": 0,
+        "seek": 0,
+        "start": 0.0,
+        "end": 3.1,
+        "text": " Salut tout le monde, on se fait une game ce soir ?",
+        "tokens": [50365, 25580, 3486, 476, 1002, 11, 322, 369, 3065, 2002, 1216, 1769, 5549, 2506, 50520],
+        "temperature": 0.0,
+        "avg_logprob": -0.21,
+        "compression_ratio": 1.12,
+        "no_speech_prob": 0.013
+      },
+      {
+        "id": 1,
+        "seek": 0,
+        "start": 3.1,
+        "end": 6.4,
+        "text": " Genre vers 21 h, j'amène les chips.",
+        "tokens": [50520, 38087, 1774, 5080, 276, 11, 361, 6, 335, 12066, 1512, 21235, 13, 50685],
+        "temperature": 0.0,
+        "avg_logprob": -0.27,
+        "compression_ratio": 1.12,
+        "no_speech_prob": 0.013
+      },
+      {
+        "id": 2,
+        "seek": 0,
+        "start": 6.4,
+        "end": 8.2,
+        "text": " Merci d'avoir regardé !",
+        "tokens": [50685, 6147, 274, 6, 26500, 3843, 526, 2298, 50775],
+        "temperature": 0.0,
+        "avg_logprob": -0.44,
+        "compression_ratio": 0.87,
+        "no_speech_prob": 0.41
+      },
+      {
+        "id": 3,
+        "seek": 0,
+        "start": 8.2,
+        "end": 9.42,
+        "text": " you",
+        "tokens": [50775, 291, 50836],
+        "temperature": 0.0,
+        "avg_logprob": -1.31,
+        "compression_ratio": 0.27,
+        "no_speech_prob": 0.86
+      }
+    ],
+    "usage": { "seconds": 9.42, "cost": 0.00007065 }
+  }
+}

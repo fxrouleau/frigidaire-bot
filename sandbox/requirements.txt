@@ -1,0 +1,7 @@
+# Preinstalled for run_code snippets. Pinned so image rebuilds are reproducible; bump deliberately.
+# Anything else can be `pip install`ed at run time: it lands in /workspace/.local and persists.
+numpy==2.5.3
+pandas==3.0.6
+matplotlib==3.11.2
+sympy==1.14.0
+requests==2.34.2

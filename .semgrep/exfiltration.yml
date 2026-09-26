@@ -1,7 +1,7 @@
 rules:
   - id: env-in-fetch
     patterns:
-      - pattern: fetch(..., { ..., body: <... process.env ...> })
+      - pattern: "fetch(..., { ..., body: <... process.env ...> })"
     message: "process.env is being passed to a fetch body — potential secret exfiltration"
     severity: ERROR
     languages: [typescript, javascript]

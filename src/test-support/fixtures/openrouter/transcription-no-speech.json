@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "description": "Gemini answering the no-speech marker for a recording without intelligible speech.",
+  "status": 200,
+  "response": {
+    "id": "gen-test-transcription-002",
+    "provider": "Google",
+    "model": "google/gemini-3.5-flash-lite-20260721",
+    "object": "chat.completion",
+    "created": 1790000000,
+    "choices": [
+      {
+        "logprobs": null,
+        "finish_reason": "stop",
+        "native_finish_reason": "STOP",
+        "index": 0,
+        "message": { "role": "assistant", "content": "[no speech]", "refusal": null, "reasoning": null }
+      }
+    ],
+    "usage": { "prompt_tokens": 140, "completion_tokens": 4, "total_tokens": 144, "cost": 0.000052 }
+  }
+}

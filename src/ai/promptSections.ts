@@ -1,6 +1,7 @@
 // Prompt fragments shared by the chat agent and the personality learner, so the two never drift on
 // how a person or an emoji is described to a model.
-import type { EmojiRow, Identity } from './memory/memoryStore';
+import { type EmojiRow, type Identity, nameKey } from './memory/memoryStore';
+import { foldMembers } from './people';
 
 const CUSTOM_EMOJI_PATTERN = /<(a?):(\w+):(\d+)>/g;
 
@@ -26,14 +27,33 @@ export function emojiCdnUrl(emojiId: string, animated: boolean): string {
   return `https://cdn.discordapp.com/emojis/${emojiId}.${ext}?size=96&quality=lossless`;
 }
 
-/** One bullet per known member: "canonical (now: current) (id:...) — IRL: ... . Also called: ..." */
+/** "Name @handle (id:…)", the handle left out when it is unknown or just the name again. */
+function accountLabel(identity: Pick<Identity, 'display_name' | 'username' | 'discord_user_id'>): string {
+  const handle =
+    identity.username && nameKey(identity.username) !== nameKey(identity.display_name) ? ` @${identity.username}` : '';
+  return `${identity.display_name}${handle} (id:${identity.discord_user_id})`;
+}
+
+/**
+ * One bullet per member, current display name first (the name memories are filed under):
+ * "Wheelie @wheelie_d (id:…) — real name Dorian; also called D, Wheels; formerly OldNick; also posts as
+ * Alt @alt_handle (id:…)". A linked side account (LINKED_ACCOUNTS) is folded into its member's line and
+ * never listed as a separate person. "formerly" is the first-seen display name, when it differs.
+ */
 export function formatIdentityLines(identities: Identity[]): string[] {
-  return identities.map((i) => {
-    const namePart =
-      i.canonical_name === i.display_name ? i.canonical_name : `${i.canonical_name} (now: ${i.display_name})`;
-    const irlPart = i.irl_name ? ` — IRL: ${i.irl_name}` : '';
-    const aliasPart = i.aliases.length > 0 ? `. Also called: ${i.aliases.join(', ')}` : '';
-    return `- ${namePart} (id:${i.discord_user_id})${irlPart}${aliasPart}`;
+  return foldMembers(identities).map((member) => {
+    const main = member.identity;
+    const accounts = [...(main ? [main] : []), ...member.sideAccounts];
+    const parts: string[] = [];
+    const irlNames = [...new Set(accounts.map((i) => i.irl_name?.trim()).filter((n): n is string => Boolean(n)))];
+    if (irlNames.length > 0) parts.push(`real name ${irlNames.join(' / ')}`);
+    const aliases = [...new Set(accounts.flatMap((i) => i.aliases))];
+    if (aliases.length > 0) parts.push(`also called ${aliases.join(', ')}`);
+    const shown = new Set(accounts.flatMap((i) => [nameKey(i.display_name), nameKey(i.username)]));
+    if (main && !shown.has(nameKey(main.canonical_name))) parts.push(`formerly ${main.canonical_name}`);
+    if (member.sideAccounts.length > 0) parts.push(`also posts as ${member.sideAccounts.map(accountLabel).join(', ')}`);
+    const head = main ? accountLabel(main) : `${member.displayName} (id:${member.userId})`;
+    return `- ${head}${parts.length > 0 ? ` — ${parts.join('; ')}` : ''}`;
   });
 }
 

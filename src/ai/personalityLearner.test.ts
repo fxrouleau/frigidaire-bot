@@ -10,13 +10,13 @@ import {
 
 describe('Observation type', () => {
   it('accepts existing personality categories', () => {
-    const obs: Observation = { category: 'fact', subject: 'Felix', content: 'Likes cats' };
+    const obs: Observation = { category: 'fact', subject: 'Remi', content: 'Likes cats' };
     expect(obs.category).toBe('fact');
 
-    const obs2: Observation = { category: 'preference', subject: 'Felix', content: 'Prefers tea' };
+    const obs2: Observation = { category: 'preference', subject: 'Remi', content: 'Prefers tea' };
     expect(obs2.category).toBe('preference');
 
-    const obs3: Observation = { category: 'personality', subject: 'Felix', content: 'Dry humor' };
+    const obs3: Observation = { category: 'personality', subject: 'Remi', content: 'Dry humor' };
     expect(obs3.category).toBe('personality');
 
     const obs4: Observation = { category: 'event', subject: 'server', content: 'Game night' };
@@ -41,7 +41,7 @@ describe('Observation type', () => {
   });
 
   it('accepts the ephemeral image category (expired by the TTL sweep)', () => {
-    const obs: Observation = { category: 'image', subject: 'Jason', content: 'Shared a meme about League ranked' };
+    const obs: Observation = { category: 'image', subject: 'Jasper', content: 'Shared a meme about League ranked' };
     expect(obs.category).toBe('image');
   });
 
@@ -100,10 +100,10 @@ describe('parseLearnerOutput', () => {
   it('parses the canonical object format', () => {
     const raw = `{
       "observations": [
-        {"category": "fact", "subject": "Wheezer", "subject_user_id": "123", "content": "Likes cats"}
+        {"category": "fact", "subject": "Wheelie", "subject_user_id": "123", "content": "Likes cats"}
       ],
       "identity_updates": [
-        {"discord_user_id": "123", "irl_name": "Derrick"}
+        {"discord_user_id": "123", "irl_name": "Dorian"}
       ]
     }`;
     const parsed = parseLearnerOutput(raw);
@@ -111,7 +111,7 @@ describe('parseLearnerOutput', () => {
     expect(parsed?.observations).toHaveLength(1);
     expect(parsed?.observations[0].subject_user_id).toBe('123');
     expect(parsed?.identity_updates).toHaveLength(1);
-    expect(parsed?.identity_updates?.[0].irl_name).toBe('Derrick');
+    expect(parsed?.identity_updates?.[0].irl_name).toBe('Dorian');
   });
 
   it('accepts object without identity_updates', () => {
@@ -122,10 +122,10 @@ describe('parseLearnerOutput', () => {
   });
 
   it('falls back to legacy array format', () => {
-    const raw = '[{"category": "fact", "subject": "Jason", "content": "Likes TFT"}]';
+    const raw = '[{"category": "fact", "subject": "Jasper", "content": "Likes TFT"}]';
     const parsed = parseLearnerOutput(raw);
     expect(parsed?.observations).toHaveLength(1);
-    expect(parsed?.observations[0].subject).toBe('Jason');
+    expect(parsed?.observations[0].subject).toBe('Jasper');
     expect(parsed?.identity_updates).toBeUndefined();
   });
 
@@ -192,10 +192,10 @@ describe('buildPersonalityPrompt (memory-quality rules)', () => {
     // Subjects key on the CURRENT display name (consistent with every getBySubject() lookup and all
     // existing prod memories); subject_user_id is the stable identity anchor across name changes.
     expect(prompt).toContain("MUST be the person's CURRENT display name");
-    expect(prompt).toContain('(now: CurrentName)');
+    expect(prompt).toContain('the name their identities entry\n   below starts with (never the "formerly" name)');
     expect(prompt).toContain('"subject_user_id" MUST be their Discord ID');
     // The earlier canonical-name keying is gone — prod canonical names are stale first-seen usernames
-    // ('gigacheese', 'chinkichanga'), and keying on them would split the memory keyspace.
+    // ('megabrie', 'wafflehammer'), and keying on them would split the memory keyspace.
     expect(prompt).not.toContain('canonical name from the known server identities list');
   });
 
@@ -210,7 +210,7 @@ describe('buildPersonalityPrompt (memory-quality rules)', () => {
   });
 
   it('contains no content-censoring instructions (observations stay verbatim)', () => {
-    // Felix's explicit exclusion: authentic observations are kept as-is, never sanitized.
+    // Remi's explicit exclusion: authentic observations are kept as-is, never sanitized.
     expect(prompt).not.toMatch(/censor/i);
     expect(prompt).not.toMatch(/paraphras/i);
     expect(prompt).not.toMatch(/never quote/i);
@@ -237,6 +237,33 @@ describe('buildSelfImprovementPrompt (anti-junk rules)', () => {
   it('interpolates the bot name and the existing observations summary', () => {
     expect(prompt).toContain('TestFridgeName');
     expect(prompt).toContain('<<EXISTING_SELF_IMPROVEMENT>>');
+  });
+
+  it('only counts a capability gap when someone asked the bot and it failed (the asked rule)', () => {
+    expect(prompt).toContain('6. The asked rule: a capability_gap needs BOTH (a) someone asked the bot');
+    expect(prompt).toContain("AND (b) it failed, errored, or said it couldn't");
+    expect(prompt).toContain('Posts nobody asked the bot about are NEVER gaps');
+    expect(prompt).toContain('Gaps inferred from posts nobody asked the bot about');
+    // The digest entry that motivated the rule, as the BAD example.
+    expect(prompt).toContain(
+      'BAD:  {"category":"capability_gap","subject":"bot","content":"Cannot react to shared meme or comic images"}',
+    );
+    // Rule 5 used to suggest exactly that kind of entry as its example.
+    expect(prompt).not.toContain('Cannot react to shared videos');
+  });
+
+  it("warns that the bot's own replies are missing from the transcript", () => {
+    expect(prompt).toContain("The bot's own replies are NOT shown in this transcript");
+  });
+
+  it('tells the model how the bot is mentioned when its id is known', () => {
+    expect(prompt).not.toContain('it is mentioned as');
+    const withId = buildSelfImprovementPrompt({
+      botName: 'TestFridgeName',
+      botUserId: '900000000000000001',
+      existingSelfImprovementSummary: '(none yet)',
+    });
+    expect(withId).toContain('it is mentioned as <@900000000000000001>.');
   });
 
   it('contains no content-censoring instructions', () => {

@@ -1,33 +1,70 @@
 import { Events, type Message } from 'discord.js';
+import type { HandleMentionOptions } from '../ai/agent';
 import { agent } from '../ai/agentInstance';
+import { isTranscriptReply, repliesToTranscript } from '../ai/media/autoTranscribe';
 import { defineEvent } from '../eventModule';
+import { addressedGate } from '../gate';
 import { logger } from '../logger';
+import { mentionsInText } from '../utils';
 
 async function isReplyToBot(message: Message): Promise<boolean> {
   if (!message.reference?.messageId) return false;
-  // Discord resolves the replied-to author into the mentions when the reply pings them, which
-  // answers the question without a REST fetch for every reply posted server-wide.
+  // The bot's auto-transcript of a voice message isn't the bot talking: a reply to it answers the voice message.
+  if (repliesToTranscript(message)) return false;
+  // discord.js resolves the replied-to author from the reply's payload (whether or not the reply pings),
+  // which answers the question without a REST fetch for every reply posted server-wide.
   const repliedUser = message.mentions.repliedUser;
   if (repliedUser) return repliedUser.id === message.client.user.id;
   try {
     const repliedTo = await message.channel.messages.fetch(message.reference.messageId);
-    return repliedTo.author.id === message.client.user.id;
+    return repliedTo.author.id === message.client.user.id && !isTranscriptReply(repliedTo);
   } catch {
     return false;
   }
 }
 
+/** Runs one agent turn; the gate learns when it ends (see AddressedGate.noteTurnDone). */
+async function routeToAgent(message: Message, opts?: HandleMentionOptions): Promise<void> {
+  try {
+    // An explicit mention/reply is the agent's default turn: called exactly as before the gate existed.
+    await (opts ? agent.handleMention(message, opts) : agent.handleMention(message));
+  } finally {
+    addressedGate.noteTurnDone(message);
+  }
+}
+
 export default defineEvent(Events.MessageCreate, {
   async execute(message) {
+    // The bot's own messages tell the gate when it last spoke per channel (who it is talking to comes from
+    // routed turns, see AddressedGate.noteRouted/noteTurnDone).
+    if (message.author.id === message.client.user.id && !message.webhookId) {
+      // A voice-message transcript is not the bot speaking in the conversation.
+      if (!isTranscriptReply(message)) addressedGate.noteBotMessage(message);
+      return;
+    }
     if (message.author.bot) return;
 
-    const explicitMention = message.mentions.users.has(message.client.user.id);
+    const author = message.member?.displayName || message.author.username;
+    // Only a mention written in the text: a pinging reply also lists the replied-to author (the bot) in
+    // `mentions.users`, and a reply to a transcript reply is not a reply to the bot (isReplyToBot).
+    const explicitMention = mentionsInText(message, message.client.user.id);
     const replyToBot = await isReplyToBot(message);
 
     if (explicitMention || replyToBot) {
-      const author = message.member?.displayName || message.author.username;
       logger.info(`Bot was ${replyToBot ? 'replied to' : 'mentioned'} by ${author}, routing to AI agent.`);
-      await agent.handleMention(message);
+      addressedGate.noteRouted(message);
+      await routeToAgent(message);
+      return;
+    }
+
+    // No mention and no reply: the gate decides whether the message is still meant for the bot.
+    const verdict = await addressedGate.evaluate(message);
+    if (verdict.respond) {
+      logger.info(
+        `Bot was addressed without a mention by ${author} (${verdict.trigger}${verdict.cold ? ', cold' : ''}), routing to AI agent.`,
+      );
+      // Unprompted: the agent tells the model nobody pinged it, so it doesn't answer "you pinged me?".
+      await routeToAgent(message, { unprompted: true });
     }
   },
 });

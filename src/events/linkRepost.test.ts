@@ -2,13 +2,21 @@ import { ChannelType } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deletedMessageReposter } from '../deletedMessages';
 import { resetFixerHealthForTesting } from '../links/embedFixers';
-import { createFakeMessage } from '../test-support/fakeDiscord';
+import { type FakeMessage, createFakeMessage } from '../test-support/fakeDiscord';
 import linkRepostEvent from './linkRepost';
 
 const OG_HTML = '<html><head><meta property="og:video" content="https://cdn.example/v.mp4"></head></html>';
 
 function respondWithOg() {
   return new Response(OG_HTML, { status: 200, headers: { 'content-type': 'text/html' } });
+}
+
+function sentPayload(fake: FakeMessage): { content: string; files: Array<{ name: string }>; threadId?: string } {
+  return fake.webhooks[0].send.calls[0][0] as { content: string; files: Array<{ name: string }>; threadId?: string };
+}
+
+function sentContent(fake: FakeMessage): string {
+  return sentPayload(fake).content;
 }
 
 describe('linkRepost event', () => {
@@ -36,7 +44,7 @@ describe('linkRepost event', () => {
     await linkRepostEvent.execute(fake.message);
 
     expect(fake.recorders.createWebhook.calls).toHaveLength(1);
-    expect(fake.webhooks[0].send.calls[0][0]).toBe('look https://ig.test/p/AbCdEf123/');
+    expect(sentContent(fake)).toBe('look https://ig.test/p/AbCdEf123/');
     expect(fake.recorders.delete.calls).toHaveLength(1);
     expect(fake.webhooks[0].delete.calls).toHaveLength(1);
   });
@@ -49,7 +57,7 @@ describe('linkRepost event', () => {
     await linkRepostEvent.execute(fake.message);
 
     expect(fake.recorders.createWebhook.calls).toHaveLength(1);
-    expect(fake.webhooks[0].send.calls[0][0]).toBe('https://tt.test/@u/video/1 and https://tw.test/u/status/2');
+    expect(sentContent(fake)).toBe('https://tt.test/@u/video/1 and https://tw.test/u/status/2');
   });
 
   it('leaves the message alone when no fixer can embed the link', async () => {
@@ -82,13 +90,147 @@ describe('linkRepost event', () => {
     expect(hook.recorders.createWebhook.calls).toHaveLength(0);
   });
 
-  it('skips channels that cannot own a webhook (threads)', async () => {
-    const fake = createFakeMessage({ channelType: ChannelType.PublicThread, content: 'https://x.com/u/status/1' });
+  it('reposts in threads through the parent channel webhook', async () => {
+    const fake = createFakeMessage({
+      channelType: ChannelType.PublicThread,
+      channelId: 'thread-1',
+      content: 'https://x.com/u/status/1',
+    });
+
+    await linkRepostEvent.execute(fake.message);
+
+    expect(fake.recorders.parentCreateWebhook.calls).toHaveLength(1);
+    expect(sentPayload(fake)).toMatchObject({ content: 'https://tw.test/u/status/1', threadId: 'thread-1' });
+    expect(fake.recorders.delete.calls).toHaveLength(1);
+  });
+
+  it('skips archived threads and DMs without probing', async () => {
+    const archived = createFakeMessage({
+      channelType: ChannelType.PublicThread,
+      threadArchived: true,
+      content: 'https://x.com/u/status/1',
+    });
+    const dm = createFakeMessage({ channelType: ChannelType.DM, content: 'https://x.com/u/status/1' });
+
+    await linkRepostEvent.execute(archived.message);
+    await linkRepostEvent.execute(dm.message);
+
+    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+    expect(archived.recorders.parentCreateWebhook.calls).toHaveLength(0);
+    expect(dm.recorders.createWebhook.calls).toHaveLength(0);
+  });
+
+  it('leaves a message with a sticker alone without probing (webhooks cannot send stickers)', async () => {
+    const fake = createFakeMessage({
+      content: 'https://x.com/u/status/1',
+      stickers: [{ id: 's1', name: 'pog', format: 1 }],
+    });
+
+    await linkRepostEvent.execute(fake.message);
+
+    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+    expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+    expect(fake.recorders.delete.calls).toHaveLength(0);
+  });
+
+  it('carries attachments posted with the link over to the repost', async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) =>
+      String(input).startsWith('https://cdn.discordapp.com/') ? new Response(new Uint8Array([9, 9])) : respondWithOg(),
+    );
+    const fake = createFakeMessage({
+      content: 'https://x.com/u/status/1 same energy',
+      attachments: [{ url: 'https://cdn.discordapp.com/me.png', contentType: 'image/png', name: 'me.png', size: 2 }],
+    });
+
+    await linkRepostEvent.execute(fake.message);
+
+    expect(sentPayload(fake).files.map((f) => f.name)).toEqual(['me.png']);
+    expect(fake.recorders.delete.calls).toHaveLength(1);
+  });
+
+  it('keeps the original when its attachment cannot be downloaded', async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) =>
+      String(input).startsWith('https://cdn.discordapp.com/') ? new Response('', { status: 404 }) : respondWithOg(),
+    );
+    const fake = createFakeMessage({
+      content: 'https://x.com/u/status/1',
+      attachments: [{ url: 'https://cdn.discordapp.com/me.png', contentType: 'image/png', name: 'me.png', size: 2 }],
+    });
 
     await linkRepostEvent.execute(fake.message);
 
     expect(fake.recorders.createWebhook.calls).toHaveLength(0);
     expect(fake.recorders.delete.calls).toHaveLength(0);
+  });
+
+  it('keeps a spoilered link spoilered', async () => {
+    const fake = createFakeMessage({ content: 'no way ||https://x.com/jasper/status/123||' });
+
+    await linkRepostEvent.execute(fake.message);
+
+    expect(sentContent(fake)).toBe('no way ||https://tw.test/jasper/status/123||');
+  });
+
+  it('adds the reply context line when the original was a reply', async () => {
+    const fake = createFakeMessage({
+      content: 'https://x.com/u/status/1',
+      guildId: 'g1',
+      channelId: 'c1',
+      referencedMessageId: 'm0',
+      repliedUserId: 'u2',
+      repliedMemberDisplayName: 'Remi',
+    });
+
+    await linkRepostEvent.execute(fake.message);
+
+    expect(sentContent(fake)).toBe('-# ↪ replying to Remi · https://discord.com/channels/g1/c1/m0\nhttps://tw.test/u/status/1');
+  });
+
+  it('does not repost a message the author edited while its links were being fixed', async () => {
+    const fake = createFakeMessage({ content: 'https://x.com/u/status/1' });
+    vi.mocked(globalThis.fetch).mockImplementation(async () => {
+      (fake.message as unknown as { content: string }).content = 'edited https://x.com/u/status/1';
+      return respondWithOg();
+    });
+
+    await linkRepostEvent.execute(fake.message);
+
+    expect(fake.recorders.createWebhook.calls).toHaveLength(0);
+    expect(fake.recorders.delete.calls).toHaveLength(0);
+  });
+
+  it('does not repost a message edited while its attachments were being carried over', async () => {
+    const fake = createFakeMessage({
+      content: 'https://x.com/u/status/1',
+      attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/pic.png', contentType: 'image/png', name: 'pic.png', size: 3 }],
+    });
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      if (String(input).startsWith('https://cdn.discordapp.com/')) {
+        // The author fixes a typo while the bot is downloading the attachment.
+        (fake.message as unknown as { content: string }).content = 'edited https://x.com/u/status/1';
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      return respondWithOg();
+    });
+
+    await linkRepostEvent.execute(fake.message);
+
+    expect(fake.webhooks.flatMap((hook) => hook.send.calls)).toHaveLength(0);
+    expect(fake.recorders.delete.calls).toHaveLength(0);
+  });
+
+  it('logs (and does not throw) when the webhook send fails, keeping the original', async () => {
+    const fake = createFakeMessage({
+      content: 'https://x.com/u/status/1',
+      webhookSendImpl: async () => {
+        throw new Error('Missing Permissions');
+      },
+    });
+
+    await expect(linkRepostEvent.execute(fake.message)).resolves.toBeUndefined();
+
+    expect(fake.recorders.delete.calls).toHaveLength(0);
+    expect(fake.webhooks[0].delete.calls).toHaveLength(1);
   });
 
   it('tells the deleted-message reposter the bot is the one deleting the original', async () => {

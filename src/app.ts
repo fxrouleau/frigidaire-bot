@@ -1,18 +1,22 @@
+// Must stay the first import: it applies .env before any module below reads config while loading.
+import './loadEnv';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
-import { Client, type ClientEvents, Events, GatewayIntentBits } from 'discord.js';
-import * as dotenv from 'dotenv';
+import { type ClientEvents, Events } from 'discord.js';
 import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
 import { getMemoryStore } from './ai/memory';
-import { config, describeEffectiveConfig } from './config';
+import { runStartupMemoryMaintenance } from './ai/memory/startupMaintenance';
+import { closeArchiveStore } from './archive/archiveStore';
+import { config, configWarnings, describeEffectiveConfig } from './config';
+import { createDiscordClient } from './discordClient';
 import { resolveEventModule } from './eventModule';
 import { logger } from './logger';
-
-dotenv.config({ quiet: true });
+import { getBotDb } from './storage/botDb';
 
 logger.info(`Effective config: ${describeEffectiveConfig()}`);
+for (const warning of configWarnings()) logger.warn(warning);
 
 // A rejected promise nobody awaited must never take the process down (Node turns it into an
 // uncaught exception by default). Event handlers are already dispatched behind a catch below; this
@@ -21,15 +25,8 @@ process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled promise rejection:', reason);
 });
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildEmojisAndStickers,
-    GatewayIntentBits.GuildMessageReactions,
-  ],
-});
+// Intents + partials live in discordClient.ts (partials: events for messages sent before the last restart).
+const client = createDiscordClient();
 
 // Every file in src/events/ is an event handler (see src/eventModule.ts). Each one runs behind a
 // dispatcher that logs a throwing/rejecting handler instead of letting it crash the bot — a missing
@@ -58,15 +55,11 @@ for (const file of eventFiles) {
   }
 }
 
-// Run memory compaction on startup
+// Link memories to member ids, THEN compact, so newly linked rows dedup on this start (see the module).
 try {
-  const store = getMemoryStore();
-  const result = store.compact();
-  if (result.removed > 0) {
-    logger.info(`Memory compaction on startup: removed ${result.removed} duplicate memories.`);
-  }
+  runStartupMemoryMaintenance(getMemoryStore());
 } catch (error) {
-  logger.warn('Memory compaction on startup failed:', error);
+  logger.warn('Memory maintenance on startup failed:', error);
 }
 
 // Embedding backfill: once at startup, then periodically. The periodic re-run is the self-heal for
@@ -134,6 +127,16 @@ const shutdown = (signal: string) => {
     getConversationPersistence().close();
   } catch (error) {
     logger.warn('Closing conversation persistence on shutdown failed:', error);
+  }
+  try {
+    getBotDb().close();
+  } catch (error) {
+    logger.warn('Closing bot database on shutdown failed:', error);
+  }
+  try {
+    closeArchiveStore();
+  } catch (error) {
+    logger.warn('Closing the message archive on shutdown failed:', error);
   }
   void client.destroy();
   process.exit(0);

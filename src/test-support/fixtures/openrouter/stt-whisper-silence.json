@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "description": "POST /audio/transcriptions (verbose_json, openai/whisper-large-v3) on a clip with no speech: Whisper's best-known hallucination, a subtitle credit. avg_logprob -0.52 beats Whisper's own logprob threshold, so only the phrase filter catches it. Synthetic, in the documented response shape.",
+  "status": 200,
+  "response": {
+    "task": "transcribe",
+    "language": "french",
+    "duration": 4.1,
+    "text": " Sous-titres réalisés par la communauté d'Amara.org",
+    "segments": [
+      {
+        "id": 0,
+        "seek": 0,
+        "start": 0.0,
+        "end": 4.1,
+        "text": " Sous-titres réalisés par la communauté d'Amara.org",
+        "tokens": [50365, 318, 563, 12, 83, 270, 495, 18778, 32478, 1110, 635, 40714, 274, 6, 32, 2356, 64, 13, 4646, 50570],
+        "temperature": 0.0,
+        "avg_logprob": -0.52,
+        "compression_ratio": 0.93,
+        "no_speech_prob": 0.93
+      }
+    ],
+    "usage": { "seconds": 4.1, "cost": 0.00003075 }
+  }
+}

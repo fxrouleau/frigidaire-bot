@@ -21,12 +21,14 @@ memories.zip
 # Git, editors, local tooling
 .git
 .github
+# Except the one workflow whose owner-only guard src/github/claudeWorkflow.test.ts checks in the CI gate.
+!.github/workflows/claude-feature-request.yml
 .idea/
 .vscode/
 .claude
 .editorconfig
 .gitattributes
-.gitignore
+# .gitignore stays: Biome 2 (vcs.useIgnoreFile) refuses to run without it, and `yarn check:ci` runs in the image.
 lefthook.yml
 REFACTOR_PLAN.md
 

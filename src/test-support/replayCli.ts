@@ -5,7 +5,7 @@ import * as fs from 'node:fs';
 import type OpenAI from 'openai';
 import { OpenRouterProvider, parseOpenRouterResponse } from '../ai/providers/openRouterProvider';
 import type { ConversationEntry } from '../ai/types';
-import { type OpenRouterFixture, createReplayClient } from './openRouterFetch';
+import { createReplayClient, type OpenRouterFixture } from './openRouterFetch';
 
 type LooseInput = {
   version?: unknown;

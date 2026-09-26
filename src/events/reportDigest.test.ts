@@ -4,7 +4,9 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
-import { createFakeChannel, createFakeClient } from '../test-support/fakeDiscord';
+import { recordUsage } from '../ai/usage';
+import { BotDb, setBotDbForTesting } from '../storage/botDb';
+import { createFakeChannel, createFakeClient, sentContent } from '../test-support/fakeDiscord';
 import reportDigestEvent, { runDigestCheck } from './reportDigest';
 
 const ENV_KEYS = [
@@ -13,6 +15,7 @@ const ENV_KEYS = [
   'DIGEST_PERIOD_MS',
   'DIGEST_CHECK_INTERVAL_MS',
   'DEBUG_CAPTURE_DIR',
+  'USAGE_LEDGER_ENABLED',
 ] as const;
 const CHANNEL_ID = 'report-digest-1';
 const WATERMARK_KEY = 'digest:last_run_at';
@@ -37,6 +40,7 @@ beforeEach(() => {
 
   store = new MemoryStore(':memory:');
   setMemoryStoreForTesting(store);
+  setBotDbForTesting(new BotDb(':memory:'));
 
   fakeChannel = createFakeChannel({ id: CHANNEL_ID });
   fakeClient = createFakeClient({ channelsById: { [CHANNEL_ID]: fakeChannel.channel } });
@@ -48,6 +52,7 @@ afterEach(() => {
     else process.env[k] = savedEnv[k];
   }
   setMemoryStoreForTesting(undefined);
+  setBotDbForTesting(undefined);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -59,7 +64,7 @@ describe('runDigestCheck watermark gating', () => {
     await runDigestCheck(fakeClient.client);
 
     expect(fakeChannel.recorders.send.calls).toHaveLength(1);
-    expect(String(fakeChannel.recorders.send.calls[0][0])).toContain('Cannot read receipts');
+    expect(sentContent(fakeChannel.recorders.send.calls[0][0])).toContain('Cannot read receipts');
     expect(store.getState(WATERMARK_KEY)).toBeDefined();
   });
 
@@ -71,9 +76,43 @@ describe('runDigestCheck watermark gating', () => {
 
     await runDigestCheck(fakeClient.client);
 
-    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
     const today = new Date().toISOString().slice(0, 10);
     expect(sent).toContain(`${eightDaysAgo.toISOString().slice(0, 10)} → ${today}`);
+  });
+
+  it('after a long gap (bot down for weeks) says "since the last digest", not "this week"', async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    store.setState(WATERMARK_KEY, new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString());
+    await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot read receipts' });
+
+    await runDigestCheck(fakeClient.client);
+
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
+    expect(sent).toContain('🩺 Self-diagnosis digest (5 weeks)');
+    expect(sent).toContain('(1 new since the last digest)');
+    expect(sent).not.toContain('this week');
+  });
+
+  it('keeps the watermark when the post fails, so the next check posts the same period', async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    store.setState(WATERMARK_KEY, eightDaysAgo);
+    await store.save({ category: 'capability_gap', subject: 'bot', content: 'Cannot read receipts' });
+    const failing = createFakeChannel({ id: CHANNEL_ID, sendError: new Error('503 Service Unavailable') });
+
+    await runDigestCheck(createFakeClient({ channelsById: { [CHANNEL_ID]: failing.channel } }).client);
+
+    expect(failing.recorders.send.calls).toHaveLength(1);
+    expect(store.getState(WATERMARK_KEY)).toBe(eightDaysAgo);
+
+    await runDigestCheck(fakeClient.client);
+
+    expect(fakeChannel.recorders.send.calls).toHaveLength(1);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
+    expect(sent).toContain('Cannot read receipts');
+    expect(sent).toContain(eightDaysAgo.slice(0, 10));
+    expect(store.getState(WATERMARK_KEY)).not.toBe(eightDaysAgo);
   });
 
   it('does not post when the last run is within the period', async () => {
@@ -103,7 +142,7 @@ describe('runDigestCheck watermark gating', () => {
 
     await runDigestCheck(fakeClient.client);
 
-    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
     expect(sent).toContain('bot gap visible');
     expect(sent).not.toContain('user gap hidden');
   });
@@ -134,7 +173,7 @@ describe('runDigestCheck privacy', () => {
 
     await runDigestCheck(fakeClient.client);
 
-    const sent = String(fakeChannel.recorders.send.calls[0][0]);
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
     // The capture is counted and its privacy-safe network-error code surfaces as a label...
     expect(sent).toContain('AI errors captured (data/debug) — 1');
     expect(sent).toContain('ECONNRESET');
@@ -160,5 +199,34 @@ describe('reportDigest execute master switch', () => {
     process.env.DIGEST_ENABLED = flag;
     execute(fakeClient.client);
     expect(fakeClient.recorders.channelsFetch.calls).toHaveLength(0);
+  });
+});
+
+describe('runDigestCheck spend', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it("reports the period's complete Eastern days of spend; today is left for the next digest", async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    store.setState(WATERMARK_KEY, new Date(Date.now() - 8 * DAY).toISOString());
+    recordUsage({ feature: 'chat', model: 'deepseek/deepseek-v3.2', cost: 0.25, at: Date.now() - 2 * DAY });
+    recordUsage({ feature: 'learner', model: 'qwen/qwen3-vl', cost: 0.1, at: Date.now() - 3 * DAY });
+    recordUsage({ feature: 'image', model: 'gemini-image', cost: 7, at: Date.now() }); // today
+    recordUsage({ feature: 'image', model: 'gemini-image', cost: 9, at: Date.now() - 30 * DAY }); // before the period
+
+    await runDigestCheck(fakeClient.client);
+
+    const sent = fakeChannel.recorders.send.calls.map((c) => sentContent(c[0])).join('\n');
+    expect(sent).toContain('— $0.35 over 2 calls');
+    expect(sent).toContain('by feature: chat $0.25 (1 call) · learner $0.10 (1 call)');
+    expect(sent).not.toContain('gemini-image');
+  });
+
+  it('omits the Spend section when the ledger is disabled', async () => {
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    process.env.USAGE_LEDGER_ENABLED = 'false';
+
+    await runDigestCheck(fakeClient.client);
+
+    expect(sentContent(fakeChannel.recorders.send.calls[0][0])).not.toContain('Spend');
   });
 });

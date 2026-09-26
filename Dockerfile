@@ -2,8 +2,12 @@
 
 # ---- base: dependencies only (cached unless package.json/yarn.lock/.yarnrc.yml change) ----
 FROM node:26-alpine AS base
-# Native module build tools (better-sqlite3, sharp)
-RUN apk add --no-cache python3 make g++
+# node-gyp toolchain. better-sqlite3 13 ships N-API prebuilds (linuxmusl x64/arm64 included) and its binding.gyp
+# builds nothing when one matches, but Yarn still runs node-gyp on it, and it compiles from source on any other
+# platform. (sharp 0.35 needs none of this: its @img/sharp-linuxmusl-* packages are prebuilt.)
+# python3 and bash also serve the CI gate: src/ai/tools/sandboxServer.test.ts starts sandbox/server.py and runs
+# python and bash snippets through it (busybox's sh is not bash). The prod stage starts from a fresh image.
+RUN apk add --no-cache python3 make g++ bash
 # Corepack is no longer bundled with Node 25+ — install it from npm
 RUN npm install -g corepack && corepack enable
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
@@ -27,7 +31,7 @@ RUN yarn check:ci && yarn typecheck && yarn build && yarn test
 FROM test AS build
 RUN yarn build
 
-# ---- prod-deps: the runtime node_modules only (no biome/typescript/vitest/nodemon/ts-node) ----
+# ---- prod-deps: the runtime node_modules only (no biome/typescript/vitest/nodemon/tsx) ----
 FROM base AS prod-deps
 RUN yarn workspaces focus --all --production
 
@@ -35,7 +39,13 @@ RUN yarn workspaces focus --all --production
 FROM node:26-alpine AS prod
 # su-exec: the entrypoint starts as root only long enough to make the data volume writable by the
 # unprivileged `node` user, then drops privileges for the bot process itself.
-RUN apk add --no-cache su-exec
+# ffmpeg/ffprobe (src/ai/media/transcoder.ts): videos too big to send whole are sampled into keyframes
+# + an audio track, clips for models that can't hear get their soundtrack transcribed, audio of unknown
+# length is probed, and audio the transcription route refuses or can't take (too big to send inline, or
+# not wav/mp3 for a non-Gemini chat model) is re-encoded to MP3. About 130 MB installed. Without it the
+# media features degrade rather than fail: voice messages (Ogg) still go as-is to Whisper, the default
+# TRANSCRIPTION_MODEL, or to the Gemini fallback, and both take Ogg.
+RUN apk add --no-cache su-exec ffmpeg
 # Baked in by CI (docker-push.yml) so the bot can announce which commit it's running.
 ARG GIT_SHA=""
 ENV GIT_SHA=$GIT_SHA \

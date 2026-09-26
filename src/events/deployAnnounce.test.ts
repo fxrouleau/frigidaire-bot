@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { Channel } from 'discord.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
-import { createFakeChannel, createFakeClient } from '../test-support/fakeDiscord';
-import deployAnnounceEvent, { shouldAnnounce } from './deployAnnounce';
+import { createFakeChannel, createFakeClient, sentContent } from '../test-support/fakeDiscord';
+import { config } from '../config';
+import deployAnnounceEvent, { formatAnnouncement, shouldAnnounce } from './deployAnnounce';
 
 const ENV_KEYS = ['REPORT_CHANNEL_ID', 'GIT_SHA', 'DEPLOY_ANNOUNCE_ENABLED'] as const;
 const CHANNEL_ID = 'report-1';
@@ -20,6 +22,10 @@ beforeEach(() => {
   }
   store = new MemoryStore(':memory:');
   setMemoryStoreForTesting(store);
+  // Hermetic: no channel variables from the developer's shell leak into the announcement.
+  for (const { name } of config.logging.channelVariables) {
+    if (!(ENV_KEYS as readonly string[]).includes(name)) vi.stubEnv(name, '');
+  }
 });
 
 afterEach(() => {
@@ -28,6 +34,7 @@ afterEach(() => {
     else process.env[k] = savedEnv[k];
   }
   setMemoryStoreForTesting(undefined);
+  vi.unstubAllEnvs();
 });
 
 function setup() {
@@ -68,12 +75,29 @@ describe('deployAnnounce execute', () => {
     await execute(fakeClient.client);
 
     expect(fakeChannel.recorders.send.calls).toHaveLength(1);
-    expect(String(fakeChannel.recorders.send.calls[0][0])).toContain('🚀 Deployed `abcdef1`');
+    expect(sentContent(fakeChannel.recorders.send.calls[0][0])).toContain('🚀 Deployed `abcdef1`');
     expect(store.getState('deploy:last_announced_sha')).toBe('abcdef1234567890');
 
     // A second boot on the same sha stays silent.
     await execute(fakeClient.client);
     expect(fakeChannel.recorders.send.calls).toHaveLength(1);
+  });
+
+  it('leaves the sha unannounced when the post fails, so the next boot on it tries again', async () => {
+    const failing = createFakeChannel({ id: CHANNEL_ID, sendError: new Error('Missing Access') });
+    const fakeClient = createFakeClient({ channelsById: { [CHANNEL_ID]: failing.channel } });
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    process.env.GIT_SHA = 'abcdef1234567890';
+
+    await execute(fakeClient.client);
+
+    expect(failing.recorders.send.calls).toHaveLength(1);
+    expect(store.getState('deploy:last_announced_sha')).toBeUndefined();
+
+    const { fakeChannel, fakeClient: nextBoot } = setup();
+    await execute(nextBoot.client);
+    expect(fakeChannel.recorders.send.calls).toHaveLength(1);
+    expect(store.getState('deploy:last_announced_sha')).toBe('abcdef1234567890');
   });
 
   it('does not announce when the stored sha already matches', async () => {
@@ -114,5 +138,39 @@ describe('deployAnnounce execute', () => {
     expect(fakeChannel.recorders.send.calls).toHaveLength(0);
     // The switch must not silently consume the sha — a later enable should still announce.
     expect(store.getState('deploy:last_announced_sha')).toBeUndefined();
+  });
+});
+
+describe('deploy announcement channel block', () => {
+  const MOD_LOGS = '700000000000000001';
+  const GONE = '700000000000000099';
+
+  it('lists the channel configuration as #names under the headline, in a code block', async () => {
+    const fakeChannel = createFakeChannel({ id: CHANNEL_ID });
+    const modLogs = { id: MOD_LOGS, name: 'mod-logs' } as unknown as Channel;
+    const fakeClient = createFakeClient({ channelsById: { [CHANNEL_ID]: fakeChannel.channel, [MOD_LOGS]: modLogs } });
+    process.env.REPORT_CHANNEL_ID = CHANNEL_ID;
+    process.env.GIT_SHA = 'abcdef1234567890';
+    vi.stubEnv('LEARNER_IGNORE_CHANNELS', `${MOD_LOGS},${GONE}`);
+
+    await execute(fakeClient.client);
+
+    const sent = sentContent(fakeChannel.recorders.send.calls[0][0]);
+    const [headline, ...rest] = sent.split('\n');
+    expect(headline).toMatch(/^🚀 Deployed `abcdef1` · .* ET$/);
+    expect(rest).toEqual([
+      '```',
+      `LEARNER_IGNORE_CHANNELS: #mod-logs (1 unknown: ${GONE})`,
+      // The test's report channel id is not a snowflake, which is exactly what the block should flag.
+      `REPORT_CHANNEL_ID: (1 not a channel id: ${CHANNEL_ID})`,
+      '```',
+    ]);
+  });
+
+  it('is just the headline when no channel variables resolve to anything', () => {
+    expect(formatAnnouncement('🚀 Deployed `abc`', [])).toBe('🚀 Deployed `abc`');
+    expect(formatAnnouncement('🚀 Deployed `abc`', ['A_CHANNEL_ID: #a'])).toBe(
+      '🚀 Deployed `abc`\n```\nA_CHANNEL_ID: #a\n```',
+    );
   });
 });

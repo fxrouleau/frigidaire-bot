@@ -1,10 +1,16 @@
+import OpenAI from 'openai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const recordUsage = vi.hoisted(() => vi.fn());
+vi.mock('./usage', async (importOriginal) => ({ ...(await importOriginal<typeof import('./usage')>()), recordUsage }));
+
 import { createReplayClient } from '../test-support/openRouterFetch';
 import { DECISIONS_ENDPOINT, type JudgeInput, createEdgyJudge, isDecisionModel } from './messageJudge';
+import { FEATURE_HEADER } from './usage';
 
-const TEXT_INPUT: JudgeInput = { author: 'Jason', text: 'you are all clowns', imageUrls: [], attachmentNames: [] };
+const TEXT_INPUT: JudgeInput = { author: 'Jasper', text: 'you are all clowns', imageUrls: [], attachmentNames: [] };
 const IMAGE_ONLY_INPUT: JudgeInput = {
-  author: 'Jason',
+  author: 'Jasper',
   text: '',
   imageUrls: ['https://cdn.discordapp.com/attachments/1/2/spicy.png'],
   attachmentNames: ['spicy.png'],
@@ -46,6 +52,7 @@ function decisionsFetch(answer: { noul?: number; status?: number }) {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  recordUsage.mockReset();
 });
 
 describe('isDecisionModel', () => {
@@ -68,7 +75,7 @@ describe('createEdgyJudge with a decision model', () => {
     expect(body.model).toBe('typesafe/jev-1.13');
     expect(body.provider).toEqual({ zdr: true });
     expect(body.state.message).toBe('you are all clowns');
-    expect(body.state.author).toBe('Jason');
+    expect(body.state.author).toBe('Jasper');
     expect(body.questions.edgy.type).toBe('noul');
   });
 
@@ -109,6 +116,15 @@ describe('createEdgyJudge with a decision model', () => {
     expect(userContent.some((part) => part.type === 'image_url')).toBe(true);
   });
 
+  it('attributes the decision call to the judge feature in the usage ledger', async () => {
+    const { fetchImpl } = decisionsFetch({ noul: 0.91 });
+    const judge = createEdgyJudge({ model: 'typesafe/jev-1.13', apiKey: 'sk-test', fetch: fetchImpl });
+
+    await judge(TEXT_INPUT);
+
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ feature: 'judge', model: 'typesafe/jev-1.13' }));
+  });
+
   it('returns undefined when there is no API key and no chat client', async () => {
     vi.stubEnv('OPENROUTER_API_KEY', undefined);
     const judge = createEdgyJudge({ model: 'typesafe/jev-1.13' });
@@ -125,10 +141,56 @@ describe('createEdgyJudge with a chat model', () => {
     expect((requests[0] as { provider: unknown }).provider).toEqual({ zdr: true });
   });
 
+  it('leaves a reasoning model room to answer: low effort, and max_tokens past the reasoning', async () => {
+    // The default chat model (GLM-5.3-Flash) reasons at 'max' unless told otherwise, and reasoning counts
+    // toward max_tokens: with 20 tokens it never got to the JSON, so every fallback failed closed.
+    const { client, requests } = chatClientSaying('{"edgy": true}');
+    const judge = createEdgyJudge({ model: 'typesafe/jev-1.13', client, fallbackModel: 'z-ai/glm-5.3-flash' });
+
+    expect(await judge(IMAGE_ONLY_INPUT)).toBe(true);
+
+    const request = requests[0] as { reasoning?: unknown; max_tokens?: number };
+    expect(request.reasoning).toEqual({ effort: 'low' });
+    expect(request.max_tokens).toBeGreaterThanOrEqual(1000);
+  });
+
   it('tolerates prose around the JSON', async () => {
     const { client } = chatClientSaying('Sure! {"edgy": false} — pretty tame.');
     const judge = createEdgyJudge({ model: 'some/chat-model', client });
     expect(await judge(TEXT_INPUT)).toBe(false);
+  });
+
+  it('tags the chat call with the judge feature header', async () => {
+    const headers: Array<string | null> = [];
+    const client = new OpenAI({
+      apiKey: 'test-key',
+      baseURL: 'https://openrouter.ai/api/v1',
+      maxRetries: 0,
+      fetch: (async (_url: RequestInfo | URL, init?: RequestInit) => {
+        headers.push(new Headers(init?.headers).get(FEATURE_HEADER));
+        return new Response(
+          JSON.stringify({
+            id: 'x',
+            object: 'chat.completion',
+            created: 0,
+            model: 'm',
+            choices: [
+              {
+                index: 0,
+                message: { role: 'assistant', content: '{"edgy": true}', refusal: null },
+                finish_reason: 'stop',
+                logprobs: null,
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }) as unknown as typeof globalThis.fetch,
+    });
+    const judge = createEdgyJudge({ model: 'some/chat-model', client });
+
+    expect(await judge(TEXT_INPUT)).toBe(true);
+    expect(headers).toEqual(['judge']);
   });
 
   it('returns undefined when the model does not answer the question', async () => {

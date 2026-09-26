@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "description": "Gemini describing a (fictional) gameplay clip sent as a video_url data URL, in the shape the video prompt asks for.",
+  "status": 200,
+  "request": {
+    "model": "google/gemini-3.5-flash-lite",
+    "max_tokens": 2048,
+    "messages": [
+      { "role": "system", "content": "You describe videos for a Discord bot ..." },
+      {
+        "role": "user",
+        "content": [
+          { "type": "video_url", "video_url": { "url": "data:video/mp4;base64,<clip>" } },
+          { "type": "text", "text": "Describe this video so someone who can't watch it knows what's in it. ..." }
+        ]
+      }
+    ],
+    "provider": { "zdr": true }
+  },
+  "response": {
+    "id": "gen-test-video-001",
+    "provider": "Google",
+    "model": "google/gemini-3.5-flash-lite-20260721",
+    "object": "chat.completion",
+    "created": 1790000000,
+    "choices": [
+      {
+        "logprobs": null,
+        "finish_reason": "stop",
+        "native_finish_reason": "STOP",
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "League of Legends clip: a low-health Jinx dodges two skillshots in bot lane and gets a triple kill while the player screams in celebration.\nOn-screen text: TRIPLE KILL\nSaid: \"no way, NO WAY\"",
+          "refusal": null,
+          "reasoning": null
+        }
+      }
+    ],
+    "usage": { "prompt_tokens": 1640, "completion_tokens": 52, "total_tokens": 1692, "cost": 0.000622 }
+  }
+}
