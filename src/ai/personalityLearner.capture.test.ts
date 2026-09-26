@@ -227,6 +227,66 @@ describe('capture reads the whole conversation', () => {
     expect(backlog.map((b) => b.channelId)).toEqual([CHANNEL]);
   });
 
+  it('retries a failed capture once the channel has been quiet again, without waiting for new messages', async () => {
+    const { client: openai, requests } = createCapturingClient([{ error: new Error('provider outage') }, nothing()]);
+    const trigger = new ConversationEndTrigger({ idleMs: 20 * MIN, maxSpanMs: 120 * MIN, minMessages: 3 });
+    const learner = new PersonalityLearner(store, { client: openai, trigger, minMessages: 3, idleMs: 20 * MIN });
+    store.setLastObserved(CHANNEL, idAt(0));
+    const log = [post(0, REMI, 0), ...chat(1, 4, 10)];
+    for (const m of log.slice(1)) learner.trackActivity(CHANNEL, { at: m.createdTimestamp, messageId: m.id, authorId: m.author.id });
+    const { client, fetches } = clientServing(log);
+
+    await learner.observeOnce(client, BASE + 33 * MIN);
+    expect([fetches.length, requests.length, store.getLastObserved(CHANNEL)]).toEqual([1, 1, idAt(0)]);
+
+    // Not before the channel has been quiet for the idle time since the failure.
+    await learner.observeOnce(client, BASE + 50 * MIN);
+    expect(fetches).toHaveLength(1);
+
+    await learner.observeOnce(client, BASE + 54 * MIN);
+    expect([fetches.length, requests.length, store.getLastObserved(CHANNEL)]).toEqual([2, 2, idAt(4)]);
+  });
+
+  it('stops retrying a capture that keeps failing until the channel is busy again', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    const down = { error: new Error('provider outage') };
+    const { client } = clientServing([post(0, REMI, 0), ...chat(1, 4, 10)]);
+    const { learner, requests, backlog, queue } = learnerWith([down, down, down, down, down]);
+
+    await learner.observeOnce(client, BASE + 100 * MIN);
+    for (let k = 2; k <= 4; k++) {
+      queue(CHANNEL);
+      await learner.observeOnce(client, BASE + k * 100 * MIN);
+    }
+    expect(requests).toHaveLength(4);
+    // When each one failed (the tick's time plus how long the capture took).
+    expect(backlog.map((b) => Math.floor((b.at - BASE) / MIN))).toEqual([100, 200, 300]);
+
+    // New activity brings it back, with its retries.
+    queue(CHANNEL);
+    await learner.observeOnce(client, BASE + 500 * MIN);
+    expect(backlog).toHaveLength(4);
+  });
+
+  it("anchors a never-captured channel's watermark first, so a failed capture is not left behind by the next conversation", async () => {
+    const first = [...chat(1, 10, 0, (i) => `old ${i}`), ...chat(11, 5, 240, (i) => `first ${i}`)];
+    const { learner, requests, queue } = learnerWith([{ error: new Error('provider outage') }, nothing()]);
+
+    await learner.observeOnce(clientServing(first).client, BASE + 300 * MIN);
+    expect(requests).toHaveLength(1);
+    expect(store.getLastObserved(CHANNEL)).toBe(idAt(10));
+
+    // A second conversation happens before the retry.
+    queue(CHANNEL);
+    await learner.observeOnce(clientServing([...first, ...chat(16, 5, 400, (i) => `second ${i}`)]).client, BASE + 500 * MIN);
+
+    const lines = linesOf(requests[1]).join('\n');
+    expect(lines).toContain('first 11');
+    expect(lines).toContain('second 20');
+    expect(lines).not.toContain('old ');
+    expect(store.getLastObserved(CHANNEL)).toBe(idAt(20));
+  });
+
   it("reads only a never-captured channel's last conversation", async () => {
     const log = [...chat(1, 10, 0, (i) => `old ${i}`), ...chat(11, 5, 240, (i) => `new ${i}`)];
     const { client } = clientServing(log);

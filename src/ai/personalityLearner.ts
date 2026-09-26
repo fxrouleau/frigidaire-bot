@@ -362,6 +362,8 @@ const LEAD_IN_HEADER =
 const CONTINUES_HEADER = '## THE CONVERSATION CONTINUES — extract from here';
 // A recently captured channel is re-read after a restart (see PersonalityLearner.start()).
 const RESUME_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
+// A failed capture is retried this many times in a row, each once the channel has been quiet again.
+const MAX_CAPTURE_RETRIES = 3;
 
 /**
  * Keeps the `max` most recent image parts (parts are in chronological order) and replaces older ones
@@ -467,6 +469,8 @@ export class PersonalityLearner {
   // A cycle can outlast the interval (slow model, many channels); the next tick must not start a
   // second one that re-reads the same watermarks and saves every observation twice.
   private cycleInFlight = false;
+  // Failed captures in a row per channel (see retryLater); cleared by a capture that finishes.
+  private readonly captureFailures = new Map<string, number>();
 
   constructor(store: MemoryStore, opts: PersonalityLearnerOptions = {}) {
     this.store = store;
@@ -925,21 +929,48 @@ export class PersonalityLearner {
     const botName = discordClient.user?.displayName ?? 'Frigidaire';
     const selfImprovementEnabled = config.learner.selfImprovementEnabled;
 
+    const started = Date.now();
     for (const channelId of channelsToProcess) {
       try {
         await this.observeChannel(discordClient, openai, channelId, botName, selfImprovementEnabled, now);
+        this.captureFailures.delete(channelId);
       } catch (error) {
         logger.error(`PersonalityLearner: Error processing channel ${channelId}:`, error);
+        this.retryLater(channelId, now + (Date.now() - started));
       }
     }
+  }
+
+  /**
+   * A capture that failed (a Discord read, or an extractor call: an outage) has already been taken from the
+   * trigger, and nothing new may be posted in the channel for days: it is reported as a backlog again, so
+   * the channel is read once it has been quiet for the idle time after the failure. After
+   * MAX_CAPTURE_RETRIES failures in a row (a lasting error, such as lost access) it waits for new activity
+   * or a restart instead, so a broken channel never costs a call every twenty minutes.
+   */
+  private retryLater(channelId: string, at: number): void {
+    const failures = (this.captureFailures.get(channelId) ?? 0) + 1;
+    if (failures > MAX_CAPTURE_RETRIES) {
+      this.captureFailures.delete(channelId);
+      logger.warn(
+        `PersonalityLearner: capture of channel ${channelId} failed ${failures} times in a row; waiting for new activity`,
+      );
+      return;
+    }
+    this.captureFailures.set(channelId, failures);
+    this.trigger.noteBacklog(channelId, at);
+    logger.info(
+      `PersonalityLearner: capture of channel ${channelId} will be retried once it is quiet (retry ${failures}/${MAX_CAPTURE_RETRIES})`,
+    );
   }
 
   /**
    * Captures a due channel: reads everything after its watermark (paged, up to the capture's cap; a channel
    * never captured is read back to the start of its last conversation), splits it into segments when it is
    * too long for one request, and runs the extractor (then the self-improvement pass) on each. The
-   * watermark moves after each segment, so a failure part-way loses nothing and repeats nothing: the rest
-   * is read at the channel's next capture. A read that stopped at its cap reports the rest as a backlog.
+   * watermark moves after each segment (a first capture's is anchored before the first one), so a failure
+   * part-way loses nothing and repeats nothing: the rest is read at the channel's next capture, which the
+   * caller schedules (retryLater). A read that stopped at its cap reports the rest as a backlog.
    */
   private async observeChannel(
     discordClient: Client,
@@ -963,9 +994,12 @@ export class PersonalityLearner {
 
     let messages = read.messages;
     let observed = this.attributeAll(messages, this.identitiesById());
+    // A first capture's anchor: the newest message before the conversation it reads.
+    let anchor: Message | undefined;
     if (!watermark && observed.length > 0) {
       // A first capture reads only the channel's last conversation; the history before it is the bootstrap's.
       const startAt = observed[conversationStartIndex(this.timed(observed), this.idleMs)].msg.createdTimestamp;
+      anchor = messages.filter((m) => m.createdTimestamp < startAt).at(-1);
       messages = messages.filter((m) => m.createdTimestamp >= startAt);
       observed = observed.filter((o) => o.msg.createdTimestamp >= startAt);
     }
@@ -982,6 +1016,9 @@ export class PersonalityLearner {
       this.trigger.noteBacklog(channelId, now);
       return;
     }
+    // Set before any part runs: when one fails, the next capture reads on from the anchor (this conversation
+    // and whatever followed it) instead of reading back to the newest conversation and leaving this one out.
+    if (anchor) this.store.setLastObserved(channelId, anchor.id);
 
     // Mechanically upsert identities for every observed author, then re-attribute so labels use the
     // refreshed names.
