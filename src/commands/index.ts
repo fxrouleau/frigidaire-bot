@@ -19,7 +19,9 @@ import {
 } from 'discord.js';
 import { agent } from '../ai/agentInstance';
 import { getCachedTranscript, transcribeAudio, watchVideo } from '../ai/media';
-import { getMemoryStore } from '../ai/memory';
+import { getMemoryStore, getNotesStore } from '../ai/memory';
+import { proposeEdit } from '../ai/memory/notes/dreamer';
+import { isBotOwner } from '../botOwner';
 import { config } from '../config';
 import { logger } from '../logger';
 import { askFridge } from './askFridge';
@@ -111,7 +113,7 @@ export async function registerGuildCommands(
 
 let defaultDeps: CommandDeps | undefined;
 
-/** The production collaborators (shared agent, summary pipeline, media, OpenRouter, memory store). */
+/** The production collaborators (shared agent, summary pipeline, media, OpenRouter, memory and notes stores, owner). */
 export function defaultCommandDeps(): CommandDeps {
   defaultDeps ??= {
     askAgent: (message) => agent.handleMention(message),
@@ -121,6 +123,9 @@ export function defaultCommandDeps(): CommandDeps {
     watchVideo,
     complete: createCompletion(),
     memoryStore: getMemoryStore,
+    notesStore: () => getNotesStore(),
+    isOwner: isBotOwner,
+    proposeEdit: (request) => proposeEdit(request, { notes: getNotesStore(), memory: getMemoryStore() }),
     now: () => new Date(),
   };
   return defaultDeps;
