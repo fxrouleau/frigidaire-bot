@@ -759,7 +759,7 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 |---|---|---|
 | `MAIN_CHANNEL_ID` | unset | the channel the group talks in: default for the gate, ramble watch, auto-react, birthdays, archive backfill, reminder fallback |
 | `LINKED_ACCOUNTS` | empty | csv of `sideId:mainId` (`;`/newlines also separate); a side account counts as its main everywhere |
-| `BOT_OWNER_USER_IDS` | empty ⇒ the application owner | csv of who may edit and undo notes (the owner); unset ⇒ the Discord application's owner, or its team's members |
+| `BOT_OWNER_USER_IDS` | empty ⇒ the application owner | csv of who may edit and undo notes (the owner); unset ⇒ the Discord application's owner, or its team's accepted members |
 
 **OpenRouter and models**
 

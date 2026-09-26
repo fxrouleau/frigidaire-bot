@@ -311,7 +311,7 @@ opens on an empty **Group notes** entry, where the owner's Edit starts them). Pe
 memories; someone the bot knows nothing about gets one plain line. Everyone can view everyone.
 
 Owner-only buttons (the owner: `BOT_OWNER_USER_IDS`, else the Discord application's owner or its team's
-members; a linked side account counts):
+accepted members, not people only invited; a linked side account counts):
 - **Edit**: a modal ("What should change?", ≤ 4,000 chars) → the edit model gets the target's notes (a
   person's with their circles) and the instruction → the message becomes a before/after preview, one change
   per page: a line diff (`-` before, `+` after) and, for a circle, its membership and other names before and

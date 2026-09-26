@@ -1,13 +1,13 @@
 // Who owns the bot: the people allowed to do owner-only things (editing someone's notes, undoing a note
-// version). BOT_OWNER_USER_IDS when it is set; otherwise the Discord application's owner, or every member
-// of the team that owns it, fetched once through the client. Never hardcoded (the repo is public), and
-// fail closed: while the owner can't be determined, nobody is the owner.
-import type { Client } from 'discord.js';
+// version). BOT_OWNER_USER_IDS when it is set; otherwise the Discord application's owner, or the owner and
+// every accepted member of the team that owns it, fetched once through the client. Never hardcoded (the
+// repo is public), and fail closed: while the owner can't be determined, nobody is the owner.
+import { type Client, TeamMemberMembershipState } from 'discord.js';
 import { config } from './config';
 import { canonicalUserId } from './linkedAccounts';
 import { logger } from './logger';
 
-/** Fetches the application owner's user ids (a team's members for a team-owned application). */
+/** Fetches the application owner's user ids (a team's owner and accepted members for a team-owned application). */
 export type ApplicationOwnerSource = () => Promise<string[]>;
 
 /** The application owner as the Discord client reports it. */
@@ -18,9 +18,13 @@ export function applicationOwnerSource(client: Client): ApplicationOwnerSource {
     const fetched = await application.fetch();
     const owner = fetched.owner;
     if (!owner) return [];
-    // A Team has members; a User is the owner itself.
-    if ('members' in owner) return [...owner.members.values()].map((member) => member.user.id);
-    return [owner.id];
+    // A User is the owner itself. A Team: its owner and every member who accepted (Discord lists people
+    // only invited to the team among its members too; they aren't members yet).
+    if (!('members' in owner)) return [owner.id];
+    const accepted = [...owner.members.values()]
+      .filter((member) => member.membershipState === TeamMemberMembershipState.Accepted)
+      .map((member) => member.user.id);
+    return [...new Set([...(owner.ownerId ? [owner.ownerId] : []), ...accepted])];
   };
 }
 
