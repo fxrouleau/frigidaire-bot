@@ -651,6 +651,56 @@ describe('undo', () => {
     ]);
   });
 
+  it('undoes a circle merge whole: the merged-away circle comes back and the notice and audit say so', async () => {
+    const circle = (slug: string, title: string, content: string, mergedFrom: string[] = []) => ({
+      slug,
+      title,
+      content,
+      aliases: [],
+      members: [
+        { id: REMI, since: '2021' },
+        { id: NOVA, since: '2024' },
+      ],
+      merged_from: mergedFrom,
+    });
+    notes.writeCircles([circle('magic', 'Magic nights', '## Now\nThursday casual games.')], { updatedBy: 'dream' });
+    notes.writeCircles([circle('mtg', 'The MTG crew', '## Now\nDrafts and casual games.', ['magic'])], {
+      updatedBy: 'dream',
+    });
+    const mtgId = notes.getCircle('mtg')?.id ?? 0;
+    const state: ViewerState = { ...REMI_HOME, screen: { kind: 'note', noteId: mtgId } };
+    const fake = fakeDeps();
+
+    const responses = await click(componentId(view(state), 'Undo v2'), fake);
+    expect(responses[0].content).toBe(
+      `undone: "The MTG crew" is back to v1's text (saved as v3); "Magic nights" is back`,
+    );
+    expect(notes.getCircle('magic')?.content).toBe('## Now\nThursday casual games.');
+    expect(fake.recorders.report.calls.map(([, text]) => text)).toEqual([
+      `↩️ notes undo · Invoker undid v2 of circle "The MTG crew": back to v1's text (saved as v3); "Magic nights" is back`,
+    ]);
+  });
+
+  it('offers Undo on a circle a merge created, which removes it and brings back what it merged', async () => {
+    const merged = {
+      slug: 'card-crew',
+      title: 'The card crew',
+      content: '## Now\nCards.',
+      aliases: [],
+      members: [{ id: REMI }, { id: NOVA }],
+      merged_from: ['mtg'],
+    };
+    expect(notes.writeCircles([merged], { updatedBy: 'dream' }).ok).toBe(true);
+    const crewId = notes.getCircle('card-crew')?.id ?? 0;
+    const state: ViewerState = { ...REMI_HOME, screen: { kind: 'note', noteId: crewId } };
+    const fake = fakeDeps();
+
+    const responses = await click(componentId(view(state), 'Undo v1'), fake);
+    expect(responses[0].content).toBe(`undone: "The card crew" is removed (saved as v2); "The MTG crew" is back`);
+    expect(notes.getCircle('card-crew')).toBeUndefined();
+    expect(notes.getCircle('mtg')?.content).toBe('## Now\nFriday drafts at the game store.');
+  });
+
   it('never undoes twice from one button (a double click)', async () => {
     const fake = fakeDeps();
     const button = componentId(view(), 'Undo v2');

@@ -150,7 +150,21 @@ export type WriteNotesResult =
     }
   | { ok: false; errors: string[] };
 
-export type UndoResult = { ok: true; note: Note } | { ok: false; error: string };
+export type UndoResult =
+  | {
+      ok: true;
+      note: Note;
+      /**
+       * Other notes the undone version changed in the same write and that undo reverted with it: the
+       * circles a merge deactivated, back to their version before the merge (or merged away again when
+       * undoing that undo). Empty for a plain note.
+       */
+      alsoRestored: Note[];
+    }
+  | { ok: false; error: string };
+
+/** Another note's version written by the same write as a version (a merge's merged-away circle). */
+type LinkedVersion = { noteId: number; version: number };
 
 export type NoteSearchHit = { note: Note; snippet: string };
 
@@ -205,6 +219,7 @@ type VersionRow = {
   updated_at: string;
   updated_by: NoteUpdatedBy;
   reason: string | null;
+  linked: string | null;
 };
 
 type MemberRow = {
@@ -246,6 +261,11 @@ function parseJsonArray<T>(raw: string | null | undefined, guard: (v: unknown) =
 }
 
 const isString = (v: unknown): v is string => typeof v === 'string';
+const isLinkedVersion = (v: unknown): v is LinkedVersion =>
+  !!v &&
+  typeof v === 'object' &&
+  Number.isInteger((v as LinkedVersion).noteId) &&
+  Number.isInteger((v as LinkedVersion).version);
 const isMember = (v: unknown): v is CircleMember =>
   !!v && typeof v === 'object' && typeof (v as CircleMember).memberId === 'string';
 
@@ -320,6 +340,8 @@ type VersionInput = {
   at: string;
   updatedBy: NoteUpdatedBy;
   reason: string | null;
+  /** Other notes' versions this write made along with this one, reverted with it by undo (a merge's). */
+  linked?: LinkedVersion[];
 };
 
 export class NotesStore {
@@ -376,6 +398,7 @@ export class NotesStore {
         updated_at  TEXT    NOT NULL,
         updated_by  TEXT    NOT NULL,
         reason      TEXT,
+        linked      TEXT,
         UNIQUE (note_id, version)
       );
 
@@ -389,6 +412,11 @@ export class NotesStore {
         PRIMARY KEY (scope, owner_id)
       ) WITHOUT ROWID;
     `);
+    // Added after note_versions first shipped: a database created before it gets the column here.
+    const versionColumns = this.db.prepare('PRAGMA table_info(note_versions)').all() as { name: string }[];
+    if (!versionColumns.some((c) => c.name === 'linked')) {
+      this.db.exec('ALTER TABLE note_versions ADD COLUMN linked TEXT');
+    }
 
     // A plain FTS5 table (it stores its own copy of title/content/aliases): the triggers below are its
     // only writers, and DELETE by rowid is a no-op for a row that isn't there.
@@ -828,35 +856,35 @@ export class NotesStore {
     const unchanged: string[] = [];
     const touched = new Set<string>();
 
-    const deactivate = (slug: string, label: string, why?: string | null) => {
+    const deactivate = (slug: string, label: string, why?: string | null): Note | undefined => {
       const existing = this.anyNote('circle', '', slug);
       if (!existing?.active) {
         errors.push(`${label} "${slug}" is not an active circle`);
-        return;
+        return undefined;
       }
       if (!includesOwner(existing.members)) {
         errors.push(`circle "${slug}": a person's notes only change circles they are part of`);
-        return;
+        return undefined;
       }
       for (const m of existing.members) touched.add(m.memberId);
-      removed.push(
-        this.putVersion(
-          'circle',
-          '',
-          slug,
-          existing,
-          version(
-            {
-              title: existing.title,
-              content: existing.content,
-              aliases: existing.aliases,
-              members: existing.members,
-              active: false,
-            },
-            why,
-          ),
+      const gone = this.putVersion(
+        'circle',
+        '',
+        slug,
+        existing,
+        version(
+          {
+            title: existing.title,
+            content: existing.content,
+            aliases: existing.aliases,
+            members: existing.members,
+            active: false,
+          },
+          why,
         ),
       );
+      removed.push(gone);
+      return gone;
     };
 
     for (const draft of circles) {
@@ -880,9 +908,16 @@ export class NotesStore {
         errors.push(`${label}: a person's notes only change circles they are part of`);
         continue;
       }
-      for (const merged of draft.merged_from) deactivate(merged, `${label}: merged_from`, `merged into ${draft.slug}`);
+      // The merged-away circles' versions are recorded on the kept circle's new version, so undoing the merge
+      // brings them back with it (undo()).
+      const linked: LinkedVersion[] = [];
+      for (const merged of draft.merged_from) {
+        const gone = deactivate(merged, `${label}: merged_from`, `merged into ${draft.slug}`);
+        if (gone) linked.push({ noteId: gone.id, version: gone.version });
+      }
       for (const m of [...members, ...(existing?.members ?? [])]) touched.add(m.memberId);
       if (
+        linked.length === 0 &&
         existing?.active &&
         existing.title === draft.title &&
         existing.content === draft.content &&
@@ -898,7 +933,14 @@ export class NotesStore {
           '',
           draft.slug,
           existing,
-          version({ title: draft.title, content: draft.content, aliases: draft.aliases, members, active: true }),
+          version({
+            title: draft.title,
+            content: draft.content,
+            aliases: draft.aliases,
+            members,
+            active: true,
+            linked,
+          }),
         ),
       );
     }
@@ -936,44 +978,98 @@ export class NotesStore {
    * content, aliases, a circle's membership, and whether it was active. Undoing twice restores what the
    * first undo replaced. Refused for a note with no earlier version, and when bringing a removed topic or
    * circle back would pass a limit.
+   *
+   * A version that merged other circles away (merged_from) is undone together with the merge: each circle
+   * it deactivated comes back to its version before the merge, in the same transaction, unless something
+   * changed that circle since (it is then left alone). A circle created by a merge (its first version) can
+   * be undone too: it is removed and the circles it merged come back. The undo's version records what it
+   * brought back, so undoing the undo merges them away again.
    */
   undo(noteId: number, opts: { reason?: string } = {}): UndoResult {
     const note = this.getNoteById(noteId);
     if (!note) return { ok: false, error: 'no such note' };
+    const linked = this.linkedOf(noteId, note.version);
     const previous = this.getVersion(noteId, note.version - 1);
-    if (!previous) return { ok: false, error: 'there is no earlier version to go back to' };
+    if (!previous && linked.length === 0) return { ok: false, error: 'there is no earlier version to go back to' };
 
     const owner = ownerOf(note);
-    if (owner && previous.active && !note.active && this.listNotes(owner).length >= maxTopicsFor(owner.scope)) {
+    if (owner && previous?.active && !note.active && this.listNotes(owner).length >= maxTopicsFor(owner.scope)) {
       return { ok: false, error: 'bringing that topic back would pass the topic limit' };
     }
     const scope = note.scope;
     const ownerId = note.ownerId ?? '';
+    const at = toSqliteUtc(this.now());
     try {
-      const restored = this.runInTransaction(() => {
+      const outcome = this.runInTransaction(() => {
+        const touched = new Set(note.members.map((m) => m.memberId));
+        const alsoRestored: Note[] = [];
+        const reverted: LinkedVersion[] = [];
+        for (const link of linked) {
+          const other = this.getNoteById(link.noteId);
+          // Changed since the merge (brought back by hand, merged again): not this undo's to touch.
+          if (!other || other.version !== link.version) continue;
+          const before = this.getVersion(link.noteId, link.version - 1);
+          if (!before) continue;
+          const back = this.putVersion(other.scope, other.ownerId ?? '', other.topic, other, {
+            title: before.title,
+            content: before.content,
+            aliases: before.aliases,
+            members: other.scope === 'circle' ? (before.members ?? other.members) : null,
+            active: before.active,
+            at,
+            updatedBy: 'undo',
+            reason: `undo of v${link.version} with ${note.topic} v${note.version} (back to v${before.version})`,
+          });
+          for (const m of [...back.members, ...other.members]) touched.add(m.memberId);
+          alsoRestored.push(back);
+          reverted.push({ noteId: back.id, version: back.version });
+        }
+        const brought = alsoRestored.length > 0 ? `; ${alsoRestored.map((n) => n.topic).join(', ')} too` : '';
         const result = this.putVersion(scope, ownerId, note.topic, note, {
-          title: previous.title,
-          content: previous.content,
-          aliases: previous.aliases,
-          members: scope === 'circle' ? (previous.members ?? note.members) : null,
-          active: previous.active,
-          at: toSqliteUtc(this.now()),
+          title: previous?.title ?? note.title,
+          content: previous?.content ?? note.content,
+          aliases: previous?.aliases ?? note.aliases,
+          members: scope === 'circle' ? (previous?.members ?? note.members) : null,
+          // No earlier version: a circle a merge created, removed by its undo.
+          active: previous ? previous.active : false,
+          at,
           updatedBy: 'undo',
-          reason: (opts.reason ?? `undo of v${note.version} (back to v${previous.version})`).slice(0, MAX_REASON_CHARS),
+          reason: (
+            opts.reason ??
+            `undo of v${note.version} (${previous ? `back to v${previous.version}` : 'removed'}${brought})`
+          ).slice(0, MAX_REASON_CHARS),
+          linked: reverted,
         });
-        if (scope === 'circle') {
-          const problems = this.circleLimitProblems(
-            new Set([...result.members, ...note.members].map((m) => m.memberId)),
-          );
+        if (scope === 'circle' || alsoRestored.length > 0) {
+          for (const m of result.members) touched.add(m.memberId);
+          const problems = this.circleLimitProblems(touched);
           if (problems.length > 0) throw new WriteRefused(problems);
         }
-        return result;
+        return { note: result, alsoRestored };
       });
-      return { ok: true, note: restored };
+      return { ok: true, ...outcome };
     } catch (error) {
       if (error instanceof WriteRefused) return { ok: false, error: error.errors.join('; ') };
       throw error;
     }
+  }
+
+  /**
+   * Whether undo() has something to go back to for a note's current version: an earlier version, or the
+   * circles its version merged away (a circle a merge created).
+   */
+  canUndo(noteId: number): boolean {
+    const note = this.getNoteById(noteId);
+    if (!note) return false;
+    return note.version > 1 || this.linkedOf(noteId, note.version).length > 0;
+  }
+
+  /** The other notes' versions a version's write made along with it (a merge's merged-away circles). */
+  private linkedOf(noteId: number, version: number): LinkedVersion[] {
+    const row = this.stmt('SELECT linked FROM note_versions WHERE note_id = ? AND version = ?').get(noteId, version) as
+      | { linked: string | null }
+      | undefined;
+    return parseJsonArray(row?.linked, isLinkedVersion);
   }
 
   /**
@@ -1055,8 +1151,9 @@ export class NotesStore {
       for (const m of next.members) insert.run(id, m.memberId, m.since, m.until, m.role);
     }
     this.stmt(
-      `INSERT INTO note_versions (note_id, version, title, content, aliases, members, active, updated_at, updated_by, reason)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO note_versions
+         (note_id, version, title, content, aliases, members, active, updated_at, updated_by, reason, linked)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       version,
@@ -1068,6 +1165,7 @@ export class NotesStore {
       next.at,
       next.updatedBy,
       next.reason,
+      next.linked && next.linked.length > 0 ? JSON.stringify(next.linked) : null,
     );
     const note = this.getNoteById(id);
     if (!note) throw new Error(`note #${id} vanished while it was written`);

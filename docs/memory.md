@@ -78,7 +78,9 @@ speaker in `said_by`. It never expires.
 |---|---|
 | `notes` | One row per note: `scope` (`person` \| `group` \| `circle`), `owner_id` (the person's main id; `''` for the group and circles), `topic` (a slug: `profile`, `games`, `running-jokes`; a circle's unique slug such as `mtg`), `title`, `content` (markdown), `aliases` (JSON, circles only), `version`, `updated_at`, `updated_by` (`dream` \| `edit` \| `bootstrap` \| `import` \| `undo`), `active`. `UNIQUE(scope, owner_id, topic)`. |
 | `note_members` | A circle's members, dated: `(note_id, member_id, since, until, role)`. `since`/`until` are partial dates (`2021`, `2021-06`, `2021-06-15`); `until` NULL means still a member. Someone who left the MTG crew in 2023 stays listed with `until = 2023`. |
-| `note_versions` | The version history (the current one included): title, content, aliases, a circle's membership snapshot, active, when, who, and the reason (the dream's change summary, the owner's instruction, "undo of v3", "merged into mtg"). Undo restores the previous version as a new version, membership included. After each night it is trimmed to the newest 50 versions per note; bootstrap and owner-edit versions are always kept. |
+| `note_versions` | The version history (the current one included): title, content, aliases, a circle's membership snapshot, active, when, who, and the reason (the dream's change summary, the owner's instruction, "undo of v3", "merged into mtg"), and `linked`: the other notes' versions the same write made (the circles a
+merge deactivated). Undo restores the previous version as a new version, membership included, and undoes a merge
+whole: the circles it merged away come back with it. After each night it is trimmed to the newest 50 versions per note; bootstrap and owner-edit versions are always kept. |
 | `notes_fts` | FTS5 over active notes (title, content, aliases). A plain FTS table kept by triggers on `notes` alone: correct by construction (a delete of a missing row is harmless, unlike the external-content 'delete' command). |
 | `dream_state` | Per person and for the group: `journal_watermark` (the highest `journal_seq` folded into the notes), `last_dream_at`, `last_error`. Circles have none: the person and group dreams maintain them. |
 
@@ -326,6 +328,8 @@ members; a linked side account counts):
   after → **Confirm** saves new versions (`updated_by = 'edit'`, reason = the instruction) / **Cancel**. Edit
   on a circle edits that circle; anywhere else it edits the person's (or the group's) notes.
 - **Undo vN**: restores the version before the shown one as a new version (membership included for a circle).
+  Undoing a circle's merge also brings back the circles it merged away (unless one changed since), and a circle a
+  merge created offers Undo v1, which removes it and brings back what it merged.
   The button carries the version it was shown for, so a double click never undoes twice.
 - Every saved edit and undo also posts one audit line to the report channel (who, whose notes, the versions
   saved, the change summary and the instruction, each capped, one line, `parse: []`), besides the INFO log

@@ -644,7 +644,7 @@ export function renderViewer(state: ViewerState, ctx: ViewerContext, notice?: st
     buttons.push(
       button(customId('e', encodeSubject(subject), encodeScreen(screen), issued), 'Edit', ButtonStyle.Primary),
     );
-    if (shownNote && shownNote.version > 1) {
+    if (shownNote && ctx.notes.canUndo(shownNote.id)) {
       buttons.push(
         button(
           customId('u', encodeSubject(subject), shownNote.id, shownNote.version, issued),

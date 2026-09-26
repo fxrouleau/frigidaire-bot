@@ -64,6 +64,27 @@ describe('NotesStore schema', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('adds the versions table\'s "linked" column to a database created before it', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'notes-'));
+    const file = path.join(dir, 'memory.db');
+    try {
+      const first = new MemoryStore(file);
+      new NotesStore(first).writeNotes(remi, [profile()], { updatedBy: 'dream' });
+      first.sharedDatabase().exec('ALTER TABLE note_versions DROP COLUMN linked');
+      first.close();
+
+      const second = new MemoryStore(file);
+      const secondNotes = new NotesStore(second);
+      const columns = second.sharedDatabase().prepare('PRAGMA table_info(note_versions)').all() as { name: string }[];
+      expect(columns.map((c) => c.name)).toContain('linked');
+      expect(secondNotes.writeNotes(remi, [profile('changed')], { updatedBy: 'dream' }).ok).toBe(true);
+      expect(secondNotes.undo(secondNotes.getProfile(REMI)?.id ?? 0).ok).toBe(true);
+      second.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('writeNotes', () => {
@@ -575,6 +596,65 @@ describe('circles', () => {
     expect(notes.undo(id).ok).toBe(true);
     expect(notes.getCircle('magic')?.members).toHaveLength(2);
     ftsIntegrity();
+  });
+
+  it('undoes a merge whole: the merged-away circle comes back, and undoing the undo merges it again', () => {
+    notes.writeCircles([mtg(), mtg({ slug: 'magic', title: 'Magic nights', content: '## Now\nThursday casual games.' })], {
+      updatedBy: 'dream',
+    });
+    // A wrong merge: the writer judged them the same thing.
+    notes.writeCircles([mtg({ content: '## Now\nDrafts on Fridays, casual games on Thursdays.', merged_from: ['magic'] })], {
+      updatedBy: 'dream',
+    });
+    expect(notes.getCircle('magic')).toBeUndefined();
+    const id = notes.getCircle('mtg')?.id ?? 0;
+
+    const undone = notes.undo(id);
+    expect(undone.ok && undone.note.content).toBe('## Now\nFriday drafts at the game store.');
+    expect(undone.ok && undone.alsoRestored.map((n) => [n.topic, n.active, n.updatedBy])).toEqual([['magic', true, 'undo']]);
+    expect(notes.getCircle('magic')?.content).toBe('## Now\nThursday casual games.');
+    expect(notes.getCircle('magic')?.members).toHaveLength(2);
+    expect(notes.getVersions(id)[0].reason).toBe('undo of v2 (back to v1; magic too)');
+
+    // Undoing the undo is the merge again, both halves.
+    const redone = notes.undo(id);
+    expect(redone.ok && redone.note.content).toContain('casual games on Thursdays');
+    expect(notes.getCircle('magic')).toBeUndefined();
+    ftsIntegrity();
+  });
+
+  it('undoes a circle a merge created: it goes, the circles it merged come back', () => {
+    notes.writeCircles([mtg(), mtg({ slug: 'magic', title: 'Magic nights' })], { updatedBy: 'dream' });
+    notes.writeCircles([mtg({ slug: 'card-crew', title: 'The card crew', merged_from: ['mtg', 'magic'] })], {
+      updatedBy: 'edit',
+    });
+    const created = notes.getCircle('card-crew');
+    expect(created?.version).toBe(1);
+    expect(notes.canUndo(created?.id ?? 0)).toBe(true);
+    // A plain first version has nothing to go back to.
+    notes.writeCircles([mtg({ slug: 'solo', title: 'Solo' })], { updatedBy: 'dream' });
+    expect(notes.canUndo(notes.getCircle('solo')?.id ?? 0)).toBe(false);
+
+    const undone = notes.undo(created?.id ?? 0);
+    expect(undone.ok && [undone.note.active, undone.note.version]).toEqual([false, 2]);
+    expect(
+      notes
+        .listCircles()
+        .map((c) => c.topic)
+        .sort(),
+    ).toEqual(['magic', 'mtg', 'solo']);
+    expect(notes.getCircle('card-crew')).toBeUndefined();
+    ftsIntegrity();
+  });
+
+  it('leaves a merged-away circle alone when something changed it since the merge', () => {
+    notes.writeCircles([mtg(), mtg({ slug: 'magic', title: 'Magic nights' })], { updatedBy: 'dream' });
+    notes.writeCircles([mtg({ merged_from: ['magic'], content: 'merged' })], { updatedBy: 'dream' });
+    const magic = notes.writeCircles([mtg({ slug: 'magic', title: 'Magic nights, revived' })], { updatedBy: 'edit' });
+    expect(magic.ok).toBe(true);
+    const undone = notes.undo(notes.getCircle('mtg')?.id ?? 0);
+    expect(undone.ok && undone.alsoRestored).toEqual([]);
+    expect(notes.getCircle('magic')?.title).toBe('Magic nights, revived');
   });
 
   it('restores the previous membership on undo', () => {

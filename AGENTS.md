@@ -527,7 +527,7 @@ Right-click (long-press on mobile) → **Apps**:
 - **Owner Edit and Undo**: the owner is `BOT_OWNER_USER_IDS`, else the application's owner or its team (`src/botOwner.ts`; a linked side account counts), re-checked on every click with a 1.5 s limit so the reply stays inside Discord's 3 s (past it, owner buttons are hidden and owner actions say to try again).
   - Edit opens a modal ("What should change?", ≤4,000 chars). The message says "drafting…", then `proposeEdit` (dreamer.ts: `MEMORY_EDIT_MODEL`, tag `memory_edit`) drafts it against the target's notes: the circle on screen, else the person's (with their circles) or the group's. The draft is dry-run against the store in a rolled-back transaction, so the preview never shows what Confirm would refuse. A draft that comes back for another target is dropped.
   - The preview shows one change per page as a `diff` code block, plus a circle's members and other names before and after. Confirm saves it (`applyEdit`: `updated_by='edit'`, reason = the instruction); Cancel drops it. Drafts live in memory for 15 min (≤20, lost on restart) and save once; Confirm refuses a draft whose notes got a new version since (the dream got there first).
-  - Undo vN restores the previous version as a new `undo` version; the button carries the version it was drawn for, so a double click does nothing extra.
+  - Undo vN restores the previous version as a new `undo` version; the button carries the version it was drawn for, so a double click does nothing extra. A merge is undone whole: the circles it merged away (recorded in `note_versions.linked`) come back in the same transaction, and a circle a merge created offers Undo v1 (it goes, what it merged comes back).
   - Every saved edit and undo posts one audit line to the report channel (who, whose notes, the versions saved, the change summary and instruction, capped; `parse: []`), besides the INFO log.
 
 ### Feature requests → GitHub (`src/ai/tools/featureRequest.ts`, `src/github/`, `.github/workflows/claude-feature-request.yml`)
@@ -672,7 +672,7 @@ Rollback is reverting the variable.
 | `memory_embeddings` | memory_id (FK, cascade), model, dims, input_text, vector BLOB (L2-normalized LE Float32, `CHECK(length = dims*4)`), `UNIQUE(memory_id, model)` |
 | `notes` | one row per note: scope (`person`/`group`/`circle`), owner_id (main id; `''` for the group and circles), topic (a slug; a circle's unique slug), title, content (markdown), aliases JSON (circles), version, updated_at, updated_by (`dream`/`edit`/`bootstrap`/`import`/`undo`), active; `UNIQUE(scope, owner_id, topic)` |
 | `note_members` | a circle's members: (note_id, member_id, since, until, role); `until` NULL = current |
-| `note_versions` | every kept version (the current one included) with a circle's membership snapshot, who and why (`reason`); trimmed to 50 per note after each night, bootstrap/import/edit versions always kept |
+| `note_versions` | every kept version (the current one included) with a circle's membership snapshot, who and why (`reason`), and `linked` (the circles a merge deactivated in the same write, for undo); trimmed to 50 per note after each night, bootstrap/import/edit versions always kept |
 | `notes_fts` | plain FTS5 over active notes (title, content, aliases), kept by triggers on `notes` |
 | `dream_state` | per person and for the group: journal_watermark, last_dream_at, last_error |
 | `identities` | discord_user_id, display_name, canonical_name (first seen), username (handle), irl_name, aliases JSON, active |
