@@ -2090,3 +2090,59 @@ describe('compact() dedup groups by person (subject_user_id, else subject)', () 
     expect(store.getAllActive().map((m) => m.id)).toEqual([a]);
   });
 });
+
+describe('journal clock (memory v2)', () => {
+  it('adds journal_seq and said_by to an existing database, starting existing rows at their id', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'journal-'));
+    const file = path.join(dir, 'memory.db');
+    try {
+      const old = new Database(file);
+      old.exec(`CREATE TABLE memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL, subject TEXT, content TEXT NOT NULL,
+        source TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+        active INTEGER DEFAULT 1)`);
+      old.exec("INSERT INTO memories (category, subject, content) VALUES ('fact', 'Remi', 'a'), ('fact', 'Dale', 'b')");
+      old.exec("DELETE FROM memories WHERE content = 'a'");
+      old.exec("INSERT INTO memories (category, subject, content) VALUES ('fact', 'Remi', 'c')");
+      old.close();
+
+      const migrated = new MemoryStore(file);
+      // @ts-expect-error accessing private db
+      const rows = migrated.db.prepare('SELECT id, journal_seq, said_by FROM memories ORDER BY id').all();
+      expect(rows).toEqual([
+        { id: 2, journal_seq: 2, said_by: null },
+        { id: 3, journal_seq: 3, said_by: null },
+      ]);
+      // New rows continue the clock, also from a raw INSERT that never names the column.
+      // @ts-expect-error accessing private db
+      migrated.db.exec("INSERT INTO memories (category, subject, content) VALUES ('fact', 'Remi', 'd')");
+      // @ts-expect-error accessing private db
+      expect(migrated.db.prepare("SELECT journal_seq FROM memories WHERE content = 'd'").get()).toEqual({
+        journal_seq: 4,
+      });
+      migrated.close();
+      // Reopening changes nothing.
+      const reopened = new MemoryStore(file);
+      // @ts-expect-error accessing private db
+      expect(reopened.db.prepare('SELECT MAX(journal_seq) AS m FROM memories').get()).toEqual({ m: 4 });
+      reopened.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('moves a row forward when its subject id is stamped, not when it is deactivated', async () => {
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'likes cats' });
+    const seq = () =>
+      // @ts-expect-error accessing private db
+      (store.db.prepare('SELECT journal_seq FROM memories WHERE id = ?').get(id) as { journal_seq: number }).journal_seq;
+    const before = seq();
+    await store.save({ category: 'fact', subject: 'Dale', content: 'plays bass' });
+    store.upsertIdentity('100000000000000001', 'Remi');
+    store.stampSubjectUserIds();
+    const stamped = seq();
+    expect(stamped).toBeGreaterThan(before);
+    store.deactivate(id);
+    expect(seq()).toBe(stamped);
+  });
+});

@@ -21,6 +21,14 @@ export type Memory = {
   updated_at: string;
   active: number;
   subject_user_id: string | null;
+  /**
+   * The journal clock (memory v2): a number that grows every time a row is written or its content or
+   * subject_user_id changes, so "what is new since the last dream" also catches a re-observation merged
+   * into an old row. Set by triggers; optional in the type only so hand-built rows (tests) need not name it.
+   */
+  journal_seq?: number | null;
+  /** Who said it, for rows that record a claim: a correction's speaker (main account id). */
+  said_by?: string | null;
 };
 
 type MemoryInput = {
@@ -29,6 +37,8 @@ type MemoryInput = {
   content: string;
   source?: string;
   subject_user_id?: string;
+  /** Who said it (main account id): set on correction rows. Rows with different speakers never merge. */
+  said_by?: string;
 };
 
 export type Identity = {
@@ -131,6 +141,14 @@ export const SELF_DIAGNOSIS_CATEGORIES = [
 
 const SELF_DIAGNOSIS_SET: ReadonlySet<string> = new Set(SELF_DIAGNOSIS_CATEGORIES);
 
+/**
+ * The journal category of a correction (memory v2, record_correction): what is wrong and what is right
+ * about someone, with who said it in `said_by`. A correction about yourself is authoritative; one about
+ * someone else is a claim the nightly dream weighs. Shown next to the person's notes until a dream has
+ * folded it in (see docs/memory.md). Never expires.
+ */
+export const CORRECTION_CATEGORY = 'correction';
+
 // Inline literal list for SQL. Safe: values are compile-time constants (no injection surface), and
 // EXPLAIN QUERY PLAN on the prod DB confirms literal vs bound params produce identical plans
 // (the exclusion is a post-join filter on PK-fetched rows; no index is involved either way).
@@ -223,10 +241,16 @@ function samePerson(a: string | null | undefined, b: string | null | undefined):
   return !a || !b || a === b;
 }
 
+/** Whether two rows record the same speaker's claim: two people's corrections never merge into one. */
+function sameSpeaker(a: string | null | undefined, b: string | null | undefined): boolean {
+  return (a ?? null) === (b ?? null);
+}
+
 /** The compact() dedup group of a memory: one person's rows group together whatever name they were filed under. */
-function dedupGroupKey(memory: Pick<Memory, 'subject' | 'subject_user_id' | 'category'>): string {
+function dedupGroupKey(memory: Pick<Memory, 'subject' | 'subject_user_id' | 'category' | 'said_by'>): string {
   const who = memory.subject_user_id ? `id:${memory.subject_user_id}` : `name:${memory.subject}`;
-  return `${who}::${memory.category}`;
+  const speaker = memory.said_by ? `::said:${memory.said_by}` : '';
+  return `${who}::${memory.category}${speaker}`;
 }
 
 export class MemoryStore {
@@ -332,6 +356,8 @@ export class MemoryStore {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject_user_id ON memories(subject_user_id);');
     this.addColumnIfMissing('emojis', 'use_count', 'INTEGER NOT NULL DEFAULT 0');
     this.addColumnIfMissing('emojis', 'last_used_at', 'TEXT');
+    this.addColumnIfMissing('memories', 'said_by', 'TEXT');
+    this.initJournalClock();
 
     // FTS5 virtual table — created separately to handle already-exists gracefully
     try {
@@ -369,6 +395,43 @@ export class MemoryStore {
   }
 
   /**
+   * The journal clock (memory v2): `journal_seq` grows on every insert and on every change of a row's
+   * content or subject_user_id, so the nightly dream's watermark ("everything up to seq N is in the
+   * notes") also catches a re-observation merged into an old row, or an old row newly linked to a member.
+   * Kept by triggers, so every write path (and a raw INSERT in a test) gets it without remembering to.
+   * Existing rows start at their id. Deactivation doesn't move it: forgetting isn't news.
+   */
+  private initJournalClock(): void {
+    this.addColumnIfMissing('memories', 'journal_seq', 'INTEGER');
+    this.db.exec(`
+      UPDATE memories SET journal_seq = id WHERE journal_seq IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_memories_journal_seq ON memories(journal_seq);
+
+      CREATE TRIGGER IF NOT EXISTS memories_journal_seq_insert AFTER INSERT ON memories
+      WHEN new.journal_seq IS NULL
+      BEGIN
+        UPDATE memories SET journal_seq = (SELECT COALESCE(MAX(journal_seq), 0) + 1 FROM memories)
+        WHERE id = new.id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS memories_journal_seq_update AFTER UPDATE OF content, subject_user_id ON memories
+      WHEN new.content IS NOT old.content OR new.subject_user_id IS NOT old.subject_user_id
+      BEGIN
+        UPDATE memories SET journal_seq = (SELECT COALESCE(MAX(journal_seq), 0) + 1 FROM memories)
+        WHERE id = new.id;
+      END;
+    `);
+  }
+
+  /**
+   * The memory.db handle, for the stores that keep their tables in the same file (the notes store,
+   * src/ai/memory/notes/notesStore.ts). Nothing else reaches into it.
+   */
+  sharedDatabase(): Database.Database {
+    return this.db;
+  }
+
+  /**
    * Saves a memory.
    *
    * PHASE 1 — synchronous, before any await: lexical (word-overlap) dedup + INSERT/UPDATE + FTS sync,
@@ -398,11 +461,12 @@ export class MemoryStore {
   private lexicalSave(memory: MemoryInput): LexicalSaveResult {
     return this.runInTransaction(() => {
       const existing = this.stmt(
-        'SELECT id, content, subject_user_id FROM memories WHERE category = ? AND subject = ? AND active = 1',
-      ).all(memory.category, memory.subject) as Pick<Memory, 'id' | 'content' | 'subject_user_id'>[];
+        'SELECT id, content, subject_user_id, said_by FROM memories WHERE category = ? AND subject = ? AND active = 1',
+      ).all(memory.category, memory.subject) as Pick<Memory, 'id' | 'content' | 'subject_user_id' | 'said_by'>[];
 
       for (const row of existing) {
         if (!samePerson(row.subject_user_id, memory.subject_user_id)) continue;
+        if (!sameSpeaker(row.said_by, memory.said_by)) continue;
         if (wordOverlap(row.content, memory.content) > 0.6) {
           // Update existing record instead of creating a duplicate
           this.updateMemoryContent(row.id, row.content, memory);
@@ -413,13 +477,14 @@ export class MemoryStore {
       }
 
       const result = this.stmt(
-        'INSERT INTO memories (category, subject, content, source, subject_user_id) VALUES (?, ?, ?, ?, ?)',
+        'INSERT INTO memories (category, subject, content, source, subject_user_id, said_by) VALUES (?, ?, ?, ?, ?, ?)',
       ).run(
         memory.category,
         memory.subject,
         memory.content,
         memory.source ?? 'conversation',
         memory.subject_user_id ?? null,
+        memory.said_by ?? null,
       );
 
       const newId = Number(result.lastInsertRowid);
@@ -488,12 +553,12 @@ export class MemoryStore {
       candidates.sort((a, b) => b.score - a.score);
 
       for (const { id: bestId, score: bestScore } of candidates) {
-        const existing = this.stmt('SELECT content, subject_user_id FROM memories WHERE id = ?').get(bestId) as Pick<
-          Memory,
-          'content' | 'subject_user_id'
-        >;
+        const existing = this.stmt('SELECT content, subject_user_id, said_by FROM memories WHERE id = ?').get(
+          bestId,
+        ) as Pick<Memory, 'content' | 'subject_user_id' | 'said_by'>;
         // subject_user_id is not in the cache (the startup stamp can change it): checked per candidate.
         if (!samePerson(existing.subject_user_id, memory.subject_user_id)) continue;
+        if (!sameSpeaker(existing.said_by, memory.said_by)) continue;
         this.updateMemoryContent(bestId, existing.content, memory);
         this.adoptSubjectUserId(bestId, existing.subject_user_id, memory.subject_user_id);
         this.removeInCurrentTransaction(phase1.id);
