@@ -24,6 +24,7 @@ import { getMemoryStore, getNotesStore } from './memory';
 import { CORRECTION_CATEGORY, type EmojiRow, type Identity, type Memory, type MemoryStore } from './memory/memoryStore';
 import {
   CIRCLE_MAX_CHARS,
+  categoryLabel,
   correctionLine,
   NEW_JOURNAL_LIMIT,
   noteKey,
@@ -1381,7 +1382,7 @@ Right before each new message you get a context note with the current time (East
         : '';
     const contextualSection =
       contextualMemories.length > 0
-        ? `Relevant to this conversation:\n${contextualMemories.map((m) => `- [${m.category}] ${subjectLabel(m)}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}`
+        ? `Relevant to this conversation:\n${contextualMemories.map((m) => `- ${categoryLabel(m, this.nameOf(store))} ${subjectLabel(m)}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}`
         : '';
 
     const text = [userSection, ...otherBlocks, mentionedSection, ...circleBlocks, contextualSection]

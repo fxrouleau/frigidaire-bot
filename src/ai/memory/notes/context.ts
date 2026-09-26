@@ -6,7 +6,7 @@
 // notes the same way and tests need no store.
 import { canonicalUserId } from '../../../linkedAccounts';
 import { formatRelativeAge } from '../../utils';
-import type { Memory } from '../memoryStore';
+import { CORRECTION_CATEGORY, type Memory } from '../memoryStore';
 import type { CircleMembership, Note } from './notesStore';
 import type { CircleMember } from './schema';
 import { earlierPart, withoutEarlier } from './sections';
@@ -101,6 +101,30 @@ export function correctionLine(
   const speaker = row.said_by ? (nameOf(row.said_by) ?? 'someone') : 'someone';
   if (isSelfCorrection(row)) return `- ${speaker}, about themself: ${row.content}${when}`;
   return `- ${speaker} says: ${row.content}${when}`;
+}
+
+/**
+ * Where a correction comes from, as a label for lists of several people's journal rows (the chat turn's
+ * search hits, recall_memories), whose lines can't say who spoke: `their own word`, or
+ * `Remi's claim, not settled`.
+ */
+export function correctionSource(row: CorrectionRow, nameOf: (userId: string) => string | undefined): string {
+  if (isSelfCorrection(row)) return 'their own word';
+  const speaker = row.said_by ? (nameOf(row.said_by) ?? 'someone') : 'someone';
+  return `${speaker}'s claim, not settled`;
+}
+
+/**
+ * A journal row's bracketed category for lists of several people's rows: `[fact]`, or for a correction who
+ * made it (`[correction, Remi's claim, not settled]`), so a claim about someone never reads as their fact.
+ */
+export function categoryLabel(
+  row: Pick<Memory, 'category' | 'said_by' | 'subject_user_id'>,
+  nameOf: (userId: string) => string | undefined,
+): string {
+  return row.category === CORRECTION_CATEGORY
+    ? `[${row.category}, ${correctionSource(row, nameOf)}]`
+    : `[${row.category}]`;
 }
 
 /** The headings of a person's open corrections, one per weight (see renderCorrections). */

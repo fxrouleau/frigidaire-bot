@@ -84,6 +84,35 @@ function writeProfile(ownerId: string, content: string): void {
   if (!result.ok) throw new Error(result.errors.join('; '));
 }
 
+describe('corrections found by the contextual search', () => {
+  it("say who made them: someone's claim about a person never reads as that person's fact", async () => {
+    // An embedder-less store: the contextual journal search is plain keyword search, ungated.
+    store = new MemoryStore(':memory:');
+    store.upsertIdentity(REMI, 'Remi');
+    store.upsertIdentity(DALE, 'Dale');
+    store.upsertIdentity(NOVA, 'Nova');
+    setMemoryStoreForTesting(store);
+    await store.save({
+      category: 'correction',
+      subject: 'Dale',
+      content: 'Dale moved to Quillport, not Brackenfield',
+      subject_user_id: DALE,
+      said_by: REMI,
+      source: 'correction',
+    });
+
+    const provider = new FakeProvider([textResponse('ok')]);
+    await makeAgent(provider).handleMention(
+      createFakeMessage({ ...BASE, authorId: NOVA, authorDisplayName: 'Nova', content: 'is quillport any good' }).message,
+    );
+
+    const text = dynamicText(provider, 0);
+    expect(text).toContain(
+      "Relevant to this conversation:\n- [correction, Remi's claim, not settled] Dale: Dale moved to Quillport, not Brackenfield (today)",
+    );
+  });
+});
+
 describe("the speaker's notes", () => {
   it('shows the profile, the journal newer than it and open corrections instead of plain memories', async () => {
     await store.save({ category: 'fact', subject: 'Remi', content: 'bakes sourdough', subject_user_id: REMI });
