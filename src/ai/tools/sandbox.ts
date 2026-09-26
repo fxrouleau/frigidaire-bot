@@ -4,6 +4,8 @@
 // Discord token and the OpenRouter key, and the model reads arbitrary chat messages and web pages. One
 // prompt-injected command could exfiltrate both. The sidecar (sandbox/server.py) holds no secrets, so the
 // worst a hijacked run can do is burn its CPU quota or scribble in its own /workspace.
+import http from 'node:http';
+import https from 'node:https';
 import { config } from '../../config';
 import { logger } from '../../logger';
 import { logFailure } from '../failureLogger';
@@ -26,21 +28,27 @@ const LANGUAGE_ALIASES: Record<string, SandboxLanguage> = {
   js: 'node',
 };
 
-/** The sidecar clamps every run to this; asking for more is pointless. */
-export const MAX_RUN_TIMEOUT_SECONDS = 60;
+/** The longest run there is: 15 minutes (the sidecar's own SANDBOX_MAX_TIMEOUT_SECONDS default). */
+export const MAX_RUN_TIMEOUT_SECONDS = 900;
 // How long a run may sit behind another one in the sidecar's queue (its SANDBOX_QUEUE_WAIT_SECONDS default),
-// plus slack for the round trip and the sidecar's post-run cleanup. The HTTP timeout covers all three.
+// plus slack for the sidecar's own work around the run (a requested wipe and the disk walk afterwards, both
+// proportional to a workspace of up to 20 GB; up to 25 MB of files to encode) and the round trip. The HTTP
+// timeout covers all of it.
 const QUEUE_GRACE_SECONDS = 30;
-const TRANSPORT_GRACE_SECONDS = 10;
+const TRANSPORT_GRACE_SECONDS = 30;
+// The biggest answer accepted: 25 MB of files as base64 plus the capped output streams, with room to spare.
+const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 // The sidecar refuses code over 256 KB; anything near that is data that belongs in a file or a URL.
 const MAX_CODE_CHARS = 100_000;
 // What the model sees of each stream. The sidecar already caps them at 16 KB, but every tool result stays
 // in the conversation for the rest of the window, so the model gets a tighter cut.
 const MODEL_STDOUT_CHARS = 4000;
 const MODEL_STDERR_CHARS = 2000;
-// Discord allows 10 attachments per message; 8 MiB keeps the reply under an unboosted server's upload cap.
+// Discord allows 10 attachments per message, each within its default 10 MB upload limit; 25 MB in all keeps one
+// reply's upload reasonable. The sidecar applies the same caps to what one run returns.
 const MAX_TURN_FILES = 10;
-const MAX_TURN_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_TURN_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_TURN_TOTAL_BYTES = 25 * 1024 * 1024;
 
 export type SandboxFile = { name: string; size: number; content_base64: string };
 export type SandboxOmittedFile = { name: string; size: number | null; reason: string };
@@ -78,9 +86,12 @@ export type SandboxFailureKind =
   | 'server_error'
   | 'bad_response';
 
+/** How far along the run holding the sidecar is, when a request was turned away as busy. */
+export type SandboxBusyInfo = { runningSeconds: number; limitSeconds: number };
+
 export type SandboxOutcome =
   | { ok: true; result: SandboxRunResult }
-  | { ok: false; kind: SandboxFailureKind; detail: string };
+  | { ok: false; kind: SandboxFailureKind; detail: string; busy?: SandboxBusyInfo };
 
 export type SandboxRunRequest = {
   language: SandboxLanguage;
@@ -90,16 +101,23 @@ export type SandboxRunRequest = {
   resetWorkspace?: boolean;
 };
 
+/** The part of fetch() the client uses. Tests inject a fake; the default is createNodeHttpFetch()'s. */
+export type SandboxFetch = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal },
+) => Promise<Response>;
+
 export type SandboxClientOptions = {
   /** Defaults to SANDBOX_URL. */
   url?: string;
   /** Defaults to SANDBOX_TOKEN. */
   token?: string;
-  fetch?: typeof globalThis.fetch;
+  /** Defaults to createNodeHttpFetch()'s transport (never the global fetch: see there). */
+  fetch?: SandboxFetch;
 };
 
 export type RunCodeToolOptions = SandboxClientOptions & {
-  /** Defaults to SANDBOX_TIMEOUT_SECONDS. */
+  /** The run time limit; timeout_seconds can only shorten it. Defaults to SANDBOX_TIMEOUT_SECONDS. */
   defaultTimeoutSeconds?: number;
 };
 
@@ -113,10 +131,17 @@ function parseFlag(raw: unknown): boolean {
   return raw === true || (typeof raw === 'string' && raw.trim().toLowerCase() === 'true');
 }
 
-function parseTimeoutSeconds(raw: unknown, fallback: number): number {
+/** The configured run limit (SANDBOX_TIMEOUT_SECONDS or the option), within 1..MAX_RUN_TIMEOUT_SECONDS. */
+function clampRunLimit(seconds: number): number {
+  if (!Number.isFinite(seconds)) return MAX_RUN_TIMEOUT_SECONDS;
+  return Math.min(MAX_RUN_TIMEOUT_SECONDS, Math.max(1, Math.round(seconds)));
+}
+
+/** The model's timeout_seconds: it may only cut a run shorter than `limit`. */
+function parseTimeoutSeconds(raw: unknown, limit: number): number {
   const value = typeof raw === 'string' ? Number(raw.trim()) : raw;
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return fallback;
-  return Math.min(MAX_RUN_TIMEOUT_SECONDS, Math.max(1, Math.round(value)));
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return limit;
+  return Math.min(limit, Math.max(1, Math.round(value)));
 }
 
 function runEndpoint(baseUrl: string): string | undefined {
@@ -171,19 +196,91 @@ export function parseRunResult(raw: unknown): SandboxRunResult | undefined {
   };
 }
 
-async function readErrorDetail(response: Response): Promise<string> {
+async function readErrorBody(response: Response): Promise<{ detail: string; busy?: SandboxBusyInfo }> {
+  let body: unknown;
   try {
-    const body: unknown = await response.json();
-    if (isRecord(body) && typeof body.error === 'string') return body.error;
+    body = await response.json();
   } catch {
     // Not JSON (a proxy's error page, say): the status code is all there is.
   }
-  return `HTTP ${response.status}`;
+  const detail = isRecord(body) && typeof body.error === 'string' ? body.error : `HTTP ${response.status}`;
+  if (!isRecord(body)) return { detail };
+  const running = body.busy_for_seconds;
+  const limit = body.busy_limit_seconds;
+  const valid = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+  return valid(running) && valid(limit)
+    ? { detail, busy: { runningSeconds: running, limitSeconds: limit } }
+    : { detail };
 }
+
+// Response bodies that must be empty: new Response() refuses one for these statuses.
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
+
+/**
+ * fetch() for the sidecar over node:http(s). Node's global fetch (undici) gives up on a response whose
+ * headers or body take longer than 300 s, and the sidecar answers only once the run is over (up to 15 min):
+ * a long run would fail on the bot's side while the sidecar was still working on it. Here the caller's
+ * signal is the only deadline. One connection per run (agent: false: no pool, so no idle-socket timeout).
+ */
+export function createNodeHttpFetch(maxResponseBytes = MAX_RESPONSE_BYTES): SandboxFetch {
+  return (url, init) =>
+    new Promise<Response>((resolve, reject) => {
+      const target = new URL(url);
+      const body = Buffer.from(init.body);
+      const request = (target.protocol === 'https:' ? https : http).request(target, {
+        method: init.method,
+        headers: { ...init.headers, 'content-length': String(body.length) },
+        signal: init.signal,
+        agent: false,
+      });
+      // The connection sits idle while the run works: TCP keep-alive notices a sidecar that vanished.
+      request.on('socket', (socket) => socket.setKeepAlive(true, 60_000));
+      request.on('error', reject);
+      request.on('response', (incoming) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        incoming.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > maxResponseBytes) {
+            // Rejected here, before 'end' (which can still follow in the same tick) could resolve it.
+            reject(new Error(`the sandbox's answer is over ${maxResponseBytes} bytes`));
+            request.destroy();
+            return;
+          }
+          chunks.push(chunk);
+        });
+        incoming.on('error', reject);
+        incoming.on('close', () => {
+          // Settles nothing when 'end' already resolved: a promise settles once.
+          if (!incoming.complete) {
+            reject(init.signal.aborted ? init.signal.reason : new Error('the connection closed mid-answer'));
+          }
+        });
+        incoming.on('end', () => {
+          const status = incoming.statusCode ?? 0;
+          const headers = new Headers();
+          for (const [name, value] of Object.entries(incoming.headers)) {
+            for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) {
+              headers.append(name, item);
+            }
+          }
+          try {
+            resolve(new Response(NULL_BODY_STATUSES.has(status) ? null : Buffer.concat(chunks), { status, headers }));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+      request.end(body);
+    });
+}
+
+const nodeHttpFetch = createNodeHttpFetch();
 
 function describeFetchError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
-  // undici reports "fetch failed" with the useful part (ECONNREFUSED, ENOTFOUND, …) in `cause`.
+  // A fetch() reports "fetch failed" with the useful part (ECONNREFUSED, ENOTFOUND, …) in `cause`; node:http
+  // puts it in the message ("connect ECONNREFUSED 10.0.0.2:8080").
   const cause = (error as Error & { cause?: unknown }).cause;
   if (isRecord(cause) && typeof cause.code === 'string') return cause.code;
   if (cause instanceof Error) return cause.message;
@@ -201,7 +298,7 @@ export async function runInSandbox(
   if (!endpoint) return { ok: false, kind: 'unconfigured', detail: `SANDBOX_URL "${baseUrl}" is not an http(s) URL` };
 
   const token = opts.token ?? config.sandbox.token;
-  const fetchImpl = opts.fetch ?? ((url, init) => globalThis.fetch(url, init));
+  const fetchImpl = opts.fetch ?? nodeHttpFetch;
   const budgetSeconds = request.timeoutSeconds + QUEUE_GRACE_SECONDS + TRANSPORT_GRACE_SECONDS;
 
   let response: Response;
@@ -228,9 +325,11 @@ export async function runInSandbox(
   }
 
   if (!response.ok) {
-    const detail = await readErrorDetail(response);
+    const { detail, busy } = await readErrorBody(response);
     if (response.status === 401 || response.status === 403) return { ok: false, kind: 'unauthorized', detail };
-    if (response.status === 429 || response.status === 503) return { ok: false, kind: 'busy', detail };
+    if (response.status === 429 || response.status === 503) {
+      return { ok: false, kind: 'busy', detail, ...(busy ? { busy } : {}) };
+    }
     if (response.status >= 500) return { ok: false, kind: 'server_error', detail };
     return { ok: false, kind: 'rejected', detail };
   }
@@ -293,8 +392,15 @@ export function attachFiles(turn: TurnEffects, files: SandboxFile[]): AttachRepo
       report.skipped.push({ name, reason: `the reply already carries ${MAX_TURN_FILES} files` });
       continue;
     }
-    if (otherBytes + attachment.length > MAX_TURN_FILE_BYTES) {
-      report.skipped.push({ name, reason: 'the reply would go over the 8 MB attachment limit' });
+    if (attachment.length > MAX_TURN_FILE_BYTES) {
+      report.skipped.push({ name, reason: `over Discord's ${MAX_TURN_FILE_BYTES / (1024 * 1024)} MB per-file limit` });
+      continue;
+    }
+    if (otherBytes + attachment.length > MAX_TURN_TOTAL_BYTES) {
+      report.skipped.push({
+        name,
+        reason: `the reply would go over the ${MAX_TURN_TOTAL_BYTES / (1024 * 1024)} MB attachment limit`,
+      });
       continue;
     }
     turn.files.splice(0, turn.files.length, ...others, { attachment, name });
@@ -374,9 +480,16 @@ export function formatRunResult(result: SandboxRunResult, files: AttachReport, r
 /** What the model hears when nothing ran; failures that need the owner's attention are also logged. */
 function describeFailure(outcome: Extract<SandboxOutcome, { ok: false }>): string {
   switch (outcome.kind) {
-    case 'busy':
+    case 'busy': {
       logger.warn(`run_code: sandbox busy (${outcome.detail})`);
-      return 'The sandbox is busy with another run, so nothing ran. Try again in a moment.';
+      // Runs can take up to 15 minutes, and a request already waited in the sidecar's queue before this: a
+      // tight retry loop would only burn the turn. The model should hand the wait to the people asking.
+      const busy = outcome.busy;
+      const progress = busy
+        ? ` (it has been going for ${formatDuration(busy.runningSeconds)} and may take up to ${formatDuration(Math.max(0, busy.limitSeconds - busy.runningSeconds))} more)`
+        : '';
+      return `The sandbox is busy with another run${progress}, so nothing ran. Don't keep retrying: say it's busy and when to try again.`;
+    }
     case 'rejected':
       // The model's request itself (bad language, oversized code): it can fix and retry.
       logger.warn(`run_code: sandbox rejected the request (${outcome.detail})`);
@@ -400,27 +513,35 @@ function describeFailure(outcome: Extract<SandboxOutcome, { ok: false }>): strin
   }
 }
 
-function describeTool(defaultTimeoutSeconds: number): string {
+/** 900 → "15 min", 20 → "20 s": how the model and the people it answers think about run times. */
+export function formatDuration(seconds: number): string {
+  const whole = Math.round(seconds);
+  if (whole >= 120 || (whole >= 60 && whole % 60 === 0)) return `${Math.round(whole / 60)} min`;
+  return `${whole} s`;
+}
+
+function describeTool(runLimitSeconds: number): string {
   return [
-    'Run a short program on your own sandbox computer and get its output.',
+    'Run a program on your own sandbox computer and get its output.',
     "Use it for any arithmetic you'd otherwise eyeball (bill splits, tips, unit or currency conversions, date and time math), data crunching, simulations, and making charts or files.",
     'Languages: python (numpy, pandas, matplotlib, sympy, requests preinstalled), bash (curl, jq, bc) or node.',
     'Only stdout/stderr come back, so print() the answer.',
-    "Anything saved to /workspace/out/ is attached to your reply (up to 5 files, 8 MB), e.g. plt.savefig('out/chart.png'); out/ is emptied before every run.",
+    "Anything saved to /workspace/out/ is attached to your reply (up to 10 files, 10 MB each, 25 MB in all), e.g. plt.savefig('out/chart.png'); out/ is emptied before every run.",
     'Each run is a fresh process (variables do not carry over), but files in /workspace persist between runs and `pip install` works, within a disk limit (going over it kills the run and wipes /workspace).',
     'Pass reset_workspace: true to wipe /workspace (saved files and installs) before the run, only when leftovers from earlier runs get in the way or look tampered with.',
-    'The sandbox has internet access but no secrets and no Discord access; its clock is Eastern time.',
-    `Runs are killed after ${defaultTimeoutSeconds} s unless you pass timeout_seconds (max ${MAX_RUN_TIMEOUT_SECONDS}).`,
+    'The sandbox has internet access but no secrets, and it cannot read or post Discord messages; its clock is Eastern time.',
+    "Files people uploaded show up in the chat as [attachment: name (size) link] or [image: name link]: to work on one, download it from that link first (curl -L -o file '<link>', or requests). Discord's links expire after about a day, so an older one may be dead.",
+    `Runs are cut off after ${formatDuration(runLimitSeconds)}, and everyone waits on your reply meanwhile; timeout_seconds only cuts a run shorter (when a quick failure beats a long hang).`,
   ].join(' ');
 }
 
 export function createRunCodeTool(opts: RunCodeToolOptions = {}): ToolDefinition {
-  const defaultTimeout = () => opts.defaultTimeoutSeconds ?? config.sandbox.timeoutSeconds;
+  const runLimit = () => clampRunLimit(opts.defaultTimeoutSeconds ?? config.sandbox.timeoutSeconds);
   return {
     name: 'run_code',
     // A getter: config is read when the provider builds its tool list (after .env is loaded), not at import.
     get description() {
-      return describeTool(defaultTimeout());
+      return describeTool(runLimit());
     },
     parameters: {
       type: 'object',
@@ -429,7 +550,8 @@ export function createRunCodeTool(opts: RunCodeToolOptions = {}): ToolDefinition
         code: { type: 'string', description: 'The complete program. Print the results you need.' },
         timeout_seconds: {
           type: 'number',
-          description: `Optional run time limit in seconds, 1-${MAX_RUN_TIMEOUT_SECONDS}. Raise it only for slow work like pip installs or big downloads.`,
+          description:
+            'Optional, in seconds: stops this run sooner than the usual limit. Leave it out normally; it can never make a run longer.',
         },
         reset_workspace: {
           type: 'boolean',
@@ -449,7 +571,7 @@ export function createRunCodeTool(opts: RunCodeToolOptions = {}): ToolDefinition
       if (code.length > MAX_CODE_CHARS) {
         return `That program is too long (${code.length} characters; the limit is ${MAX_CODE_CHARS}). Load big data from a URL or a file in /workspace instead of inlining it.`;
       }
-      const timeoutSeconds = parseTimeoutSeconds(args.timeout_seconds, defaultTimeout());
+      const timeoutSeconds = parseTimeoutSeconds(args.timeout_seconds, runLimit());
       const resetWorkspace = parseFlag(args.reset_workspace);
 
       const outcome = await runInSandbox({ language, code, timeoutSeconds, resetWorkspace }, opts);

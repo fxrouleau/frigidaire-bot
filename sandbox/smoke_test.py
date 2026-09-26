@@ -201,8 +201,23 @@ def main() -> int:
         expect(after['stdout'].strip() == 'wiped', 'the over-limit workspace was not wiped', after)
 
     def memory_limit() -> None:
+        # 1.5 GB fits (the container has 2 GB, a process 1792 MB of data); 3 GB is a clean MemoryError.
+        fits = sandbox.run('python', 'x = bytearray(1536 * 1024 ** 2)\nprint(len(x) // 1024 ** 2)')
+        expect(fits['stdout'].strip() == '1536', 'a 1.5 GB allocation failed: memory limits too low', fits)
         result = sandbox.run('python', 'x = bytearray(3 * 1024 ** 3)')
         expect(result['exit_code'] != 0 and 'MemoryError' in result['stderr'], 'memory limit not enforced', result)
+
+    def no_file_size_cap() -> None:
+        # Over the old 100 MB RLIMIT_FSIZE, in the run's /tmp directory (tmpfs: outside the workspace limit).
+        code = 'head -c 104857700 /dev/zero > "$TMPDIR/big" && wc -c < "$TMPDIR/big"'
+        result = sandbox.run('bash', code, timeout_seconds=60)
+        expect(result['stdout'].strip() == '104857700', 'a 100 MB+ file could not be written', result)
+
+    def out_file_limits() -> None:
+        result = sandbox.run('bash', 'for i in $(seq -w 0 10); do echo $i > out/f$i.txt; done')
+        expect(len(result['files']) == 10, 'out/ should return 10 files', result)
+        omitted = [(f['name'], f['reason']) for f in result['files_omitted']]
+        expect(omitted == [('f10.txt', 'more than 10 files')], 'the 11th file was not listed as omitted', result)
 
     def auth_required() -> None:
         if not args.token:
@@ -234,6 +249,8 @@ def main() -> int:
         ('timeout', timeout_kills),
         ('escaped process killed', escaped_process_is_killed),
         ('memory limit', memory_limit),
+        ('no per-file size cap', no_file_size_cap),
+        ('out/ file limits', out_file_limits),
         ('workspace disk limit', disk_limit),
         ('auth', auth_required),
         ('hardening', hardening),

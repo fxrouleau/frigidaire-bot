@@ -103,7 +103,7 @@ describe('AgentOrchestrator.handleMention', () => {
 
     const promptText = developerPromptText(provider);
     expect(promptText).toContain(
-      'added automatically rather than typed by anyone: [link: …] previews of shared links, [voice message …] transcripts and [video msg:<id>: …] descriptions',
+      'added automatically rather than typed by anyone: [link: …] previews of shared links, [voice message …] transcripts, [video msg:<id>: …] descriptions of posted clips, and [image: …] / [attachment: …] lines naming uploaded files with their download links',
     );
     // Previews carry third-party text (pages, posts, on-screen text) into the user turn.
     expect(promptText).toContain(
@@ -112,6 +112,9 @@ describe('AgentOrchestrator.handleMention', () => {
     expect(promptText).toContain('read_link opens the full page or post and can watch a short linked video');
     expect(promptText).toContain('watch_video answers a specific question about a video');
     expect(promptText).toContain('run the numbers with run_code instead of eyeballing them');
+    expect(promptText).toContain(
+      "run_code can download it from its link with curl or requests; Discord's links expire after about a day",
+    );
     // run_code and watch_video are only registered when configured: the persona must not promise them.
     expect(promptText).toContain("only when they're in your tool list");
   });

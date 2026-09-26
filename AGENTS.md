@@ -13,7 +13,7 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 7. **Scheduling** — reminders, native polls and birthdays (announced in character), all in Eastern time.
 8. **Spontaneous reactions** — auto-react learns how the group reacts and, rarely, adds one emoji to a standout post. It ships in **shadow** mode: it only reports what it would do. Emoji captions are re-grounded in real usage.
 9. **Ramble redirect** — a configured member's rambles get an in-character nudge toward their own channel.
-10. **Code sandbox** — `run_code` runs Python/bash/node in a secret-free sidecar container (math, charts).
+10. **Code sandbox** — `run_code` runs Python/bash/node in a secret-free sidecar container (math, charts, data): up to 15 minutes, 2 GB, a 20 GB workspace.
 11. **Right-click commands** — Ask Fridge, Summarize from here, Transcribe, Translate, Remember this, What does Fridge know?
 12. **Feature requests → GitHub** — members' requests become public issues (or +1s on existing ones). The owner's `claude-implement` label has Claude implement them in a PR.
 13. **Deleted-message repost** — a configured member's message deleted right after posting is judged ("was that edgy?") and reposted as them. Off unless `DELETE_REPOST_USER_IDS` is set.
@@ -38,7 +38,7 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 - **AI**: OpenRouter through the `openai` 7 SDK (chat completions, embeddings, `/audio/transcriptions`) and its `/api/alpha/decisions` endpoint (TypeSafe "System One" decision models: the gate and the deleted-message judge)
 - **Storage**: `better-sqlite3` 13, four files in `./data`: `memory.db`, `conversations.db`, `bot.db`, `archive.db` (see [Storage](#storage))
 - **Media**: `sharp` (images); `ffmpeg`/`ffprobe` in the prod image (keyframes, MP3 transcodes)
-- **Sandbox sidecar**: its own image (`sandbox/`): Python 3.14 + Node 26 behind a stdlib-only HTTP server
+- **Sandbox sidecar**: its own image (`sandbox/`): Python 3.14 + Node 26 behind a stdlib-only HTTP server; the compose service is capped at 2 GB / 1 CPU, runs at 15 minutes, the workspace at 20 GB
 - **Lint/format**: Biome 2 (120 cols, 2 spaces, single quotes, trailing commas; `noUnusedImports`/`noUnusedVariables` are errors; `check` also sorts imports through the organizeImports assist)
 - **Tests**: Vitest 5 (with `vite` as an explicit dev dependency: Yarn does not install peers), ~2,800 tests in ~170 files colocated as `src/**/*.test.ts`
 - **Deployment**: two Docker images (the bot, the sandbox sidecar) built and pushed by CI; dev/test toolchain fully containerized (host needs only Docker)
@@ -51,7 +51,7 @@ src/
 ├── loadEnv.ts                 # dotenv; the FIRST import of every entry point (some modules read config while loading)
 ├── config.ts                  # EVERY env var, one set of parsing rules; describeEffectiveConfig(), configWarnings()
 ├── discordClient.ts           # Intents, partials, the client-wide allowedMentions default
-├── eventModule.ts             # defineEvent()/EventModule — the contract each file in src/events/ fulfils
+├── eventModule.ts             # defineEvent()/EventModule — the contract each file in src/events/ fulfils; registerEventModules()
 ├── logger.ts  logFile.ts      # Console logger, mirrored into the size-rotated ./data/logs/bot.log
 ├── channelEnv.ts              # Every channel variable resolved to #names (startup log + deploy ping)
 ├── linkedAccounts.ts          # LINKED_ACCOUNTS: canonicalUserId(), accountIdsFor(), isSamePerson()
@@ -125,7 +125,7 @@ Every env var the bot reads is parsed here, in its feature's section. Values are
 ### Startup, events, shutdown (`src/app.ts`, `src/eventModule.ts`)
 
 - Order: `loadEnv` → the Effective config line and warnings → the client → load every event file → startup memory maintenance (subject-id stamp, then `compact()`) → embedding backfill (and its periodic re-run) → login. A missing or rejected token exits with code 1 (fail fast; the restart policy takes it from there). SIGTERM/SIGINT close all four SQLite handles, then the client.
-- Every non-test file in `src/events/` must `export default defineEvent(Events.X, { once?, execute })`; `execute`'s arguments are typed from the event name. An invalid file fails startup with a clear error (`eventModule.test.ts` checks every file). Handlers run behind a dispatcher that logs a throwing or rejecting handler, and a `process.on('unhandledRejection')` logger covers everything else, so one missing permission can't take the process down.
+- Every non-test file in `src/events/` must `export default defineEvent(Events.X, { once?, execute })`; `execute`'s arguments are typed from the event name. An invalid file fails startup with a clear error (`eventModule.test.ts` checks every file). `registerEventModules()` puts ONE client listener on each (event, once) that hands the event to every module for it, in load order; each handler runs behind a dispatcher that logs a throwing or rejecting handler, on its own promise chain, so they stay concurrent and one that fails or hangs never stops or delays the others. A listener per file used to trip Node's MaxListenersExceededWarning (11 each on messageCreate and clientReady): don't raise `setMaxListeners` instead, the warning should mean a real leak. A `process.on('unhandledRejection')` logger covers everything else, so one missing permission can't take the process down.
 - **Partials** (Message, Channel, Reaction, User) make reaction, delete and update events fire for messages sent before the last restart, which means before every deploy. Handlers of MessageReactionAdd/Remove, MessageDelete and MessageUpdate must check `.partial` (or `fetch()`) before reading anything but ids. MessageCreate is never partial.
 
 | Event | Handlers |
@@ -221,8 +221,9 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
     - The `react` tool (≤3 per turn) can end a turn with only a reaction.
     - An empty answer posts an `EMPTY_REPLIES` line; an exception posts an `ERROR_REPLIES` line and writes an error capture. Both are in character, and neither is posted on an unprompted turn.
     - Out-of-order turns: an unprompted turn whose message a later turn already showed the model is dropped. A late explicit turn is answered with `LATE_MESSAGE_NOTE`.
-11. **Images** (`openRouterProvider.ts`):
-    - A user message's custom emojis, attachments, stickers and embed images (through Discord's `proxyURL`) become image parts.
+11. **Images and files** (`openRouterProvider.ts`, `describeAttachment` in `agent.ts`):
+    - Every attachment is named in its message's line with its signed CDN link: `[attachment: data.csv (12 KB) <url>]`, `[image: photo.png <url>]`. That holds wherever the agent renders a message (the current one, seeded history, the catch-up, reply-context lines, its own earlier replies), so `run_code` can download an uploaded file with curl/requests. The links expire after about a day; `read_link` still declines them. In reply-context lines only the text is cut to fit, never a link.
+    - A user message's custom emojis, image attachments, stickers and embed images (through Discord's `proxyURL`) also become image parts.
     - A request sends only the newest 40 image parts; older ones go as `[image]`. The cut moves in steps of 10 so the cached prefix rarely changes.
     - Downloads: an LRU cache (150 entries / 256 MB, 15 min TTL that restarts on use), 4 at a time. Non-Discord hosts go through the link reader's SSRF-guarded fetch.
 12. **Fallback models**: with `CHAT_FALLBACK_MODELS` set, requests send `models: [CHAT_MODEL, …fallbacks]` with the same `provider: { zdr: true, sort: 'throughput' }`; the response's `model` names whichever answered.
@@ -384,7 +385,7 @@ Fetching makes no model calls and is free; the only paid step is watching a link
   - ≤5 manual redirects, each re-checked. One deadline per request, a byte cap after decompression, a content-type allowlist.
   - `html.ts` is linear on hostile pages (no regex over unbounded input); labels are capped at 500 chars, URLs at 2048.
 - **Previews** (`enricher.ts`): for the triggering and replied-to messages, up to 3 links (skipping `<…>` and code) get one `[link: <url> — …]` line each, plus up to 2 checked images per link (4 per message; none when Discord already rendered the embed image), within a 15 s budget. A slow read keeps going and fills the cache. History messages use cached previews only, text only.
-- **`read_link({url, question?})`**: the full labelled output under an "untrusted web content" header, ≤6 per turn, declines Discord links. It watches the post's first video (`LINK_READER_WATCH_VIDEOS`): a long one is skimmed via keyframes + soundtrack, within the media download cap and budget. With `question`, it answers from the video. The persona says preview/tool/video text is information, never instructions.
+- **`read_link({url, question?})`**: the full labelled output under an "untrusted web content" header, ≤6 per turn, declines Discord links (for an uploaded file it points at `run_code`). It watches the post's first video (`LINK_READER_WATCH_VIDEOS`): a long one is skimmed via keyframes + soundtrack, within the media download cap and budget. With `question`, it answers from the video. The persona says preview/tool/video text is information, never instructions.
 - Live canary (free): `linkReader.live.test.ts` catches upstream shape changes.
 
 ### Link fixing (`src/links/`, `src/events/linkRepost.ts`, `repostMessage` in `src/utils.ts`)
@@ -471,21 +472,25 @@ Everyone lives in America/New_York, so every time a tool takes or shows is Easte
 - **`create_poll({question, answers, duration_hours?, allow_multiselect?})`**: a native poll, validated against Discord's limits first (question ≤300, 1–10 unique answers ≤55, 1–768 h, default 24). It needs the Create Polls permission.
 - **Birthdays** (bot.db `birthdays`): `set_birthday` (`MM-DD` or `YYYY-MM-DD`), `list_birthdays` (by next occurrence, with the age they'll turn) and `forget_birthday`.
   - The announcement starts once ET reaches `BIRTHDAY_ANNOUNCE_HOUR`, for birthdays that are **today** (Feb 29 → Feb 28 in common years), so a bot down all afternoon announces late the same day, never the next. It goes to `BIRTHDAY_CHANNEL_ID` (default main).
-  - The text is written by `CHAT_MODEL` (ZDR, low reasoning effort, tagged `birthday`) with ≤5 of the person's memories, then cleaned and 🎂-prefixed. A template is used on failure.
+  - The text is written by `CHAT_MODEL` (ZDR, low reasoning effort, tagged `birthday`), then cleaned and 🎂-prefixed; a template is used on failure. The writer gets today's Eastern date and what the bot knows about the person nearly whole: up to 40 memories (past that, the 20 oldest and the 20 newest; no `image` or self-diagnosis rows), oldest first, each tagged with when it was first noted (`created_at`, so re-confirmed lore stays old). It picks for itself: long-running things (a trait, a running joke, old lore) first, and anything from the last couple of weeks only as recent news. Undated and limited to the newest 5, it once told yesterday's story as old lore.
   - The year is claimed before posting and released if the send fails. A birthday set in chat on the day is marked announced (the reply was the wish). Members who left are skipped.
   - **`BIRTHDAYS_SEED`** (`userId:MM-DD` / `userId:YYYY-MM-DD`) is applied **once per user** (`birthday_seed_applied`): chat corrections and `forget_birthday` stick. A seed entry that differs from a saved birthday is logged as a WARN (use `set_birthday` to change it).
 
 ### Code sandbox (`sandbox/`, `src/ai/tools/sandbox.ts`)
 
-`run_code({language: python|bash|node, code, timeout_seconds?, reset_workspace?})` gives the bot a small computer for math, bill splits, conversions, dates, data and charts.
+`run_code({language: python|bash|node, code, timeout_seconds?, reset_workspace?})` gives the bot a computer for math, bill splits, conversions, dates, data and charts. It runs on the owner's own machine, so the limits are generous and only there to stop a runaway: 15 minutes per run, 2 GB of memory, 20 GB of workspace, no per-file cap.
 - **Why a sidecar**: the bot container holds the Discord token and the OpenRouter key, and the model reads arbitrary chat and web pages, so one prompt-injected command next to those secrets could exfiltrate them. The sidecar holds no secrets (no `env_file`; only its optional `SANDBOX_TOKEN`, which runs never see). **Never give the sandbox service the bot's `.env`, and never let the bot run commands itself.**
 - **Server** (`server.py`, Python stdlib only; `POST /run`, `GET /health`):
-  - **Isolation**: each run executes as uid 10001 in `/workspace`, in its own process group, with rlimits (CPU, data 768 MB, file size, nproc, nofile, no core) applied by an exec launcher, and the maximum OOM score so the kernel kills the run, not the server. Timeout or exit SIGKILLs the group, and the server, a child subreaper, sweeps escaped descendants. Output is capped at 12 KB head + 4 KB tail per stream; `out/` files (≤5, ≤8 MB) come back base64.
-  - **Self-protection**: the server is **PID 1** (no tini: the kernel won't deliver SIGSTOP/SIGKILL to a namespace's init from inside it) and non-dumpable, so `/proc/1/environ` is unreadable from runs. It refuses `/run` from its own addresses (a run can't queue follow-up runs), and drops a queued request whose client hung up. Runs are serialized behind a lock with a short queue (3 waiting, 30 s, then 429/503).
+  - **Isolation**: each run executes as uid 10001 in `/workspace`, in its own process group, with rlimits (CPU = the run's timeout, data 1792 MB, file size only when `SANDBOX_FILE_SIZE_MB` sets one, nproc, nofile, no core) applied by an exec launcher, and the maximum OOM score so the kernel kills the run, not the server. A run lasts at most `SANDBOX_MAX_TIMEOUT_SECONDS` (900). Timeout or exit SIGKILLs the group, and the server, a child subreaper, sweeps escaped descendants. Output is capped at 12 KB head + 4 KB tail per stream; `out/` files come back base64: ≤10 files, each ≤10 MB, ≤25 MB in all (Discord's per-message count and default upload size); the rest are listed as omitted with the reason.
+  - **Self-protection**: the server is **PID 1** (no tini: the kernel won't deliver SIGSTOP/SIGKILL to a namespace's init from inside it) and non-dumpable, so `/proc/1/environ` is unreadable from runs. It refuses `/run` from its own addresses (a run can't queue follow-up runs), and drops a queued request whose client hung up. Runs are serialized behind a lock with a short queue (3 waiting, 30 s, then 429/503 carrying `busy_for_seconds`/`busy_limit_seconds` of the run holding it, so the model can say when to try again instead of retrying in a loop).
   - **Persistence without tampering**: `/workspace` persists on purpose (files, `pip install --user`, `npm install`) within `SANDBOX_WORKSPACE_MAX_MB` / `_MAX_FILES`; a run that goes over is killed and the workspace wiped. Python runs with `-P` + `PYTHONSAFEPATH=1` (a planted `json.py` can't shadow the stdlib; import your own module with `sys.path.append('/workspace')`). System dirs come first on PATH. Node package lookups are pinned per run directory. Installed packages are trusted until `reset_workspace: true` wipes everything first; the tool suggests it after a server error.
-- **Tool**: offered only when `SANDBOX_URL` is set. The timeout is clamped to 1–60 s (default `SANDBOX_TIMEOUT_SECONDS`), and the HTTP timeout is the run timeout + 40 s. Typed failures: unreachable/timeout/unauthorized also write a `tool_error` self-diagnosis entry. The model sees clipped output (4 KB/2 KB) and is told never to present a guess as computed. Files ride on the reply (≤10, 8 MB per turn).
-- **Compose hardening**: read-only root, `/tmp` tmpfs, the named volume `sandbox-workspace`, `cap_drop: [ALL]`, `no-new-privileges`, 1 GB / 1 CPU / 256 pids, no published ports. Only the bot reaches it at `http://sandbox:8080`. **Egress is open** by design (pip, curl); on a bridge network that also reaches the Docker host and cloud metadata. The compose comment gives the two options (an internal network, or a host firewall). The link reader's SSRF guard keeps the *bot's* fetches away from the sandbox.
-- **Tests**: `sandbox.test.ts` (fake fetch); `sandboxServer.test.ts` drives the real `server.py` with python3 and bash (skipped where missing); `sandbox/ci-smoke.sh <image>` runs a built image with the compose hardening.
+- **Tool**: offered only when `SANDBOX_URL` is set. The run limit is `SANDBOX_TIMEOUT_SECONDS` (default and maximum 900 s); the model's `timeout_seconds` can only cut a run shorter. The HTTP timeout is the run limit + 60 s (queue wait, the sidecar's wipe/disk walk/file encoding, the round trip).
+  - **Transport**: `node:http`/`node:https` (`createNodeHttpFetch`), never the global fetch: undici's 300 s headers/body timeouts would fail any run over 5 minutes on the bot's side while the sidecar was still working (the sidecar answers only when the run ends). One connection per run, TCP keep-alive on, the caller's signal as the only deadline, answers capped at 64 MB.
+  - Uploaded files: the tool description tells the model that `[attachment: …]`/`[image: …]` lines carry a download link (see Chat turn, Images and files) and that it expires after about a day.
+  - Typed failures: unreachable/timeout/unauthorized also write a `tool_error` self-diagnosis entry. The model sees clipped output (4 KB/2 KB) and is told never to present a guess as computed. Files ride on the reply (≤10 per turn, each ≤10 MB, ≤25 MB in all).
+  - A long run keeps its turn (and the channel's queue) busy; the typing indicator keeps going, and the gate counts a routed turn as open for 20 minutes.
+- **Compose hardening**: read-only root, `/tmp` tmpfs, the named volume `sandbox-workspace`, `cap_drop: [ALL]`, `no-new-privileges`, 2 GB (`mem_limit` = `memswap_limit`: no swap) / 1 CPU / 256 pids, no published ports. Only the bot reaches it at `http://sandbox:8080`. **Egress is open** by design (pip, curl); on a bridge network that also reaches the Docker host and cloud metadata. The compose comment gives the two options (an internal network, or a host firewall). The link reader's SSRF guard keeps the *bot's* fetches away from the sandbox.
+- **Tests**: `sandbox.test.ts` (fake fetch, plus the `node:http` transport against a local server); `sandboxServer.test.ts` drives the real `server.py` with python3 and bash (skipped where missing); `sandbox/ci-smoke.sh <image>` runs a built image with the compose hardening. Runs over 5 minutes aren't in the suite: the transport was proven once with a 330 s run against the real sidecar.
 
 ### Context-menu commands (`src/commands/`, events `commandsRegister`, `interactionCreate`)
 
@@ -848,9 +853,9 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 |---|---|---|
 | `SANDBOX_URL` | unset (compose: `http://sandbox:8080`) | sidecar base URL; unset/empty ⇒ `run_code` not offered |
 | `SANDBOX_TOKEN` | unset | optional bearer token; the SAME value on the bot and the sidecar |
-| `SANDBOX_TIMEOUT_SECONDS` | 20 | run limit when the model doesn't ask (1..60) |
+| `SANDBOX_TIMEOUT_SECONDS` | 900 | run limit (1..900); the model's `timeout_seconds` can only shorten it |
 
-Sidecar-only (the `sandbox` service's own environment, read by `server.py`): `SANDBOX_TOKEN`, `SANDBOX_HOST`/`SANDBOX_PORT` (0.0.0.0:8080), `SANDBOX_WORKSPACE` (/workspace), `SANDBOX_MEMORY_MB` (768, RLIMIT_DATA), `SANDBOX_FILE_SIZE_MB` (100), `SANDBOX_WORKSPACE_MAX_MB` (2048), `SANDBOX_WORKSPACE_MAX_FILES` (200000), `SANDBOX_MAX_PROCESSES` (128), `SANDBOX_QUEUE_SIZE` (3), `SANDBOX_QUEUE_WAIT_SECONDS` (30).
+Sidecar-only (the `sandbox` service's own environment, read by `server.py`): `SANDBOX_TOKEN`, `SANDBOX_HOST`/`SANDBOX_PORT` (0.0.0.0:8080), `SANDBOX_WORKSPACE` (/workspace), `SANDBOX_MAX_TIMEOUT_SECONDS` (900), `SANDBOX_MEMORY_MB` (1792, RLIMIT_DATA), `SANDBOX_FILE_SIZE_MB` (0 = no per-file cap), `SANDBOX_WORKSPACE_MAX_MB` (20480; keep that much free on the host), `SANDBOX_WORKSPACE_MAX_FILES` (200000), `SANDBOX_MAX_PROCESSES` (128), `SANDBOX_QUEUE_SIZE` (3), `SANDBOX_QUEUE_WAIT_SECONDS` (30).
 
 **Feature requests**
 
@@ -941,7 +946,7 @@ Both image workflows build the `ci` Docker stage (GHA layer cache), which runs `
 - **Bot**: stages `base` (deps; python3/make/g++ for node-gyp, bash for the sandbox tests) → `test` (full source) → `ci` (runs the gate) / `build` (tsc) / `prod-deps` (`yarn workspaces focus --all --production`: runtime deps only).
   - `prod` starts from a fresh `node:26-alpine` with `su-exec` and **ffmpeg** (~130 MB installed; without it the media features degrade instead of failing), copies `dist/` + production `node_modules`, and starts through `docker/entrypoint.sh`, which chowns `/app/data` and drops to the `node` user.
   - `.dockerignore` keeps the build context to the sources (no `.git`, `dist/`, `data/`, Yarn cache; `.github` except the Claude workflow).
-- **Sandbox** (`sandbox/Dockerfile`): `python:3.14-slim-trixie` + Node 26 copied from the official image, pinned numpy/pandas/matplotlib/sympy/requests, bash/curl/jq/bc. uid 10001, `TZ=America/New_York`, one BLAS thread, a HEALTHCHECK, and `server.py` as the ENTRYPOINT (PID 1). Don't set `init: true` on the service: Docker's init would take PID 1 back.
+- **Sandbox** (`sandbox/Dockerfile`): `python:3.14-slim-trixie` + Node 26 copied from the official image, pinned numpy/pandas/matplotlib/sympy/requests, bash/curl/jq/bc. uid 10001, `TZ=America/New_York`, one BLAS thread, a HEALTHCHECK, and `server.py` as the ENTRYPOINT (PID 1). Don't set `init: true` on the service: Docker's init would take PID 1 back. The service gets `mem_limit: 2g` with `memswap_limit: 2g` (a process's own RLIMIT_DATA is 1792 MB, so a hungry program gets a MemoryError before the container limit), and the `sandbox-workspace` volume needs up to 20 GB on the host.
 
 ## Conventions
 

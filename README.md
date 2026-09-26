@@ -44,8 +44,8 @@ services:
       - sandbox-workspace:/workspace
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    mem_limit: 1g
-    memswap_limit: 1g
+    mem_limit: 2g
+    memswap_limit: 2g
     cpus: 1
     pids_limit: 256
 

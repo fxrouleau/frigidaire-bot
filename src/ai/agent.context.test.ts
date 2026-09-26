@@ -369,7 +369,9 @@ describe('reply context', () => {
       chat('998', 'before three', { authorId: CAROL, authorDisplayName: 'Carol' }),
       chat('1000', referencedContent, {
         referencedMessageId: '990',
-        attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/proof.png', contentType: 'image/png' }],
+        attachments: [
+          { url: 'https://cdn.discordapp.com/attachments/1/2/proof.png', contentType: 'image/png', name: 'proof.png' },
+        ],
       }),
       chat('1001', 'after one', { authorId: CAROL, authorDisplayName: 'Carol' }),
       chat('1002', 'after two', { authorId: CAROL, authorDisplayName: 'Carol' }),
@@ -413,7 +415,9 @@ describe('reply context', () => {
     const referenced = text.indexOf('↳ [');
     expect(root).toBeGreaterThan(0);
     expect(referenced).toBeGreaterThan(root);
-    expect(text).toContain(`Alice: nah you are wrong [image] (${jumpLink('1000')})  ← the message being replied to`);
+    expect(text).toContain(
+      `Alice: nah you are wrong [image: proof.png https://cdn.discordapp.com/attachments/1/2/proof.png] (${jumpLink('1000')})  ← the message being replied to`,
+    );
     for (const shown of ['before one', 'before two', 'before three', 'after one', 'after two']) {
       expect(text).toContain(shown);
     }
@@ -537,7 +541,9 @@ describe('reply context', () => {
       expect(textOf(messages.at(-1))).toContain(`(replying to Bob's voice message — ${jumpLink(VOICE_ID)}): is that true?`);
       const context = textOf(messages.at(-2));
       expect(context).toContain(REPLY_CONTEXT);
-      expect(context).toContain(`Bob: [attachment: voice-message.ogg] (${jumpLink(VOICE_ID)})  ← the message being replied to`);
+      expect(context).toContain(
+        `Bob: [attachment: voice-message.ogg https://cdn.discordapp.com/attachments/1/2/voice-message.ogg] (${jumpLink(VOICE_ID)})  ← the message being replied to`,
+      );
       expect(context).toContain(`transcript of Bob's voice message: ${TRANSCRIPT_HEADER}`);
       expect(context).toContain(`[voice message from Bob: ${SAID}]`);
       expect(roles).toContain(`${VOICE_ID}:reference`);
@@ -625,6 +631,92 @@ describe('reply context', () => {
     expect(text).toContain(REPLY_CONTEXT);
     expect(text.length).toBeLessThanOrEqual(4000);
     expect(text).toContain('← the message being replied to');
+  });
+});
+
+describe('uploaded files', () => {
+  const CSV_URL = 'https://cdn.discordapp.com/attachments/1/2/data.csv?ex=abc&is=def&hm=123&';
+  const PNG_URL = 'https://cdn.discordapp.com/attachments/1/3/photo.png?ex=abc&is=def&hm=456&';
+  const CHART_URL = 'https://cdn.discordapp.com/attachments/1/4/chart.png?ex=abc&is=def&hm=789&';
+  const csv = { url: CSV_URL, contentType: 'text/csv', name: 'data.csv', size: 12_345 };
+  const png = { url: PNG_URL, contentType: 'image/png', name: 'photo.png', size: 400_000 };
+  const CSV_LINE = `[attachment: data.csv (12 KB) ${CSV_URL}]`;
+  const PNG_LINE = `[image: photo.png ${PNG_URL}]`;
+
+  it('names every file on the current message with its size and download link; images still go as images', async () => {
+    const provider = new FakeProvider([textResponse('ok')]);
+    const agent = makeAgent(provider);
+
+    await agent.handleMention(
+      createFakeMessage({ ...BASE, content: 'crunch this', attachments: [csv, png] }).message,
+    );
+
+    const current = provider.calls[0].messages.at(-1);
+    expect(textOf(current)).toContain(`Alice (id:${ALICE}): crunch this ${CSV_LINE} ${PNG_LINE}`);
+    expect(current?.kind === 'message' && current.content).toContainEqual({ type: 'image', url: PNG_URL });
+  });
+
+  it('shows a file-only message as its files', async () => {
+    const provider = new FakeProvider([textResponse('ok')]);
+    const agent = makeAgent(provider);
+
+    await agent.handleMention(createFakeMessage({ ...BASE, content: '', attachments: [csv] }).message);
+
+    expect(textOf(provider.calls[0].messages.at(-1))).toMatch(new RegExp(`Alice \\(id:${ALICE}\\): \\[attachment: data\\.csv`));
+  });
+
+  it('links files in seeded history, in the catch-up and on its own earlier replies', async () => {
+    const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
+    const agent = makeAgent(provider);
+    const seeded = [
+      chat('7000', 'here is the export', { authorId: BOB, authorDisplayName: 'Bob', attachments: [csv] }),
+      createFakeBotMessage({
+        messageId: '7001',
+        content: 'made you a chart',
+        channelId: CH,
+        botUserId: BOT_ID,
+        attachments: [{ url: CHART_URL, contentType: 'image/png', name: 'chart.png', size: 20_000 }],
+      }).message,
+    ];
+    const first = createFakeMessage({ ...BASE, messageId: '7002', content: 'thoughts?', channelMessages: seeded });
+    await agent.handleMention(first.message);
+
+    const history = provider.calls[0].messages;
+    expect(indexOfText(history, `Bob (id:${BOB}): here is the export ${CSV_LINE}`)).toBeGreaterThan(0);
+    expect(
+      messageEntries(history).some(
+        (e) => e.role === 'assistant' && textOf(e) === `made you a chart\n[image: chart.png ${CHART_URL}]`,
+      ),
+    ).toBe(true);
+
+    const later = [
+      ...seeded,
+      first.message,
+      chat('7003', 'and the photo', { authorId: CAROL, authorDisplayName: 'Carol', attachments: [png] }),
+    ];
+    await agent.handleMention(
+      createFakeMessage({ ...BASE, messageId: '7004', content: 'now?', channelMessages: later }).message,
+    );
+
+    expect(indexOfText(provider.calls[1].messages, `Carol (id:${CAROL}): and the photo ${PNG_LINE}`)).toBeGreaterThan(0);
+  });
+
+  it('keeps a reply-context link whole when the message text around it is cut', async () => {
+    const provider = new FakeProvider([textResponse('ok')]);
+    const agent = makeAgent(provider);
+    const fillers = Array.from({ length: 30 }, (_, i) =>
+      chat(String(4000 + i), `filler ${i}`, { authorId: CAROL, authorDisplayName: 'Carol' }),
+    );
+    const log = [chat('1000', 'long story '.repeat(300), { authorId: BOB, authorDisplayName: 'Bob', attachments: [csv] }), ...fillers];
+
+    await agent.handleMention(
+      createFakeMessage({ ...BASE, messageId: '5000', content: 'run it', referencedMessageId: '1000', channelMessages: log })
+        .message,
+    );
+
+    const context = textOf(provider.calls[0].messages.at(-2));
+    expect(context).toContain(REPLY_CONTEXT);
+    expect(context).toContain(`… ${CSV_LINE} (${jumpLink('1000')})  ← the message being replied to`);
   });
 });
 

@@ -787,9 +787,12 @@ export const config = {
     get token(): string | undefined {
       return envString('SANDBOX_TOKEN');
     },
-    /** Run time limit when the model doesn't ask for one (the sidecar caps every run at 60 s). */
+    /**
+     * The run time limit (15 min by default and at most). The model's timeout_seconds can only shorten it;
+     * the sidecar caps every run at its own SANDBOX_MAX_TIMEOUT_SECONDS (also 900 by default).
+     */
     get timeoutSeconds(): number {
-      return envInt('SANDBOX_TIMEOUT_SECONDS', 20, { min: 1, max: 60 });
+      return envInt('SANDBOX_TIMEOUT_SECONDS', 900, { min: 1, max: 900 });
     },
   },
 

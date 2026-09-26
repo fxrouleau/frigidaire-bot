@@ -1,3 +1,5 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeMessage } from '../../test-support/fakeDiscord';
 import { FakeProvider } from '../../test-support/fakeProvider';
@@ -9,7 +11,9 @@ import {
   type SandboxRunResult,
   attachFiles,
   clip,
+  createNodeHttpFetch,
   createRunCodeTool,
+  formatDuration,
   parseLanguage,
   parseRunResult,
   runInSandbox,
@@ -48,7 +52,7 @@ function runResult(overrides: Partial<SandboxRunResult> = {}): SandboxRunResult 
     workspace_reset: false,
     disk_limit_exceeded: false,
     workspace_over_limit: false,
-    workspace_limit_mb: 2048,
+    workspace_limit_mb: 20480,
     ...overrides,
   };
 }
@@ -110,26 +114,32 @@ describe('run_code tool', () => {
     expect(new Headers(calls[0].init.headers).has('authorization')).toBe(false);
   });
 
-  it('accepts language aliases and clamps the requested timeout to the sidecar maximum', async () => {
+  it('accepts language aliases and lets timeout_seconds only cut a run shorter than 15 minutes', async () => {
     const { fetch, calls } = fakeFetch(() => jsonResponse(200, runResult({ stdout: 'x' })));
     const tool = createRunCodeTool({ url: 'http://sandbox:8080', fetch });
 
-    await tool.handler(makeCtx(), { language: 'JavaScript', code: 'console.log(1)', timeout_seconds: 600 });
+    await tool.handler(makeCtx(), { language: 'JavaScript', code: 'console.log(1)', timeout_seconds: 5000 });
     await tool.handler(makeCtx(), { language: 'sh', code: 'true', timeout_seconds: '5' });
+    await tool.handler(makeCtx(), { language: 'python', code: 'pass' });
 
-    expect(bodyOf(calls[0])).toMatchObject({ language: 'node', timeout_seconds: 60 });
+    expect(bodyOf(calls[0])).toMatchObject({ language: 'node', timeout_seconds: 900 });
     expect(bodyOf(calls[1])).toMatchObject({ language: 'bash', timeout_seconds: 5 });
+    expect(bodyOf(calls[2])).toMatchObject({ language: 'python', timeout_seconds: 900 });
+    expect(tool.description).toContain('Runs are cut off after 15 min');
+    expect(tool.description).toContain('timeout_seconds only cuts a run shorter');
   });
 
-  it('uses SANDBOX_TIMEOUT_SECONDS as the default run timeout', async () => {
+  it('uses SANDBOX_TIMEOUT_SECONDS as the run limit, which timeout_seconds cannot raise', async () => {
     vi.stubEnv('SANDBOX_TIMEOUT_SECONDS', '7');
     const { fetch, calls } = fakeFetch(() => jsonResponse(200, runResult()));
     const tool = createRunCodeTool({ url: 'http://sandbox:8080', fetch });
 
     await tool.handler(makeCtx(), { language: 'python', code: 'pass' });
+    await tool.handler(makeCtx(), { language: 'python', code: 'pass', timeout_seconds: 60 });
 
     expect(bodyOf(calls[0]).timeout_seconds).toBe(7);
-    expect(tool.description).toContain('killed after 7 s');
+    expect(bodyOf(calls[1]).timeout_seconds).toBe(7);
+    expect(tool.description).toContain('cut off after 7 s');
   });
 
   it('asks the sidecar to wipe the workspace only when reset_workspace is true, and says it happened', async () => {
@@ -162,6 +172,13 @@ describe('run_code tool', () => {
     expect(output).not.toContain('was wiped');
   });
 
+  it("tells the model how to work on a file someone uploaded (its Discord link, which expires)", () => {
+    const tool = createRunCodeTool({ url: 'http://sandbox:8080' });
+    expect(tool.description).toContain('[attachment: name (size) link] or [image: name link]');
+    expect(tool.description).toContain('download it from that link first');
+    expect(tool.description).toContain("Discord's links expire after about a day");
+  });
+
   it('describes reset_workspace to the model as opt-in', () => {
     const tool = createRunCodeTool({ url: 'http://sandbox:8080' });
     const properties = tool.parameters.properties as Record<string, { type: string }>;
@@ -190,7 +207,7 @@ describe('run_code tool', () => {
             { name: 'chart.png', size: png.length, content_base64: png.toString('base64') },
             { name: 'data.csv', size: 3, content_base64: b64('a,b') },
           ],
-          files_omitted: [{ name: 'huge.bin', size: 9e6, reason: 'over the 8 MB total limit' }],
+          files_omitted: [{ name: 'huge.bin', size: 3e7, reason: 'over the 10 MB per-file limit' }],
         }),
       ),
     );
@@ -203,7 +220,7 @@ describe('run_code tool', () => {
     expect(ctx.turn.files[0].attachment.equals(png)).toBe(true);
     expect(ctx.turn.files[1].attachment.toString()).toBe('a,b');
     expect(output).toContain('Attached to your reply: chart.png (7 B), data.csv (3 B).');
-    expect(output).toContain('Not attached: huge.bin (over the 8 MB total limit).');
+    expect(output).toContain('Not attached: huge.bin (over the 10 MB per-file limit).');
     expect(output).toContain('No output: print() whatever you want to see.');
   });
 
@@ -260,7 +277,7 @@ describe('run_code tool', () => {
           duration_ms: 3100,
           disk_limit_exceeded: true,
           workspace_over_limit: true,
-          workspace_limit_mb: 2048,
+          workspace_limit_mb: 20480,
         }),
       ),
     );
@@ -268,9 +285,9 @@ describe('run_code tool', () => {
 
     const output = await tool.handler(makeCtx(), { language: 'bash', code: 'yes > big' });
 
-    expect(output).toContain("Killed after 3.1 s: /workspace went over the sandbox's disk limit (2048 MB).");
+    expect(output).toContain("Killed after 3.1 s: /workspace went over the sandbox's disk limit (20480 MB).");
     expect(output).not.toContain('memory limit');
-    expect(output).toContain('/workspace was over its size limit (2048 MB) after this run, so the sandbox wiped it');
+    expect(output).toContain('/workspace was over its size limit (20480 MB) after this run, so the sandbox wiped it');
   });
 
   it('reads a result from a sidecar without the disk limit fields', () => {
@@ -328,14 +345,29 @@ describe('run_code tool', () => {
     expect(store.getByCategory('tool_error', 10)).toHaveLength(1);
   });
 
-  it('asks the model to retry when the sidecar is busy, without a self-diagnosis entry', async () => {
+  it('tells the model the sidecar is busy, without a self-diagnosis entry', async () => {
     const { fetch } = fakeFetch(() => jsonResponse(429, { error: 'sandbox is busy with another run' }));
     const tool = createRunCodeTool({ url: 'http://sandbox:8080', fetch });
 
     const output = await tool.handler(makeCtx(), { language: 'python', code: 'print(1)' });
 
-    expect(output).toContain('busy');
+    expect(output).toBe(
+      "The sandbox is busy with another run, so nothing ran. Don't keep retrying: say it's busy and when to try again.",
+    );
     expect(store.getByCategory('tool_error', 10)).toHaveLength(0);
+  });
+
+  it("says how far along the run holding the sidecar is, so the model can tell people when to try again", async () => {
+    const { fetch } = fakeFetch(() =>
+      jsonResponse(503, { error: 'sandbox is busy with another run', busy_for_seconds: 190, busy_limit_seconds: 900 }),
+    );
+    const tool = createRunCodeTool({ url: 'http://sandbox:8080', fetch });
+
+    const output = await tool.handler(makeCtx(), { language: 'python', code: 'print(1)' });
+
+    expect(output).toBe(
+      "The sandbox is busy with another run (it has been going for 3 min and may take up to 12 min more), so nothing ran. Don't keep retrying: say it's busy and when to try again.",
+    );
   });
 
   it("passes the sidecar's validation message through so the model can fix its request", async () => {
@@ -408,8 +440,120 @@ describe('runInSandbox', () => {
     const setTimeoutSpy = vi.spyOn(AbortSignal, 'timeout');
     const { fetch } = fakeFetch(() => jsonResponse(200, runResult()));
     await runInSandbox(request, { url: 'http://sandbox:8080', fetch });
-    expect(setTimeoutSpy).toHaveBeenCalledWith((10 + 30 + 10) * 1000);
+    expect(setTimeoutSpy).toHaveBeenCalledWith((10 + 30 + 30) * 1000);
     setTimeoutSpy.mockRestore();
+  });
+});
+
+describe('the default transport (node:http, not the global fetch)', () => {
+  type Seen = { method?: string; headers: IncomingMessage['headers']; body: string };
+  let server: Server | undefined;
+
+  /** A local HTTP server; `handle` answers each request after its body has been read. */
+  async function serve(handle: (res: ServerResponse, seen: Seen) => void): Promise<{ url: string; seen: Seen[] }> {
+    const seen: Seen[] = [];
+    server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+      req.on('end', () => {
+        const entry = { method: req.method, headers: req.headers, body };
+        seen.push(entry);
+        handle(res, entry);
+      });
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    return { url: `http://127.0.0.1:${port}`, seen };
+  }
+
+  afterEach(async () => {
+    server?.closeAllConnections();
+    await new Promise((resolve) => server?.close(resolve));
+    server = undefined;
+  });
+
+  it('is what runInSandbox uses when no fetch is injected: POST with the token, JSON body, JSON answer', async () => {
+    const { url, seen } = await serve((res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(runResult({ stdout: 'hi\n' })));
+    });
+
+    const outcome = await runInSandbox(
+      { language: 'bash', code: 'echo hi', timeoutSeconds: 5 },
+      { url: `${url}/`, token: 'secret' },
+    );
+
+    expect(outcome).toMatchObject({ ok: true, result: { stdout: 'hi\n' } });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].method).toBe('POST');
+    expect(seen[0].headers.authorization).toBe('Bearer secret');
+    expect(seen[0].headers['content-length']).toBe(String(Buffer.byteLength(seen[0].body)));
+    expect(JSON.parse(seen[0].body)).toEqual({ language: 'bash', code: 'echo hi', timeout_seconds: 5 });
+  });
+
+  it('maps an error answer to its typed outcome, busy details included', async () => {
+    const { url } = await serve((res) => {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'sandbox is busy with another run', busy_for_seconds: 5, busy_limit_seconds: 900 }));
+    });
+
+    const outcome = await runInSandbox({ language: 'bash', code: 'true', timeoutSeconds: 5 }, { url });
+
+    expect(outcome).toEqual({
+      ok: false,
+      kind: 'busy',
+      detail: 'sandbox is busy with another run',
+      busy: { runningSeconds: 5, limitSeconds: 900 },
+    });
+  });
+
+  it("gives up only when the caller's signal says so: before the headers, or halfway through the body", async () => {
+    const nodeFetch = createNodeHttpFetch();
+    const init = (ms: number) => ({ method: 'POST', headers: {}, body: '{}', signal: AbortSignal.timeout(ms) });
+
+    const silent = await serve(() => {
+      // Never answers.
+    });
+    const beforeHeaders = await nodeFetch(silent.url, init(100)).then(
+      () => 'resolved',
+      (error: Error) => error.name,
+    );
+    expect(['AbortError', 'TimeoutError']).toContain(beforeHeaders);
+    server?.closeAllConnections();
+    await new Promise((resolve) => server?.close(resolve));
+
+    const stalled = await serve((res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"stdout": "par');
+    });
+    const midBody = await nodeFetch(stalled.url, init(100)).then(
+      () => 'resolved',
+      (error: Error) => error.name,
+    );
+    expect(['AbortError', 'TimeoutError']).toContain(midBody);
+  });
+
+  it('refuses an answer over its size cap, and builds bodiless responses', async () => {
+    const big = await serve((res) => {
+      res.writeHead(200);
+      res.end('x'.repeat(2048));
+    });
+    const capped = createNodeHttpFetch(1024);
+    const init = { method: 'POST', headers: {}, body: '{}', signal: AbortSignal.timeout(5000) };
+    await expect(capped(big.url, init)).rejects.toThrow("the sandbox's answer is over 1024 bytes");
+    server?.closeAllConnections();
+    await new Promise((resolve) => server?.close(resolve));
+
+    const empty = await serve((res) => {
+      res.writeHead(204, { 'x-test': 'yes' });
+      res.end();
+    });
+    const response = await createNodeHttpFetch()(empty.url, init);
+    expect(response.status).toBe(204);
+    expect(response.headers.get('x-test')).toBe('yes');
+    expect(await response.text()).toBe('');
   });
 });
 
@@ -460,7 +604,7 @@ describe('sandbox helpers', () => {
     expect(clipped).toContain('[80 chars omitted]');
   });
 
-  it('attachFiles caps the reply at 10 files and 8 MB and skips empty files', () => {
+  it('attachFiles caps the reply at 10 files, 10 MB each and 25 MB in all, and skips empty files', () => {
     const turn = createTurnEffects();
     for (let i = 0; i < 9; i++) turn.files.push({ attachment: Buffer.from('x'), name: `pre-${i}.txt` });
 
@@ -474,11 +618,29 @@ describe('sandbox helpers', () => {
     expect(report.skipped.map((f) => f.name)).toEqual(['empty.txt', 'eleventh.txt']);
     expect(turn.files).toHaveLength(10);
 
+    const MB = 1024 * 1024;
+    const file = (name: string, bytes: number) => ({ name, size: bytes, content_base64: Buffer.alloc(bytes).toString('base64') });
     const big = createTurnEffects();
-    big.files.push({ attachment: Buffer.alloc(7 * 1024 * 1024), name: 'image.png' });
+    big.files.push({ attachment: Buffer.alloc(9 * MB), name: 'image.png' });
     const bigReport = attachFiles(big, [
-      { name: 'more.bin', size: 2 * 1024 * 1024, content_base64: Buffer.alloc(2 * 1024 * 1024).toString('base64') },
+      file('huge.bin', 10 * MB + 1),
+      file('a.bin', 10 * MB),
+      file('b.bin', 6 * MB),
+      file('c.bin', 6 * MB),
     ]);
-    expect(bigReport.skipped).toEqual([{ name: 'more.bin', reason: 'the reply would go over the 8 MB attachment limit' }]);
+    expect(bigReport.attached.map((f) => f.name)).toEqual(['a.bin', 'b.bin']);
+    expect(bigReport.skipped).toEqual([
+      { name: 'huge.bin', reason: "over Discord's 10 MB per-file limit" },
+      { name: 'c.bin', reason: 'the reply would go over the 25 MB attachment limit' },
+    ]);
+  });
+
+  it('formatDuration speaks in minutes from two minutes up', () => {
+    expect(formatDuration(900)).toBe('15 min');
+    expect(formatDuration(720)).toBe('12 min');
+    expect(formatDuration(190)).toBe('3 min');
+    expect(formatDuration(60)).toBe('1 min');
+    expect(formatDuration(90)).toBe('90 s');
+    expect(formatDuration(20)).toBe('20 s');
   });
 });

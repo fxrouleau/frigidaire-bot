@@ -1,6 +1,6 @@
 // The daily birthday announcement. Once the Eastern clock reaches BIRTHDAY_ANNOUNCE_HOUR, every
 // birthday that is today and not yet announced this year gets one short in-character message in the
-// birthday channel, written by the chat model with a few of the person's memories as light context
+// birthday channel, written by the chat model with what it knows about the person as light context
 // (a fixed template when the model call fails). Only today's birthdays are ever considered, so a bot
 // that was offline all afternoon announces late the same evening and never the day after.
 import { createHash } from 'node:crypto';
@@ -12,14 +12,19 @@ import { SELF_DIAGNOSIS_CATEGORIES } from '../ai/memory/memoryStore';
 import { getOpenRouterClient } from '../ai/openRouterClient';
 import { memoryKeyFor } from '../ai/people';
 import { featureRequestOptions } from '../ai/usage';
-import { easternParts } from '../ai/utils';
+import { easternParts, formatRelativeAge, parseSqliteUtc } from '../ai/utils';
 import { config } from '../config';
 import { logger } from '../logger';
 import { type Birthday, claimAnnouncement, isBirthdayOn, listBirthdays, releaseAnnouncement } from './birthdayStore';
 import { describeError, discordErrorCode, fetchPostableChannel, type PostableChannel } from './discord';
 
 const MINUTE_MS = 60_000;
-const MEMORY_CONTEXT_LIMIT = 5;
+// The writer sees what the bot knows about the person nearly whole (a few dozen memories each), dated, and
+// picks for itself. With only the newest few, undated, yesterday's story became the whole message, told
+// as old lore. Past the limit it gets the oldest half (lore) and the newest half (what's going on).
+const MEMORY_CONTEXT_LIMIT = 40;
+// Every memory filed under them, before the categories below are dropped.
+const MEMORY_CANDIDATES = 500;
 const MODEL_TIMEOUT_MS = 30_000;
 // The default chat model (z-ai/glm-5.3-flash) reasons at 'max' unless told otherwise, and reasoning counts
 // toward max_tokens: the writer asks for 'low' and leaves room for it before the message (only the tokens
@@ -28,17 +33,28 @@ const MODEL_MAX_TOKENS = 1500;
 const MAX_MESSAGE_CHARS = 600;
 /** Waits between failed attempts for the same birthday (the last one repeats until the day ends). */
 const RETRY_DELAYS_MS = [MINUTE_MS, 5 * MINUTE_MS, 15 * MINUTE_MS, 30 * MINUTE_MS, 60 * MINUTE_MS];
-// Image shares expire within a day and self-diagnosis rows are about the bot; neither belongs in a toast.
+// Image shares expire within a day and self-diagnosis rows are about the bot: neither belongs in a toast.
+// Events stay: dated, recent news can be fair game ("just got engaged") as long as it's told as recent.
 const EXCLUDED_MEMORY_CATEGORIES = new Set<string>(['image', ...SELF_DIAGNOSIS_CATEGORIES]);
+// "Friday, September 25, 2026": the writer's today, on the group's clock.
+const EASTERN_DATE = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  weekday: 'long',
+  month: 'long',
+  day: 'numeric',
+  year: 'numeric',
+});
 
 export type BirthdayMessageInput = {
   userId: string;
   name: string;
   /** The age they turn today, when the birth year is known. */
   age?: number;
-  /** A few things the bot knows about them (memory contents). */
+  /** What the bot knows about them, oldest first, each tagged with when it was first noted ("… (noted 3mo ago)"). */
   memories: string[];
   botName: string;
+  /** Today's Eastern date, e.g. "Friday, September 25, 2026". */
+  today: string;
 };
 
 /** Writes the announcement text, or undefined when it couldn't (the caller then uses the template). */
@@ -65,14 +81,14 @@ function buildPrompt(input: BirthdayMessageInput): { system: string; user: strin
 It's ${input.name}'s birthday today${turning}. Write the birthday message you'd drop in the group chat:
 - 1 or 2 short sentences, casual group-chat texting, lowercase is fine. Warm underneath, but in the group's voice — a light roast is welcome, nothing actually mean.
 - Address them with the exact token ${mention} (it becomes a ping); don't @ anyone else.
-- At most one detail from what you know about them, and only if it fits naturally — never list facts, and never say you have notes or memories.
+- At most one detail from what you know about them, and only if it fits naturally. Prefer something long-running about them (a trait, a running joke, old lore). Each thing you know says when you first noted it: anything from the last couple of weeks is recent news, so only bring it up as something that just happened, never as history or an old running joke. Never list facts, and never say you have notes or memories.
 - No hashtags, no emojis, no quotation marks around the message.
 Reply with the message text only.`;
   const known =
     input.memories.length > 0
-      ? `Things you know about ${input.name} (background only):\n${input.memories.map((m) => `- ${m}`).join('\n')}`
+      ? `What you know about ${input.name} (background only; oldest first, each with when you first noted it):\n${input.memories.map((m) => `- ${m}`).join('\n')}`
       : `You don't know much about ${input.name} beyond their name.`;
-  return { system, user: known };
+  return { system, user: `Today is ${input.today}.\n\n${known}` };
 }
 
 /** Cleans the model's text into a postable announcement; undefined when there's nothing usable. */
@@ -218,12 +234,12 @@ export class BirthdayAnnouncer {
       const identity = this.safeIdentity(userId);
       const name = member?.displayName ?? identity?.display_name ?? (await this.lookupUserName(userId));
       const age = birthday.year ? year - birthday.year : undefined;
-      const memories = this.memoriesFor(userId, name);
+      const memories = this.memoriesFor(userId, name, nowMs);
       const botName = this.client.user?.displayName ?? 'Frigidaire';
 
       let written: string | undefined;
       try {
-        written = await this.writer({ userId, name, age, memories, botName });
+        written = await this.writer({ userId, name, age, memories, botName, today: EASTERN_DATE.format(nowMs) });
       } catch (error) {
         logger.warn(`birthdays: writing ${userId}'s message failed; using the template:`, error);
       }
@@ -291,15 +307,28 @@ export class BirthdayAnnouncer {
     }
   }
 
-  /** Their memories by id and every name any of their accounts goes by (display, handle, first-seen, IRL, nicknames). */
-  private memoriesFor(userId: string, liveName: string): string[] {
+  /**
+   * What the bot knows about them (by id and every name any of their accounts goes by: display, handle,
+   * first-seen, IRL, nicknames), minus image and self-diagnosis rows: oldest first, each tagged with when it was
+   * first noted, capped at MEMORY_CONTEXT_LIMIT (the oldest and the newest halves).
+   */
+  private memoriesFor(userId: string, liveName: string, nowMs: number): string[] {
     try {
       const store = getMemoryStore();
-      return store
-        .getForPerson(memoryKeyFor(store, userId, [liveName]), 20)
+      // Oldest first by when each was first noted (an unreadable time counts as old); ties by id, for a stable
+      // order. created_at, not updated_at: the learner re-confirming old lore must not make it look new.
+      const dated = store
+        .getForPerson(memoryKeyFor(store, userId, [liveName]), MEMORY_CANDIDATES)
         .filter((m) => !EXCLUDED_MEMORY_CATEGORIES.has(m.category))
-        .slice(0, MEMORY_CONTEXT_LIMIT)
-        .map((m) => m.content);
+        .map((m) => ({ memory: m, noted: parseSqliteUtc(m.created_at) ?? Number.NEGATIVE_INFINITY }))
+        .sort((a, b) => (a.noted === b.noted ? a.memory.id - b.memory.id : a.noted < b.noted ? -1 : 1));
+      const half = MEMORY_CONTEXT_LIMIT / 2;
+      const picked = dated.length > MEMORY_CONTEXT_LIMIT ? [...dated.slice(0, half), ...dated.slice(-half)] : dated;
+      const now = new Date(nowMs);
+      return picked.map(({ memory }) => {
+        const age = formatRelativeAge(memory.created_at, now);
+        return age ? `${memory.content} (noted ${age})` : memory.content;
+      });
     } catch (error) {
       logger.warn(`birthdays: couldn't read memories for ${userId}:`, error);
       return [];

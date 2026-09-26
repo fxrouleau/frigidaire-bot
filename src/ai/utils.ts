@@ -116,16 +116,24 @@ export function parseEasternDateTime(text: string): Date | undefined {
 const DAY_MS = 86_400_000;
 
 /**
- * Renders a SQLite `datetime('now')` timestamp ('YYYY-MM-DD HH:MM:SS', UTC, no zone) as a terse
- * relative age for prompt injection. The space→'T' + 'Z' rewrite makes the UTC explicit; without it
- * `new Date()` reads the string as local time and skews on any non-UTC host. Garbage/missing input
- * yields '' so prompt building never throws.
+ * Epoch ms of a SQLite `datetime('now')` timestamp ('YYYY-MM-DD HH:MM:SS', UTC, no zone); undefined when it
+ * doesn't parse. The space→'T' + 'Z' rewrite makes the UTC explicit; without it `new Date()` reads the
+ * string as local time and skews on any non-UTC host.
+ */
+export function parseSqliteUtc(sqliteUtcTimestamp: string | null | undefined): number | undefined {
+  if (!sqliteUtcTimestamp) return undefined;
+  const ms = new Date(`${sqliteUtcTimestamp.trim().replace(' ', 'T')}Z`).getTime();
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/**
+ * Renders a SQLite `datetime('now')` timestamp as a terse relative age for prompt injection. Garbage or
+ * missing input yields '' so prompt building never throws.
  */
 export function formatRelativeAge(sqliteUtcTimestamp: string, now: Date = new Date()): string {
-  if (!sqliteUtcTimestamp) return '';
-
-  const parsed = new Date(`${sqliteUtcTimestamp.replace(' ', 'T')}Z`);
-  const elapsedMs = now.getTime() - parsed.getTime();
+  const parsed = parseSqliteUtc(sqliteUtcTimestamp);
+  if (parsed === undefined) return '';
+  const elapsedMs = now.getTime() - parsed;
   if (!Number.isFinite(elapsedMs)) return '';
 
   const days = Math.max(0, elapsedMs) / DAY_MS;
