@@ -71,6 +71,19 @@ describe('readUncaptured', () => {
     expect([read.messages.length, read.capped, fetches.length]).toEqual([2_000, true, 20]);
   });
 
+  it('keeps exactly the oldest messages up to a cap that is not a whole number of pages', async () => {
+    const log = range(0, 400).map((i) => msg(i));
+    const { fetcher } = channelServing(log);
+
+    const read = await readUncaptured(fetcher, idAt(0), { idleMs: 20 * MIN, maxMessages: 150 });
+    expect([read.messages.length, read.messages.at(-1)?.id, read.capped]).toEqual([150, idAt(150), true]);
+
+    // A cap reached on the channel's last, short page: nothing more is waiting.
+    const short = channelServing(range(0, 151).map((i) => msg(i)));
+    const exact = await readUncaptured(short.fetcher, idAt(0), { idleMs: 20 * MIN, maxMessages: 150 });
+    expect([exact.messages.length, exact.capped]).toEqual([150, false]);
+  });
+
   it('returns nothing when nothing is newer than the watermark', async () => {
     const { fetcher } = channelServing(range(0, 5).map((i) => msg(i)));
     expect(await readUncaptured(fetcher, idAt(4), { idleMs: 20 * MIN })).toEqual({ messages: [], capped: false });

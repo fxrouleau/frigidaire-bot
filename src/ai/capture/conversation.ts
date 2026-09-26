@@ -69,14 +69,18 @@ export async function readUncaptured(
   if (watermark) {
     const messages: Message[] = [];
     let after = watermark;
-    while (messages.length < max) {
+    for (;;) {
       const page = await fetcher.fetch({ limit: pageSize, after });
       const added = fresh(page);
       messages.push(...added);
-      if (page.size < pageSize || added.length === 0) return { messages, capped: false };
+      const exhausted = page.size < pageSize || added.length === 0;
+      if (messages.length >= max) {
+        // The oldest `max`: the next capture continues from the newest of them.
+        return { messages: messages.slice(0, max), capped: messages.length > max || !exhausted };
+      }
+      if (exhausted) return { messages, capped: false };
       after = added[added.length - 1].id;
     }
-    return { messages, capped: true };
   }
 
   let messages: Message[] = [];
@@ -88,7 +92,7 @@ export async function readUncaptured(
     if (page.size < pageSize || added.length === 0 || hasQuietGap(messages, opts.idleMs)) break;
     before = added[0].id;
   }
-  return { messages, capped: false };
+  return { messages: messages.slice(-max), capped: false };
 }
 
 /**

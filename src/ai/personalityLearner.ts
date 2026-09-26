@@ -495,7 +495,8 @@ export class PersonalityLearner {
    */
   async observeOnce(discordClient: Client, now: number = Date.now()): Promise<void> {
     if (this.cycleInFlight) {
-      logger.warn('PersonalityLearner: previous observation cycle still running, skipping this tick');
+      // Routine on the 1-minute capture tick while a long conversation is being read: not worth a WARN.
+      logger.debug('PersonalityLearner: previous observation cycle still running, skipping this tick');
       return;
     }
     this.cycleInFlight = true;
