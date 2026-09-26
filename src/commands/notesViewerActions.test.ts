@@ -7,9 +7,10 @@ import {
 } from 'discord.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryStore } from '../ai/memory/memoryStore';
-import type { EditProposal, EditTarget } from '../ai/memory/notes/dreamer';
+import { type EditProposal, type EditTarget, proposeEdit } from '../ai/memory/notes/dreamer';
 import { NotesStore } from '../ai/memory/notes/notesStore';
 import type { NotesOutput } from '../ai/memory/notes/schema';
+import { chatCompletionBody, createCapturingClient } from '../test-support/capturingClient';
 import {
   createFakeButtonInteraction,
   createFakeCommandDeps,
@@ -484,6 +485,92 @@ describe('owner edit', () => {
       expect.objectContaining({ method: 'reply', ephemeral: true, content: 'you have to tell me what to change' }),
     ]);
     expect(fake.recorders.proposeEdit.calls).toHaveLength(0);
+  });
+});
+
+describe('owner edit through the real proposeEdit (dreamer.ts)', () => {
+  const REMI_ALT = '100000000000000011';
+  /** The viewer's deps with the dream part's own proposeEdit, over a capturing client scripted with `answers`. */
+  function realDeps(...answers: unknown[]) {
+    const { client, requests } = createCapturingClient(
+      answers.map((answer) => ({ body: chatCompletionBody(JSON.stringify(answer)) })),
+    );
+    const fake = createFakeCommandDeps({
+      store: memory,
+      notes,
+      owners: [OWNER],
+      now: () => clock,
+      proposeEdit: (request) => proposeEdit(request, { notes, memory, client, now: () => clock }),
+    });
+    return { fake, requests };
+  }
+
+  it("round-trips a person's edit: the draft comes back for exactly that person and saves on Confirm", async () => {
+    const { fake, requests } = realDeps({
+      notes: [{ topic: 'profile', title: 'Remi', content: '## Now\nRemi moved to Laval in August 2026.\n\n## Traits\nDeadpan.' }],
+      change_summary: 'moved to Laval',
+    });
+    const { preview } = await draft(fake);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].headers.get('X-Frigidaire-Feature')).toBe('memory_edit');
+    expect(requests[0].body.provider).toEqual({ zdr: true });
+    expect(preview.content).toContain('**Edit preview** · 1 change: moved to Laval');
+
+    const confirmed = await click(componentId(preview, 'Confirm'), fake);
+    expect(confirmed[0].content).toBe('done, saved profile v2');
+    expect(notes.getProfile(REMI)).toMatchObject({ version: 2, updatedBy: 'edit' });
+  });
+
+  it("drafts a side account's notes as its main account's (the viewer's target is canonical too)", async () => {
+    vi.stubEnv('LINKED_ACCOUNTS', `${REMI_ALT}:${REMI}`);
+    const { fake } = realDeps({
+      notes: [{ topic: 'profile', title: 'Remi', content: '## Now\nRemi lives in Laval.' }],
+      change_summary: 'Laval',
+    });
+    const responses = await submit(`nv:m:p${REMI_ALT}:h`, 'Remi lives in Laval', fake);
+    expect(fake.recorders.proposeEdit.calls[0][0].target).toEqual({ scope: 'person', ownerId: REMI });
+    const preview = sentOf(responses[responses.length - 1]);
+    expect(labels(preview)).toEqual(['Confirm', 'Cancel']);
+    await click(componentId(preview, 'Confirm'), fake);
+    expect(notes.getProfile(REMI)?.content).toBe('## Now\nRemi lives in Laval.');
+  });
+
+  it('round-trips a circle edit (its slug) and a group edit', async () => {
+    const circle = notes.getCircle('mtg');
+    const { fake, requests } = realDeps(
+      {
+        notes: [],
+        circles: [
+          {
+            slug: 'mtg',
+            title: 'The MTG crew',
+            content: '## Now\nFriday drafts at Nova’s place.',
+            aliases: [],
+            members: [
+              { id: REMI, since: '2021' },
+              { id: NOVA, since: '2024' },
+            ],
+            merged_from: [],
+          },
+        ],
+        change_summary: 'drafts moved',
+      },
+      { notes: [{ topic: 'vibe', title: 'Vibe', content: '## Now\nRoasts are affection.' }], change_summary: 'vibe' },
+    );
+    const onCircle = view({ subject: { kind: 'person', id: REMI }, screen: { kind: 'note', noteId: circle?.id ?? 0 }, page: 0 });
+    const circleDraft = await draft(fake, 'drafts are at Nova’s now', onCircle);
+    expect(fake.recorders.proposeEdit.calls[0][0].target).toEqual({ scope: 'circle', slug: 'mtg' });
+    expect((await click(componentId(circleDraft.preview, 'Confirm'), fake))[0].content).toBe('done, saved circle mtg v2');
+
+    notes.writeNotes({ scope: 'group' }, [{ topic: 'vibe', title: 'Vibe', content: '## Now\nChaotic.' }], {
+      updatedBy: 'dream',
+    });
+    const groupHome = view({ subject: { kind: 'group' }, screen: { kind: 'home' }, page: 0 });
+    const groupDraft = await draft(fake, 'add that roasts are affection', groupHome);
+    expect(fake.recorders.proposeEdit.calls[1][0].target).toEqual({ scope: 'group' });
+    expect((await click(componentId(groupDraft.preview, 'Confirm'), fake))[0].content).toBe('done, saved vibe v2');
+    expect(notes.getNote({ scope: 'group' }, 'vibe')).toMatchObject({ updatedBy: 'edit' });
+    expect(requests.map((r) => r.headers.get('X-Frigidaire-Feature'))).toEqual(['memory_edit', 'memory_edit']);
   });
 });
 

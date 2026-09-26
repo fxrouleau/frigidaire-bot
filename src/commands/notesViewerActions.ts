@@ -147,7 +147,8 @@ export function editTargetFor(subject: ViewerSubject, screen: ViewerScreen, note
     const note = notes.getNoteById(screen.noteId);
     if (note?.active && note.scope === 'circle') return { scope: 'circle', slug: note.topic };
   }
-  return subject.kind === 'group' ? { scope: 'group' } : { scope: 'person', ownerId: subject.id };
+  // The main account, as proposeEdit() answers for (a draft for another target is dropped).
+  return subject.kind === 'group' ? { scope: 'group' } : { scope: 'person', ownerId: canonicalUserId(subject.id) };
 }
 
 function describeTarget(target: EditTarget): string {
