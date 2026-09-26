@@ -12,15 +12,23 @@
 // A run is resumable: finished segments are recorded in memory.db (bot_state), so a stopped run picks up
 // at the next one. Everything the model returns is untrusted: fields are checked, unknown people dropped,
 // nothing with Discord markup saved.
+//
+// The prompt is its own (history read years later: dated rows, notable history, recurrence), but the
+// mechanics are capture's (src/ai/capture/): segments are cut by its splitter (chunks.ts), a quote is
+// matched to the line it came from by citedEvidence(), related members are resolved by relatedMembers(),
+// and "already known" is buildCaptureKnowledge() with each row's seen span and count.
 import type OpenAI from 'openai';
 import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 import type { ArchiveStore } from '../../../archive/archiveStore';
 import { canonicalUserId } from '../../../linkedAccounts';
 import { logger } from '../../../logger';
+import { type TranscriptLine as CitedLine, citedEvidence, relatedMembers } from '../../capture/citations';
+import { buildCaptureKnowledge } from '../../capture/knowledge';
 import type { ModelPricing } from '../../modelCatalog';
+import { foldMembers, type Member } from '../../people';
 import { featureRequestOptions } from '../../usage';
 import type { JournalEvidence } from '../evidence';
-import { type Memory, type MemoryStore, nameKey } from '../memoryStore';
+import { type Identity, type Memory, type MemoryStore, nameKey } from '../memoryStore';
 import type { NightlyDreamResult } from '../notes/dreamer';
 import type { NotesStore } from '../notes/notesStore';
 import { noteTextProblems } from '../notes/schema';
@@ -44,8 +52,7 @@ export const BOOTSTRAP_DEFAULTS = {
   segmentTokens: 60_000,
   leadInTokens: 1_500,
   maxOutputTokens: MAX_OUTPUT_TOKENS,
-  /** What the journal already knows, shown per segment (the newest rows about its people). */
-  knownRowsPerPerson: 25,
+  /** What is already known about a segment's people and the server, at most (capture's knowledge section). */
   knownContextMaxChars: 12_000,
 } as const;
 
@@ -251,42 +258,53 @@ function personLine(p: ExportPerson): string {
   return `- ${p.name} (id:${p.id})${parts.length > 0 ? ` — ${parts.join('; ')}` : ''}`;
 }
 
-/** A journal row as the "already known" context shows it: category, content, span and recurrence. */
-function knownLine(row: Memory, name: string): string {
+/** A journal row as the "already known" context shows it: category, content, seen span and recurrence. */
+export function knownRowLine(row: Memory): string {
   const first = row.first_seen_at?.slice(0, 7) ?? row.created_at.slice(0, 7);
   const last = row.last_seen_at?.slice(0, 7) ?? row.updated_at.slice(0, 7);
   const span = first === last ? first : `${first}–${last}`;
   const seen = (row.seen_count ?? 1) > 1 ? `, seen ${row.seen_count}×` : '';
-  return `- [${row.category}] ${name}: ${row.content} (${span}${seen})`;
+  return `- [${row.category}] ${row.subject}: ${row.content} (${span}${seen})`;
 }
 
-/** What the journal already holds about the segment's people and the server, newest first, capped. */
-function knownContext(memory: MemoryStore, involved: ExportPerson[]): string {
-  const lines: string[] = [];
-  const seen = new Set<number>();
-  const push = (rows: Memory[], name: string) => {
-    for (const row of rows) {
-      if (seen.has(row.id)) continue;
-      seen.add(row.id);
-      lines.push(knownLine(row, name));
-    }
-  };
-  for (const person of involved) {
-    push(
-      memory.getForPerson(
-        { userId: person.id, names: [person.name, ...person.otherNames] },
-        BOOTSTRAP_DEFAULTS.knownRowsPerPerson,
-      ),
-      person.name,
-    );
+/**
+ * What is already known about the segment's people and the server: capture's knowledge section (their
+ * notes in short, their circles, the journal rows newer than the notes, open corrections; the newest rows
+ * for someone without notes yet), each row with its span and recurrence, capped.
+ */
+function knownContext(memory: MemoryStore, notes: NotesStore, involved: ExportPerson[], now: Date): string {
+  return buildCaptureKnowledge({
+    store: memory,
+    notes,
+    people: involved.map((p) => ({ userId: p.id, name: p.name })),
+    now,
+    rowLine: knownRowLine,
+    maxChars: BOOTSTRAP_DEFAULTS.knownContextMaxChars,
+  });
+}
+
+// The export's people as the resolver's members (relatedMembers() takes those): people only the archive
+// knows are included under the names they posted with.
+const membersCache = new WeakMap<ExportPeople, Member[]>();
+
+function exportMembers(people: ExportPeople): Member[] {
+  let members = membersCache.get(people);
+  if (!members) {
+    const rows: Identity[] = people.people.map((p) => ({
+      discord_user_id: p.id,
+      display_name: p.name,
+      canonical_name: p.name,
+      username: null,
+      irl_name: p.realName,
+      aliases: [...p.nicknames, ...p.otherNames],
+      first_seen_at: '',
+      updated_at: '',
+      active: 1,
+    }));
+    members = foldMembers(rows);
+    membersCache.set(people, members);
   }
-  push(memory.getBySubject('server', BOOTSTRAP_DEFAULTS.knownRowsPerPerson), 'server');
-  let text = '';
-  for (const line of lines) {
-    if (text.length + line.length + 1 > BOOTSTRAP_DEFAULTS.knownContextMaxChars) break;
-    text += `${line}\n`;
-  }
-  return text.trim() || '(nothing yet)';
+  return members;
 }
 
 /**
@@ -328,7 +346,7 @@ RULES:
 People (transcript name → id):
 ${args.people}
 
-Already known (earlier history and the bot's journal; span and how often seen):
+Already known (the bot's notes on them, and journal rows with the span they were seen over and how often):
 ${args.known}
 
 Respond ONLY with a JSON object; with nothing worth saving, {"observations": []}.
@@ -360,15 +378,25 @@ export type BootstrapObservation = {
   evidence?: JournalEvidence;
 };
 
-function normalizedForMatch(text: string): string {
-  return text.toLowerCase().replace(/\s+/g, ' ').trim();
-}
-
-/** The transcript line a quote comes from (exact text, whitespace and case aside), or undefined. */
-function lineOfQuote(segment: BootstrapSegment, quote: string): TranscriptLine | undefined {
-  const needle = normalizedForMatch(quote.replace(/^(?:\d{2}:\d{2} )?[^:]{1,80}: /, ''));
-  if (needle.length < 3) return undefined;
-  return segment.lines.find((line) => normalizedForMatch(lineText(line, true)).includes(needle));
+/**
+ * The segment's lines as capture's citable lines (citedEvidence): numbered in order, each citing every
+ * message it merges, read with its time and author (a quote may carry either). Lead-in lines are left out:
+ * nothing is extracted from them.
+ */
+function citableLines(segment: BootstrapSegment): Map<number, CitedLine> {
+  return new Map(
+    segment.lines.map((line, i): [number, CitedLine] => [
+      i + 1,
+      {
+        line: i + 1,
+        messageId: line.messageIds[0],
+        messageIds: line.messageIds,
+        at: line.startMs,
+        text: lineText(line, true),
+        leadIn: false,
+      },
+    ]),
+  );
 }
 
 /** A YYYY-MM-DD / YYYY-MM date as epoch ms (noon UTC), when it falls within [min, max] ± a month. */
@@ -383,9 +411,11 @@ function dateMs(raw: unknown, min: number, max: number): number | undefined {
 
 /**
  * The model's answer as observations about known people. Anything malformed is dropped (and counted): an
- * unknown category, a subject or related id nobody in the export has, content that is empty, too long or
- * carries Discord markup or ids. The observed time is the quoted line's (when the quote is found), else
- * the given date, else the segment's start; the evidence cites the quoted line's messages.
+ * unknown category, a subject nobody in the export has, content that is empty, too long or carries
+ * Discord markup or ids. Related members are capture's relatedMembers() over the export's people (ids or
+ * unique names; unknown ones and the subject left out). The quote is capture's citedEvidence(): kept only
+ * when it occurs in a line of the segment, whose messages it then cites. The observed time is that line's,
+ * else the given date, else the segment's start.
  */
 export function parseBootstrapAnswer(
   text: string,
@@ -405,6 +435,8 @@ export function parseBootstrapAnswer(
 
   const first = segment.lines[0]?.startMs ?? 0;
   const last = segment.lines.at(-1)?.endMs ?? first;
+  const lines = citableLines(segment);
+  const members = exportMembers(people);
   const observations: BootstrapObservation[] = [];
   let dropped = 0;
   for (const entry of raw) {
@@ -430,22 +462,17 @@ export function parseBootstrapAnswer(
       dropped++;
       continue;
     }
-    const related = (Array.isArray(fields.related_user_ids) ? fields.related_user_ids : [])
-      .filter((id): id is string => typeof id === 'string')
-      .map((id) => people.byAccount(id.trim())?.id)
-      .filter((id): id is string => id !== undefined && id !== subject?.id);
-    const quote = typeof fields.quote === 'string' ? fields.quote.trim() : '';
-    const line = quote ? lineOfQuote(segment, quote) : undefined;
-    const observedAt = line?.startMs ?? dateMs(fields.date, first, last) ?? first;
-    const evidence =
-      line || quote ? { messageIds: line?.messageIds.slice(0, 12) ?? [], ...(quote ? { quote } : {}) } : undefined;
+    const related = relatedMembers({ related_user_ids: fields.related_user_ids }, members, subject?.id);
+    // Only the quote: the transcript shows no line numbers, so any the model sends mean nothing.
+    const cited = citedEvidence({ quote: fields.quote }, lines);
+    const observedAt = cited.observedAt?.getTime() ?? dateMs(fields.date, first, last) ?? first;
     observations.push({
       category,
       ...(subject && category !== 'vibe' ? { subjectUserId: subject.id } : {}),
-      relatedUserIds: [...new Set(related)],
+      relatedUserIds: related,
       content,
       observedAt,
-      ...(evidence ? { evidence } : {}),
+      ...(cited.evidence ? { evidence: cited.evidence } : {}),
     });
   }
   return { observations, dropped };
@@ -504,7 +531,7 @@ async function extractSegment(
   const prompt = buildBootstrapPrompt({
     month: segment.month,
     people: involved.map(personLine).join('\n') || '(nobody identified)',
-    known: knownContext(deps.memory, involved),
+    known: knownContext(deps.memory, deps.notes, involved, (deps.now ?? (() => new Date()))()),
     transcript: renderSegment(segment),
   });
   const body: ChatBody = {

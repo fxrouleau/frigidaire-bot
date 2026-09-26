@@ -168,6 +168,35 @@ describe('parseBootstrapAnswer', () => {
     expect(observations[1].observedAt).toBe(Date.UTC(2019, 2, 15, 12));
   });
 
+  it("matches quotes and related members the way capture does (src/ai/capture)", () => {
+    const { segment: s, plan, job } = segment();
+    const { observations } = parseBootstrapAnswer(
+      JSON.stringify({
+        observations: [
+          // Typographic quote marks and an elision still find the line; a related member by name.
+          {
+            category: 'fact',
+            subject_user_id: REMI,
+            related_user_ids: ['Nova', 'nobody'],
+            content: 'Works early shifts at a bakery.',
+            quote: '“the bakery shift … 5am”',
+          },
+          // A quote from nowhere in this stretch is dropped, with its date kept.
+          { category: 'fact', subject_user_id: DALE, content: 'Asks about work.', date: '2019-03-01', quote: 'made up' },
+        ],
+      }),
+      s,
+      plan.people,
+    );
+    expect(observations[0]).toMatchObject({
+      relatedUserIds: [NOVA],
+      observedAt: MARCH + MIN,
+      evidence: { messageIds: [job], quote: '“the bakery shift … 5am”' },
+    });
+    expect(observations[1].evidence).toBeUndefined();
+    expect(observations[1].observedAt).toBe(Date.UTC(2019, 2, 1, 12));
+  });
+
   it('drops what it cannot trust', () => {
     const { segment: s, plan } = segment();
     const { observations, dropped } = parseBootstrapAnswer(

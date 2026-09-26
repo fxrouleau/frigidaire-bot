@@ -15,6 +15,11 @@ export type TranscriptLine = {
   line: number;
   /** The Discord id of the message it renders (archive.db key). */
   messageId: string;
+  /**
+   * Every message a line renders, oldest first, when it merges several (the bootstrap's `Name: a / b`
+   * lines); citing the line cites them all. Default: [messageId].
+   */
+  messageIds?: string[];
   /** When the message was posted (epoch ms). */
   at: number;
   /** What the model read: the message text plus its voice transcript, if any. */
@@ -120,7 +125,10 @@ export function citedEvidence(
   }
 
   const citedLines = [...cited.values()];
-  const evidence = normalizeEvidence({ messageIds: citedLines.map((line) => line.messageId), quote });
+  const evidence = normalizeEvidence({
+    messageIds: citedLines.flatMap((line) => line.messageIds ?? [line.messageId]),
+    quote,
+  });
   const newest = citedLines.reduce<number | undefined>(
     (max, line) => (max === undefined || line.at > max ? line.at : max),
     undefined,

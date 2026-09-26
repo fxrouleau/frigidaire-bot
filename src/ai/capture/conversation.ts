@@ -106,8 +106,11 @@ export function conversationStartIndex(items: readonly { at: number }[], idleMs:
   return 0;
 }
 
-/** A transcript entry the splitter can weigh: when it was posted, and its rendered size. */
-export type SizedItem = { at: number; chars: number };
+/**
+ * A transcript entry the splitter can weigh: when it was posted (`endAt`: when a merged run of messages
+ * ended, default `at`), and its rendered size (characters here; the bootstrap weighs its lines in tokens).
+ */
+export type SizedItem = { at: number; endAt?: number; chars: number };
 
 export type Segment<T> = {
   /** The end of the previous segment, shown as context only (empty for the first segment). */
@@ -147,7 +150,7 @@ export function splitIntoSegments<T extends SizedItem>(
       let bestGap = Number.NEGATIVE_INFINITY;
       for (let k = start + 1; k <= end; k++) {
         if (sizeBefore[k] < minChars && k !== end) continue;
-        const gap = items[k].at - items[k - 1].at;
+        const gap = items[k].at - (items[k - 1].endAt ?? items[k - 1].at);
         if (gap >= bestGap) {
           bestGap = gap;
           cut = k;

@@ -132,4 +132,27 @@ describe('buildCaptureKnowledge', () => {
   it('says so when nothing is known', () => {
     expect(knowledge([{ userId: NOVA, name: 'Nova' }])).toBe('(none yet)');
   });
+
+  it("renders rows with the caller's format, and leaves out a person's block past the budget", async () => {
+    await memory.save({ category: 'fact', subject: 'Remi', subject_user_id: REMI, content: 'Works at a bakery' });
+    await memory.save({ category: 'fact', subject: 'Dale', subject_user_id: DALE, content: 'x'.repeat(300) });
+    await memory.save({ category: 'fact', subject: 'Nova', subject_user_id: NOVA, content: 'Plays chess' });
+    await memory.save({ category: 'vibe', subject: 'server', content: 'Movie night is Fridays' });
+    const text = buildCaptureKnowledge({
+      store: memory,
+      notes,
+      people: [
+        { userId: REMI, name: 'Remi' },
+        { userId: DALE, name: 'Dale' },
+        { userId: NOVA, name: 'Nova' },
+      ],
+      now,
+      rowLine: (row) => `* ${row.subject} said so ${row.seen_count}×: ${row.content}`,
+      maxChars: 150,
+    });
+    expect(text).toContain('* Remi said so 1×: Works at a bakery');
+    expect(text).not.toContain('xxx');
+    expect(text).toContain('* Nova said so 1×: Plays chess');
+    expect(text).not.toContain('Movie night');
+  });
 });

@@ -86,6 +86,17 @@ describe('citedEvidence', () => {
     expect(citedEvidence({ evidence: { quote: 'that was close' } }, lines).evidence?.messageIds).toEqual([msgId(2)]);
   });
 
+  it('cites every message of a line that merges several (the bootstrap)', () => {
+    const merged = new Map<number, TranscriptLine>([
+      [1, { line: 1, messageId: msgId(1), messageIds: [msgId(1), msgId(2)], at: BASE, text: '21:40 Remi: bakery at 5am / send help', leadIn: false }],
+      [2, { line: 2, messageId: msgId(3), at: BASE + 60_000, text: 'Dale: rip', leadIn: false }],
+    ]);
+    expect(citedEvidence({ quote: 'Remi: bakery at 5am' }, merged)).toEqual({
+      evidence: { messageIds: [msgId(1), msgId(2)], quote: 'Remi: bakery at 5am' },
+      observedAt: new Date(BASE),
+    });
+  });
+
   it('drops an invented quote but keeps the cited lines', () => {
     const result = citedEvidence({ evidence: { lines: [2], quote: 'I love working at the bakery' } }, LINES);
     expect(result.evidence).toEqual({ messageIds: [msgId(2)] });

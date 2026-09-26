@@ -179,6 +179,13 @@ describe('splitIntoSegments', () => {
     expect(segments.map((s) => ns(s.items))).toEqual([[0, 1], [2], [3]]);
   });
 
+  it("measures a pause from where a merged item ends (endAt), not where it starts", () => {
+    // Item 5 is a 30-minute run ending right before item 6; item 8 follows a real 10-minute pause.
+    const list = items(12, 100, { 6: 31, 8: 10 }).map((item) => (item.n === 5 ? { ...item, endAt: item.at + 30 * MIN } : item));
+    const segments = splitIntoSegments(list, { maxChars: 1_000, minFill: 0.5 });
+    expect(ns(segments[0].items)).toEqual(range(0, 8));
+  });
+
   it('covers every item exactly once, in order', () => {
     const gaps = Object.fromEntries(range(1, 300).map((k) => [k, (k * 7919) % 13]));
     const list = items(300, 150, gaps).map((item) => ({ ...item, chars: 50 + ((item.n * 31) % 400) }));

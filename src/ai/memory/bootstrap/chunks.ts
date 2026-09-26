@@ -1,10 +1,12 @@
-// Token-sized chunks of a transcript for the memory bootstrap's readers (docs/memory.md "Bootstrap"). A
-// reader gets one chunk at a time, so a chunk must be big enough to hold whole conversations and small
-// enough to avoid context rot: sized by tokens, not by calendar. Each boundary goes at the LONGEST quiet
-// gap among the lines that would fill the chunk to 75–100% of its target, so a chunk never ends in the
+// Token-sized chunks of a transcript for the memory bootstrap's readers (docs/memory.md "Bootstrap"), and
+// the built-in bootstrap's segments. A reader gets one chunk at a time, so a chunk must be big enough to
+// hold whole conversations and small enough to avoid context rot: sized by tokens, not by calendar. Each
+// boundary goes at the LONGEST quiet gap among the lines that would fill the chunk to 75–100% of its
+// target (capture's splitter, which cuts long conversations the same way), so a chunk never ends in the
 // middle of a conversation when a quieter point is near (a single day over the target is split at its own
 // longest gap the same way), and each chunk opens with the conversation just before it as context.
 // Deterministic: the same transcript and options always give the same chunks.
+import { splitIntoSegments } from '../../capture/conversation';
 import { estimateTokens } from './tokens';
 import type { TranscriptLine } from './transcript';
 
@@ -39,48 +41,26 @@ export function lineCosts(lines: TranscriptLine[]): number[] {
   });
 }
 
-/** The quiet time before line `k` (ms): how long nobody had posted when it came. */
-function gapBefore(lines: TranscriptLine[], k: number): number {
-  return lines[k].startMs - lines[k - 1].endMs;
-}
-
 /**
- * Plans the chunks of `lines` (oldest first). Greedy: from each start, take lines while they fit the
- * target, then end the chunk at the longest gap among the boundaries that leave it at least `minFill`
- * full (the latest one on a tie, so chunks stay full). A line bigger than the target is a chunk alone.
+ * Plans the chunks of `lines` (oldest first) with capture's splitter (src/ai/capture/conversation.ts
+ * splitIntoSegments), weighing each line in estimated tokens: from each start, take lines while they fit
+ * the target, then end the chunk at the longest quiet gap (from a line's last message to the next line)
+ * among the boundaries that leave it at least `minFill` full (the latest one on a tie, so chunks stay
+ * full). A line bigger than the target is a chunk alone. The lead-in is whole lines within its budget.
  */
 export function planChunks(lines: TranscriptLine[], opts: ChunkOptions): ChunkRange[] {
-  const target = Math.max(1, opts.targetTokens);
-  const minFill = Math.min(1, Math.max(0, opts.minFill ?? CHUNK_DEFAULTS.minFill));
   const costs = lineCosts(lines);
-  const chunks: ChunkRange[] = [];
-  let start = 0;
-  while (start < lines.length) {
-    let end = start;
-    let tokens = 0;
-    while (end < lines.length && (end === start || tokens + costs[end] <= target)) {
-      tokens += costs[end];
-      end++;
-    }
-    if (end < lines.length) {
-      let best = end;
-      let bestGap = Number.NEGATIVE_INFINITY;
-      let filled = 0;
-      for (let k = start + 1; k <= end; k++) {
-        filled += costs[k - 1];
-        if (filled < minFill * target && k < end) continue;
-        const gap = gapBefore(lines, k);
-        if (gap >= bestGap) {
-          best = k;
-          bestGap = gap;
-        }
-      }
-      end = best;
-    }
-    chunks.push({ start, end, leadInStart: leadInStart(costs, start, opts.leadInTokens) });
-    start = end;
-  }
-  return chunks;
+  const items = lines.map((line, index) => ({ at: line.startMs, endAt: line.endMs, chars: costs[index], index }));
+  const segments = splitIntoSegments(items, {
+    maxChars: Math.max(1, opts.targetTokens),
+    minFill: Math.min(1, Math.max(0, opts.minFill ?? CHUNK_DEFAULTS.minFill)),
+    leadInChars: 0,
+  });
+  return segments.map((segment) => {
+    const start = segment.items[0].index;
+    const end = (segment.items.at(-1)?.index ?? start) + 1;
+    return { start, end, leadInStart: leadInStart(costs, start, opts.leadInTokens) };
+  });
 }
 
 /** Where a lead-in of about `tokens` before line `start` begins (whole lines; `start` itself when 0). */
