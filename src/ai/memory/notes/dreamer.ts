@@ -1,26 +1,85 @@
 // Memory v2's writers (docs/memory.md): the nightly dream that folds each person's new journal rows into
-// their notes (and circles), the group pass after it, and the owner's edits. This module is the CONTRACT
-// the phase-2 parts build against:
+// their notes (and circles), the group pass after it, and the owner's edits.
 //
-// - The dream (dream part) implements dreamPerson(), dreamGroup(), runNightlyDream() and proposeEdit()
-//   here, with its prompts, in this file or modules it adds next to it. Every model answer goes through
-//   parseNotesOutput() (schema.ts: the JSON output schema and its validator, shared by the dream, owner
-//   edits, the import and the built-in bootstrap) and is saved with NotesStore.applyNotesOutput(), all or
-//   nothing. The watermark moves (NotesStore.recordDreamSuccess) only after a successful save; a failure is
-//   recorded (recordDreamFailure) and retried the next night.
-// - The viewer (viewer part) calls proposeEdit() for the owner's Edit button, shows previewChanges() as the
-//   before/after, and on Confirm calls applyEdit() with the same proposal (it holds the proposal meanwhile).
+// - dreamPerson() / dreamGroup(): one MEMORY_DREAM_MODEL call (tag memory_dream, ZDR) over the owner's
+//   names, ALL their current notes and circles, the journal rows above their watermark and the cited
+//   passages of the entries that matter most (dreamPrompts.ts). The answer goes through parseNotesOutput()
+//   (schema.ts, shared by every writer) and is saved with NotesStore.applyNotesOutput(), all or nothing. A
+//   refused answer (invalid JSON, a rule broken, a write the store refuses) gets ONE repair round with the
+//   errors; then the watermark moves (recordDreamSuccess) only after a successful save. A failure is
+//   recorded (recordDreamFailure) and retried the next night. They never throw.
+// - runNightlyDream(): the people with new rows (most recently active first, capped), then the group. The
+//   scheduler that calls it once per Eastern day, and the report line, live in dreamSchedule.ts.
+// - proposeEdit(): the owner's Edit button (MEMORY_EDIT_MODEL, tag memory_edit): the target's notes plus
+//   the instruction, answered as a NotesOutput and dry-run against the store (a savepoint rolled back), so
+//   the preview never shows something Confirm would refuse. Nothing is saved: the viewer shows
+//   previewChanges() and saves with applyEdit() on Confirm.
 //
-// Until the dream part lands, the four model-backed functions throw: nothing in production calls them yet.
+// The dream model (Claude Opus by default) only reasons when asked, so the calls send no reasoning field
+// and leave generous output room (NOTES_MAX_TOKENS): everything generated is the answer.
 import type OpenAI from 'openai';
-import { canonicalUserId } from '../../../linkedAccounts';
-import type { MemoryStore } from '../memoryStore';
+import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
+import { config } from '../../../config';
+import { accountIdsFor, canonicalUserId } from '../../../linkedAccounts';
+import { logger } from '../../../logger';
+import { getOpenRouterClient } from '../../openRouterClient';
+import { formatIdentityLines } from '../../promptSections';
+import { featureRequestOptions, type UsageFeature } from '../../usage';
+import { extractUsage } from '../../usageFetch';
+import type { Identity, Memory, MemoryStore } from '../memoryStore';
+import {
+  buildEditPrompt,
+  buildGroupDreamPrompt,
+  buildPersonDreamPrompt,
+  easternDay,
+  excerptOnlyProblems,
+  type JournalRenderContext,
+  MAX_JOURNAL_ROWS_PER_DREAM,
+  pickEvidence,
+  renderCircles,
+  renderJournal,
+  renderPassages,
+  renderRoster,
+  repairPrompt,
+} from './dreamPrompts';
 import type { Note, NotesStore, WriteNotesResult } from './notesStore';
-import type { EvidencePassage, EvidencePassageOptions } from './passages';
-import type { CircleMember, NoteOwner, NotesOutput } from './schema';
+import { type EvidencePassage, type EvidencePassageOptions, loadEvidencePassages } from './passages';
+import {
+  type CircleMember,
+  clampSummary,
+  type NoteOwner,
+  type NoteScope,
+  type NotesOutput,
+  normalizeTopic,
+  PROFILE_TOPIC,
+  parseNotesOutput,
+} from './schema';
+import { noteShapeWarnings } from './sections';
 
 export type { NotesOutput } from './schema';
 export { parseNotesOutput, validateNotesOutput } from './schema';
+
+const DREAM_FEATURE: UsageFeature = 'memory_dream';
+const EDIT_FEATURE: UsageFeature = 'memory_edit';
+/**
+ * Output room per call. A dream rewrites the profile in full plus the topic notes and circles it changes
+ * (a few thousand tokens on a normal night; far more when a first dream builds everything at once). Only
+ * the tokens actually generated are billed, and the dream model doesn't reason unless asked, so this is all
+ * answer.
+ */
+const NOTES_MAX_TOKENS = 16_000;
+/** A long rewrite takes minutes: well past the shared client's per-attempt default. */
+const MODEL_TIMEOUT_MS = 10 * 60_000;
+/** Repair rounds after a refused answer (each resends the whole conversation). */
+const MAX_REPAIRS = 1;
+/** A night stops after this many people failed in a row (the API is down; the rest wait for tomorrow). */
+const MAX_FAILURES_IN_A_ROW = 3;
+/** Cited passages one dream rereads at most. */
+const MAX_PASSAGES_PER_DREAM = 8;
+/** The owner's edit instruction (the modal's limit). */
+export const MAX_EDIT_INSTRUCTION_CHARS = 4_000;
+/** How much of a failure is kept and logged. */
+const MAX_ERROR_CHARS = 600;
 
 /** What an owner edit changes: a person's notes (and their circles), the group's, or one circle. */
 export type EditTarget = NoteOwner | { scope: 'circle'; slug: string };
@@ -62,8 +121,11 @@ export type DreamOutcome =
   | { status: 'unchanged'; owner: NoteOwner; watermark: number; costUsd?: number }
   /** Nothing above the watermark: no call was made. */
   | { status: 'skipped'; owner: NoteOwner; reason: 'nothing-new' }
-  /** No usable answer (model error, invalid JSON, a refused write): the watermark stays; retried next night. */
-  | { status: 'failed'; owner: NoteOwner; error: string };
+  /**
+   * No usable answer (model error, invalid JSON, a refused write): the watermark stays; retried next night.
+   * `costUsd`: what the refused answers cost, when any came back.
+   */
+  | { status: 'failed'; owner: NoteOwner; error: string; costUsd?: number };
 
 /** Context the group pass gets from the night's person dreams. */
 export type GroupDreamContext = {
@@ -103,48 +165,554 @@ export type EditProposal =
     }
   | { ok: false; error: string };
 
-function notImplemented(name: string): never {
-  throw new Error(`not implemented: ${name} (memory v2 dream part)`);
+// ---- The model call ----
+
+type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+
+type NotesRequestBody = {
+  model: string;
+  max_tokens: number;
+  messages: ChatMessage[];
+  provider: { zdr: true };
+};
+
+type ModelAnswer = { text: string; truncated: boolean; costUsd?: number };
+
+/** One ZDR completion, tagged for the usage ledger; its cost read off the response when reported. */
+async function askModel(
+  client: OpenAI,
+  model: string,
+  feature: UsageFeature,
+  messages: ChatMessage[],
+): Promise<ModelAnswer> {
+  const body: NotesRequestBody = {
+    model,
+    max_tokens: NOTES_MAX_TOKENS,
+    messages: [...messages],
+    provider: { zdr: true },
+  };
+  // The SDK's types don't know OpenRouter's `provider` object: bridged here, once.
+  const response = await client.chat.completions.create(body as unknown as ChatCompletionCreateParamsNonStreaming, {
+    ...featureRequestOptions(feature),
+    timeout: MODEL_TIMEOUT_MS,
+    maxRetries: 1,
+  });
+  const choice = response.choices?.[0];
+  return {
+    text: choice?.message?.content ?? '',
+    truncated: choice?.finish_reason === 'length',
+    costUsd: extractUsage(response, feature)?.cost,
+  };
 }
 
+type Checked<T> = { ok: true; value: T } | { ok: false; errors: string[] };
+
 /**
- * Dreams one person (main id): their names, ALL their current notes and circles, the journal rows above
- * their watermark (dated, category, source/speaker, recurrence and seen span, evidence) and, for claims
- * that are contested, low-confidence or about to become core profile facts, the cited passages; today's
- * date. One MEMORY_DREAM_MODEL call; the answer is parsed with parseNotesOutput({ scope: 'person',
- * requireProfile: true, allowedIds }) and saved with applyNotesOutput(..., { updatedBy: 'dream' }); the
- * watermark moves to the highest journal_seq it read. Never throws: failures come back as 'failed'.
+ * Asks, checks the answer with `check` (parse, validate, and for the dream the save itself), and on a
+ * refusal asks once more with the errors. Model and network errors throw (the callers turn them into
+ * failures).
  */
-export async function dreamPerson(_ownerId: string, _deps: DreamDeps): Promise<DreamOutcome> {
-  return notImplemented('dreamPerson');
+async function draftWithRepair<T>(args: {
+  client: OpenAI;
+  model: string;
+  feature: UsageFeature;
+  system: string;
+  user: string;
+  check: (text: string) => Checked<T>;
+}): Promise<{ result: Checked<T>; costUsd?: number }> {
+  const messages: ChatMessage[] = [
+    { role: 'system', content: args.system },
+    { role: 'user', content: args.user },
+  ];
+  let costUsd: number | undefined;
+  for (let attempt = 0; ; attempt++) {
+    const answer = await askModel(args.client, args.model, args.feature, messages);
+    if (answer.costUsd !== undefined) costUsd = (costUsd ?? 0) + answer.costUsd;
+    const result: Checked<T> = answer.truncated
+      ? { ok: false, errors: ['the answer was cut off at the length limit'] }
+      : answer.text.trim()
+        ? args.check(answer.text)
+        : { ok: false, errors: ['the answer was empty'] };
+    if (result.ok || attempt >= MAX_REPAIRS) return { result, costUsd };
+    messages.push(
+      {
+        role: 'assistant',
+        content: answer.truncated ? '(an answer cut off at the length limit)' : answer.text || '(empty)',
+      },
+      { role: 'user', content: repairPrompt(result.errors, answer.truncated) },
+    );
+  }
 }
+
+// ---- Shared pieces ----
+
+/** A member's current display name by any account id. */
+function nameResolver(memory: MemoryStore): (userId: string) => string | undefined {
+  return (id) => memory.getIdentityById(canonicalUserId(id))?.display_name ?? memory.getIdentityById(id)?.display_name;
+}
+
+/** Ids a writer's output may carry: everyone in SERVER PEOPLE (the input), plus `extra` (the owner, circle members). */
+function allowedIdsFrom(identities: Identity[], extra: Iterable<string> = []): string[] {
+  return [...new Set([...identities.map((i) => i.discord_user_id), ...extra])];
+}
+
+function circleMemberIds(circles: Note[]): string[] {
+  return circles.flatMap((c) => c.members.map((m) => m.memberId));
+}
+
+/** The oldest rows above the watermark, capped; the rest wait for the next dream. */
+function rowsToDream(rows: Memory[]): Memory[] {
+  return rows.slice(0, MAX_JOURNAL_ROWS_PER_DREAM);
+}
+
+function highestSeq(rows: Memory[]): number {
+  return rows.reduce((max, r) => Math.max(max, r.journal_seq ?? 0), 0);
+}
+
+function errorText(errors: string[]): string {
+  const text = errors.join('; ');
+  return text.length > MAX_ERROR_CHARS ? `${text.slice(0, MAX_ERROR_CHARS - 1)}…` : text;
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    // The SDK's API errors already read "429 …"; anything else carrying a status gets it prefixed.
+    const status = (error as { status?: unknown }).status;
+    const prefix = typeof status === 'number' && !error.message.startsWith(String(status)) ? `${status} ` : '';
+    return `${prefix}${error.message}`.slice(0, MAX_ERROR_CHARS);
+  }
+  return String(error).slice(0, MAX_ERROR_CHARS);
+}
+
+function formatCost(costUsd: number | undefined): string {
+  return costUsd === undefined ? '' : ` · $${costUsd.toFixed(3)}`;
+}
+
+function ownerLabel(owner: NoteOwner, name?: string): string {
+  return owner.scope === 'group' ? 'the group' : `${name ?? 'someone'} (${owner.ownerId})`;
+}
+
+/** Advisory shape checks on what a dream wrote (the store never refuses a note for its shape). */
+function logShapeWarnings(label: string, written: Note[]): void {
+  for (const note of written) {
+    if (note.scope === 'circle' || !note.active) continue;
+    const kind = note.topic === PROFILE_TOPIC && note.scope === 'person' ? 'profile' : 'topic';
+    const warnings = noteShapeWarnings(note.content, kind);
+    if (warnings.length > 0) logger.info(`dream: ${label}'s "${note.topic}" note: ${warnings.join('; ')}`);
+  }
+}
+
+type Saved = { output: NotesOutput; saved: Extract<WriteNotesResult, { ok: true }> };
+
+/**
+ * The end of a dream: a saved answer moves the watermark (updated, or unchanged when nothing differed); no
+ * usable answer records the failure and leaves the watermark alone.
+ */
+function finishDream(
+  deps: DreamDeps,
+  owner: NoteOwner,
+  label: string,
+  watermark: number,
+  outcome: { result: Checked<Saved>; costUsd?: number },
+): DreamOutcome {
+  const cost = outcome.costUsd !== undefined ? { costUsd: outcome.costUsd } : {};
+  if (!outcome.result.ok) {
+    const error = errorText(outcome.result.errors);
+    deps.notes.recordDreamFailure(owner, error);
+    logger.warn(`dream: ${label} failed${formatCost(outcome.costUsd)}: ${error}`);
+    return { status: 'failed', owner, error, ...cost };
+  }
+  const { output, saved } = outcome.result.value;
+  deps.notes.recordDreamSuccess(owner, watermark);
+  if (saved.written.length === 0 && saved.removed.length === 0) {
+    logger.info(`dream: ${label} unchanged (journal through #${watermark})${formatCost(outcome.costUsd)}`);
+    return { status: 'unchanged', owner, watermark, ...cost };
+  }
+  logShapeWarnings(label, saved.written);
+  const touched = [
+    ...saved.written.map((n) => (n.scope === 'circle' ? `circle:${n.topic}` : n.topic)),
+    ...saved.removed.map((n) => `-${n.scope === 'circle' ? `circle:${n.topic}` : n.topic}`),
+  ];
+  logger.info(
+    `dream: ${label} updated [${touched.join(', ')}] (journal through #${watermark})${formatCost(outcome.costUsd)}: ${output.change_summary || '(no summary)'}`,
+  );
+  return {
+    status: 'updated',
+    owner,
+    written: saved.written,
+    removed: saved.removed,
+    changeSummary: output.change_summary,
+    watermark,
+    ...cost,
+  };
+}
+
+/** A dream that threw (a model or network error, a store error): recorded, never rethrown. */
+function failDream(deps: DreamDeps, owner: NoteOwner, label: string, error: unknown): DreamOutcome {
+  const message = describeError(error);
+  try {
+    deps.notes.recordDreamFailure(owner, message);
+  } catch (recordError) {
+    logger.warn(`dream: recording ${label}'s failure failed:`, recordError);
+  }
+  logger.warn(`dream: ${label} failed: ${message}`);
+  return { status: 'failed', owner, error: message };
+}
+
+/** The cited passages worth rereading for these rows, as a prompt section ('' when none). */
+function passagesFor(deps: DreamDeps, rows: Memory[], ctx: JournalRenderContext): string {
+  const picks = pickEvidence(rows, ctx);
+  if (picks.length === 0) return '';
+  const load = deps.loadPassages ?? loadEvidencePassages;
+  let passages: EvidencePassage[] = [];
+  try {
+    passages = load(
+      picks.map((p) => p.messageId),
+      { maxPassages: MAX_PASSAGES_PER_DREAM },
+    );
+  } catch (error) {
+    logger.warn('dream: reading evidence passages failed; dreaming without them:', error);
+  }
+  return renderPassages(passages, picks, ctx.nameOf);
+}
+
+// ---- The person dream ----
+
+/**
+ * Dreams one person (any account id; their main id is used): their names, ALL their current notes and
+ * circles, the journal rows above their watermark (the oldest MAX_JOURNAL_ROWS_PER_DREAM; dated, category,
+ * source/speaker, recurrence and seen span, related members, quote) and the cited passages of the entries
+ * that matter most (corrections, traits, recurring facts); today's date. One MEMORY_DREAM_MODEL call (plus
+ * one repair round when the answer is refused); the answer is parsed with parseNotesOutput({ scope:
+ * 'person', requireProfile: true, allowedIds }) and saved with applyNotesOutput(..., { updatedBy: 'dream'
+ * }); the watermark moves to the highest journal_seq it read. Never throws: failures come back as 'failed'.
+ */
+export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<DreamOutcome> {
+  const ownerId = canonicalUserId(rawOwnerId);
+  const owner: NoteOwner = { scope: 'person', ownerId };
+  let label = ownerLabel(owner);
+  try {
+    const rows = rowsToDream(deps.notes.newJournal(owner));
+    if (rows.length === 0) return { status: 'skipped', owner, reason: 'nothing-new' };
+
+    const memory = deps.memory;
+    const nameOf = nameResolver(memory);
+    const name = nameOf(ownerId) ?? rows.at(-1)?.subject ?? 'this member';
+    label = ownerLabel(owner, name);
+    const client = deps.client ?? getOpenRouterClient();
+    if (!client) return failDream(deps, owner, label, new Error('OPENROUTER_API_KEY is not set'));
+
+    const now = (deps.now ?? (() => new Date()))();
+    const identities = memory.getAllIdentities();
+    const accounts = new Set(accountIdsFor(ownerId));
+    const person =
+      formatIdentityLines(identities.filter((i) => accounts.has(i.discord_user_id)))[0] ??
+      `- ${name} (id:${ownerId}): not in SERVER PEOPLE (they may have left)`;
+    const circles = deps.notes.circlesOf(ownerId, { includeFormer: true }).map((c) => c.circle);
+    const circleView = renderCircles(`CIRCLES ${name} is or was in`, circles, nameOf);
+    const ctx: JournalRenderContext = { ownerId, nameOf, canonical: canonicalUserId };
+    const prompt = buildPersonDreamPrompt({
+      now,
+      roster: renderRoster(identities),
+      person,
+      name,
+      notes: deps.notes.listNotes(owner),
+      circles: circleView.text,
+      journal: renderJournal(rows, ctx),
+      passages: passagesFor(deps, rows, ctx),
+    });
+    const allowedIds = allowedIdsFrom(identities, [...accounts, ...circleMemberIds(circles)]);
+    const watermark = highestSeq(rows);
+
+    const outcome = await draftWithRepair<Saved>({
+      client,
+      model: deps.model ?? config.dream.model,
+      feature: DREAM_FEATURE,
+      system: prompt.system,
+      user: prompt.user,
+      check: (text) => {
+        const parsed = parseNotesOutput(text, { scope: 'person', requireProfile: true, allowedIds });
+        if (!parsed.ok) return parsed;
+        const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
+        if (excerpts.length > 0) return { ok: false, errors: excerpts };
+        const saved = deps.notes.applyNotesOutput(owner, parsed.value, { updatedBy: 'dream', allowedIds });
+        return saved.ok ? { ok: true, value: { output: parsed.value, saved } } : { ok: false, errors: saved.errors };
+      },
+    });
+    return finishDream(deps, owner, label, watermark, outcome);
+  } catch (error) {
+    return failDream(deps, owner, label, error);
+  }
+}
+
+// ---- The group dream ----
 
 /**
  * The group pass after the people: journal rows about the server (no person) plus the night's person
- * change summaries become the group's notes (lore, running jokes, vibe; server-wide only) and any circles
- * that span the group. Same contract as dreamPerson with scope 'group'.
+ * change summaries become the group's notes (vibe, lore, running jokes; server-wide only) and any circles
+ * that span the group. Same contract as dreamPerson with scope 'group'. Skipped when the group has no new
+ * rows: person changes alone don't wake the strong model (cost control).
  */
-export async function dreamGroup(_deps: DreamDeps, _context: GroupDreamContext): Promise<DreamOutcome> {
-  return notImplemented('dreamGroup');
+export async function dreamGroup(deps: DreamDeps, context: GroupDreamContext): Promise<DreamOutcome> {
+  const owner: NoteOwner = { scope: 'group' };
+  const label = ownerLabel(owner);
+  try {
+    const rows = rowsToDream(deps.notes.newJournal(owner));
+    if (rows.length === 0) return { status: 'skipped', owner, reason: 'nothing-new' };
+    const client = deps.client ?? getOpenRouterClient();
+    if (!client) return failDream(deps, owner, label, new Error('OPENROUTER_API_KEY is not set'));
+
+    const memory = deps.memory;
+    const nameOf = nameResolver(memory);
+    const now = (deps.now ?? (() => new Date()))();
+    const identities = memory.getAllIdentities();
+    const circles = deps.notes.listCircles();
+    const circleView = renderCircles('CIRCLES', circles, nameOf);
+    const ctx: JournalRenderContext = { nameOf, canonical: canonicalUserId };
+    const prompt = buildGroupDreamPrompt({
+      now,
+      roster: renderRoster(identities),
+      notes: deps.notes.listNotes(owner),
+      circles: circleView.text,
+      personChanges: context.personChanges.map((c) => ({ name: c.name, changeSummary: c.changeSummary })),
+      journal: renderJournal(rows, ctx),
+      passages: passagesFor(deps, rows, ctx),
+    });
+    const allowedIds = allowedIdsFrom(identities, circleMemberIds(circles));
+    const watermark = highestSeq(rows);
+
+    const outcome = await draftWithRepair<Saved>({
+      client,
+      model: deps.model ?? config.dream.model,
+      feature: DREAM_FEATURE,
+      system: prompt.system,
+      user: prompt.user,
+      check: (text) => {
+        const parsed = parseNotesOutput(text, { scope: 'group', allowedIds });
+        if (!parsed.ok) return parsed;
+        const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
+        if (excerpts.length > 0) return { ok: false, errors: excerpts };
+        const saved = deps.notes.applyNotesOutput(owner, parsed.value, { updatedBy: 'dream', allowedIds });
+        return saved.ok ? { ok: true, value: { output: parsed.value, saved } } : { ok: false, errors: saved.errors };
+      },
+    });
+    return finishDream(deps, owner, label, watermark, outcome);
+  } catch (error) {
+    return failDream(deps, owner, label, error);
+  }
+}
+
+// ---- One night ----
+
+function addCost(total: number | undefined, outcome: DreamOutcome | undefined): number | undefined {
+  const cost = outcome && 'costUsd' in outcome ? outcome.costUsd : undefined;
+  return cost === undefined ? total : (total ?? 0) + cost;
 }
 
 /**
- * One night: NotesStore.pendingDreams({ limit: MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT }) people, one at a time,
- * then the group. The scheduler that calls it (once per Eastern day, on the first tick at/after
- * MEMORY_DREAM_HOUR, catching up the same day, never twice) and the report-channel line belong to the
- * dream part.
+ * One night: NotesStore.pendingDreams({ limit: maxPeople ?? MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT }) people,
+ * one at a time (most recently active first), then the group. Stops early after MAX_FAILURES_IN_A_ROW
+ * failed people in a row (an outage: everyone left waits for the next night). Never throws. The scheduler
+ * that calls it (once per Eastern day) and the report line are dreamSchedule.ts's.
  */
-export async function runNightlyDream(_deps: DreamDeps & { maxPeople?: number }): Promise<NightlyDreamResult> {
-  return notImplemented('runNightlyDream');
+export async function runNightlyDream(deps: DreamDeps & { maxPeople?: number }): Promise<NightlyDreamResult> {
+  const now = (deps.now ?? (() => new Date()))();
+  const day = easternDay(now);
+  const client = deps.client ?? getOpenRouterClient();
+  if (!client) {
+    logger.warn(`dream: OPENROUTER_API_KEY is not set; no dream tonight (${day}).`);
+    return { day, people: [] };
+  }
+  const withClient: DreamDeps = { ...deps, client };
+
+  let pending: ReturnType<NotesStore['pendingDreams']>;
+  try {
+    pending = deps.notes.pendingDreams({ limit: deps.maxPeople ?? config.dream.maxPeoplePerNight });
+  } catch (error) {
+    logger.warn('dream: reading who has new journal rows failed; no dream tonight:', error);
+    return { day, people: [] };
+  }
+  const count = pending.people.length;
+  logger.info(
+    `dream: night ${day}: ${count} ${count === 1 ? 'person' : 'people'} with new journal rows${pending.group ? ', and the group' : ''}.`,
+  );
+
+  const people: DreamOutcome[] = [];
+  let failuresInARow = 0;
+  for (const entry of pending.people) {
+    if (entry.owner.scope !== 'person') continue;
+    const outcome = await dreamPerson(entry.owner.ownerId, withClient);
+    people.push(outcome);
+    failuresInARow = outcome.status === 'failed' ? failuresInARow + 1 : 0;
+    if (failuresInARow >= MAX_FAILURES_IN_A_ROW) {
+      logger.warn(
+        `dream: ${failuresInARow} people failed in a row; stopping tonight's dream (the rest wait for tomorrow).`,
+      );
+      break;
+    }
+  }
+
+  let group: DreamOutcome | undefined;
+  if (failuresInARow < MAX_FAILURES_IN_A_ROW) {
+    const nameOf = nameResolver(deps.memory);
+    const personChanges = people.flatMap((o) =>
+      o.status === 'updated' && o.owner.scope === 'person'
+        ? [{ ownerId: o.owner.ownerId, name: nameOf(o.owner.ownerId) ?? 'someone', changeSummary: o.changeSummary }]
+        : [],
+    );
+    group = await dreamGroup(withClient, { personChanges });
+  }
+
+  let costUsd: number | undefined;
+  for (const outcome of [...people, group]) costUsd = addCost(costUsd, outcome);
+  return { day, people, ...(group ? { group } : {}), ...(costUsd !== undefined ? { costUsd } : {}) };
+}
+
+// ---- Owner edits ----
+
+/** Carries a dry run's result out of the savepoint it rolls back. */
+class DryRunRollback extends Error {
+  constructor(readonly result: WriteNotesResult) {
+    super('memory edit dry run');
+  }
 }
 
 /**
- * Drafts an owner edit with MEMORY_EDIT_MODEL: the target's current notes (a person's with their circles)
- * plus the instruction, answered as a NotesOutput for the target's scope ('circle' for a circle edit:
- * exactly that circle). Nothing is saved: see previewChanges() and applyEdit().
+ * What applyEdit() would return for this output, with nothing written: the store's own checks (circle
+ * membership, limits, a person's circles only) run inside a transaction that is always rolled back.
  */
-export async function proposeEdit(_request: EditRequest, _deps: DreamDeps): Promise<EditProposal> {
-  return notImplemented('proposeEdit');
+export function dryRunEdit(
+  deps: Pick<DreamDeps, 'notes' | 'memory'>,
+  target: EditTarget,
+  output: NotesOutput,
+  allowedIds: string[],
+): WriteNotesResult {
+  try {
+    deps.memory.sharedDatabase().transaction(() => {
+      throw new DryRunRollback(deps.notes.applyNotesOutput(target, output, { updatedBy: 'edit', allowedIds }));
+    })();
+  } catch (error) {
+    if (error instanceof DryRunRollback) return error.result;
+    throw error;
+  }
+  return { ok: false, errors: ['the dry run did not finish'] };
+}
+
+type EditView = {
+  scope: NoteScope;
+  /** What is being edited, for the prompt. */
+  what: string;
+  /** For the log. */
+  label: string;
+  target: EditTarget;
+  notes?: Note[];
+  circles: Note[];
+};
+
+/** What an edit of `target` shows the model, or an error when the target doesn't exist. */
+function editView(target: EditTarget, deps: DreamDeps): EditView | { error: string } {
+  if (target.scope === 'circle') {
+    const slug = normalizeTopic(target.slug);
+    const circle = slug ? deps.notes.getCircle(slug) : undefined;
+    if (!slug || !circle) return { error: `there is no circle "${target.slug}"` };
+    return {
+      scope: 'circle',
+      what: `the circle "${circle.title}" (slug "${circle.topic}"): write exactly this circle, keeping its slug`,
+      label: `circle "${slug}"`,
+      target: { scope: 'circle', slug },
+      circles: [circle],
+    };
+  }
+  if (target.scope === 'group') {
+    return {
+      scope: 'group',
+      what: "your notes on the group as a whole (the server's circles are shown too)",
+      label: "the group's notes",
+      target,
+      notes: deps.notes.listNotes(target),
+      circles: deps.notes.listCircles(),
+    };
+  }
+  const ownerId = canonicalUserId(target.ownerId);
+  const name = nameResolver(deps.memory)(ownerId) ?? 'this member';
+  return {
+    scope: 'person',
+    what: `your notes on ${name}: their profile, their topic notes and the circles they are or were in`,
+    label: `${name}'s notes (${ownerId})`,
+    target: { scope: 'person', ownerId },
+    notes: deps.notes.listNotes({ scope: 'person', ownerId }),
+    circles: deps.notes.circlesOf(ownerId, { includeFormer: true }).map((c) => c.circle),
+  };
+}
+
+/**
+ * Drafts an owner edit with MEMORY_EDIT_MODEL (tag memory_edit): the target's current notes (a person's
+ * with their circles; the group's with every circle; one circle) plus the instruction, answered as a
+ * NotesOutput for the target's scope ('circle' for a circle edit: exactly that circle). The draft is
+ * checked against the store in a rolled-back dry run, with one repair round when refused. Nothing is saved:
+ * see previewChanges() and applyEdit(). Never throws: problems come back as { ok: false, error }.
+ */
+export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promise<EditProposal> {
+  try {
+    const instruction = request.instruction.trim();
+    if (!instruction) return { ok: false, error: 'the instruction is empty' };
+    if (instruction.length > MAX_EDIT_INSTRUCTION_CHARS) {
+      return {
+        ok: false,
+        error: `the instruction is longer than ${MAX_EDIT_INSTRUCTION_CHARS.toLocaleString('en-US')} characters`,
+      };
+    }
+    const view = editView(request.target, deps);
+    if ('error' in view) return { ok: false, error: view.error };
+    const client = deps.client ?? getOpenRouterClient();
+    if (!client) return { ok: false, error: 'OPENROUTER_API_KEY is not set' };
+
+    const nameOf = nameResolver(deps.memory);
+    const identities = deps.memory.getAllIdentities();
+    const circleView = renderCircles(view.scope === 'circle' ? 'THE CIRCLE' : 'CIRCLES', view.circles, nameOf);
+    const prompt = buildEditPrompt({
+      now: (deps.now ?? (() => new Date()))(),
+      roster: renderRoster(identities),
+      what: view.what,
+      notes: view.notes,
+      circles: circleView.text,
+      instruction,
+    });
+    const owned = view.target.scope === 'person' ? accountIdsFor(view.target.ownerId) : [];
+    const allowedIds = allowedIdsFrom(identities, [...owned, ...circleMemberIds(view.circles)]);
+
+    const { result, costUsd } = await draftWithRepair<NotesOutput>({
+      client,
+      model: deps.model ?? config.dream.editModel,
+      feature: EDIT_FEATURE,
+      system: prompt.system,
+      user: prompt.user,
+      check: (text) => {
+        const parsed = parseNotesOutput(text, { scope: view.scope, allowedIds });
+        if (!parsed.ok) return parsed;
+        const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
+        if (excerpts.length > 0) return { ok: false, errors: excerpts };
+        const dryRun = dryRunEdit(deps, view.target, parsed.value, allowedIds);
+        return dryRun.ok ? parsed : { ok: false, errors: dryRun.errors };
+      },
+    });
+    if (!result.ok) {
+      const error = errorText(result.errors);
+      logger.warn(
+        `memory edit: drafting an edit of ${view.label} for ${request.requestedBy} failed${formatCost(costUsd)}: ${error}`,
+      );
+      return { ok: false, error };
+    }
+    const changeSummary = result.value.change_summary || clampSummary(instruction);
+    logger.info(
+      `memory edit: drafted an edit of ${view.label} for ${request.requestedBy}${formatCost(costUsd)}: ${changeSummary}`,
+    );
+    return { ok: true, target: view.target, output: result.value, allowedIds, changeSummary };
+  } catch (error) {
+    const message = describeError(error);
+    logger.warn(`memory edit: drafting failed: ${message}`);
+    return { ok: false, error: message };
+  }
 }
 
 /** Saves a confirmed edit as new versions (updated_by 'edit', reason = the owner's instruction). */
