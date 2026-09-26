@@ -10,6 +10,7 @@ import {
   lowestEffort,
   modelEndpointsUrl,
   parseCatalogEntry,
+  parsePricing,
   staticModelInfo,
 } from './modelCatalog';
 
@@ -266,6 +267,37 @@ describe('ModelCatalog: modalities and reasoning effort', () => {
     advance(25 * 60 * 60 * 1000);
     expect((await catalog.catalogInfo('z-ai/glm-5.3-flash'))?.lowestEffort).toBe('low');
     expect(catalog.lookupContextLength('z-ai/glm-5.3-flash')).toBe(1_310_720);
+  });
+});
+
+describe('ModelCatalog: prices', () => {
+  it("reads per-token prompt and completion prices from OpenRouter's model list", async () => {
+    const { catalog, urls } = setup({ [MODELS_URL]: CATALOG });
+    expect(await catalog.pricing('z-ai/glm-5.3-flash')).toEqual({
+      promptUsdPerToken: 0.000000045,
+      completionUsdPerToken: 0.00000014,
+    });
+    expect(await catalog.pricing('z-ai/glm-5.3-flash:nitro')).toBeDefined();
+    expect(await catalog.pricing('nobody/unlisted')).toBeUndefined();
+    expect(urls).toEqual([MODELS_URL]);
+  });
+
+  it('refuses prices that are missing or not non-negative numbers', () => {
+    expect(parsePricing({ prompt: '0.000004', completion: '0.00002' })).toEqual({
+      promptUsdPerToken: 0.000004,
+      completionUsdPerToken: 0.00002,
+    });
+    expect(parsePricing({ prompt: '0.000004' })).toBeUndefined();
+    expect(parsePricing({ prompt: '-1', completion: '0' })).toBeUndefined();
+    expect(parsePricing({ prompt: 'free', completion: '0' })).toBeUndefined();
+    expect(parsePricing(null)).toBeUndefined();
+  });
+
+  it('never fetches when disabled', async () => {
+    const fetch = vi.fn();
+    const catalog = new ModelCatalog({ fetch, enabled: false });
+    expect(await catalog.pricing('z-ai/glm-5.3-flash')).toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
 
