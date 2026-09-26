@@ -139,6 +139,19 @@ describe('runCli', () => {
     expect(fs.readFileSync(path.join(work, 'by-person', `${DALE}.jsonl`), 'utf8')).toContain('Best friends');
   });
 
+  it('refuses a folder that is not the work folder, instead of rebuilding empty views there', async () => {
+    const wrong = path.join(tmp, 'work');
+    expect(await runCli(['observations', wrong], deps())).toBe(1);
+    expect(err.at(-1)).toContain('has no observations/ folder');
+    expect(err.at(-1)).toContain('./data/memory-bootstrap/work');
+    expect(fs.existsSync(wrong)).toBe(false);
+    // A file named like it doesn't count either.
+    fs.mkdirSync(wrong);
+    fs.writeFileSync(path.join(wrong, 'observations'), '');
+    expect(await runCli(['observations', wrong], deps())).toBe(1);
+    expect(fs.readdirSync(wrong)).toEqual(['observations']);
+  });
+
   it('prices a dry run without calling the model', async () => {
     const client = vi.fn();
     const code = await runCli(

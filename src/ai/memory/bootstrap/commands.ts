@@ -257,6 +257,14 @@ async function importCommand(args: Args, deps: CliDeps): Promise<number> {
 
 async function observationsCommand(args: Args, deps: CliDeps): Promise<number> {
   const workDir = args.positional[0] ?? DEFAULT_WORK_DIR;
+  // A wrong path must never look like an empty log: the views would be rebuilt empty (in a stray folder)
+  // and the command would still succeed.
+  if (!fs.statSync(path.join(workDir, 'observations'), { throwIfNoEntry: false })?.isDirectory()) {
+    deps.io.err(
+      `${path.resolve(workDir)} has no observations/ folder: that is not the playbook's work folder (the default is ${DEFAULT_WORK_DIR}). Nothing was written.`,
+    );
+    return 1;
+  }
   const peopleFile = stringFlag(args, 'people') ?? path.join(workDir, '..', 'export', 'people.json');
   let known: ReadonlySet<string> | undefined;
   if (fs.existsSync(peopleFile)) {

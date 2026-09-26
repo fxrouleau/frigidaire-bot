@@ -35,7 +35,8 @@ owner asked for it.
    estimated tokens) before starting: that is roughly what the scan reads.
 2. **The helper commands** run from the repo root: `yarn memory <command>` when Node and the dependencies
    are installed, otherwise `docker compose run --rm test yarn memory <command>` (same arguments). Below,
-   `memory …` means either form.
+   `memory …` means either form. Their paths are relative to the repo root: `memory observations` works on
+   `data/memory-bootstrap/work` (its default; give that full path if you pass one, never a bare `work`).
 3. `data/` is gitignored: everything here stays out of git. Never commit, paste or upload any of it.
 
 ## Folder layout
@@ -51,7 +52,7 @@ data/memory-bootstrap/
     working/                   the working notes (an interpretation aid, same format as final notes)
       people/<id>/profile.md (+ topics)   group/<topic>.md   circles/<slug>.md
     by-person/<id>.jsonl, by-person/group.jsonl, by-person/index.json, by-circle/<slug>.jsonl, cast.md
-                               derived views, rebuilt by `memory observations work` (never edit them)
+                               derived views, rebuilt by `memory observations` (never edit them)
     eras/<id>/<from>_<to>.md   era summaries for people with very long logs
     final/                     the notes tree the bot imports (manifest.json, people/, group/, circles/)
     critic/report.md
@@ -99,7 +100,7 @@ You stay lean so your context never fills up:
      `cp -R work/steps/N/working/. work/working/` (when that folder exists), then add `N` to `scan.done`.
    - After applying a chunk whose number is a multiple of `reground.every` (0010, 0020, …) and isn't in
      `reground.after`: **re-ground**, then add it to `reground.after`.
-3. When every chunk is scanned: run `memory observations work` (validates the log, rebuilds by-person/,
+3. When every chunk is scanned: run `memory observations` (validates the log, rebuilds by-person/,
    by-circle/ and cast.md). Problems in the log are listed by file and line: have a fixer subagent correct
    those lines in `observations/NNNN.jsonl` (the one exception to append-only: fixing a malformed line),
    and run it again until it reports none.
@@ -147,7 +148,7 @@ the chunk id, and `{FROM}`/`{TO}` with the chunk's dates from the manifest):
 Repeated re-summarizing drifts. Every 10 chunks, rebuild the working notes of everyone the last 10 chunks
 touched from their FULL observation log, not from the previous notes:
 
-1. Run `memory observations work` (rebuilds by-person/, by-circle/, cast.md).
+1. Run `memory observations` (rebuilds by-person/, by-circle/, cast.md).
 2. The people to re-ground: the ids that appear in `people` of the last 10 `observations/NNNN.jsonl` files.
    Have ONE small subagent list them (it may read those 10 files) and return the ids as one line; or re-ground
    everyone in `by-person/index.json` when that list is short.
@@ -165,7 +166,7 @@ touched from their FULL observation log, not from the previous notes:
 
 ## Step 4: final build
 
-Run `memory observations work` first (fresh by-person/, by-circle/, cast.md). The final tree goes in
+Run `memory observations` first (fresh by-person/, by-circle/, cast.md). The final tree goes in
 `work/final/` in the import layout (NOTE FORMAT, CIRCLE FORMAT, FINAL MANIFEST).
 
 ### 4a. Circles
