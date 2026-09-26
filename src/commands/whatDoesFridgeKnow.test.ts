@@ -260,11 +260,21 @@ describe('What does Fridge know? (notes)', () => {
       subject_user_id: REMI,
       said_by: REMI,
     });
+    await memory.save({
+      category: CORRECTION_CATEGORY,
+      subject: 'Remi',
+      content: 'Moved to Laval.',
+      subject_user_id: REMI,
+      said_by: DALE,
+    });
 
     const { sent } = await open({ id: REMI, memberDisplayName: 'Remi' }, { now: new Date() });
     const pending = sent.embeds?.[0].fields?.find((f) => f.name === 'Not in the notes yet');
     expect(pending?.value).toContain('1 newer journal entry');
-    expect(pending?.value).toContain('Remi, about themself: Quit Valorant in August.');
+    expect(pending?.value).toContain(
+      'Their own corrections (they win over the note):\n• Remi, about themself: Quit Valorant in August.',
+    );
+    expect(pending?.value).toContain("Others' claims (weighed tonight, not settled):\n• Dale says: Moved to Laval.");
   });
 
   it('describes each menu entry with its size and age (the profile is one page: no paging buttons)', async () => {

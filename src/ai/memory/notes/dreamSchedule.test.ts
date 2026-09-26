@@ -67,7 +67,7 @@ describe('formatDreamReport', () => {
         updated(REMI, 'new job at the bakery'),
         updated(DALE, 'quit Valorant'),
         { status: 'unchanged', owner: person(NOVA), watermark: 3 },
-        { status: 'failed', owner: person('100000000000000009'), error: '500' },
+        { status: 'failed', owner: person('100000000000000009'), error: '500', cause: 'error' },
       ],
       group: { status: 'updated', owner: { scope: 'group' }, written: [], removed: [], changeSummary: 'new lore', watermark: 4 },
       costUsd: 0.1834,
@@ -91,7 +91,7 @@ describe('formatDreamReport', () => {
     const failed: NightlyDreamResult = {
       day: '2026-09-26',
       people: [],
-      group: { status: 'failed', owner: { scope: 'group' }, error: 'refused' },
+      group: { status: 'failed', owner: { scope: 'group' }, error: 'refused', cause: 'answer' },
     };
     expect(formatDreamReport(failed, nameOf)).toBe('🌙 dream · 1 failed (the group; retried tomorrow)');
 

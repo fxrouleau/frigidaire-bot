@@ -122,7 +122,15 @@ describe('read_note', () => {
     const text = await run('read_note', { person: 'Remi' });
     expect(text).toContain('Remi · Remi (v1, updated today by dream)');
     expect(text).toContain('Back in 2017 played Overwatch nightly.');
-    expect(text).toContain('Corrections newer than this note (they win over it):\n- Dale says: Works nights again. (today)');
+    // Dale's word about Remi is a claim, never headed as winning over the note.
+    expect(text).toContain(
+      "What others claim about them, newer than this note (their word, not settled: don't repeat it as fact):\n- Dale says: Works nights again. (today)",
+    );
+    expect(text).not.toContain('win over');
+    await run('record_correction', { person: 'me', correction: 'Works days, actually.' });
+    expect(await run('read_note', { person: 'Remi' })).toContain(
+      'Their own corrections, newer than this note (they win over it):\n- Remi, about themself: Works days, actually. (today)',
+    );
   });
 
   it('reads a topic, a group note and a circle by slug, title, alias or as a topic of a member', async () => {
@@ -181,6 +189,12 @@ describe('record_correction', () => {
       "as Remi's claim about the group",
     );
     expect(notes.openCorrections({ scope: 'group' }).map((m) => m.content)).toEqual(['Movie night moved to Saturdays.']);
+    // It shows next to the group's notes until the group's dream folds it in.
+    expect(await run('read_note', { person: 'group', topic: 'lore' })).toContain(
+      "The great bakery heist of 2022.\n\nCorrections about the group not in your notes yet (each is the speaker's word: weigh it against what you know):\n- Remi says: Movie night moved to Saturdays. (today)",
+    );
+    notes.recordDreamSuccess({ scope: 'group' }, notes.journalHighWater());
+    expect(await run('read_note', { person: 'group', topic: 'lore' })).not.toContain('Corrections about the group');
   });
 
   it('refuses empty, overlong and unknown-person corrections', async () => {

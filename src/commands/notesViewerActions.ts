@@ -620,9 +620,23 @@ async function undoNote(
   logger.info(
     `notes viewer: ${interaction.user.username} undid note #${noteId} (${restored.scope} ${restored.topic}) v${version} → v${restored.version}`,
   );
-  const notice = restored.active
-    ? `undone: "${restored.title}" is back to v${version - 1}'s text (saved as v${restored.version})`
-    : `undone: "${restored.title}" is removed again, as it was in v${version - 1} (saved as v${restored.version})`;
+  // What the undo did to the note itself: its earlier text back, removed again as it was before, or (a circle
+  // a merge created, v1) removed.
+  const earlier = version > 1;
+  const outcome = restored.active
+    ? `back to v${version - 1}'s text`
+    : earlier
+      ? `removed again, as in v${version - 1}`
+      : 'removed';
+  const noticeOutcome = restored.active
+    ? `is back to v${version - 1}'s text`
+    : earlier
+      ? `is removed again, as it was in v${version - 1}`
+      : 'is removed';
+  // Circles the undone version had merged away come back with it.
+  const back = result.alsoRestored.filter((n) => n.active).map((n) => `"${n.title}"`);
+  const backPart = back.length > 0 ? `; ${back.join(', ')} ${back.length === 1 ? 'is' : 'are'} back` : '';
+  const notice = `undone: "${restored.title}" ${noticeOutcome} (saved as v${restored.version})${backPart}`;
   const screen: ViewerScreen = restored.active ? { kind: 'note', noteId } : { kind: 'home' };
   await interaction.update(update(await views.render({ subject, screen, page: 0 }, notice)));
   const what =
@@ -632,6 +646,6 @@ async function undoNote(
   await postAudit(
     interaction,
     deps,
-    `↩️ notes undo · ${clickerName(interaction)} undid v${version} of ${what}: ${restored.active ? `back to v${version - 1}'s text` : `removed again, as in v${version - 1}`} (saved as v${restored.version})`,
+    `↩️ notes undo · ${clickerName(interaction)} undid v${version} of ${what}: ${outcome} (saved as v${restored.version})${backPart}`,
   );
 }

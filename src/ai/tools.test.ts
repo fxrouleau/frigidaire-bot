@@ -139,6 +139,33 @@ describe('recall_memories tool', () => {
     expect(firstLine).toContain('Margo_test');
   });
 
+  it("labels a correction with who made it: someone's claim never reads as the person's fact", async () => {
+    const REMI = '100000000000000001';
+    const DALE = '100000000000000002';
+    const store = new MemoryStore(':memory:');
+    setMemoryStoreForTesting(store);
+    store.upsertIdentity(REMI, 'Remi');
+    store.upsertIdentity(DALE, 'Dale');
+    await store.save({
+      category: 'correction',
+      subject: 'Dale',
+      content: 'Moved to Quillport, not Brackenfield',
+      subject_user_id: DALE,
+      said_by: REMI,
+    });
+    await store.save({
+      category: 'correction',
+      subject: 'Dale',
+      content: 'Quit the Quillport choir in August',
+      subject_user_id: DALE,
+      said_by: DALE,
+    });
+
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'Quillport' });
+    expect(result).toMatch(/\[id:\d+\] \[correction, Remi's claim, not settled\] Dale: Moved to Quillport, not Brackenfield/);
+    expect(result).toMatch(/\[id:\d+\] \[correction, their own word\] Dale: Quit the Quillport choir in August/);
+  });
+
   it('returns "no memories found" for a nonexistent query', async () => {
     const result = await recallMemoriesTool!.handler(stubCtx, { query: 'zzz_completely_nonexistent_xyz_12345' });
     expect(result).toContain('No memories found');

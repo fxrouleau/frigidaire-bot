@@ -253,7 +253,7 @@ export const IDENTITY_NAME_TIERS: readonly ((identity: Identity) => (string | nu
  * startup stamp's strict rule). A side account (LINKED_ACCOUNTS) counts as its main account, so a name
  * the main and the side account share is still one person.
  */
-function everyoneGoingBy(identities: Identity[], name: string): string[] {
+export function everyoneGoingBy(identities: Identity[], name: string): string[] {
   const needle = nameKey(name);
   if (!needle) return [];
   const owners = identities.filter((i) =>

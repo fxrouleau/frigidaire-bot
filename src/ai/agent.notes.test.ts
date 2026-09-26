@@ -84,6 +84,35 @@ function writeProfile(ownerId: string, content: string): void {
   if (!result.ok) throw new Error(result.errors.join('; '));
 }
 
+describe('corrections found by the contextual search', () => {
+  it("say who made them: someone's claim about a person never reads as that person's fact", async () => {
+    // An embedder-less store: the contextual journal search is plain keyword search, ungated.
+    store = new MemoryStore(':memory:');
+    store.upsertIdentity(REMI, 'Remi');
+    store.upsertIdentity(DALE, 'Dale');
+    store.upsertIdentity(NOVA, 'Nova');
+    setMemoryStoreForTesting(store);
+    await store.save({
+      category: 'correction',
+      subject: 'Dale',
+      content: 'Dale moved to Quillport, not Brackenfield',
+      subject_user_id: DALE,
+      said_by: REMI,
+      source: 'correction',
+    });
+
+    const provider = new FakeProvider([textResponse('ok')]);
+    await makeAgent(provider).handleMention(
+      createFakeMessage({ ...BASE, authorId: NOVA, authorDisplayName: 'Nova', content: 'is quillport any good' }).message,
+    );
+
+    const text = dynamicText(provider, 0);
+    expect(text).toContain(
+      "Relevant to this conversation:\n- [correction, Remi's claim, not settled] Dale: Dale moved to Quillport, not Brackenfield (today)",
+    );
+  });
+});
+
 describe("the speaker's notes", () => {
   it('shows the profile, the journal newer than it and open corrections instead of plain memories', async () => {
     await store.save({ category: 'fact', subject: 'Remi', content: 'bakes sourdough', subject_user_id: REMI });
@@ -112,11 +141,36 @@ describe("the speaker's notes", () => {
     expect(text).toContain('What you know about the person talking to you right now (Remi):');
     expect(text).toContain('Your notes on Remi (updated today):\nRemi runs night shifts at a bakery.');
     expect(text).toContain('Newer than your notes on Remi:\n- [fact] adopted a cat named Toast (today)');
-    expect(text).toContain('Corrections about Remi newer than your notes (they win over the notes):');
-    expect(text).toContain('- Remi, about themself: Quit Valorant in August 2026. (today)');
-    expect(text).toContain('- Dale says: Works days now, not nights. (today)');
+    // Remi's own word wins over the notes; Dale's claim about Remi is only a claim.
+    expect(text).toContain(
+      "Remi's own corrections, newer than your notes (they win over the notes):\n- Remi, about themself: Quit Valorant in August 2026. (today)",
+    );
+    expect(text).toContain(
+      "What others claim about Remi, newer than your notes (their word, not settled: don't repeat it as fact):\n- Dale says: Works days now, not nights. (today)",
+    );
+    expect(text).not.toContain('Dale says: Works days now, not nights. (today)\n- Remi, about themself');
     // What the notes already hold is not repeated as a raw memory.
     expect(text).not.toContain('bakes sourdough');
+  });
+
+  it('shows corrections about the group, once per window, until the group dream folds them in', async () => {
+    await store.save({
+      category: 'correction',
+      subject: 'server',
+      content: 'Movie night moved to Saturdays.',
+      said_by: DALE,
+      source: 'correction',
+    });
+    const provider = new FakeProvider([textResponse('one'), textResponse('two')]);
+    const agent = makeAgent(provider);
+
+    await agent.handleMention(createFakeMessage({ ...BASE, messageId: '99001', content: 'yo' }).message);
+    await agent.handleMention(createFakeMessage({ ...BASE, messageId: '99002', content: 'yo again' }).message);
+
+    expect(dynamicText(provider, 0)).toContain(
+      "Corrections about the group not in your notes yet (each is the speaker's word: weigh it against what you know):\n- Dale says: Movie night moved to Saturdays. (today)",
+    );
+    expect(dynamicText(provider, 1)).not.toContain('Movie night');
   });
 
   it('shows a profile version once per window, a newer version and new journal rows again', async () => {

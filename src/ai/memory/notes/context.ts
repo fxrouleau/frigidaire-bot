@@ -4,8 +4,9 @@
 // writer). Chat turns see a note without its dated "Earlier" footnotes (sections.ts): those come up on
 // demand (read_note) or through search. Pure functions over already-loaded rows, so every consumer renders
 // notes the same way and tests need no store.
+import { canonicalUserId } from '../../../linkedAccounts';
 import { formatRelativeAge } from '../../utils';
-import type { Memory } from '../memoryStore';
+import { CORRECTION_CATEGORY, type Memory } from '../memoryStore';
 import type { CircleMembership, Note } from './notesStore';
 import type { CircleMember } from './schema';
 import { earlierPart, withoutEarlier } from './sections';
@@ -72,6 +73,20 @@ export function journalLine(row: Pick<Memory, 'category' | 'content' | 'updated_
   return `- [${row.category}] ${row.content}${age ? ` (${age})` : ''}`;
 }
 
+type CorrectionRow = Pick<Memory, 'said_by' | 'subject_user_id'>;
+
+/**
+ * Whether a correction is the person's own word about themself (authoritative) rather than someone else's
+ * claim about them (weighed, never settled). Linked accounts count as one member: a correction filed from
+ * an account later linked as a side account stays their own after the startup stamp moved the row's
+ * subject to the main account.
+ */
+export function isSelfCorrection(row: CorrectionRow): boolean {
+  return (
+    !!row.said_by && !!row.subject_user_id && canonicalUserId(row.said_by) === canonicalUserId(row.subject_user_id)
+  );
+}
+
 /**
  * A correction as one dated line, naming who said it: `- Dale says: moved to Laval (today)`, or
  * `- Remi, about themself: quit Valorant (today)` when the person corrected their own notes.
@@ -84,10 +99,60 @@ export function correctionLine(
   const age = formatRelativeAge(row.updated_at, now);
   const when = age ? ` (${age})` : '';
   const speaker = row.said_by ? (nameOf(row.said_by) ?? 'someone') : 'someone';
-  if (row.said_by && row.subject_user_id && row.said_by === row.subject_user_id) {
-    return `- ${speaker}, about themself: ${row.content}${when}`;
-  }
+  if (isSelfCorrection(row)) return `- ${speaker}, about themself: ${row.content}${when}`;
   return `- ${speaker} says: ${row.content}${when}`;
+}
+
+/**
+ * Where a correction comes from, as a label for lists of several people's journal rows (the chat turn's
+ * search hits, recall_memories), whose lines can't say who spoke: `their own word`, or
+ * `Remi's claim, not settled`.
+ */
+export function correctionSource(row: CorrectionRow, nameOf: (userId: string) => string | undefined): string {
+  if (isSelfCorrection(row)) return 'their own word';
+  const speaker = row.said_by ? (nameOf(row.said_by) ?? 'someone') : 'someone';
+  return `${speaker}'s claim, not settled`;
+}
+
+/**
+ * A journal row's bracketed category for lists of several people's rows: `[fact]`, or for a correction who
+ * made it (`[correction, Remi's claim, not settled]`), so a claim about someone never reads as their fact.
+ */
+export function categoryLabel(
+  row: Pick<Memory, 'category' | 'said_by' | 'subject_user_id'>,
+  nameOf: (userId: string) => string | undefined,
+): string {
+  return row.category === CORRECTION_CATEGORY
+    ? `[${row.category}, ${correctionSource(row, nameOf)}]`
+    : `[${row.category}]`;
+}
+
+/**
+ * The heading of the group's open corrections (chat turns, read_note): the group has no "own word", so each
+ * is the speaker's claim, as the dream reads it.
+ */
+export const GROUP_CORRECTIONS_HEADING =
+  "Corrections about the group not in your notes yet (each is the speaker's word: weigh it against what you know):";
+
+/** The headings of a person's open corrections, one per weight (see renderCorrections). */
+export type CorrectionHeadings = { own: string; claims: string };
+
+/**
+ * A person's open corrections as heading + lines, split by weight: their own first (they win over the
+ * notes), then what others claim about them (their word, weighed by the dream, never settled). A kind with
+ * no rows is left out; each keeps its rows' order.
+ */
+export function renderCorrections<T extends CorrectionRow>(
+  rows: T[],
+  headings: CorrectionHeadings,
+  line: (row: T) => string,
+): string[] {
+  const own = rows.filter(isSelfCorrection);
+  const claims = rows.filter((row) => !isSelfCorrection(row));
+  return [
+    ...(own.length > 0 ? [headings.own, ...own.map(line)] : []),
+    ...(claims.length > 0 ? [headings.claims, ...claims.map(line)] : []),
+  ];
 }
 
 /** A membership span: `since 2021`, `2021–2023-02`, `until 2023`, or ''. */
@@ -156,9 +221,14 @@ export function renderPersonNotes(block: PersonNotesBlock): string {
   }
   if (block.corrections.length > 0) {
     parts.push(
-      `Corrections about ${block.name} newer than your notes (they win over the notes):\n${block.corrections
-        .map((r) => correctionLine(r, block.nameOf, block.now))
-        .join('\n')}`,
+      renderCorrections(
+        block.corrections,
+        {
+          own: `${block.name}'s own corrections, newer than your notes (they win over the notes):`,
+          claims: `What others claim about ${block.name}, newer than your notes (their word, not settled: don't repeat it as fact):`,
+        },
+        (r) => correctionLine(r, block.nameOf, block.now),
+      ).join('\n'),
     );
   }
   if (parts.length === 0) return '';

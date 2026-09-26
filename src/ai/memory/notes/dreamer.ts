@@ -79,7 +79,12 @@ const NOTES_MAX_TOKENS = 16_000;
 const MODEL_TIMEOUT_MS = 10 * 60_000;
 /** Repair rounds after a refused answer (each resends the whole conversation). */
 const MAX_REPAIRS = 1;
-/** A night stops after this many people failed in a row (the API is down; the rest wait for tomorrow). */
+/**
+ * A night stops after this many dreams in a row failed with a model or network error (the API is down; the
+ * rest wait for tomorrow). A refused answer (invalid, cut off, refused by the store) is that person's
+ * problem, not an outage: it never counts, so a few people whose dreams keep failing can't stop the night
+ * for everyone behind them.
+ */
 const MAX_FAILURES_IN_A_ROW = 3;
 /** Cited passages one dream rereads at most. */
 const MAX_PASSAGES_PER_DREAM = 8;
@@ -138,9 +143,10 @@ export type DreamOutcome =
   | { status: 'skipped'; owner: NoteOwner; reason: 'nothing-new' }
   /**
    * No usable answer (model error, invalid JSON, a refused write): the watermark stays; retried next night.
-   * `costUsd`: what the refused answers cost, when any came back.
+   * `cause`: 'error' when the call itself failed (network, API error, no key, a store error), 'answer' when
+   * answers came back but none was usable. `costUsd`: what the refused answers cost, when any came back.
    */
-  | { status: 'failed'; owner: NoteOwner; error: string; costUsd?: number };
+  | { status: 'failed'; owner: NoteOwner; error: string; cause: 'error' | 'answer'; costUsd?: number };
 
 /** Context the group pass gets: what changed in the members' notes since its last dream. */
 export type GroupDreamContext = {
@@ -396,7 +402,7 @@ function finishDream(
     const error = errorText(outcome.result.errors);
     deps.notes.recordDreamFailure(owner, error);
     logger.warn(`dream: ${label} failed${formatCost(outcome.costUsd)}: ${error}`);
-    return { status: 'failed', owner, error, ...cost };
+    return { status: 'failed', owner, error, cause: 'answer', ...cost };
   }
   const { output, saved } = outcome.result.value;
   deps.notes.recordDreamSuccess(owner, watermark);
@@ -509,7 +515,7 @@ function failDream(deps: DreamDeps, owner: NoteOwner, label: string, error: unkn
     logger.warn(`dream: recording ${label}'s failure failed:`, recordError);
   }
   logger.warn(`dream: ${label} failed: ${message}`);
-  return { status: 'failed', owner, error: message };
+  return { status: 'failed', owner, error: message, cause: 'error' };
 }
 
 /** The cited passages worth rereading for these rows, as a prompt section ('' when none). */
@@ -803,7 +809,7 @@ function nightResult(day: string, people: DreamOutcome[], groups: DreamOutcome[]
 
 /**
  * Dreams these people one at a time, pushing each outcome to `into`; stops once MAX_FAILURES_IN_A_ROW
- * dreams failed in a row (counting on from `failuresInARow`).
+ * calls failed in a row (counting on from `failuresInARow`; refused answers don't count).
  */
 async function dreamPeople(
   pending: PendingDream[],
@@ -816,7 +822,8 @@ async function dreamPeople(
     if (entry.owner.scope !== 'person') continue;
     const outcome = await dreamPerson(entry.owner.ownerId, deps);
     into.push(outcome);
-    failures = outcome.status === 'failed' ? failures + 1 : 0;
+    // Only a failed call counts toward the outage stop; any answer (usable or not) means the API is up.
+    failures = outcome.status === 'failed' && outcome.cause === 'error' ? failures + 1 : 0;
     if (failures >= MAX_FAILURES_IN_A_ROW) {
       logger.warn(`dream: ${failures} dreams failed in a row; stopping (the rest wait for the next night).`);
       return { failuresInARow: failures, stopped: true };

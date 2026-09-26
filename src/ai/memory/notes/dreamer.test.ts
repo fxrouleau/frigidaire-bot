@@ -811,6 +811,37 @@ describe('runNightlyDream', () => {
     expect(notes.pendingDreams().people).toHaveLength(4);
   });
 
+  it('never lets refused answers stop the night, and dreams the people whose dreams failed last the next night', async () => {
+    notes.recordDreamSuccess(group, notes.journalHighWater()); // no group pass tonight
+    // Dale is the least recently active; three members whose answers keep being refused come first tonight.
+    await memory.save({ category: 'fact', subject: 'Dale', subject_user_id: DALE, content: 'Dale plays Deadlock.' });
+    const stubborn = ['100000000000000004', '100000000000000005', '100000000000000006'];
+    for (const id of stubborn) {
+      memory.upsertIdentity(id, `Member ${id.slice(-1)}`);
+      await memory.save({ category: 'fact', subject: `Member ${id.slice(-1)}`, subject_user_id: id, content: `Likes ${id.slice(-1)}.` });
+    }
+    const refused = reply('not json at all');
+    const { client, requests } = createCapturingClient([
+      ...Array.from({ length: 6 }, () => refused), // each stubborn dream: the answer and its repair round
+      reply({ notes: [{ topic: 'profile', title: 'Dale', content: '## Now\nPlays Deadlock.' }], change_summary: 'x' }),
+    ]);
+    const night = await runNightlyDream(deps(client));
+    expect(night.people.map((o) => [o.owner.scope === 'person' ? o.owner.ownerId : '', o.status])).toEqual([
+      ...stubborn.map((id) => [id, 'failed']).reverse(),
+      [DALE, 'updated'],
+    ]);
+    expect(night.people.slice(0, 3).map((o) => (o.status === 'failed' ? o.cause : ''))).toEqual(['answer', 'answer', 'answer']);
+    expect(requests).toHaveLength(7);
+
+    // Tomorrow, someone with new rows is dreamed before the three whose dreams failed.
+    await saveFact('Works day shifts.');
+    expect(notes.pendingDreams().people.map((p) => (p.owner.scope === 'person' ? p.owner.ownerId : ''))).toEqual([
+      REMI,
+      ...[...stubborn].reverse(),
+    ]);
+    expect(notes.pendingDreams({ limit: 1 }).people.map((p) => p.owner)).toEqual([remi]);
+  });
+
   it('refreshes the group weekly from the people changes alone, reading no journal rows', async () => {
     const lastWeek = new Date(NOW.getTime() - (GROUP_REFRESH_DAYS + 2) * 24 * 60 * 60_000);
     await memory.save({ category: 'vibe', subject: 'server', content: 'Movie night is Fridays.' });

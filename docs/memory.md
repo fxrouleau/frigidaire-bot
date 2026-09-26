@@ -78,7 +78,7 @@ speaker in `said_by`. It never expires.
 |---|---|
 | `notes` | One row per note: `scope` (`person` \| `group` \| `circle`), `owner_id` (the person's main id; `''` for the group and circles), `topic` (a slug: `profile`, `games`, `running-jokes`; a circle's unique slug such as `mtg`), `title`, `content` (markdown), `aliases` (JSON, circles only), `version`, `updated_at`, `updated_by` (`dream` \| `edit` \| `bootstrap` \| `import` \| `undo`), `active`. `UNIQUE(scope, owner_id, topic)`. |
 | `note_members` | A circle's members, dated: `(note_id, member_id, since, until, role)`. `since`/`until` are partial dates (`2021`, `2021-06`, `2021-06-15`); `until` NULL means still a member. Someone who left the MTG crew in 2023 stays listed with `until = 2023`. |
-| `note_versions` | The version history (the current one included): title, content, aliases, a circle's membership snapshot, active, when, who, and the reason (the dream's change summary, the owner's instruction, "undo of v3", "merged into mtg"). Undo restores the previous version as a new version, membership included. After each night it is trimmed to the newest 50 versions per note; bootstrap and owner-edit versions are always kept. |
+| `note_versions` | The version history (the current one included): title, content, aliases, a circle's membership snapshot, active, when, who, and the reason (the dream's change summary, the owner's instruction, "undo of v3", "merged into mtg"), and `linked`: the other notes' versions the same write made (the circles a merge deactivated). Undo restores the previous version as a new version, membership included, and undoes a merge whole: the circles it merged away come back with it. After each night it is trimmed to the newest 50 versions per note; bootstrap and owner-edit versions are always kept. |
 | `notes_fts` | FTS5 over active notes (title, content, aliases). A plain FTS table kept by triggers on `notes` alone: correct by construction (a delete of a missing row is harmless, unlike the external-content 'delete' command). |
 | `dream_state` | Per person and for the group: `journal_watermark` (the highest `journal_seq` folded into the notes), `last_dream_at`, `last_error`. Circles have none: the person and group dreams maintain them. |
 
@@ -136,7 +136,8 @@ text (≤ 3 each):
 - their `profile` without its Earlier part (the speaker's up to 3,000 chars, others' up to 1,500), with a line
   listing their current circles and a hint when Earlier history was left out;
 - their journal rows newer than their dream watermark (≤ 10, dated with relative ages);
-- their open corrections (always shown, marked with who said them; they win over the notes).
+- their open corrections (always shown, marked with who said them): their own under a heading saying they win
+  over the notes, what others claim about them under one saying it is their word, not settled.
 
 People without notes yet fall back to their plain memories (corrections labelled as claims). Then circles
 (≤ 3, up to 1,500 chars each, Earlier left out): the ones the message names (title, slug words or alias, as
@@ -145,7 +146,9 @@ above, the window's recent participants). Everything is shown once per window pe
 persisted with the window), deduped against what the window already showed.
 
 The static prompt carries a short group section: the group's `vibe` and `lore` notes, Earlier left out, up to
-2,500 chars. It changes at most nightly, so the provider's prefix cache survives within a window.
+2,500 chars. It changes at most nightly, so the provider's prefix cache survives within a window. Corrections
+about the group that no group dream has folded in yet ride in the dynamic context instead (each labelled as the
+speaker's word, once per window), and after the group note in `read_note`.
 
 The hybrid journal search stays (old details, exact wording). The persona: when someone says something the bot
 knows is wrong or outdated, record it; never argue with a self-correction; a correction about someone else is
@@ -156,7 +159,7 @@ Tools:
 | Tool | What it does |
 |---|---|
 | `list_notes({person?})` | A person's topics (size, age) and circles (former ones marked, with spans), plus how many journal rows and corrections are newer than the notes; without a person, everyone with notes, the group's topics and every circle with its current members. |
-| `read_note({person?, topic?, circle?})` | A full note, Earlier included: a person's topic (default `profile`, followed by the rows and corrections newer than it), a group topic (`person: "group"`), or a circle by slug, title or alias. |
+| `read_note({person?, topic?, circle?})` | A full note, Earlier included: a person's topic (default `profile`, followed by the rows and corrections newer than it), a group topic (`person: "group"`, followed by the open corrections about the group), or a circle by slug, title or alias. |
 | `search_notes({query})` | FTS over every note (people, group, circles) with snippets. |
 | `record_correction({person, correction})` | Files a `correction` journal row about a member (or the group): the speaker in `said_by`, the triggering message as evidence. Self-corrections are authoritative; anyone else's is a claim. |
 | `recall_memories`, `remember_fact`, `forget_memory`, `set_member_info` | Unchanged (remember_fact now keeps its message as evidence). |
@@ -221,7 +224,13 @@ day stays unclaimed and the night runs on the first check after it is done (one 
 while the night holds it the bootstrap doesn't dream and says to run it again.
 
 For each person with journal rows above their watermark (most recently active first, at most
-`MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`, default 20), one call to `MEMORY_DREAM_MODEL` with:
+`MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`, default 20), one call to `MEMORY_DREAM_MODEL`. Only real people are
+dreamed: a member the bot knows (an identities row, a `LINKED_ACCOUNTS` id) or a Discord id a writer other than
+the old learner vouched for (remember_fact, "Remember this", a correction, related members); a junk id the old
+learner left on a row whose name the startup stamp couldn't resolve never becomes a person with notes. A
+person's journal is the rows stamped with any of their ids, the rows naming them among related members, and
+id-less rows filed under a name only they go by: a row under a name two members share (one's IRL name, the
+other's nickname) is left for the stamp, never read into both people's notes. The call gets:
 - the rules (below), the person's names (identities), ALL their current notes and circles;
 - the new journal rows: dated, category, source and speaker, recurrence count and seen span, related members,
   the quote; corrections say who made them and whether they are authoritative (about themself) or a
@@ -266,7 +275,9 @@ or former, since someone who left gets an `until` and only the owner's edit remo
 nothing as new versions (`updated_by = 'dream'`). A refused answer (invalid JSON, a broken rule, a write the store refuses, an answer
 cut off at the length limit) gets one repair round with the errors. The watermark advances only on success
 (an answer that changes nothing still advances it); a failure is logged, kept in `dream_state` and retried the
-next night. A night stops early after three people failed in a row (an outage). Circles past a 60,000-char
+next night. A night stops early after three calls in a row failed with a model or network error (an outage);
+a refused answer is that person's problem and never stops the night, and people whose last dream failed are
+dreamed after everyone else, so a few stubborn failures can't starve the rest. Circles past a 60,000-char
 budget are shown as excerpts and may not be rewritten by that call. An answer is never saved over notes that
 changed while the model was thinking (an owner edit or undo of that person's notes, or of a circle the answer
 writes): the save compares the versions the prompt showed in the same transaction, and on a change the dream
@@ -330,6 +341,8 @@ accepted members, not people only invited; a linked side account counts):
   after → **Confirm** saves new versions (`updated_by = 'edit'`, reason = the instruction) / **Cancel**. Edit
   on a circle edits that circle; anywhere else it edits the person's (or the group's) notes.
 - **Undo vN**: restores the version before the shown one as a new version (membership included for a circle).
+  Undoing a circle's merge also brings back the circles it merged away (unless one changed since), and a circle a
+  merge created offers Undo v1, which removes it and brings back what it merged.
   The button carries the version it was shown for, so a double click never undoes twice.
 - Every saved edit and undo also posts one audit line to the report channel (who, whose notes, the versions
   saved, the change summary and the instruction, each capped, one line, `parse: []`), besides the INFO log

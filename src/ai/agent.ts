@@ -24,7 +24,9 @@ import { getMemoryStore, getNotesStore } from './memory';
 import { CORRECTION_CATEGORY, type EmojiRow, type Identity, type Memory, type MemoryStore } from './memory/memoryStore';
 import {
   CIRCLE_MAX_CHARS,
+  categoryLabel,
   correctionLine,
+  GROUP_CORRECTIONS_HEADING,
   NEW_JOURNAL_LIMIT,
   noteKey,
   OPEN_CORRECTIONS_LIMIT,
@@ -1313,6 +1315,22 @@ Right before each new message you get a context note with the current time (East
         rows.length > 0 ? `${speakerHeading}\n${rows.map((m) => this.plainMemoryLine(m, store, now)).join('\n')}` : '';
     }
 
+    // 1b. Corrections about the group no dream has folded in yet. The group's notes live in the static
+    //     prompt, which must stay byte-identical for the window, so their corrections ride here (rare, and
+    //     shown once per window like everything else).
+    let groupCorrections: Memory[] = [];
+    if (notes) {
+      try {
+        groupCorrections = take(notes.openCorrections({ scope: 'group' }, OPEN_CORRECTIONS_LIMIT));
+      } catch (error) {
+        logger.warn('Failed to read corrections about the group:', error);
+      }
+    }
+    const groupSection =
+      groupCorrections.length > 0
+        ? `${GROUP_CORRECTIONS_HEADING}\n${groupCorrections.map((m) => correctionLine(m, this.nameOf(store), now)).join('\n')}`
+        : '';
+
     // 2. Contextual relevance search of the journal based on the current message. Resolve @-mentions to
     //    display names (rather than stripping them) so the person being asked about survives into the query.
     let contextualMemories: Memory[] = [];
@@ -1381,10 +1399,10 @@ Right before each new message you get a context note with the current time (East
         : '';
     const contextualSection =
       contextualMemories.length > 0
-        ? `Relevant to this conversation:\n${contextualMemories.map((m) => `- [${m.category}] ${subjectLabel(m)}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}`
+        ? `Relevant to this conversation:\n${contextualMemories.map((m) => `- ${categoryLabel(m, this.nameOf(store))} ${subjectLabel(m)}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}`
         : '';
 
-    const text = [userSection, ...otherBlocks, mentionedSection, ...circleBlocks, contextualSection]
+    const text = [userSection, ...otherBlocks, mentionedSection, ...circleBlocks, groupSection, contextualSection]
       .filter((s) => s)
       .join('\n\n');
     return { text, injectedIds, noteKeys };
