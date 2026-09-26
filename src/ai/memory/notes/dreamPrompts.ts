@@ -142,8 +142,8 @@ You get:
 - SERVER PEOPLE: everyone in the server, with every name they go by and their Discord id;
 - GROUP NOTES: your current notes on the server as a whole, or none yet;
 - CIRCLES: the shared notes of groups and pairs inside the server;
-- TONIGHT'S PERSON CHANGES: what tonight's dreams changed in individual members' notes (context only);
-- NEW JOURNAL: what the bot picked up about the server as a whole since your last group dream, one entry per line: its number, category, when it was first and last seen (and how many times), where it came from, the text, and a short quote;
+- PERSON CHANGES: what changed in individual members' notes since your last group dream (the nightly dreams, the owner's edits), dated (context only: their own notes are not yours to write);
+- NEW JOURNAL: what the bot picked up about the server as a whole since your last group dream, one entry per line: its number, category, when it was first and last seen (and how many times), where it came from, the text, and a short quote. It can be empty: then this is a periodic refresh, to keep the group notes in step with how the members changed;
 - PASSAGES: for the entries that matter most, the messages they came from, the cited one marked ">>".
 
 Rewrite the group notes so they hold everything worth knowing about the server as a whole.
@@ -430,8 +430,8 @@ export type GroupDreamInput = {
 export function buildGroupDreamPrompt(input: GroupDreamInput): { system: string; user: string } {
   const changes =
     input.personChanges.length > 0
-      ? `TONIGHT'S PERSON CHANGES:\n${input.personChanges.map((c) => `- ${c.name}: ${c.changeSummary || 'updated'}`).join('\n')}`
-      : "TONIGHT'S PERSON CHANGES: none.";
+      ? `PERSON CHANGES since your last group dream:\n${input.personChanges.map((c) => `- ${c.name}: ${c.changeSummary || 'updated'}`).join('\n')}`
+      : 'PERSON CHANGES since your last group dream: none.';
   const parts = [
     todayLine(input.now),
     input.roster,

@@ -95,6 +95,21 @@ export type NoteVersion = {
 /** A member's place in a circle. */
 export type CircleMembership = { circle: Note; membership: CircleMember };
 
+/** One version written to a person's note or a circle (see NotesStore.changesSince). */
+export type NoteChange = {
+  noteId: number;
+  scope: 'person' | 'circle';
+  /** The person's main id; null for a circle. */
+  ownerId: string | null;
+  /** The topic, or the circle's slug. */
+  topic: string;
+  title: string;
+  version: number;
+  updatedAt: string;
+  updatedBy: NoteUpdatedBy;
+  reason: string | null;
+};
+
 export type WriteNotesOptions = {
   updatedBy: NoteUpdatedBy;
   /** Stored on every version this write creates. */
@@ -501,6 +516,45 @@ export class NotesStore {
       | VersionRow
       | undefined;
     return row ? toVersion(row) : undefined;
+  }
+
+  /**
+   * Versions written to people's notes and to circles after `since` (a SQLite UTC timestamp; null = ever),
+   * oldest first, at most the newest `limit`: what changed in the members' notes since then (the group
+   * pass reads it; see dreamer.ts).
+   */
+  changesSince(since: string | null, opts: { limit?: number } = {}): NoteChange[] {
+    const limit = Math.max(0, Math.floor(opts.limit ?? 500));
+    const rows = this.stmt(
+      `SELECT * FROM (
+         SELECT v.id AS vid, v.note_id, v.version, v.title, v.updated_at, v.updated_by, v.reason,
+                n.scope, n.owner_id, n.topic
+         FROM note_versions v JOIN notes n ON n.id = v.note_id
+         WHERE n.scope IN ('person', 'circle') AND (@since IS NULL OR v.updated_at > @since)
+         ORDER BY v.id DESC LIMIT @limit
+       ) ORDER BY vid ASC`,
+    ).all({ since, limit }) as {
+      note_id: number;
+      version: number;
+      title: string;
+      updated_at: string;
+      updated_by: NoteUpdatedBy;
+      reason: string | null;
+      scope: 'person' | 'circle';
+      owner_id: string;
+      topic: string;
+    }[];
+    return rows.map((r) => ({
+      noteId: r.note_id,
+      scope: r.scope,
+      ownerId: r.scope === 'person' ? r.owner_id : null,
+      topic: r.topic,
+      title: r.title,
+      version: r.version,
+      updatedAt: r.updated_at,
+      updatedBy: r.updated_by,
+      reason: r.reason,
+    }));
   }
 
   /**

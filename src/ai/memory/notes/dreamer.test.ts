@@ -17,12 +17,15 @@ import {
   dreamPerson,
   dryRunEdit,
   type EditProposal,
+  GROUP_REFRESH_DAYS,
+  planGroupDream,
   previewChanges,
   proposeEdit,
   runNightlyDream,
+  summarizePersonChanges,
 } from './dreamer';
 import { MAX_JOURNAL_ROWS_PER_DREAM } from './dreamPrompts';
-import { NotesStore } from './notesStore';
+import { type NoteChange, NotesStore } from './notesStore';
 import type { EvidencePassage } from './passages';
 import { NOTE_LIMITS, validateNotesOutput } from './schema';
 
@@ -471,10 +474,96 @@ describe('dreamGroup', () => {
     const [system, user] = messagesOf(requests[0]);
     expect(system.content).toContain('consolidate your notes on the GROUP as a whole');
     expect(requests[0].headers.get('X-Frigidaire-Feature')).toBe('memory_dream');
-    expect(user.content).toContain("TONIGHT'S PERSON CHANGES:\n- Remi: new job");
+    expect(user.content).toContain('PERSON CHANGES since your last group dream:\n- Remi: new job');
     expect(user.content).toContain('Roasts are affection here.');
     expect(user.content).toContain('GROUP NOTES: none yet.');
     expect(user.content).toContain('<circle slug="magic"');
+  });
+});
+
+describe('planGroupDream (the group pass: new rows, or the weekly refresh)', () => {
+  const DAY = 24 * 60 * 60_000;
+  /** The same memory.db through a store whose clock reads `at`: versions and dream stamps written then. */
+  const storeAt = (at: Date) => new NotesStore(memory, { now: () => at });
+
+  it('runs on new server rows, whenever the group last dreamed', async () => {
+    notes.recordDreamSuccess(group, 0);
+    await memory.save({ category: 'vibe', subject: 'server', content: 'Movie night is Fridays.' });
+    expect(planGroupDream(deps(undefined), NOW)).toMatchObject({ run: true, why: 'new-rows' });
+  });
+
+  it('without new rows, refreshes once the last group dream is a week old and a person changed since', () => {
+    const lastWeek = new Date(NOW.getTime() - (GROUP_REFRESH_DAYS + 1) * DAY);
+    storeAt(lastWeek).recordDreamSuccess(group, 0);
+    const fiveDaysAgo = new Date(NOW.getTime() - 5 * DAY);
+    storeAt(fiveDaysAgo).writeNotes(dale, [{ topic: 'profile', title: 'Dale', content: '## Now\nPlays Deadlock.' }], {
+      updatedBy: 'dream',
+      reason: 'started Deadlock',
+    });
+    const plan = planGroupDream(deps(undefined), NOW);
+    expect(plan).toMatchObject({ run: true, why: 'weekly-refresh' });
+    // Remi's notes (set up without a reason) count as a change, but only reasons are listed.
+    expect(plan).toMatchObject({ changedNotes: 5 });
+    expect(plan.run && plan.context.personChanges).toEqual([
+      { ownerId: DALE, name: 'Dale', changeSummary: 'started Deadlock (2026-09-21)' },
+    ]);
+  });
+
+  it('does not refresh within the week, or when nothing changed since', () => {
+    const threeDaysAgo = new Date(NOW.getTime() - 3 * DAY);
+    storeAt(threeDaysAgo).recordDreamSuccess(group, 0);
+    notes.writeNotes(dale, [{ topic: 'profile', title: 'Dale', content: '## Now\nPlays Deadlock.' }], {
+      updatedBy: 'dream',
+      reason: 'started Deadlock',
+    });
+    expect(planGroupDream(deps(undefined), NOW)).toEqual({ run: false });
+
+    // A week later, but every change predates that dream.
+    notes.recordDreamSuccess(group, 0);
+    expect(planGroupDream(deps(undefined), new Date(NOW.getTime() + 8 * DAY))).toEqual({ run: false });
+  });
+
+  it('refreshes a group that never dreamed once someone has notes', () => {
+    expect(planGroupDream(deps(undefined), NOW)).toMatchObject({ run: true, why: 'weekly-refresh' });
+  });
+});
+
+describe('summarizePersonChanges', () => {
+  const change = (ownerId: string | null, reason: string | null, extra: Partial<NoteChange> = {}): NoteChange => ({
+    noteId: 1,
+    scope: ownerId ? 'person' : 'circle',
+    ownerId,
+    topic: 'profile',
+    title: 'x',
+    version: 2,
+    updatedAt: '2026-09-24 12:00:00',
+    updatedBy: 'dream',
+    reason,
+    ...extra,
+  });
+  const nameOf = (id: string) => ({ [REMI]: 'Remi', [DALE]: 'Dale' })[id];
+
+  it('says each change once per person, dated, with owner edits marked; circles and blank reasons left out', () => {
+    const summaries = summarizePersonChanges(
+      [
+        change(REMI, 'new job'),
+        change(REMI, 'new job', { topic: 'work' }),
+        change(null, 'new job', { topic: 'mtg' }),
+        change(DALE, null),
+        change(REMI, 'he never quit Valorant', { updatedBy: 'edit', updatedAt: '2026-09-26 02:00:00' }),
+      ],
+      nameOf,
+    );
+    expect(summaries).toEqual([
+      { ownerId: REMI, name: 'Remi', changeSummary: 'new job (2026-09-24); owner edit: he never quit Valorant (2026-09-25)' },
+    ]);
+  });
+
+  it('keeps the newest four changes per person', () => {
+    const many = ['a', 'b', 'c', 'd', 'e'].map((r) => change(REMI, `change ${r}`));
+    expect(summarizePersonChanges(many, nameOf)[0].changeSummary).toBe(
+      'change b (2026-09-24); change c (2026-09-24); change d (2026-09-24); change e (2026-09-24)',
+    );
   });
 });
 
@@ -497,11 +586,14 @@ describe('runNightlyDream', () => {
     ]);
     expect(result.group).toMatchObject({ status: 'updated', changeSummary: 'movie night' });
     expect(result.costUsd).toBeCloseTo(0.035);
-    expect(userPrompt(requests[2])).toContain("TONIGHT'S PERSON CHANGES:\n- Dale: deadlock\n- Remi: day shifts");
+    expect(userPrompt(requests[2])).toContain(
+      'PERSON CHANGES since your last group dream:\n- Dale: deadlock (2026-09-26)\n- Remi: day shifts (2026-09-26)',
+    );
     expect(notes.pendingDreams()).toEqual({ people: [] });
   });
 
   it('dreams at most maxPeople a night; the rest wait', async () => {
+    notes.recordDreamSuccess(group, 0); // the group dreamed tonight already: no refresh due
     await saveFact('Works day shifts.');
     await memory.save({ category: 'fact', subject: 'Dale', subject_user_id: DALE, content: 'Dale plays Deadlock.' });
     const { client } = createCapturingClient([
@@ -527,6 +619,24 @@ describe('runNightlyDream', () => {
     expect(result.group).toBeUndefined();
     expect(requests).toHaveLength(3);
     expect(notes.pendingDreams().people).toHaveLength(4);
+  });
+
+  it('refreshes the group weekly from the people changes alone, reading no journal rows', async () => {
+    const lastWeek = new Date(NOW.getTime() - (GROUP_REFRESH_DAYS + 2) * 24 * 60 * 60_000);
+    await memory.save({ category: 'vibe', subject: 'server', content: 'Movie night is Fridays.' });
+    new NotesStore(memory, { now: () => lastWeek }).recordDreamSuccess(group, notes.journalHighWater());
+    await saveFact('Works day shifts.');
+    const { client, requests } = createCapturingClient([
+      reply({ notes: [newProfile()], change_summary: 'day shifts' }),
+      reply({ notes: [{ topic: 'vibe', title: 'Vibe', content: '## Now\nRemi works days now.' }], change_summary: 'vibe' }),
+    ]);
+    const watermark = notes.getDreamState(group).journalWatermark;
+    const result = await runNightlyDream(deps(client));
+    expect(result.group).toMatchObject({ status: 'updated', changeSummary: 'vibe' });
+    const user = userPrompt(requests[1]);
+    expect(user).toContain('NEW JOURNAL: nothing new.');
+    expect(user).toContain('- Remi: day shifts (2026-09-26)');
+    expect(notes.getDreamState(group)).toMatchObject({ journalWatermark: watermark, lastDreamAt: '2026-09-26 08:30:00' });
   });
 
   it('does nothing without an OpenRouter key', async () => {

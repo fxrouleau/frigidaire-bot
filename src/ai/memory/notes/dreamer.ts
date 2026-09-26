@@ -8,8 +8,9 @@
 //   refused answer (invalid JSON, a rule broken, a write the store refuses) gets ONE repair round with the
 //   errors; then the watermark moves (recordDreamSuccess) only after a successful save. A failure is
 //   recorded (recordDreamFailure) and retried the next night. They never throw.
-// - runNightlyDream(): the people with new rows (most recently active first, capped), then the group. The
-//   scheduler that calls it once per Eastern day, and the report line, live in dreamSchedule.ts.
+// - runNightlyDream(): the people with new rows (most recently active first, capped), then the group when
+//   it has new rows, or at least weekly while members' notes keep changing (planGroupDream). The scheduler
+//   that calls it once per Eastern day, and the report line, live in dreamSchedule.ts.
 // - proposeEdit(): the owner's Edit button (MEMORY_EDIT_MODEL, tag memory_edit): the target's notes plus
 //   the instruction, answered as a NotesOutput and dry-run against the store (a savepoint rolled back), so
 //   the preview never shows something Confirm would refuse. Nothing is saved: the viewer shows
@@ -26,12 +27,14 @@ import { getOpenRouterClient } from '../../openRouterClient';
 import { formatIdentityLines } from '../../promptSections';
 import { featureRequestOptions, type UsageFeature } from '../../usage';
 import { extractUsage } from '../../usageFetch';
+import { parseSqliteUtc } from '../../utils';
 import type { Identity, Memory, MemoryStore } from '../memoryStore';
 import {
   buildEditPrompt,
   buildGroupDreamPrompt,
   buildPersonDreamPrompt,
   easternDay,
+  easternDayOf,
   excerptOnlyProblems,
   type JournalRenderContext,
   MAX_JOURNAL_ROWS_PER_DREAM,
@@ -42,7 +45,7 @@ import {
   renderRoster,
   repairPrompt,
 } from './dreamPrompts';
-import type { Note, NotesStore, WriteNotesResult } from './notesStore';
+import type { Note, NoteChange, NotesStore, WriteNotesResult } from './notesStore';
 import { type EvidencePassage, type EvidencePassageOptions, loadEvidencePassages } from './passages';
 import {
   type CircleMember,
@@ -80,6 +83,14 @@ const MAX_PASSAGES_PER_DREAM = 8;
 export const MAX_EDIT_INSTRUCTION_CHARS = 4_000;
 /** How much of a failure is kept and logged. */
 const MAX_ERROR_CHARS = 600;
+/**
+ * The group pass runs on any night with new server rows; without any, it still runs when its last dream is
+ * this many days old and someone's notes (or a circle) changed since: the weekly refresh that keeps the
+ * vibe and lore in step with how the members changed.
+ */
+export const GROUP_REFRESH_DAYS = 7;
+/** How much of the members' change history since its last dream the group pass reads. */
+const GROUP_CHANGES = { maxVersions: 400, maxPeople: 40, perPerson: 4, summaryChars: 200 } as const;
 
 /** What an owner edit changes: a person's notes (and their circles), the group's, or one circle. */
 export type EditTarget = NoteOwner | { scope: 'circle'; slug: string };
@@ -127,11 +138,19 @@ export type DreamOutcome =
    */
   | { status: 'failed'; owner: NoteOwner; error: string; costUsd?: number };
 
-/** Context the group pass gets from the night's person dreams. */
+/** Context the group pass gets: what changed in the members' notes since its last dream. */
 export type GroupDreamContext = {
-  /** Each updated person's change summary, by main id and current name. */
+  /**
+   * Each person whose notes changed, by main id and current name, with what changed: the dreams' change
+   * summaries (and the owner's edits), dated, oldest first.
+   */
   personChanges: { ownerId: string; name: string; changeSummary: string }[];
 };
+
+/** Whether tonight's group pass runs, and why (see GROUP_REFRESH_DAYS). */
+export type GroupDreamPlan =
+  | { run: false }
+  | { run: true; why: 'new-rows' | 'weekly-refresh'; context: GroupDreamContext; changedNotes: number };
 
 /** One night's run: every person dreamed (most recently active first, capped), then the group. */
 export type NightlyDreamResult = {
@@ -448,17 +467,21 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
 // ---- The group dream ----
 
 /**
- * The group pass after the people: journal rows about the server (no person) plus the night's person
- * change summaries become the group's notes (vibe, lore, running jokes; server-wide only) and any circles
- * that span the group. Same contract as dreamPerson with scope 'group'. Skipped when the group has no new
- * rows: person changes alone don't wake the strong model (cost control).
+ * The group pass after the people: journal rows about the server (no person) plus what changed in the
+ * members' notes since its last dream become the group's notes (vibe, lore, running jokes; server-wide only)
+ * and any circles that span the group. Same contract as dreamPerson with scope 'group'. Skipped when the
+ * group has no new rows, unless `refresh` is set (the weekly refresh: see planGroupDream()).
  */
-export async function dreamGroup(deps: DreamDeps, context: GroupDreamContext): Promise<DreamOutcome> {
+export async function dreamGroup(
+  deps: DreamDeps,
+  context: GroupDreamContext,
+  opts: { refresh?: boolean } = {},
+): Promise<DreamOutcome> {
   const owner: NoteOwner = { scope: 'group' };
   const label = ownerLabel(owner);
   try {
     const rows = rowsToDream(deps.notes.newJournal(owner));
-    if (rows.length === 0) return { status: 'skipped', owner, reason: 'nothing-new' };
+    if (rows.length === 0 && !opts.refresh) return { status: 'skipped', owner, reason: 'nothing-new' };
     const client = deps.client ?? getOpenRouterClient();
     if (!client) return failDream(deps, owner, label, new Error('OPENROUTER_API_KEY is not set'));
 
@@ -479,7 +502,8 @@ export async function dreamGroup(deps: DreamDeps, context: GroupDreamContext): P
       passages: passagesFor(deps, rows, ctx),
     });
     const allowedIds = allowedIdsFrom(identities, circleMemberIds(circles));
-    const watermark = highestSeq(rows);
+    // A refresh reads no rows: the watermark stays where it is.
+    const watermark = Math.max(highestSeq(rows), deps.notes.getDreamState(owner).journalWatermark);
 
     const outcome = await draftWithRepair<Saved>({
       client,
@@ -502,6 +526,77 @@ export async function dreamGroup(deps: DreamDeps, context: GroupDreamContext): P
   }
 }
 
+// ---- When the group dreams ----
+
+function oneLine(text: string, max: number): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line;
+}
+
+/** A version's "what changed", in words: the dream's summary, the owner's instruction, the undo. */
+function changeText(change: NoteChange): string | undefined {
+  const reason = change.reason?.trim();
+  if (!reason) return undefined;
+  const text = change.updatedBy === 'edit' ? `owner edit: ${reason}` : reason;
+  return oneLine(text, GROUP_CHANGES.summaryChars);
+}
+
+/**
+ * The members' note changes, per person (their current name), each dated and said once, oldest first; at
+ * most GROUP_CHANGES.perPerson per person (the newest) and GROUP_CHANGES.maxPeople people (the most
+ * recently changed). Versions without a reason are left out.
+ */
+export function summarizePersonChanges(
+  changes: NoteChange[],
+  nameOf: (userId: string) => string | undefined,
+): GroupDreamContext['personChanges'] {
+  const people = new Map<string, { items: string[]; texts: Set<string>; latest: number }>();
+  changes.forEach((change, index) => {
+    if (change.scope !== 'person' || !change.ownerId) return;
+    const text = changeText(change);
+    if (!text) return;
+    const entry = people.get(change.ownerId) ?? { items: [], texts: new Set<string>(), latest: index };
+    entry.latest = index;
+    if (!entry.texts.has(text)) {
+      entry.texts.add(text);
+      entry.items.push(`${text} (${easternDayOf(change.updatedAt) ?? change.updatedAt})`);
+    }
+    people.set(change.ownerId, entry);
+  });
+  const kept = new Set(
+    [...people.entries()]
+      .sort((a, b) => b[1].latest - a[1].latest)
+      .slice(0, GROUP_CHANGES.maxPeople)
+      .map(([ownerId]) => ownerId),
+  );
+  return [...people.entries()]
+    .filter(([ownerId]) => kept.has(ownerId))
+    .map(([ownerId, entry]) => ({
+      ownerId,
+      name: nameOf(ownerId) ?? 'someone',
+      changeSummary: entry.items.slice(-GROUP_CHANGES.perPerson).join('; '),
+    }));
+}
+
+/**
+ * Whether the group pass runs tonight: when the server has journal rows above its watermark, or (the weekly
+ * refresh) when its last successful dream is GROUP_REFRESH_DAYS or more ago (or never happened) and a
+ * person's notes or a circle changed since. Its input then carries every person change since that dream.
+ */
+export function planGroupDream(deps: Pick<DreamDeps, 'notes' | 'memory'>, now: Date): GroupDreamPlan {
+  const owner: NoteOwner = { scope: 'group' };
+  const state = deps.notes.getDreamState(owner);
+  const changes = deps.notes.changesSince(state.lastDreamAt, { limit: GROUP_CHANGES.maxVersions });
+  const context: GroupDreamContext = { personChanges: summarizePersonChanges(changes, nameResolver(deps.memory)) };
+  if (deps.notes.newJournal(owner, { limit: 1 }).length > 0) {
+    return { run: true, why: 'new-rows', context, changedNotes: changes.length };
+  }
+  const last = parseSqliteUtc(state.lastDreamAt);
+  if (last !== undefined && now.getTime() - last < GROUP_REFRESH_DAYS * 24 * 60 * 60_000) return { run: false };
+  if (changes.length === 0) return { run: false };
+  return { run: true, why: 'weekly-refresh', context, changedNotes: changes.length };
+}
+
 // ---- One night ----
 
 function addCost(total: number | undefined, outcome: DreamOutcome | undefined): number | undefined {
@@ -509,10 +604,29 @@ function addCost(total: number | undefined, outcome: DreamOutcome | undefined): 
   return cost === undefined ? total : (total ?? 0) + cost;
 }
 
+/** The group pass when planGroupDream() says so; 'skipped' otherwise. Never throws. */
+async function dreamGroupIfDue(deps: DreamDeps, now: Date): Promise<DreamOutcome> {
+  const owner: NoteOwner = { scope: 'group' };
+  let plan: GroupDreamPlan;
+  try {
+    plan = planGroupDream(deps, now);
+  } catch (error) {
+    return failDream(deps, owner, ownerLabel(owner), error);
+  }
+  if (!plan.run) return { status: 'skipped', owner, reason: 'nothing-new' };
+  if (plan.why === 'weekly-refresh') {
+    logger.info(
+      `dream: the group has no new rows, but its last dream is ${GROUP_REFRESH_DAYS}+ days old and ${plan.changedNotes} note version(s) changed since: refreshing it.`,
+    );
+  }
+  return dreamGroup(deps, plan.context, { refresh: plan.why === 'weekly-refresh' });
+}
+
 /**
  * One night: NotesStore.pendingDreams({ limit: maxPeople ?? MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT }) people,
- * one at a time (most recently active first), then the group. Stops early after MAX_FAILURES_IN_A_ROW
- * failed people in a row (an outage: everyone left waits for the next night). Never throws. The scheduler
+ * one at a time (most recently active first), then the group when it is due (planGroupDream: new server
+ * rows, or the weekly refresh). Stops early after MAX_FAILURES_IN_A_ROW failed people in a row (an outage:
+ * everyone left waits for the next night). Never throws. The scheduler
  * that calls it (once per Eastern day) and the report line are dreamSchedule.ts's.
  */
 export async function runNightlyDream(deps: DreamDeps & { maxPeople?: number }): Promise<NightlyDreamResult> {
@@ -554,13 +668,7 @@ export async function runNightlyDream(deps: DreamDeps & { maxPeople?: number }):
 
   let group: DreamOutcome | undefined;
   if (failuresInARow < MAX_FAILURES_IN_A_ROW) {
-    const nameOf = nameResolver(deps.memory);
-    const personChanges = people.flatMap((o) =>
-      o.status === 'updated' && o.owner.scope === 'person'
-        ? [{ ownerId: o.owner.ownerId, name: nameOf(o.owner.ownerId) ?? 'someone', changeSummary: o.changeSummary }]
-        : [],
-    );
-    group = await dreamGroup(withClient, { personChanges });
+    group = await dreamGroupIfDue(withClient, now);
   }
 
   let costUsd: number | undefined;

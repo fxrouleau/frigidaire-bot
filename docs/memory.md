@@ -269,9 +269,12 @@ long-unseen facts to a short Earlier section written as history instead of delet
 create, update and merge circles for recurring shared things; no censoring or paraphrasing away of what people
 are like; no speculation beyond the journal and its passages; English.
 
-After the people, a group pass: journal rows about the server (no person) plus the night's person change
-summaries become the group notes (and any circle). It runs only when the group has new rows: person changes
-alone don't wake the strong model.
+After the people, a group pass: journal rows about the server (no person) plus what changed in the members'
+notes since the group's last dream (each person's dated change summaries and the owner's edits, from the
+note versions) become the group notes (and any circle). It runs on any night the group has new rows, and
+otherwise at least weekly: when its last dream is 7 days old (or it never dreamed) and a person's notes or a
+circle changed since, it runs that night with no journal rows (a refresh, about $0.08 a week), so the vibe
+and lore keep up with how the members changed.
 
 Report: one report-channel line after a night with changes or failures, e.g.
 `🌙 dream · updated 2 profiles (Remi: new job; Dale: quit Valorant) · group: new lore · 1 unchanged · $0.18`
