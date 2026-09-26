@@ -51,7 +51,7 @@ src/
 ├── loadEnv.ts                 # dotenv; the FIRST import of every entry point (some modules read config while loading)
 ├── config.ts                  # EVERY env var, one set of parsing rules; describeEffectiveConfig(), configWarnings()
 ├── discordClient.ts           # Intents, partials, the client-wide allowedMentions default
-├── eventModule.ts             # defineEvent()/EventModule — the contract each file in src/events/ fulfils
+├── eventModule.ts             # defineEvent()/EventModule — the contract each file in src/events/ fulfils; registerEventModules()
 ├── logger.ts  logFile.ts      # Console logger, mirrored into the size-rotated ./data/logs/bot.log
 ├── channelEnv.ts              # Every channel variable resolved to #names (startup log + deploy ping)
 ├── linkedAccounts.ts          # LINKED_ACCOUNTS: canonicalUserId(), accountIdsFor(), isSamePerson()
@@ -125,7 +125,7 @@ Every env var the bot reads is parsed here, in its feature's section. Values are
 ### Startup, events, shutdown (`src/app.ts`, `src/eventModule.ts`)
 
 - Order: `loadEnv` → the Effective config line and warnings → the client → load every event file → startup memory maintenance (subject-id stamp, then `compact()`) → embedding backfill (and its periodic re-run) → login. A missing or rejected token exits with code 1 (fail fast; the restart policy takes it from there). SIGTERM/SIGINT close all four SQLite handles, then the client.
-- Every non-test file in `src/events/` must `export default defineEvent(Events.X, { once?, execute })`; `execute`'s arguments are typed from the event name. An invalid file fails startup with a clear error (`eventModule.test.ts` checks every file). Handlers run behind a dispatcher that logs a throwing or rejecting handler, and a `process.on('unhandledRejection')` logger covers everything else, so one missing permission can't take the process down.
+- Every non-test file in `src/events/` must `export default defineEvent(Events.X, { once?, execute })`; `execute`'s arguments are typed from the event name. An invalid file fails startup with a clear error (`eventModule.test.ts` checks every file). `registerEventModules()` puts ONE client listener on each (event, once) that hands the event to every module for it, in load order; each handler runs behind a dispatcher that logs a throwing or rejecting handler, on its own promise chain, so they stay concurrent and one that fails or hangs never stops or delays the others. A listener per file used to trip Node's MaxListenersExceededWarning (11 each on messageCreate and clientReady): don't raise `setMaxListeners` instead, the warning should mean a real leak. A `process.on('unhandledRejection')` logger covers everything else, so one missing permission can't take the process down.
 - **Partials** (Message, Channel, Reaction, User) make reaction, delete and update events fire for messages sent before the last restart, which means before every deploy. Handlers of MessageReactionAdd/Remove, MessageDelete and MessageUpdate must check `.partial` (or `fetch()`) before reading anything but ids. MessageCreate is never partial.
 
 | Event | Handlers |

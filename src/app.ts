@@ -3,7 +3,7 @@ import './loadEnv';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
-import { type ClientEvents, Events } from 'discord.js';
+import { Events } from 'discord.js';
 import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
 import { getMemoryStore } from './ai/memory';
@@ -11,7 +11,7 @@ import { runStartupMemoryMaintenance } from './ai/memory/startupMaintenance';
 import { closeArchiveStore } from './archive/archiveStore';
 import { config, configWarnings, describeEffectiveConfig } from './config';
 import { createDiscordClient } from './discordClient';
-import { resolveEventModule } from './eventModule';
+import { registerEventModules, resolveEventModule } from './eventModule';
 import { logger } from './logger';
 import { getBotDb } from './storage/botDb';
 
@@ -28,32 +28,22 @@ process.on('unhandledRejection', (reason) => {
 // Intents + partials live in discordClient.ts (partials: events for messages sent before the last restart).
 const client = createDiscordClient();
 
-// Every file in src/events/ is an event handler (see src/eventModule.ts). Each one runs behind a
-// dispatcher that logs a throwing/rejecting handler instead of letting it crash the bot — a missing
-// permission in one channel used to be enough to take the whole process down.
+// Every file in src/events/ is an event handler (see src/eventModule.ts). They share one client listener
+// per event, and each runs behind a dispatcher that logs a throwing/rejecting handler instead of letting it
+// crash the bot — a missing permission in one channel used to be enough to take the whole process down.
 const eventsPath = path.join(__dirname, 'events');
-const eventFiles = fs
+const eventModules = fs
   .readdirSync(eventsPath)
-  .filter((file) => (file.endsWith('.ts') || file.endsWith('.js')) && !file.includes('.test.'));
-
-for (const file of eventFiles) {
-  const event = resolveEventModule(require(path.join(eventsPath, file)));
-  if (!event) {
-    throw new Error(`src/events/${file} does not export an event module (use defineEvent()).`);
-  }
-
-  const dispatch = (...args: ClientEvents[keyof ClientEvents]) => {
-    Promise.resolve()
-      .then(() => (event.execute as (...a: unknown[]) => unknown)(...args))
-      .catch((error) => logger.error(`Event handler ${file} (${event.name}) failed:`, error));
-  };
-
-  if (event.once) {
-    client.once(event.name, dispatch);
-  } else {
-    client.on(event.name, dispatch);
-  }
-}
+  .filter((file) => (file.endsWith('.ts') || file.endsWith('.js')) && !file.includes('.test.'))
+  .map((file) => {
+    const event = resolveEventModule(require(path.join(eventsPath, file)));
+    if (!event) {
+      throw new Error(`src/events/${file} does not export an event module (use defineEvent()).`);
+    }
+    return { file, event };
+  });
+const listenerCount = registerEventModules(client, eventModules);
+logger.info(`Event handlers: ${eventModules.length} modules on ${listenerCount} client listeners.`);
 
 // Link memories to member ids, THEN compact, so newly linked rows dedup on this start (see the module).
 try {
