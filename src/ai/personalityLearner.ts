@@ -56,8 +56,13 @@ export type ObservationCategory = (typeof OBSERVATION_CATEGORIES)[number];
 
 // The default learner model (z-ai/glm-5.3-flash) reasons at 'max' unless told otherwise, and reasoning
 // counts toward max_tokens: at 'max', the old 1536-token cap could be spent before any JSON was written.
-// Each pass asks for 'low' and keeps room for the observations after it (only generated tokens are billed).
-const LEARNER_MAX_TOKENS = 4096;
+// Each pass asks for 'low' and keeps room for the observations after it: a part is a whole conversation
+// (up to ~48k characters) and every observation carries its evidence, so a busy one can run to dozens of
+// ~100-token rows. Only generated tokens are billed: the room costs nothing unless it is used.
+const LEARNER_MAX_TOKENS = 16_384;
+// Requests per pass: an answer that is empty, not the JSON asked for, or cut off at the length limit is
+// asked for once more (see analyzeAndSave).
+const LEARNER_ATTEMPTS = 2;
 
 type LearnerRequestBody = {
   model: string;
@@ -141,6 +146,45 @@ export function parseLearnerOutput(raw: string): LearnerOutput | undefined {
   }
 
   return undefined;
+}
+
+/**
+ * The complete observations of an answer cut off at the length limit: the entries of its "observations"
+ * array up to the last one that closed (the whole array when the cut came after it, e.g. in
+ * identity_updates). Undefined when there is no such array or the cut came before its first entry closed.
+ * Strings are skipped with their escapes, so a brace or bracket inside a quote never counts.
+ */
+export function salvageTruncatedObservations(raw: string): Observation[] | undefined {
+  const key = /"observations"\s*:\s*\[/.exec(raw);
+  if (!key) return undefined;
+  const start = key.index + key[0].length;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let lastEntryEnd = -1;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') {
+      if (depth === 0) break; // the observations array itself closed
+      depth--;
+      if (depth === 0) lastEntryEnd = i;
+    }
+  }
+  if (lastEntryEnd < 0) return undefined;
+  try {
+    const entries: unknown = JSON.parse(`[${raw.slice(start, lastEntryEnd + 1)}]`);
+    return Array.isArray(entries) && entries.length > 0 ? (entries as Observation[]) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -783,26 +827,42 @@ export class PersonalityLearner {
       reasoning: { effort: 'low' },
       provider: { zdr: true },
     };
-    // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
-    const response = await openai.chat.completions.create(
-      body as unknown as ChatCompletionCreateParamsNonStreaming,
-      featureRequestOptions(feature),
-    );
-
-    const choice = response.choices?.[0];
-    const text = choice?.message?.content?.trim();
-    if (!text) {
-      logger.warn(
-        `${label}: ${model} returned nothing for channel ${channelId} (finish=${choice?.finish_reason ?? 'none'}).`,
+    // An answer that is empty, not the JSON asked for, or cut off at the length limit is asked for once
+    // more (a fresh sample: a cut at this cap is a runaway, not a long answer). When no answer parses,
+    // the complete observations of a cut-off one are kept. Either way the part then counts as read: the
+    // same part would fail the same way at every later capture and hold the channel's watermark, and
+    // every conversation after it, back for good. A failed call throws (the part is retried later).
+    let parsed: LearnerOutput | undefined;
+    let salvaged: Observation[] = [];
+    for (let attempt = 1; attempt <= LEARNER_ATTEMPTS; attempt++) {
+      // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
+      const response = await openai.chat.completions.create(
+        body as unknown as ChatCompletionCreateParamsNonStreaming,
+        featureRequestOptions(feature),
       );
-      return { observations: 0, identityUpdates: 0 };
+      const choice = response.choices?.[0];
+      const text = choice?.message?.content?.trim() ?? '';
+      const finish = choice?.finish_reason ?? 'none';
+      parsed = text ? parseLearnerOutput(text) : undefined;
+      if (parsed) break;
+      const cut = finish === 'length';
+      if (cut) {
+        const complete = salvageTruncatedObservations(text) ?? [];
+        if (complete.length > salvaged.length) salvaged = complete;
+      }
+      const problem = !text ? 'returned nothing' : cut ? 'was cut off at the length limit' : 'returned no JSON';
+      const next = attempt < LEARNER_ATTEMPTS ? 'asking again' : 'no attempt left';
+      logger.warn(
+        `${label}: ${model} ${problem} for channel ${channelId} (finish=${finish}, attempt ${attempt}/${LEARNER_ATTEMPTS}), ${next}.${text && !cut ? ` Raw: ${text.slice(0, 200)}` : ''}`,
+      );
     }
-
-    const parsed = parseLearnerOutput(text);
-    if (!parsed) {
-      logger.warn(`${label}: Failed to parse JSON for channel ${channelId}. Raw: ${text.slice(0, 200)}`);
-      return { observations: 0, identityUpdates: 0 };
+    if (!parsed && salvaged.length > 0) {
+      logger.warn(
+        `${label}: keeping the ${salvaged.length} complete observation(s) of a cut-off answer for channel ${channelId}`,
+      );
+      parsed = { observations: salvaged };
     }
+    if (!parsed) return { observations: 0, identityUpdates: 0 };
 
     const members = foldMembers(this.store.getAllIdentities());
     let observations = 0;

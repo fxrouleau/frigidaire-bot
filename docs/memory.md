@@ -184,7 +184,10 @@ captured is read back to the start of its last conversation; older history is th
 conversation longer than one request (~48k characters of transcript) is split into parts at its longest quiet
 gap once a part is at least 60% full, and each later part opens with the end of the previous one (~2k
 characters) under `## ALREADY COVERED — context only, do not extract`. The watermark moves after each part, so
-a failure part-way neither loses nor repeats anything.
+a failure part-way neither loses nor repeats anything. The extractor gets 16,384 output tokens (low reasoning
+effort); an answer that is empty, not JSON or cut off at the length limit is asked for once more, and when the
+second one is no better the complete observations of a cut-off answer are kept and the part counts as read (the
+same part would fail the same way at every capture and hold the channel back for good).
 
 **Evidence and related members**: the transcript's lines are numbered (`#N [time] [Name (id:…)] text`), and each
 observation cites `evidence: {lines, quote}` plus, for a relationship or something shared, `related_user_ids`.

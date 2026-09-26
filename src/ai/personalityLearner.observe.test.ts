@@ -209,7 +209,7 @@ describe('PersonalityLearner observation cycle', () => {
     expect(requests.map((r) => r.body.provider)).toEqual([{ zdr: true }, { zdr: true }]);
     // The default learner model reasons at 'max' unless told otherwise, which could spend the whole cap.
     expect(requests.map((r) => r.body.reasoning)).toEqual([{ effort: 'low' }, { effort: 'low' }]);
-    expect(requests.map((r) => r.body.max_tokens)).toEqual([4096, 4096]);
+    expect(requests.map((r) => r.body.max_tokens)).toEqual([16_384, 16_384]);
     expect(requests.map((r) => r.headers.get(FEATURE_HEADER))).toEqual(['memory_capture', 'self_improvement']);
   });
 

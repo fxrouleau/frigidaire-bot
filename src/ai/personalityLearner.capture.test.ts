@@ -241,6 +241,62 @@ describe('capture reads the whole conversation', () => {
   });
 });
 
+describe('capture survives an answer cut off at the length limit', () => {
+  const FACTS = ['Works nights at the depot', 'Owns a husky named Pepper', 'Plays bass in a cover band'];
+  const answer = JSON.stringify({
+    observations: FACTS.map((content, k) => ({
+      category: 'fact',
+      subject: 'Remi',
+      subject_user_id: REMI,
+      content,
+      evidence: { lines: [k + 1], quote: `message ${k + 1}` },
+    })),
+  });
+  /** A reply cut off at the length limit, mid-way through the third observation. */
+  const cutOff = (): ScriptedReply => {
+    const text = answer.slice(0, answer.indexOf('Plays bass'));
+    const body = chatCompletionBody(text) as { choices: { finish_reason: string }[] };
+    return { body: { ...body, choices: body.choices.map((c) => ({ ...c, finish_reason: 'length' })) } };
+  };
+
+  it('asks once more, with room for a whole conversation, and keeps the complete answer', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    const { client } = clientServing([post(0, REMI, 0), ...chat(1, 4, 10)]);
+    const { learner, requests } = learnerWith([cutOff(), { body: chatCompletionBody(answer) }]);
+
+    await learner.observeOnce(client, BASE + 300 * MIN);
+
+    expect(requests).toHaveLength(2);
+    expect(requests.map((r) => r.body.max_tokens)).toEqual([16_384, 16_384]);
+    expect(store.getAllActive().map((m) => m.content).sort()).toEqual([...FACTS].sort());
+    expect(store.getLastObserved(CHANNEL)).toBe(idAt(4));
+  });
+
+  it('keeps the complete observations when the second answer is cut off too, and moves on', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    const { client } = clientServing([post(0, REMI, 0), ...chat(1, 4, 10)]);
+    const { learner, requests } = learnerWith([cutOff(), cutOff()]);
+
+    await learner.observeOnce(client, BASE + 300 * MIN);
+
+    expect(requests).toHaveLength(2);
+    expect(store.getAllActive().map((m) => m.content).sort()).toEqual(FACTS.slice(0, 2).sort());
+    // The same part would be cut the same way at every capture: it counts as read.
+    expect(store.getLastObserved(CHANNEL)).toBe(idAt(4));
+  });
+
+  it('asks once more after an answer that is not JSON', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    const { client } = clientServing([post(0, REMI, 0), ...chat(1, 4, 10)]);
+    const { learner, requests } = learnerWith([{ body: chatCompletionBody('Sure! Here are the facts:') }, reply(JSON.parse(answer))]);
+
+    await learner.observeOnce(client, BASE + 300 * MIN);
+
+    expect(requests).toHaveLength(2);
+    expect(store.getAllActive()).toHaveLength(3);
+  });
+});
+
 describe('capture keeps what it cites', () => {
   it('stores the cited messages, a verified quote, the related members and when it was said', async () => {
     store.setLastObserved(CHANNEL, idAt(0));
