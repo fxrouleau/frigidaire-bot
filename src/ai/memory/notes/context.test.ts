@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CIRCLE_MIN_PRESENT,
+  correctionLine,
   circleNames,
   circlesNamedIn,
   describeMembers,
@@ -72,6 +73,34 @@ describe('pickCircles', () => {
     expect(pickCircles({ circles: [named], text: 'hi', present: new Set([REMI, NOVA]) })).toEqual([]);
     expect(pickCircles({ circles: [named], text: 'hi', present: new Set([REMI, DALE]) })).toHaveLength(1);
     expect(pickCircles({ circles: [named], text: 'mtg', present, skip: () => true })).toEqual([]);
+  });
+});
+
+describe('correctionLine', () => {
+  const now = new Date('2026-09-20T12:00:00Z');
+  const row = (said_by: string, subject_user_id: string) => ({
+    content: 'Quit Valorant in August.',
+    updated_at: '2026-09-20 11:00:00',
+    said_by,
+    subject_user_id,
+  });
+  const nameOf = (id: string) => NAMES[id] ?? (id === REMI_ALT ? 'Remi' : undefined);
+  const REMI_ALT = '100000000000000011';
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("tells a person's own correction from someone else's claim", () => {
+    expect(correctionLine(row(REMI, REMI), nameOf, now)).toBe('- Remi, about themself: Quit Valorant in August. (today)');
+    expect(correctionLine(row(DALE, REMI), nameOf, now)).toBe('- Dale says: Quit Valorant in August. (today)');
+  });
+
+  it('keeps a correction filed from an account later linked as a side account their own', () => {
+    // Filed from REMI_ALT about themself; the owner then linked REMI_ALT to REMI, and the startup stamp moved
+    // the row's subject to REMI (said_by keeps the account that spoke).
+    vi.stubEnv('LINKED_ACCOUNTS', `${REMI_ALT}:${REMI}`);
+    expect(correctionLine(row(REMI_ALT, REMI), nameOf, now)).toBe(
+      '- Remi, about themself: Quit Valorant in August. (today)',
+    );
   });
 });
 

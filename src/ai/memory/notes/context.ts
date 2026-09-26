@@ -4,6 +4,7 @@
 // writer). Chat turns see a note without its dated "Earlier" footnotes (sections.ts): those come up on
 // demand (read_note) or through search. Pure functions over already-loaded rows, so every consumer renders
 // notes the same way and tests need no store.
+import { canonicalUserId } from '../../../linkedAccounts';
 import { formatRelativeAge } from '../../utils';
 import type { Memory } from '../memoryStore';
 import type { CircleMembership, Note } from './notesStore';
@@ -72,6 +73,20 @@ export function journalLine(row: Pick<Memory, 'category' | 'content' | 'updated_
   return `- [${row.category}] ${row.content}${age ? ` (${age})` : ''}`;
 }
 
+type CorrectionRow = Pick<Memory, 'said_by' | 'subject_user_id'>;
+
+/**
+ * Whether a correction is the person's own word about themself (authoritative) rather than someone else's
+ * claim about them (weighed, never settled). Linked accounts count as one member: a correction filed from
+ * an account later linked as a side account stays their own after the startup stamp moved the row's
+ * subject to the main account.
+ */
+export function isSelfCorrection(row: CorrectionRow): boolean {
+  return (
+    !!row.said_by && !!row.subject_user_id && canonicalUserId(row.said_by) === canonicalUserId(row.subject_user_id)
+  );
+}
+
 /**
  * A correction as one dated line, naming who said it: `- Dale says: moved to Laval (today)`, or
  * `- Remi, about themself: quit Valorant (today)` when the person corrected their own notes.
@@ -84,9 +99,7 @@ export function correctionLine(
   const age = formatRelativeAge(row.updated_at, now);
   const when = age ? ` (${age})` : '';
   const speaker = row.said_by ? (nameOf(row.said_by) ?? 'someone') : 'someone';
-  if (row.said_by && row.subject_user_id && row.said_by === row.subject_user_id) {
-    return `- ${speaker}, about themself: ${row.content}${when}`;
-  }
+  if (isSelfCorrection(row)) return `- ${speaker}, about themself: ${row.content}${when}`;
   return `- ${speaker} says: ${row.content}${when}`;
 }
 
