@@ -260,7 +260,10 @@ they were in the input, circle membership shape and dates) and saved all or noth
 cut off at the length limit) gets one repair round with the errors. The watermark advances only on success
 (an answer that changes nothing still advances it); a failure is logged, kept in `dream_state` and retried the
 next night. A night stops early after three people failed in a row (an outage). Circles past a 60,000-char
-budget are shown as excerpts and may not be rewritten by that call.
+budget are shown as excerpts and may not be rewritten by that call. An answer is never saved over notes that
+changed while the model was thinking (an owner edit or undo of that person's notes, or of a circle the answer
+writes): the save compares the versions the prompt showed in the same transaction, and on a change the dream
+fails without a repair round, so the next night dreams from the new version.
 
 Dream rules (the prompt): merge new facts; resolve contradictions (newer wins; a self-correction beats
 anything; a third-party claim is weighed, never blindly applied); weigh by recency × recurrence; keep dates
@@ -286,7 +289,9 @@ reasons when asked, so calls send no reasoning field and a `max_tokens` of 16,00
 
 Owner edits (`proposeEdit`) show the model the target's notes (a person's with their circles, the group's with
 every circle, or one circle) and the instruction; the draft is checked against the store in a rolled-back
-transaction (one repair round when refused), so the preview never shows something Confirm would refuse.
+transaction (one repair round when refused), so the preview never shows something Confirm would refuse. A draft
+whose notes changed while the model was drafting (a dream saved meanwhile) is refused ("ask again"), so Confirm
+can never put back what the dream replaced.
 
 `record_correction` takes at most 15 corrections from one member in a rolling 24 hours (each one can pull a
 person into the night's dream); at the cap the bot says so in its own voice.

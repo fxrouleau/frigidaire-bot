@@ -7,14 +7,17 @@
 //   (schema.ts, shared by every writer) and is saved with NotesStore.applyNotesOutput(), all or nothing. A
 //   refused answer (invalid JSON, a rule broken, a write the store refuses) gets ONE repair round with the
 //   errors; then the watermark moves (recordDreamSuccess) only after a successful save. A failure is
-//   recorded (recordDreamFailure) and retried the next night. They never throw.
+//   recorded (recordDreamFailure) and retried the next night. They never throw. An answer drafted from
+//   notes that changed while the model was thinking (an owner edit or undo, another writer) is never saved
+//   over them: that dream fails without a repair round and the next night dreams from the new version.
 // - runNightlyDream(): the people with new rows (most recently active first, capped), then the group when
 //   it has new rows, or at least weekly while members' notes keep changing (planGroupDream). The scheduler
 //   that calls it once per Eastern day, and the report line, live in dreamSchedule.ts.
 // - proposeEdit(): the owner's Edit button (MEMORY_EDIT_MODEL, tag memory_edit): the target's notes plus
 //   the instruction, answered as a NotesOutput and dry-run against the store (a savepoint rolled back), so
 //   the preview never shows something Confirm would refuse. Nothing is saved: the viewer shows
-//   previewChanges() and saves with applyEdit() on Confirm.
+//   previewChanges() and saves with applyEdit() on Confirm. A draft whose notes changed while the model was
+//   thinking (the dream saved meanwhile) is refused, so Confirm can't put back what the dream replaced.
 //
 // The dream model (Claude Opus by default) only reasons when asked, so the calls send no reasoning field
 // and leave generous output room (NOTES_MAX_TOKENS): everything generated is the answer.
@@ -224,12 +227,15 @@ async function askModel(
   };
 }
 
-type Checked<T> = { ok: true; value: T } | { ok: false; errors: string[] };
+type Checked<T> =
+  | { ok: true; value: T }
+  /** `final`: no repair round can fix it (the notes changed meanwhile), so none is asked for. */
+  | { ok: false; errors: string[]; final?: boolean };
 
 /**
  * Asks, checks the answer with `check` (parse, validate, and for the dream the save itself), and on a
- * refusal asks once more with the errors. Model and network errors throw (the callers turn them into
- * failures).
+ * refusal asks once more with the errors (unless the refusal is final). Model and network errors throw (the
+ * callers turn them into failures).
  */
 async function draftWithRepair<T>(args: {
   client: OpenAI;
@@ -252,7 +258,7 @@ async function draftWithRepair<T>(args: {
       : answer.text.trim()
         ? args.check(answer.text)
         : { ok: false, errors: ['the answer was empty'] };
-    if (result.ok || attempt >= MAX_REPAIRS) return { result, costUsd };
+    if (result.ok || result.final || attempt >= MAX_REPAIRS) return { result, costUsd };
     messages.push(
       {
         role: 'assistant',
@@ -261,6 +267,47 @@ async function draftWithRepair<T>(args: {
       { role: 'user', content: repairPrompt(result.errors, answer.truncated) },
     );
   }
+}
+
+// ---- What a writer was shown ----
+
+/**
+ * The versions a writer's prompt was built from, each as `id.version`: the target's notes (a person's or
+ * the group's; none for a circle) by topic, and every active circle by slug. Taken with the prompt,
+ * compared again right before the save (changedSince).
+ */
+type NotesBasis = { notes: Map<string, string>; circles: Map<string, string> };
+
+const versionKey = (note: Note) => `${note.id}.${note.version}`;
+
+function notesBasis(notes: NotesStore, target: EditTarget): NotesBasis {
+  return {
+    notes: new Map(target.scope === 'circle' ? [] : notes.listNotes(target).map((n) => [n.topic, versionKey(n)])),
+    circles: new Map(notes.listCircles().map((c) => [c.topic, versionKey(c)])),
+  };
+}
+
+/**
+ * What changed since `basis` that an answer depends on: any of the target's notes (rewritten, undone, added
+ * or removed meanwhile: an owner edit or undo, a dream, another process's writer) and the circles the
+ * answer writes, merges or removes (plus a circle edit's own circle). Topics, and circles as
+ * `circle:<slug>`; empty when none did. The viewer's Confirm applies the same rule (editFingerprint).
+ */
+function changedSince(notes: NotesStore, target: EditTarget, basis: NotesBasis, output?: NotesOutput): string[] {
+  const current = notesBasis(notes, target);
+  const changed: string[] = [];
+  for (const topic of new Set([...basis.notes.keys(), ...current.notes.keys()])) {
+    if (basis.notes.get(topic) !== current.notes.get(topic)) changed.push(topic);
+  }
+  const slugs = new Set([
+    ...(output?.circles.flatMap((c) => [c.slug, ...c.merged_from]) ?? []),
+    ...(output?.removed_circles ?? []),
+    ...(target.scope === 'circle' ? [target.slug] : []),
+  ]);
+  for (const slug of [...slugs].sort()) {
+    if (basis.circles.get(slug) !== current.circles.get(slug)) changed.push(`circle:${slug}`);
+  }
+  return changed;
 }
 
 // ---- Shared pieces ----
@@ -366,6 +413,49 @@ function finishDream(
   };
 }
 
+/**
+ * A dream's answer, checked and saved: parsed (parseNotesOutput with `parse`), refused for good when the
+ * notes it was drafted from changed while the model was thinking (see changedSince: saving it would
+ * overwrite the newer version, an owner edit say; no repair round, the next night dreams from the new
+ * version), refused for a rewrite of an excerpt-only circle, then saved as dream versions. The comparison
+ * and the save run in one IMMEDIATE transaction, so no writer (this process or another: a bootstrap's
+ * dream) lands in between.
+ */
+function checkAndSaveDream(
+  deps: DreamDeps,
+  owner: NoteOwner,
+  text: string,
+  check: {
+    parse: Parameters<typeof parseNotesOutput>[1];
+    basis: NotesBasis;
+    excerptOnly: ReadonlySet<string>;
+    allowedIds: string[];
+  },
+): Checked<Saved> {
+  const parsed = parseNotesOutput(text, check.parse);
+  const save = (): Checked<Saved> => {
+    const changed = changedSince(deps.notes, owner, check.basis, parsed.ok ? parsed.value : undefined);
+    if (changed.length > 0) {
+      return {
+        ok: false,
+        final: true,
+        errors: [
+          `the notes changed while dreaming (${changed.join(', ')}): not saved over them; the next night dreams from the new version`,
+        ],
+      };
+    }
+    if (!parsed.ok) return parsed;
+    const excerpts = excerptOnlyProblems(parsed.value, check.excerptOnly);
+    if (excerpts.length > 0) return { ok: false, errors: excerpts };
+    const saved = deps.notes.applyNotesOutput(owner, parsed.value, {
+      updatedBy: 'dream',
+      allowedIds: check.allowedIds,
+    });
+    return saved.ok ? { ok: true, value: { output: parsed.value, saved } } : { ok: false, errors: saved.errors };
+  };
+  return deps.memory.sharedDatabase().transaction(save).immediate();
+}
+
 /** A dream that threw (a model or network error, a store error): recorded, never rethrown. */
 function failDream(deps: DreamDeps, owner: NoteOwner, label: string, error: unknown): DreamOutcome {
   const message = describeError(error);
@@ -442,6 +532,7 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
     });
     const allowedIds = allowedIdsFrom(identities, [...accounts, ...circleMemberIds(circles)]);
     const watermark = highestSeq(rows);
+    const basis = notesBasis(deps.notes, owner);
 
     const outcome = await draftWithRepair<Saved>({
       client,
@@ -449,14 +540,13 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
       feature: DREAM_FEATURE,
       system: prompt.system,
       user: prompt.user,
-      check: (text) => {
-        const parsed = parseNotesOutput(text, { scope: 'person', requireProfile: true, allowedIds });
-        if (!parsed.ok) return parsed;
-        const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
-        if (excerpts.length > 0) return { ok: false, errors: excerpts };
-        const saved = deps.notes.applyNotesOutput(owner, parsed.value, { updatedBy: 'dream', allowedIds });
-        return saved.ok ? { ok: true, value: { output: parsed.value, saved } } : { ok: false, errors: saved.errors };
-      },
+      check: (text) =>
+        checkAndSaveDream(deps, owner, text, {
+          parse: { scope: 'person', requireProfile: true, allowedIds },
+          basis,
+          excerptOnly: circleView.excerptOnly,
+          allowedIds,
+        }),
     });
     return finishDream(deps, owner, label, watermark, outcome);
   } catch (error) {
@@ -504,6 +594,7 @@ export async function dreamGroup(
     const allowedIds = allowedIdsFrom(identities, circleMemberIds(circles));
     // A refresh reads no rows: the watermark stays where it is.
     const watermark = Math.max(highestSeq(rows), deps.notes.getDreamState(owner).journalWatermark);
+    const basis = notesBasis(deps.notes, owner);
 
     const outcome = await draftWithRepair<Saved>({
       client,
@@ -511,14 +602,13 @@ export async function dreamGroup(
       feature: DREAM_FEATURE,
       system: prompt.system,
       user: prompt.user,
-      check: (text) => {
-        const parsed = parseNotesOutput(text, { scope: 'group', allowedIds });
-        if (!parsed.ok) return parsed;
-        const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
-        if (excerpts.length > 0) return { ok: false, errors: excerpts };
-        const saved = deps.notes.applyNotesOutput(owner, parsed.value, { updatedBy: 'dream', allowedIds });
-        return saved.ok ? { ok: true, value: { output: parsed.value, saved } } : { ok: false, errors: saved.errors };
-      },
+      check: (text) =>
+        checkAndSaveDream(deps, owner, text, {
+          parse: { scope: 'group', allowedIds },
+          basis,
+          excerptOnly: circleView.excerptOnly,
+          allowedIds,
+        }),
     });
     return finishDream(deps, owner, label, watermark, outcome);
   } catch (error) {
@@ -870,6 +960,7 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
     });
     const owned = view.target.scope === 'person' ? accountIdsFor(view.target.ownerId) : [];
     const allowedIds = allowedIdsFrom(identities, [...owned, ...circleMemberIds(view.circles)]);
+    const basis = notesBasis(deps.notes, view.target);
 
     const { result, costUsd } = await draftWithRepair<NotesOutput>({
       client,
@@ -879,6 +970,16 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
       user: prompt.user,
       check: (text) => {
         const parsed = parseNotesOutput(text, { scope: view.scope, allowedIds });
+        // A dream (or another edit) saved while the model drafted: the preview would compare against notes
+        // the draft never saw, and Confirm would put the replaced version back. The owner asks again.
+        const changed = changedSince(deps.notes, view.target, basis, parsed.ok ? parsed.value : undefined);
+        if (changed.length > 0) {
+          return {
+            ok: false,
+            final: true,
+            errors: [`the notes changed while drafting (${changed.join(', ')}): ask again`],
+          };
+        }
         if (!parsed.ok) return parsed;
         const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
         if (excerpts.length > 0) return { ok: false, errors: excerpts };

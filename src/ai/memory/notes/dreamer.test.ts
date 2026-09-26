@@ -379,6 +379,100 @@ describe('dreamPerson', () => {
   });
 });
 
+describe('a write that lands while the model is thinking', () => {
+  const ownerEdit = () => {
+    const saved = notes.writeNotes(remi, [{ topic: 'profile', title: 'Remi', content: '## Now\nMoved to Laval.' }], {
+      updatedBy: 'edit',
+      reason: 'he moved',
+    });
+    if (!saved.ok) throw new Error(saved.errors.join('; '));
+  };
+
+  it("never overwrites an owner edit saved during the dream's call: failed, no repair, the watermark stays", async () => {
+    await saveFact('Works day shifts at the bakery now.');
+    const { client, requests } = createCapturingClient(
+      [reply({ notes: [newProfile()], change_summary: 'day shifts' }), reply({ notes: [newProfile()], change_summary: 'x' })],
+      { onRequest: ownerEdit },
+    );
+    const outcome = await dreamPerson(REMI, deps(client));
+    expect(outcome).toMatchObject({ status: 'failed', owner: remi, costUsd: 0.03 });
+    expect(outcome.status === 'failed' ? outcome.error : '').toContain('changed while dreaming (profile)');
+    // No repair round: the model can't fix notes it never saw.
+    expect(requests).toHaveLength(1);
+    expect(notes.getProfile(REMI)).toMatchObject({ version: 2, updatedBy: 'edit', content: '## Now\nMoved to Laval.' });
+    expect(notes.getDreamState(remi)).toMatchObject({ journalWatermark: 0 });
+    expect(notes.getDreamState(remi).lastError).toContain('changed while dreaming');
+    expect(notes.newJournal(remi)).toHaveLength(1);
+  });
+
+  it('refuses a circle that changed meanwhile, and saves when only circles it leaves alone did', async () => {
+    await saveFact('Drafts on Fridays with Dale.');
+    const editCircle = (slug: string, content: string) => () => {
+      const saved = notes.writeCircles(
+        [{ slug, title: slug === 'mtg' ? 'The MTG crew' : 'Magic nights', content, members: [{ id: REMI }, { id: DALE }] }],
+        { updatedBy: 'edit' },
+      );
+      if (!saved.ok) throw new Error(saved.errors.join('; '));
+    };
+    const mtg = {
+      slug: 'mtg',
+      title: 'The MTG crew',
+      content: '## Now\nFriday drafts.',
+      members: [{ id: REMI }, { id: DALE }],
+    };
+    const touched = createCapturingClient([reply({ notes: [newProfile()], circles: [mtg], change_summary: 'fridays' })], {
+      onRequest: editCircle('mtg', '## Now\nCommander now.'),
+    });
+    const refused = await dreamPerson(REMI, deps(touched.client));
+    expect(refused.status === 'failed' ? refused.error : '').toContain('changed while dreaming (circle:mtg)');
+    expect(notes.getCircle('mtg')?.content).toBe('## Now\nCommander now.');
+
+    const untouched = createCapturingClient([reply({ notes: [newProfile()], circles: [mtg], change_summary: 'fridays' })], {
+      onRequest: editCircle('magic', '## Now\nSame crew, other night.'),
+    });
+    expect(await dreamPerson(REMI, deps(untouched.client))).toMatchObject({ status: 'updated' });
+    expect(notes.getCircle('mtg')?.content).toBe('## Now\nFriday drafts.');
+    expect(notes.getCircle('magic')?.content).toBe('## Now\nSame crew, other night.');
+  });
+
+  it("never overwrites the group's notes changed during the group pass", async () => {
+    notes.writeNotes(group, [{ topic: 'vibe', title: 'Vibe', content: '## Now\nChill.' }], { updatedBy: 'dream' });
+    await memory.save({ category: 'vibe', subject: 'server', content: 'Roasts are affection here.' });
+    const { client, requests } = createCapturingClient(
+      [reply({ notes: [{ topic: 'vibe', title: 'Vibe', content: '## Now\nRoasts.' }], change_summary: 'roasts' })],
+      {
+        onRequest: () => {
+          notes.writeNotes(group, [{ topic: 'lore', title: 'Lore', content: '## Now\nThe 2026 LAN.' }], {
+            updatedBy: 'edit',
+          });
+        },
+      },
+    );
+    const outcome = await dreamGroup(deps(client), { personChanges: [] });
+    expect(outcome.status === 'failed' ? outcome.error : '').toContain('changed while dreaming (lore)');
+    expect(requests).toHaveLength(1);
+    expect(notes.getNote(group, 'vibe')?.content).toBe('## Now\nChill.');
+    expect(notes.getNote(group, 'lore')?.content).toBe('## Now\nThe 2026 LAN.');
+    expect(notes.newJournal(group)).toHaveLength(1);
+  });
+
+  it("refuses an owner edit drafted from notes a dream rewrote meanwhile (Confirm would undo the dream's work)", async () => {
+    const { client, requests } = createCapturingClient(
+      [reply({ notes: [{ topic: 'profile', title: 'Remi', content: '## Now\nDay shifts.' }], change_summary: 'x' })],
+      {
+        onRequest: () => {
+          notes.writeNotes(remi, [newProfile('## Now\nNight shifts; new bakery job (2026-09).')], { updatedBy: 'dream' });
+        },
+      },
+    );
+    const proposal = await proposeEdit({ target: remi, instruction: 'he works days now', requestedBy: NOVA }, deps(client));
+    expect(proposal).toMatchObject({ ok: false });
+    expect(proposal.ok ? '' : proposal.error).toContain('changed while drafting (profile)');
+    expect(requests).toHaveLength(1);
+    expect(notes.getProfile(REMI)).toMatchObject({ version: 2, updatedBy: 'dream' });
+  });
+});
+
 describe('dreamPerson evidence passages', () => {
   const CHANNEL = '100000000000000050';
   const T0 = Date.UTC(2026, 7, 3, 1, 0); // 2026-08-02 21:00 ET
