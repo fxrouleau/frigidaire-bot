@@ -66,6 +66,13 @@ describe.skipIf(!present)('the memory bootstrap playbook', () => {
     expect(DEFAULT_WORK_DIR).toBe('./data/memory-bootstrap/work');
   });
 
+  it('always leaves a scan step the orchestrator can apply', () => {
+    const scan = skill.slice(skill.indexOf('## Step 2: scan one chunk'), skill.indexOf('## Step 3'));
+    // A chunk with nothing to keep still leaves observations.jsonl, and applying tolerates a step without one.
+    expect(scan).toContain('`observations.jsonl`, ALWAYS');
+    expect(skill).toContain('when the step\n     has no `observations.jsonl`, create an empty');
+  });
+
   it('shows observation lines the observations helper accepts', () => {
     const lines = blocks(skill, 'json')
       .flatMap((block) => block.split('\n'))

@@ -96,7 +96,8 @@ You stay lean so your context never fills up:
    - `work/steps/N/` exists → the step committed but was not applied: **apply** it (below).
    - `work/steps/N.tmp/` exists → the step was interrupted: `rm -rf work/steps/N.tmp`, then scan `N` again.
    - Otherwise launch the **scan subagent** for `N`. When it returns, apply the step.
-   - **Apply** (idempotent): `cp work/steps/N/observations.jsonl work/observations/N.jsonl`, then
+   - **Apply** (idempotent): `cp work/steps/N/observations.jsonl work/observations/N.jsonl` (when the step
+     has no `observations.jsonl`, create an empty `work/observations/N.jsonl` instead), then
      `cp -R work/steps/N/working/. work/working/` (when that folder exists), then add `N` to `scan.done`.
    - After applying a chunk whose number is a multiple of `reground.every` (0010, 0020, …) and isn't in
      `reground.after`: **re-ground**, then add it to `reground.after`.
@@ -124,7 +125,8 @@ the chunk id, and `{FROM}`/`{TO}` with the chunk's dates from the manifest):
 >    quoted lines under "ALREADY COVERED" are context from the previous chunk: never extract from them.
 >
 > Then write, and ONLY write, inside `{WORK}/steps/{N}.tmp/`:
-> - `observations.jsonl`: one JSON object per line, per the OBSERVATION FORMAT and the KNOWLEDGE RULES
+> - `observations.jsonl`, ALWAYS (an empty file when the chunk has nothing worth keeping): one JSON object
+>   per line, per the OBSERVATION FORMAT and the KNOWLEDGE RULES
 >   below. Every observation is dated and cites the chunk lines it comes from (`"chunk": "{N}"`, line
 >   numbers as the Read tool shows them). Interpret references with the working notes: a callback to an
 >   earlier joke is recorded as that joke, with its origin. Relationships and shared events list everyone
