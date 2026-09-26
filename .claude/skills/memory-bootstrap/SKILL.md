@@ -189,8 +189,10 @@ Record each slug in `final.circles` (also the "not a circle" ones).
 
 ### 4b. People
 
-For each owner in `work/by-person/index.json` → `people` (skip people with fewer than 3 observations;
-their journal rows will reach the dream anyway):
+For each owner in `work/by-person/index.json` → `people`, except people with fewer than 3 observations.
+Those are skipped, and what the scan saw of them is NOT imported (nothing in this playbook writes the bot's
+journal): the bot builds their notes from whatever memories it already had about them and learns them from
+what it captures from now on. Count them for the hand-over.
 
 - **Long logs** (`tokens` > 60,000): build eras first. From the index's `years` (estimated tokens per year),
   group consecutive years into eras of at most ~40,000 tokens. For each era not in `final.eras`
@@ -261,8 +263,9 @@ Set `critic` to true.
    `docker exec frigidaire-bot chown -R node:node /app/data/memory-import`) and restart the bot. At startup
    the bot validates it again, loads it as the notes' first version, moves it to
    `data/memory-import/imported-<timestamp>/` and posts one line in the report channel; a tree with any
-   problem loads nothing and stays in place (the log says why). The export and the work folder are private
-   chat: delete them once the import is done.
+   problem loads nothing and stays in place (the log says why). Say how many people were skipped for having
+   fewer than 3 observations (Step 4b): the tree has nothing on them. The export and the work folder are
+   private chat: delete them once the import is done.
 
 ## Reference
 
