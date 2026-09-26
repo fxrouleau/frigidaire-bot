@@ -56,8 +56,13 @@ export type ObservationCategory = (typeof OBSERVATION_CATEGORIES)[number];
 
 // The default learner model (z-ai/glm-5.3-flash) reasons at 'max' unless told otherwise, and reasoning
 // counts toward max_tokens: at 'max', the old 1536-token cap could be spent before any JSON was written.
-// Each pass asks for 'low' and keeps room for the observations after it (only generated tokens are billed).
-const LEARNER_MAX_TOKENS = 4096;
+// Each pass asks for 'low' and keeps room for the observations after it: a part is a whole conversation
+// (up to ~48k characters) and every observation carries its evidence, so a busy one can run to dozens of
+// ~100-token rows. Only generated tokens are billed: the room costs nothing unless it is used.
+const LEARNER_MAX_TOKENS = 16_384;
+// Requests per pass: an answer that is empty, not the JSON asked for, or cut off at the length limit is
+// asked for once more (see analyzeAndSave).
+const LEARNER_ATTEMPTS = 2;
 
 type LearnerRequestBody = {
   model: string;
@@ -141,6 +146,45 @@ export function parseLearnerOutput(raw: string): LearnerOutput | undefined {
   }
 
   return undefined;
+}
+
+/**
+ * The complete observations of an answer cut off at the length limit: the entries of its "observations"
+ * array up to the last one that closed (the whole array when the cut came after it, e.g. in
+ * identity_updates). Undefined when there is no such array or the cut came before its first entry closed.
+ * Strings are skipped with their escapes, so a brace or bracket inside a quote never counts.
+ */
+export function salvageTruncatedObservations(raw: string): Observation[] | undefined {
+  const key = /"observations"\s*:\s*\[/.exec(raw);
+  if (!key) return undefined;
+  const start = key.index + key[0].length;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let lastEntryEnd = -1;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') {
+      if (depth === 0) break; // the observations array itself closed
+      depth--;
+      if (depth === 0) lastEntryEnd = i;
+    }
+  }
+  if (lastEntryEnd < 0) return undefined;
+  try {
+    const entries: unknown = JSON.parse(`[${raw.slice(start, lastEntryEnd + 1)}]`);
+    return Array.isArray(entries) && entries.length > 0 ? (entries as Observation[]) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -318,6 +362,8 @@ const LEAD_IN_HEADER =
 const CONTINUES_HEADER = '## THE CONVERSATION CONTINUES — extract from here';
 // A recently captured channel is re-read after a restart (see PersonalityLearner.start()).
 const RESUME_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
+// A failed capture is retried this many times in a row, each once the channel has been quiet again.
+const MAX_CAPTURE_RETRIES = 3;
 
 /**
  * Keeps the `max` most recent image parts (parts are in chronological order) and replaces older ones
@@ -423,6 +469,8 @@ export class PersonalityLearner {
   // A cycle can outlast the interval (slow model, many channels); the next tick must not start a
   // second one that re-reads the same watermarks and saves every observation twice.
   private cycleInFlight = false;
+  // Failed captures in a row per channel (see retryLater); cleared by a capture that finishes.
+  private readonly captureFailures = new Map<string, number>();
 
   constructor(store: MemoryStore, opts: PersonalityLearnerOptions = {}) {
     this.store = store;
@@ -783,26 +831,42 @@ export class PersonalityLearner {
       reasoning: { effort: 'low' },
       provider: { zdr: true },
     };
-    // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
-    const response = await openai.chat.completions.create(
-      body as unknown as ChatCompletionCreateParamsNonStreaming,
-      featureRequestOptions(feature),
-    );
-
-    const choice = response.choices?.[0];
-    const text = choice?.message?.content?.trim();
-    if (!text) {
-      logger.warn(
-        `${label}: ${model} returned nothing for channel ${channelId} (finish=${choice?.finish_reason ?? 'none'}).`,
+    // An answer that is empty, not the JSON asked for, or cut off at the length limit is asked for once
+    // more (a fresh sample: a cut at this cap is a runaway, not a long answer). When no answer parses,
+    // the complete observations of a cut-off one are kept. Either way the part then counts as read: the
+    // same part would fail the same way at every later capture and hold the channel's watermark, and
+    // every conversation after it, back for good. A failed call throws (the part is retried later).
+    let parsed: LearnerOutput | undefined;
+    let salvaged: Observation[] = [];
+    for (let attempt = 1; attempt <= LEARNER_ATTEMPTS; attempt++) {
+      // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
+      const response = await openai.chat.completions.create(
+        body as unknown as ChatCompletionCreateParamsNonStreaming,
+        featureRequestOptions(feature),
       );
-      return { observations: 0, identityUpdates: 0 };
+      const choice = response.choices?.[0];
+      const text = choice?.message?.content?.trim() ?? '';
+      const finish = choice?.finish_reason ?? 'none';
+      parsed = text ? parseLearnerOutput(text) : undefined;
+      if (parsed) break;
+      const cut = finish === 'length';
+      if (cut) {
+        const complete = salvageTruncatedObservations(text) ?? [];
+        if (complete.length > salvaged.length) salvaged = complete;
+      }
+      const problem = !text ? 'returned nothing' : cut ? 'was cut off at the length limit' : 'returned no JSON';
+      const next = attempt < LEARNER_ATTEMPTS ? 'asking again' : 'no attempt left';
+      logger.warn(
+        `${label}: ${model} ${problem} for channel ${channelId} (finish=${finish}, attempt ${attempt}/${LEARNER_ATTEMPTS}), ${next}.${text && !cut ? ` Raw: ${text.slice(0, 200)}` : ''}`,
+      );
     }
-
-    const parsed = parseLearnerOutput(text);
-    if (!parsed) {
-      logger.warn(`${label}: Failed to parse JSON for channel ${channelId}. Raw: ${text.slice(0, 200)}`);
-      return { observations: 0, identityUpdates: 0 };
+    if (!parsed && salvaged.length > 0) {
+      logger.warn(
+        `${label}: keeping the ${salvaged.length} complete observation(s) of a cut-off answer for channel ${channelId}`,
+      );
+      parsed = { observations: salvaged };
     }
+    if (!parsed) return { observations: 0, identityUpdates: 0 };
 
     const members = foldMembers(this.store.getAllIdentities());
     let observations = 0;
@@ -822,8 +886,14 @@ export class PersonalityLearner {
         continue;
       }
 
+      const { evidence, observedAt, leadInOnly } = citedEvidence(obs, lines);
+      if (leadInOnly) {
+        // Taken from the "ALREADY COVERED" lead-in, which the previous part already read: saved again, it
+        // would count one message as a second sighting, or file a reworded duplicate.
+        logger.info(`${label}: dropping an observation that cites only already-covered lines: ${obs.content}`);
+        continue;
+      }
       const { subject, subjectUserId } = this.normalizeSubject(obs.subject, obs.subject_user_id, members);
-      const { evidence, observedAt } = citedEvidence(obs, lines);
       // Self-improvement rows are about the bot: nobody's journal.
       const related = SELF_IMPROVEMENT_CATEGORIES.includes(category) ? [] : relatedMembers(obs, members, subjectUserId);
       await this.store.save({
@@ -865,21 +935,48 @@ export class PersonalityLearner {
     const botName = discordClient.user?.displayName ?? 'Frigidaire';
     const selfImprovementEnabled = config.learner.selfImprovementEnabled;
 
+    const started = Date.now();
     for (const channelId of channelsToProcess) {
       try {
         await this.observeChannel(discordClient, openai, channelId, botName, selfImprovementEnabled, now);
+        this.captureFailures.delete(channelId);
       } catch (error) {
         logger.error(`PersonalityLearner: Error processing channel ${channelId}:`, error);
+        this.retryLater(channelId, now + (Date.now() - started));
       }
     }
+  }
+
+  /**
+   * A capture that failed (a Discord read, or an extractor call: an outage) has already been taken from the
+   * trigger, and nothing new may be posted in the channel for days: it is reported as a backlog again, so
+   * the channel is read once it has been quiet for the idle time after the failure. After
+   * MAX_CAPTURE_RETRIES failures in a row (a lasting error, such as lost access) it waits for new activity
+   * or a restart instead, so a broken channel never costs a call every twenty minutes.
+   */
+  private retryLater(channelId: string, at: number): void {
+    const failures = (this.captureFailures.get(channelId) ?? 0) + 1;
+    if (failures > MAX_CAPTURE_RETRIES) {
+      this.captureFailures.delete(channelId);
+      logger.warn(
+        `PersonalityLearner: capture of channel ${channelId} failed ${failures} times in a row; waiting for new activity`,
+      );
+      return;
+    }
+    this.captureFailures.set(channelId, failures);
+    this.trigger.noteBacklog(channelId, at);
+    logger.info(
+      `PersonalityLearner: capture of channel ${channelId} will be retried once it is quiet (retry ${failures}/${MAX_CAPTURE_RETRIES})`,
+    );
   }
 
   /**
    * Captures a due channel: reads everything after its watermark (paged, up to the capture's cap; a channel
    * never captured is read back to the start of its last conversation), splits it into segments when it is
    * too long for one request, and runs the extractor (then the self-improvement pass) on each. The
-   * watermark moves after each segment, so a failure part-way loses nothing and repeats nothing: the rest
-   * is read at the channel's next capture. A read that stopped at its cap reports the rest as a backlog.
+   * watermark moves after each segment (a first capture's is anchored before the first one), so a failure
+   * part-way loses nothing and repeats nothing: the rest is read at the channel's next capture, which the
+   * caller schedules (retryLater). A read that stopped at its cap reports the rest as a backlog.
    */
   private async observeChannel(
     discordClient: Client,
@@ -903,9 +1000,12 @@ export class PersonalityLearner {
 
     let messages = read.messages;
     let observed = this.attributeAll(messages, this.identitiesById());
+    // A first capture's anchor: the newest message before the conversation it reads.
+    let anchor: Message | undefined;
     if (!watermark && observed.length > 0) {
       // A first capture reads only the channel's last conversation; the history before it is the bootstrap's.
       const startAt = observed[conversationStartIndex(this.timed(observed), this.idleMs)].msg.createdTimestamp;
+      anchor = messages.filter((m) => m.createdTimestamp < startAt).at(-1);
       messages = messages.filter((m) => m.createdTimestamp >= startAt);
       observed = observed.filter((o) => o.msg.createdTimestamp >= startAt);
     }
@@ -922,6 +1022,9 @@ export class PersonalityLearner {
       this.trigger.noteBacklog(channelId, now);
       return;
     }
+    // Set before any part runs: when one fails, the next capture reads on from the anchor (this conversation
+    // and whatever followed it) instead of reading back to the newest conversation and leaving this one out.
+    if (anchor) this.store.setLastObserved(channelId, anchor.id);
 
     // Mechanically upsert identities for every observed author, then re-attribute so labels use the
     // refreshed names.

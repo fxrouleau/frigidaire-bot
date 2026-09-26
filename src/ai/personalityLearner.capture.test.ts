@@ -227,6 +227,66 @@ describe('capture reads the whole conversation', () => {
     expect(backlog.map((b) => b.channelId)).toEqual([CHANNEL]);
   });
 
+  it('retries a failed capture once the channel has been quiet again, without waiting for new messages', async () => {
+    const { client: openai, requests } = createCapturingClient([{ error: new Error('provider outage') }, nothing()]);
+    const trigger = new ConversationEndTrigger({ idleMs: 20 * MIN, maxSpanMs: 120 * MIN, minMessages: 3 });
+    const learner = new PersonalityLearner(store, { client: openai, trigger, minMessages: 3, idleMs: 20 * MIN });
+    store.setLastObserved(CHANNEL, idAt(0));
+    const log = [post(0, REMI, 0), ...chat(1, 4, 10)];
+    for (const m of log.slice(1)) learner.trackActivity(CHANNEL, { at: m.createdTimestamp, messageId: m.id, authorId: m.author.id });
+    const { client, fetches } = clientServing(log);
+
+    await learner.observeOnce(client, BASE + 33 * MIN);
+    expect([fetches.length, requests.length, store.getLastObserved(CHANNEL)]).toEqual([1, 1, idAt(0)]);
+
+    // Not before the channel has been quiet for the idle time since the failure.
+    await learner.observeOnce(client, BASE + 50 * MIN);
+    expect(fetches).toHaveLength(1);
+
+    await learner.observeOnce(client, BASE + 54 * MIN);
+    expect([fetches.length, requests.length, store.getLastObserved(CHANNEL)]).toEqual([2, 2, idAt(4)]);
+  });
+
+  it('stops retrying a capture that keeps failing until the channel is busy again', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    const down = { error: new Error('provider outage') };
+    const { client } = clientServing([post(0, REMI, 0), ...chat(1, 4, 10)]);
+    const { learner, requests, backlog, queue } = learnerWith([down, down, down, down, down]);
+
+    await learner.observeOnce(client, BASE + 100 * MIN);
+    for (let k = 2; k <= 4; k++) {
+      queue(CHANNEL);
+      await learner.observeOnce(client, BASE + k * 100 * MIN);
+    }
+    expect(requests).toHaveLength(4);
+    // When each one failed (the tick's time plus how long the capture took).
+    expect(backlog.map((b) => Math.floor((b.at - BASE) / MIN))).toEqual([100, 200, 300]);
+
+    // New activity brings it back, with its retries.
+    queue(CHANNEL);
+    await learner.observeOnce(client, BASE + 500 * MIN);
+    expect(backlog).toHaveLength(4);
+  });
+
+  it("anchors a never-captured channel's watermark first, so a failed capture is not left behind by the next conversation", async () => {
+    const first = [...chat(1, 10, 0, (i) => `old ${i}`), ...chat(11, 5, 240, (i) => `first ${i}`)];
+    const { learner, requests, queue } = learnerWith([{ error: new Error('provider outage') }, nothing()]);
+
+    await learner.observeOnce(clientServing(first).client, BASE + 300 * MIN);
+    expect(requests).toHaveLength(1);
+    expect(store.getLastObserved(CHANNEL)).toBe(idAt(10));
+
+    // A second conversation happens before the retry.
+    queue(CHANNEL);
+    await learner.observeOnce(clientServing([...first, ...chat(16, 5, 400, (i) => `second ${i}`)]).client, BASE + 500 * MIN);
+
+    const lines = linesOf(requests[1]).join('\n');
+    expect(lines).toContain('first 11');
+    expect(lines).toContain('second 20');
+    expect(lines).not.toContain('old ');
+    expect(store.getLastObserved(CHANNEL)).toBe(idAt(20));
+  });
+
   it("reads only a never-captured channel's last conversation", async () => {
     const log = [...chat(1, 10, 0, (i) => `old ${i}`), ...chat(11, 5, 240, (i) => `new ${i}`)];
     const { client } = clientServing(log);
@@ -238,6 +298,62 @@ describe('capture reads the whole conversation', () => {
     expect(lines).toContain('new 11');
     expect(lines).not.toContain('old ');
     expect(store.getLastObserved(CHANNEL)).toBe(idAt(15));
+  });
+});
+
+describe('capture survives an answer cut off at the length limit', () => {
+  const FACTS = ['Works nights at the depot', 'Owns a husky named Pepper', 'Plays bass in a cover band'];
+  const answer = JSON.stringify({
+    observations: FACTS.map((content, k) => ({
+      category: 'fact',
+      subject: 'Remi',
+      subject_user_id: REMI,
+      content,
+      evidence: { lines: [k + 1], quote: `message ${k + 1}` },
+    })),
+  });
+  /** A reply cut off at the length limit, mid-way through the third observation. */
+  const cutOff = (): ScriptedReply => {
+    const text = answer.slice(0, answer.indexOf('Plays bass'));
+    const body = chatCompletionBody(text) as { choices: { finish_reason: string }[] };
+    return { body: { ...body, choices: body.choices.map((c) => ({ ...c, finish_reason: 'length' })) } };
+  };
+
+  it('asks once more, with room for a whole conversation, and keeps the complete answer', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    const { client } = clientServing([post(0, REMI, 0), ...chat(1, 4, 10)]);
+    const { learner, requests } = learnerWith([cutOff(), { body: chatCompletionBody(answer) }]);
+
+    await learner.observeOnce(client, BASE + 300 * MIN);
+
+    expect(requests).toHaveLength(2);
+    expect(requests.map((r) => r.body.max_tokens)).toEqual([16_384, 16_384]);
+    expect(store.getAllActive().map((m) => m.content).sort()).toEqual([...FACTS].sort());
+    expect(store.getLastObserved(CHANNEL)).toBe(idAt(4));
+  });
+
+  it('keeps the complete observations when the second answer is cut off too, and moves on', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    const { client } = clientServing([post(0, REMI, 0), ...chat(1, 4, 10)]);
+    const { learner, requests } = learnerWith([cutOff(), cutOff()]);
+
+    await learner.observeOnce(client, BASE + 300 * MIN);
+
+    expect(requests).toHaveLength(2);
+    expect(store.getAllActive().map((m) => m.content).sort()).toEqual(FACTS.slice(0, 2).sort());
+    // The same part would be cut the same way at every capture: it counts as read.
+    expect(store.getLastObserved(CHANNEL)).toBe(idAt(4));
+  });
+
+  it('asks once more after an answer that is not JSON', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    const { client } = clientServing([post(0, REMI, 0), ...chat(1, 4, 10)]);
+    const { learner, requests } = learnerWith([{ body: chatCompletionBody('Sure! Here are the facts:') }, reply(JSON.parse(answer))]);
+
+    await learner.observeOnce(client, BASE + 300 * MIN);
+
+    expect(requests).toHaveLength(2);
+    expect(store.getAllActive()).toHaveLength(3);
   });
 });
 
@@ -293,6 +409,33 @@ describe('capture keeps what it cites', () => {
     const drafts = rows.find((m) => m.content === 'Likes drafts');
     expect(drafts?.evidence ?? null).toBeNull();
     expect(drafts?.related_user_ids ?? null).toBeNull();
+  });
+
+  it('drops what a later part takes from its already-covered lead-in', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    // Two stretches with a pause between them, too long for one request: the second part opens with the
+    // end of the first (#1, #2) under ALREADY COVERED.
+    const text = (i: number) => (i === 30 ? 'I adopted a husky named Pepper' : `message ${i}`);
+    const log = [post(0, REMI, 0), ...chat(1, 30, 10, text), ...chat(31, 30, 52, text)];
+    const dale = (content: string, evidence: unknown) => ({ category: 'fact', subject: 'Dale', subject_user_id: DALE, content, evidence });
+    const first = { observations: [dale('Owns a husky named Pepper', { lines: [30] })] };
+    const second = {
+      observations: [
+        dale('Has a dog called Pepper', { lines: [2] }),
+        dale('Adopted a husky', { quote: 'adopted a husky named Pepper' }),
+        dale('Walks Pepper before drafts', { lines: [2, 3] }),
+      ],
+    };
+    const { client } = clientServing(log);
+    const { learner, requests } = learnerWith([reply(first), reply(second)], { sizes: { segmentMaxChars: 40 * 60, leadInChars: 200 } });
+
+    await learner.observeOnce(client, BASE + 300 * MIN);
+
+    expect(requests).toHaveLength(2);
+    expect(linesOf(requests[1])[2]).toMatch(/^#2 .* I adopted a husky named Pepper$/);
+    const rows = store.getAllActive();
+    expect(rows.map((m) => m.content).sort()).toEqual(['Owns a husky named Pepper', 'Walks Pepper before drafts']);
+    expect(rows.find((m) => m.content === 'Owns a husky named Pepper')?.seen_count).toBe(1);
   });
 
   it('puts a relationship row in every member’s journal', async () => {

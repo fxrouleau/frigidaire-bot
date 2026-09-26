@@ -178,16 +178,24 @@ messages exist and the channel has been quiet for `CAPTURE_IDLE_MINUTES` (20), o
 message is `CAPTURE_MAX_SPAN_MINUTES` (120) old. A 1-minute tick, oldest conversation first;
 `LEARNER_IGNORE_CHANNELS` is respected. Activity lives in memory, so at startup every channel captured in the
 last two weeks is reported as a possible backlog: each is read once it has been quiet (the learner counts what
-it finds against the minimum), and a deploy never strands a conversation. `LEARNING_INTERVAL_MS` still parses
+it finds against the minimum), and a deploy never strands a conversation. Neither does a failure: a capture
+that fails (a Discord read, or an extractor call during an outage) is reported back the same way and retried
+once the channel has been quiet again, up to three times in a row (after that it waits for new activity or a
+restart). `LEARNING_INTERVAL_MS` still parses
 and only drives the old interval trigger, which the bot no longer uses.
 
 **How much**: everything after the channel's watermark, paged past Discord's 100-message fetch, up to 2,000
 messages per capture (the rest is reported as a backlog and read once the channel is quiet). A channel never
-captured is read back to the start of its last conversation; older history is the bootstrap's job. A
+captured is read back to the start of its last conversation; older history is the bootstrap's job. Its
+watermark is set just before that conversation before the first part runs, so a capture that fails is not left
+behind when another conversation follows before the retry. A
 conversation longer than one request (~48k characters of transcript) is split into parts at its longest quiet
 gap once a part is at least 60% full, and each later part opens with the end of the previous one (~2k
 characters) under `## ALREADY COVERED — context only, do not extract`. The watermark moves after each part, so
-a failure part-way neither loses nor repeats anything.
+a failure part-way neither loses nor repeats anything. The extractor gets 16,384 output tokens (low reasoning
+effort); an answer that is empty, not JSON or cut off at the length limit is asked for once more, and when the
+second one is no better the complete observations of a cut-off answer are kept and the part counts as read (the
+same part would fail the same way at every capture and hold the channel back for good).
 
 **Evidence and related members**: the transcript's lines are numbered (`#N [time] [Name (id:…)] text`), and each
 observation cites `evidence: {lines, quote}` plus, for a relationship or something shared, `related_user_ids`.
@@ -195,7 +203,9 @@ All of it is untrusted model output:
 - line numbers resolve only to lines the request showed, so the model never types a message id;
 - a quote is kept only when it occurs in the cited messages (case, spacing, quote marks and "…" elisions
   tolerated); one found in another shown line cites that line too, and an invented one is dropped;
-- related members must be known members (ids or unique names; a side account counts as its main).
+- related members must be known members (ids or unique names; a side account counts as its main);
+- an observation whose lines (cited, or found by its quote) are all in the already-covered lead-in is dropped:
+  the previous part read them, and saving it again would count one message as a second sighting.
 
 A row's first and last seen are when the newest message it cites was posted.
 
