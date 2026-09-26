@@ -36,6 +36,7 @@ export type UsageFeature =
   | 'auto_react'
   | 'memory_dream'
   | 'memory_edit'
+  | 'memory_bootstrap'
   | 'eval'
   | 'other';
 

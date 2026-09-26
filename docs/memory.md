@@ -329,50 +329,82 @@ Safety:
 
 ## Bootstrap
 
-Years of history sit in the message archive (archive.db). Two routes turn it into first notes.
+Years of history sit in the message archive (archive.db). Two routes turn it into first notes: the Claude
+Code playbook (export → playbook → import) and the built-in bootstrap. Everything runs from one command line,
+`src/ai/memory/bootstrap/cli.ts`: `yarn memory <command>` locally, and in the prod container
+`docker exec -u node frigidaire-bot node dist/ai/memory/bootstrap/cli.js <command>` (as the `node` user, so
+the files it writes in the data volume stay the bot's). It reads `./data`, prints what it did, and never
+creates empty databases where the data folder is missing.
+
+| Command | What |
+|---|---|
+| `export [--out DIR] [--chunk-tokens N] [--lead-in-tokens N]` (`yarn memory:export`) | the archive as compact transcripts (below) |
+| `import --check [DIR] [--people FILE]` (`yarn memory:check`) | validates a notes tree with the import's own loader, against a scratch store |
+| `observations [WORKDIR] [--people FILE]` | the playbook's bookkeeping: validates the observation log, rebuilds its per-person views and the cast sheet |
+| `bootstrap --dry-run \| --run [--from YYYY-MM] [--to YYYY-MM] [--segment-tokens N] [--max-segments N] [--no-dream]` (`yarn memory:bootstrap`) | the built-in bootstrap |
 
 ### 1. Export
 
-A CLI (runnable in the prod container and locally) writes `data/memory-bootstrap/export/`:
-- one compact transcript per month (`YYYY-MM.md`): `## YYYY-MM-DD (Weekday)` per day, `### #channel` per
-  channel run, then `HH:MM Name: text` lines. Consecutive messages by the same author within a few minutes are
-  merged onto one line joined by ` / `. Names are the member's current display name (unique per export);
-  `people.json` maps each name to the main id, every other name and linked accounts, so ids never appear per
-  line. Transcripts inline, attachments `[file: name]`, embeds `[link: title]`, replies `(↩ Name)`; relays
-  attributed; other bots excluded; `ARCHIVE_IGNORE_CHANNELS` respected; the bot's own lines kept, prefixed
-  `bot:` and truncated. Framing stays under ~15% of the text's own tokens.
-- `chunks/NNNN.md` sized by tokens (`--chunk-tokens`, default ~80k), each boundary at the longest quiet gap
-  near the target size (never mid-conversation), each opening with the previous ~2k tokens under an
-  `## ALREADY COVERED — context only, do not extract` header. Chunk files have stable line numbers.
-- `manifest.json`: months, message/character/token counts per month and in total, every chunk (date range,
-  messages, tokens), the export time and the journal's highest `journal_seq` at export.
+`export` writes `data/memory-bootstrap/export/` (to a temporary folder first, swapped in when complete):
+- `months/YYYY-MM.md`, one compact transcript per month: `## YYYY-MM-DD (Weekday)` per Eastern day,
+  `### #channel` per channel run (`#parent › thread` for a thread), then `Name: text` lines. A line starts
+  with its `HH:MM` when a conversation (re)starts: after a header, or after 10 quiet minutes. Consecutive
+  messages by one author in one channel within 5 minutes share a line, joined by ` / ` (at most 12 messages
+  or 700 characters). Names are the member's current display name, made unique within the export (the more
+  active keeps the plain name, the other gets their handle or a number); people who left before the bot ever
+  saw them are named by the last name they posted with. Mentions become `@Name`, custom emojis `:name:`,
+  links their host (`youtube.com/…`), Discord timestamps a date; voice transcripts are inline
+  (`[voice: …]`), attachments `[file: name]`, link previews `[link: title]`, stickers, forwards and polls
+  too, replies `(↩ Name)`; relays read as their author; deleted messages and `ARCHIVE_IGNORE_CHANNELS` are
+  left out; the bot's own lines read `bot:` and are cut to 200 characters. Ids never appear per line.
+  Framing (times, names, headers) is ~12% of the text's own tokens on a realistic fictional fixture (a test
+  keeps it under 15%).
+- `chunks/NNNN.md`, the same transcript cut by tokens (`--chunk-tokens`, default 80k): each boundary at the
+  longest quiet gap among the lines that fill the chunk to 75–100% of its target (a busy day is split at its
+  own longest gap), each chunk opening with the previous ~2k tokens quoted under
+  `## ALREADY COVERED — context only, do not extract`, then `## NEW — extract from here`. The files never
+  change once written, so their line numbers are stable evidence.
+- `people.json`: each transcript name → `id` (main account), `accounts` (linked side accounts), `real_name`,
+  `nicknames`, `other_names` (handles, first-seen names, every name archived with their messages), message
+  count and first/last message day, and whether the bot knows them.
+- `manifest.json`: per month and in total, messages, characters and estimated tokens (the framing ratio
+  too); every chunk (date range, messages, tokens, lead-in tokens); the channels; the export time; and
+  `journal_high_water`, the journal's highest `journal_seq` at export.
+
+Token counts are estimates (3.5 ASCII characters per token, one per other character: on the high side).
 
 ### 2. The playbook (a Claude Code skill in the repo)
 
-`.claude/skills/memory-bootstrap/SKILL.md` tells a Claude Code agent how to run the bootstrap. An orchestrator
-that stays lean (it reads only the manifest and `progress.json`, launches one fresh subagent per step and
-records each finished step) runs:
-- **Sequential scan**, chunk by chunk in date order, one fresh subagent each. Input: the chunk, `people.json`
-  and the current working notes (every profile and circle, capped). It appends dated observations to
-  `observations/NNNN.jsonl` (`people`: the main ids involved, one or several, or `["group"]`; `category`;
-  `content`; `date`; `kind` (`trait` \| `fact` \| `event` \| `joke` \| `relationship` \| `history`);
-  optional `confidence`; `evidence: [{chunk, lines: [from, to]}]` and a short `quote`), interpreting
-  references with what the working notes know (a callback to an old joke is recorded as that joke, with its
-  origin), and updates the working notes it touched (a small dream). Nothing is extracted from the "already
-  covered" lead-in. The observation log is append-only; the working notes are only an interpretation aid.
-- **Re-grounding** every ~10 chunks: per person with new observations, their working notes are rebuilt from
-  their FULL observation log (not from the previous notes), so re-summarizing drift is reset.
-- **Final build**: per person, the final notes (front matter: title) from their full observation log sorted by
-  date, plus every relationship/shared-event observation involving them (from either side), plus a cast sheet
-  (the first paragraph of everyone's working profile), weighted by recency × recurrence into the Now / Traits
-  / Circles & people / Earlier shape; hierarchical (era summaries first) when a log exceeds ~60k tokens.
-  Circles are built from the shared observations and filed under every member involved; then the group notes
-  (lore, running jokes with their origin, who's close to whom).
-- **Check**: a critic subagent pulls the cited passages (± context) for key and contested items and
-  reconciles against the real messages, and cross-checks relationships between profiles (A says best friends
-  with B, B's says they fell out → reconcile from the log); then `import --check` validates the tree.
-- `progress.json` records every step; a scan step is atomic (its observations and working-note updates are
-  committed together by renaming temp files), so an interrupted run resumes exactly where it stopped.
+`.claude/skills/memory-bootstrap/SKILL.md` tells a Claude Code agent how to run the bootstrap on the owner's
+subscription; it holds every format and rule verbatim. An orchestrator that stays lean (it reads only the
+manifest, `progress.json` and the observation index, launches one fresh subagent per step, records each
+finished step, and never reads transcripts, observations or notes) runs, in `data/memory-bootstrap/work/`:
+- **Sequential scan**, chunk by chunk in date order, one fresh subagent each. Input: the chunk,
+  `people.json` and the current working notes (every profile, circle and group note). It appends dated
+  observations to `observations/NNNN.jsonl` (`people`: the main ids involved, one or several, or
+  `["group"]`; `category`; `kind` (`trait` \| `fact` \| `event` \| `joke` \| `relationship` \| `history`);
+  `content`; `date`; optional `confidence`; `evidence: [{chunk, lines: [from, to]}]`; an optional `quote`;
+  an optional `circle` slug), interpreting references with what the working notes know (a callback to an old
+  joke is recorded as that joke, with its origin), and rewrites the working notes it touched (a small dream).
+  Nothing is extracted from the lead-in. The log is append-only; the working notes are an interpretation aid.
+  A step is atomic: the subagent writes `steps/NNNN.tmp/` and renames it to `steps/NNNN/` as its last
+  action; the orchestrator then copies it into place (idempotent) and records it, so an interrupted step is
+  simply redone.
+- **Re-grounding** every 10 chunks: `observations` rebuilds `by-person/<id>.jsonl` (a person's own
+  observations plus every relationship or shared event naming them, from either side), `by-circle/` and
+  `cast.md`; then each person the last 10 chunks touched gets their working notes rebuilt from their FULL
+  log, not from the previous notes, so re-summarizing drift is reset.
+- **Final build**, into `final/` in the import layout: circles first (from `by-circle/` and the working
+  circles), then one subagent per person (their full log, the cast sheet so relationships read consistently,
+  their circles; hierarchical when a log passes ~60k tokens: era summaries cut from the index's tokens per
+  year first), then the group (vibe, lore, running jokes with their origin, who's close to whom). Every
+  writer weighs by recency × recurrence into Now / Traits / Circles & people / Earlier and pulls the cited
+  chunk lines (± 5) for key and contested items.
+- **Critic**: spot-checks profiles against their logs and the cited passages, cross-checks relationships
+  and circle memberships between all profiles (A says best friends with B, B's says they fell out →
+  reconcile from both logs), fixes the final notes and writes a report.
+- **Check**: `memory import --check work/final --people export/people.json`, fixed until it passes; then the
+  owner copies `final/` into the bot's data volume as `data/memory-import/` and restarts the bot.
 
 Privacy note: this route runs on the owner's own Claude subscription. A consumer Claude plan is not
 zero-data-retention; that is the owner's informed choice for this one-off import, documented as such. The
@@ -380,18 +412,56 @@ built-in route below stays ZDR.
 
 ### 3. Import
 
-At startup, a `data/memory-import/` folder holding a notes tree and a manifest is validated (known ids, sizes,
-slugs, markdown, circle membership), loaded as note versions (`updated_by = 'bootstrap'`), the dream
-watermarks set to the manifest's journal high-water mark, and the folder renamed to
-`data/memory-import/imported-<timestamp>/`, with a log line and a report-channel line. A tree that fails
-validation is left in place with a clear error, nothing loaded. A `check` CLI mode validates without loading.
+The notes tree (`src/ai/memory/bootstrap/notesTree.ts`):
+
+```
+manifest.json         {"format": "frigidaire-notes", "version": 1, "journal_high_water": 1234, …}
+people/<main id>/profile.md, people/<main id>/<topic>.md
+group/<topic>.md
+circles/<slug>.md
+```
+
+Each note is markdown under a front matter block: `title:` (plain text), and for a circle `aliases:` and
+`members:` as one-line JSON (`[{"id": "…", "since": "2021", "until": "2023-02", "role": "organizer"}]`).
+File names are the slugs.
+
+At startup (app.ts, before login, so nothing dreams on the old state meanwhile), a tree in
+`data/memory-import/` is read and checked (front matter, slugs, sizes, markdown only, a profile per person,
+topic and circle limits; every person and circle member must be a main id the bot knows: identities,
+`LINKED_ACCOUNTS`, or an archive author, who then gets an identities row under the last name they posted
+with). It then loads in ONE memory.db transaction: every note as a new version (`updated_by = 'bootstrap'`,
+reason "bootstrap import"; identical notes write nothing), an imported person's topics the tree doesn't
+have removed (versioned, so recoverable), the group's likewise when the tree has a `group/` folder, and every
+circle the tree doesn't have when it has a `circles/` folder; then the imported owners' dream watermarks move
+to the manifest's `journal_high_water` (never backwards; a mark above the journal's own is refused as an
+export of another database). The tree moves to `data/memory-import/imported-<timestamp>/`, the log gets a
+summary, and the report channel one line once the bot is ready (`src/events/memoryImportReport.ts`). A tree
+with any problem loads nothing: every problem is logged, the report channel gets a one-line refusal, and the
+folder stays where it is. `import --check` runs the same loader against a scratch in-memory store (known
+people from `--people`, the tree's own `people.json`, or the bot's databases), so a tree that passes it
+imports.
 
 ### 4. Built-in bootstrap (OpenRouter, ZDR)
 
-`yarn memory:bootstrap --dry-run` counts the archive and prints estimated tokens and cost from the model
-catalog's prices for `MEMORY_BOOTSTRAP_MODEL` (default the dream model); `--run` feeds the history through the
-capture extractor (journal rows with source `bootstrap`, backdated `first_seen_at`, evidence ids), resumably,
-then triggers a dream for everyone. Tag `memory_bootstrap`.
+`yarn memory:bootstrap --dry-run` cuts the archive into segments (months; a month over `--segment-tokens`,
+default 60k, split at its quiet gaps, each with a ~1.5k-token lead-in) and prints the messages, segments,
+estimated input and output tokens and cost from the model catalog's per-token prices for
+`MEMORY_BOOTSTRAP_MODEL` (default the dream model), plus a rough figure for the dream afterwards.
+
+`--run` reads the segments oldest first, one call each (ZDR, tag `memory_bootstrap`, 8k output tokens, no
+reasoning override: the default model only reasons when asked). The prompt keeps the capture extractor's
+rules (the 30-day test, atomic rows, what a message reveals rather than what it did, no censoring) adapted to
+history: notable history is worth keeping and dated, and a fact seen again is repeated with the same
+wording so it merges into the existing row as a recurrence (seen count, first/last seen widened). Each
+segment sees what the journal already holds about its people and the server. The answer is untrusted: rows
+about people outside the export, unknown categories (only fact, preference, personality and vibe), Discord
+markup, ids or over-long content are dropped. Rows are saved with source `bootstrap`, `first_seen_at`
+backdated to the quoted line's time (or the given date), evidence (the quoted line's message ids and the
+quote) and the other members involved. Finished segments are recorded in memory.db (`bot_state`
+`memory_bootstrap:progress`), so a stopped run resumes at the next one and a failed segment is retried on the
+next run; `--from`/`--to` and `--max-segments` make a trial run. Once the whole archive is read (not after a
+range), it runs the dream for everyone with new journal rows (`--no-dream` skips it; a failure leaves it to
+the nightly dream).
 
 ## Configuration
 
@@ -438,6 +508,13 @@ Spend section and `query_costs` automatically; the dream's report line carries t
 | `src/commands/notesViewerActions.ts`, `src/commands/noteDiff.ts` | the viewer's clicks: paging, the owner's Edit (draft, diff preview, Confirm/Cancel) and Undo |
 | `src/events/notesViewerInteraction.ts` | routes the viewer's buttons, menu and modal |
 | `src/botOwner.ts` | the owner resolution |
+| `src/ai/memory/bootstrap/cli.ts`, `commands.ts` | the bootstrap command line (`yarn memory …`, `dist/ai/memory/bootstrap/cli.js`) |
+| `src/ai/memory/bootstrap/transcript.ts`, `people.ts`, `chunks.ts`, `export.ts` | compact transcripts, export names, token-sized chunks, the export |
+| `src/ai/memory/bootstrap/notesTree.ts`, `importer.ts` | the notes tree format; the startup import and `import --check` |
+| `src/ai/memory/bootstrap/observations.ts` | the playbook's observation log: validation, per-person views, cast sheet |
+| `src/ai/memory/bootstrap/builtin.ts` | the built-in bootstrap (dry-run estimate, resumable run) |
+| `src/events/memoryImportReport.ts` | the import's report-channel line |
+| `.claude/skills/memory-bootstrap/SKILL.md` | the Claude Code playbook |
 
 Tests use a fictional cast and placeholder snowflakes; everything is hermetic (in-memory stores, injected
 clocks and clients).

@@ -46,14 +46,18 @@ export type ModelInfo = {
   lowestEffort?: string;
 };
 
+/** What a model costs per token (USD), from the list's `pricing` (the memory bootstrap's dry-run estimate). */
+export type ModelPricing = { promptUsdPerToken: number; completionUsdPerToken: number };
+
 type CatalogEntry = {
   id?: unknown;
   context_length?: unknown;
   architecture?: { input_modalities?: unknown };
   reasoning?: { supported_efforts?: unknown; mandatory?: unknown } | null;
+  pricing?: unknown;
 };
 
-type ParsedEntry = { info?: ModelInfo; contextLength?: number };
+type ParsedEntry = { info?: ModelInfo; contextLength?: number; pricing?: ModelPricing };
 
 export type EndpointInfo = { provider: string; tag: string; zdr: boolean };
 
@@ -103,6 +107,23 @@ export function parseCatalogEntry(entry: CatalogEntry): ModelInfo | undefined {
 
 function parseContextLength(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * The list's `pricing` object (`{ prompt: "0.000004", completion: "0.00002", … }`, USD per token as
+ * decimal strings); undefined when either price is missing or not a non-negative number.
+ */
+export function parsePricing(value: unknown): ModelPricing | undefined {
+  if (!isRecord(value)) return undefined;
+  const price = (raw: unknown): number | undefined => {
+    const parsed = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : typeof raw === 'number' ? raw : NaN;
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+  };
+  const prompt = price(value.prompt);
+  const completion = price(value.completion);
+  return prompt === undefined || completion === undefined
+    ? undefined
+    : { promptUsdPerToken: prompt, completionUsdPerToken: completion };
 }
 
 /**
@@ -238,6 +259,15 @@ export class ModelCatalog {
     return this.lookup(modelId)?.contextLength;
   }
 
+  // ---- Prices (the memory bootstrap's cost estimate) ----
+
+  /** The model's per-token prices, or undefined when the catalog is unavailable or doesn't list them. */
+  async pricing(modelId: string): Promise<ModelPricing | undefined> {
+    if (!this.enabled) return undefined;
+    await this.models.get();
+    return this.lookup(modelId)?.pricing;
+  }
+
   // ---- Modalities and reasoning effort (the media features) ----
 
   /** The model's catalog entry; the static fallback when the catalog is unavailable or lacks it. */
@@ -306,8 +336,9 @@ export class ModelCatalog {
       const entry: ParsedEntry = {
         info: parseCatalogEntry(raw),
         contextLength: parseContextLength(raw.context_length),
+        pricing: parsePricing(raw.pricing),
       };
-      if (entry.info || entry.contextLength !== undefined) models.set(raw.id, entry);
+      if (entry.info || entry.contextLength !== undefined || entry.pricing) models.set(raw.id, entry);
     }
     if (models.size === 0) throw new Error('the model list was empty');
     return models;

@@ -7,6 +7,7 @@ import { Events } from 'discord.js';
 import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
 import { getMemoryStore } from './ai/memory';
+import { importNotesAtStartup } from './ai/memory/bootstrap/importer';
 import { runStartupMemoryMaintenance } from './ai/memory/startupMaintenance';
 import { closeArchiveStore } from './archive/archiveStore';
 import { config, configWarnings, describeEffectiveConfig } from './config';
@@ -51,6 +52,10 @@ try {
 } catch (error) {
   logger.warn('Memory maintenance on startup failed:', error);
 }
+
+// Memory v2's bootstrap drop-in: a notes tree in data/memory-import/ is loaded here, before login, so no
+// dream runs on the old state meanwhile (never throws; the report line waits for memoryImportReport).
+importNotesAtStartup();
 
 // Embedding backfill: once at startup, then periodically. The periodic re-run is the self-heal for
 // memories saved while the embeddings API was down (they stay vector-less and invisible to gated
