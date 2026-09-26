@@ -4,17 +4,24 @@
 // refused whole (nothing is clamped into a different meaning), except the free-text change summary, which
 // is only ever shown in a log or report line and is clamped. See docs/memory.md.
 
-/** Whose notes: one member (by main account id) or the group as a whole. */
-export type NoteScope = 'person' | 'group';
+/**
+ * Whose note:
+ * - `person`: one member (by main account id): a `profile` plus topic notes.
+ * - `group`: the server as a whole (truly server-wide lore, running jokes, vibe).
+ * - `circle`: a SET of members sharing something: an interest or sub-group (the MTG crew, the Valorant
+ *   squad, roommates) or a pair (two people's history, a rivalry). One note per circle, its topic is the
+ *   circle's unique slug, and its membership is dated (CircleMember).
+ */
+export type NoteScope = 'person' | 'group' | 'circle';
 
-/** The owner of a set of notes. A person is always their MAIN account id (LINKED_ACCOUNTS resolved). */
+/** The owner of a set of topic notes. A person is always their MAIN account id (LINKED_ACCOUNTS resolved). */
 export type NoteOwner = { scope: 'person'; ownerId: string } | { scope: 'group' };
 
 /** Who wrote a note version. */
 export const NOTE_WRITERS = ['dream', 'edit', 'bootstrap', 'import', 'undo'] as const;
 export type NoteUpdatedBy = (typeof NOTE_WRITERS)[number];
 
-/** Every person has this topic once they have notes at all: who they are, in ~200–400 words. */
+/** Every person has this topic once they have notes at all: who they are (see PROFILE_SECTIONS). */
 export const PROFILE_TOPIC = 'profile';
 
 /** Size limits, checked on every write. */
@@ -23,43 +30,102 @@ export const NOTE_LIMITS = {
   profileMaxChars: 4_000,
   /** Any other topic (a person's or the group's). */
   topicMaxChars: 8_000,
+  /** A circle's note. */
+  circleMaxChars: 6_000,
   /** Topics per person, the profile included. */
   maxPersonTopics: 10,
   /** Topics for the group. */
   maxGroupTopics: 8,
+  /** Active circles in all. */
+  maxCircles: 60,
+  /** Active circles one member currently belongs to (former memberships don't count). */
+  maxCirclesPerMember: 12,
+  /** Members of one circle (current and former), and the fewest a circle can have. */
+  maxCircleMembers: 30,
+  minCircleMembers: 2,
+  /** Other names a circle goes by ("the squad"), and their length. */
+  maxCircleAliases: 8,
+  aliasMaxChars: 40,
+  /** A member's role in a circle ("DM", "founder"). */
+  roleMaxChars: 40,
   titleMaxChars: 80,
   topicSlugMaxChars: 32,
   /** The change summary a dream or an edit returns (clamped, never refused). */
   changeSummaryMaxChars: 300,
 } as const;
 
-/** One note as a writer proposes it. `content` is markdown. */
+/** One person or group note as a writer proposes it. `content` is markdown. */
 export type NoteDraft = { topic: string; title: string; content: string };
 
 /**
- * What a dream, an owner edit and the bootstrap return for ONE owner (a person or the group), as JSON:
- * the notes to write (new or changed; unchanged ones may be repeated or left out), the topics to remove,
- * and a few words on what changed (for the report line and the version history).
+ * A circle member as a writer proposes it: `id` any account of the member (stored as the main id),
+ * `since`/`until` partial dates (`YYYY`, `YYYY-MM` or `YYYY-MM-DD`; `until` null/absent = still a member),
+ * an optional short role.
+ */
+export type CircleMemberDraft = { id: string; since?: string | null; until?: string | null; role?: string | null };
+
+/**
+ * One circle as a writer proposes it (also its JSON shape in model output): its slug, title and markdown
+ * content, other names it goes by, its FULL membership as it should be (current and former members), and
+ * the slugs of duplicate circles folded into it (deactivated by the same write).
+ */
+export type CircleDraft = {
+  slug: string;
+  title: string;
+  content: string;
+  aliases: string[];
+  members: CircleMemberDraft[];
+  merged_from: string[];
+};
+
+/** A stored circle membership. */
+export type CircleMember = {
+  /** The member's main account id. */
+  memberId: string;
+  since: string | null;
+  /** null: still a member. */
+  until: string | null;
+  role: string | null;
+};
+
+/**
+ * What a dream, an owner edit and the bootstrap return for ONE owner (a person, the group, or one circle
+ * for an edit of a circle), as JSON:
+ * - `notes`: the owner's notes to write (new or changed; unchanged ones may be repeated or left out);
+ * - `removed_topics`: the owner's topics to remove;
+ * - `circles`: circles to create or update (a person's output may only touch circles that person is or
+ *   was in; the group's any circle);
+ * - `removed_circles`: circle slugs to remove (a mistake, not a circle that drifted apart: that one keeps
+ *   its history with dated `until`s);
+ * - `change_summary`: a few words on what changed (the report line and the version history).
+ * `circles` and `removed_circles` may be absent in the JSON (read as []).
  */
 export type NotesOutput = {
   notes: NoteDraft[];
   removed_topics: string[];
+  circles: CircleDraft[];
+  removed_circles: string[];
   change_summary: string;
 };
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; errors: string[] };
 
 export type NoteValidationContext = {
+  /** Whose output this is: a person's, the group's, or one circle's (an owner edit of a circle). */
   scope: NoteScope;
   /**
    * Discord ids that may appear in note text: the person's own account ids and ids that were in the
-   * writer's input. Any other 15–21 digit number is refused (a model copying someone else's id).
+   * writer's input. Any other 15–21 digit number is refused (a model copying someone else's id). A
+   * circle's own member ids are always allowed in its text.
    */
   allowedIds?: Iterable<string>;
 };
 
-/** Lowercase words joined by single hyphens: `profile`, `games`, `running-jokes`. */
+/** Lowercase words joined by single hyphens: `profile`, `games`, `running-jokes`, `valorant-squad`. */
 export const TOPIC_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/** A partial date: `2024`, `2024-08` or `2024-08-15`. */
+export const PARTIAL_DATE = /^\d{4}(?:-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01]))?)?$/;
+const MEMBER_ID = /^\d{15,21}$/;
 
 // Discord markup a note must never carry: it would ping, render as an emoji or a timestamp, or link a
 // channel when a note is quoted into a message. Notes describe emoji style in words.
@@ -78,17 +144,18 @@ const HTML_TAG = /<\/?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^<>]*)?\/?>/;
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
 const SNOWFLAKE_LIKE = /\b\d{15,21}\b/g;
 
-/** The size limit of a topic's content. */
+/** The size limit of a note's content. */
 export function maxCharsFor(scope: NoteScope, topic: string): number {
+  if (scope === 'circle') return NOTE_LIMITS.circleMaxChars;
   return scope === 'person' && topic === PROFILE_TOPIC ? NOTE_LIMITS.profileMaxChars : NOTE_LIMITS.topicMaxChars;
 }
 
-/** The topic limit for a scope. */
-export function maxTopicsFor(scope: NoteScope): number {
+/** The topic limit of an owner. */
+export function maxTopicsFor(scope: NoteOwner['scope']): number {
   return scope === 'person' ? NOTE_LIMITS.maxPersonTopics : NOTE_LIMITS.maxGroupTopics;
 }
 
-/** A topic slug, lowercased and trimmed, or undefined when it isn't one. */
+/** A topic (or circle) slug, lowercased and trimmed, or undefined when it isn't one. */
 export function normalizeTopic(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const topic = raw.trim().toLowerCase();
@@ -96,7 +163,7 @@ export function normalizeTopic(raw: unknown): string | undefined {
   return TOPIC_SLUG.test(topic) ? topic : undefined;
 }
 
-/** The rule violations in a piece of note text (title or content); empty when it is fine. */
+/** The rule violations in a piece of note text (title, content, alias, role); empty when it is fine. */
 export function noteTextProblems(text: string, allowedIds: ReadonlySet<string> = new Set()): string[] {
   const problems: string[] = [];
   for (const { pattern, what } of DISCORD_MARKUP) {
@@ -109,54 +176,202 @@ export function noteTextProblems(text: string, allowedIds: ReadonlySet<string> =
   return problems;
 }
 
+/** A one-line title's problems (shared by notes and circles). */
+function titleProblems(
+  raw: unknown,
+  label: string,
+  allowed: ReadonlySet<string>,
+): { title?: string; errors: string[] } {
+  const title = typeof raw === 'string' ? raw.trim() : undefined;
+  if (!title) return { errors: [`${label}: the title is missing`] };
+  const errors: string[] = [];
+  if (title.length > NOTE_LIMITS.titleMaxChars) {
+    errors.push(`${label}: the title is longer than ${NOTE_LIMITS.titleMaxChars} characters`);
+  }
+  if (/[\r\n]/.test(title)) errors.push(`${label}: the title must be one line`);
+  for (const problem of noteTextProblems(title, allowed)) errors.push(`${label}: the title ${problem}`);
+  return { title, errors };
+}
+
+/** Markdown content's problems within a size limit (shared by notes and circles). */
+function contentProblems(
+  raw: unknown,
+  label: string,
+  max: number,
+  allowed: ReadonlySet<string>,
+): { content?: string; errors: string[] } {
+  const content = typeof raw === 'string' ? raw.replace(/\r\n?/g, '\n').trim() : undefined;
+  if (!content) return { errors: [`${label}: the content is empty`] };
+  const errors: string[] = [];
+  if (content.length > max) errors.push(`${label}: the content is ${content.length} characters, over the ${max} limit`);
+  for (const problem of noteTextProblems(content, allowed)) errors.push(`${label}: the content ${problem}`);
+  return { content, errors };
+}
+
 /**
- * One note as proposed by a writer: shape, topic slug, a one-line title, markdown content within the
- * topic's size limit, and no Discord markup, HTML or foreign ids. Title and content are trimmed.
+ * One person or group note as proposed by a writer: shape, topic slug, a one-line title, markdown content
+ * within the topic's size limit, and no Discord markup, HTML or foreign ids. Title and content are trimmed.
  */
 export function validateNoteDraft(raw: unknown, ctx: NoteValidationContext): ValidationResult<NoteDraft> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, errors: ['a note must be an object'] };
   const fields = raw as Record<string, unknown>;
   const topic = normalizeTopic(fields.topic);
-  const label = topic ?? (typeof fields.topic === 'string' ? fields.topic.slice(0, 40) : '?');
+  const label = `note "${topic ?? (typeof fields.topic === 'string' ? fields.topic.slice(0, 40) : '?')}"`;
   const errors: string[] = [];
   const allowed = new Set(ctx.allowedIds ?? []);
 
   if (!topic) {
     errors.push(
-      `note "${label}": the topic must be a lowercase slug (letters, digits, single hyphens; ≤${NOTE_LIMITS.topicSlugMaxChars} chars)`,
+      `${label}: the topic must be a lowercase slug (letters, digits, single hyphens; ≤${NOTE_LIMITS.topicSlugMaxChars} chars)`,
     );
   }
+  const title = titleProblems(fields.title, label, allowed);
+  const content = contentProblems(fields.content, label, maxCharsFor(ctx.scope, topic ?? ''), allowed);
+  errors.push(...title.errors, ...content.errors);
 
-  const title = typeof fields.title === 'string' ? fields.title.trim() : undefined;
-  if (!title) errors.push(`note "${label}": the title is missing`);
-  else {
-    if (title.length > NOTE_LIMITS.titleMaxChars) {
-      errors.push(`note "${label}": the title is longer than ${NOTE_LIMITS.titleMaxChars} characters`);
-    }
-    if (/[\r\n]/.test(title)) errors.push(`note "${label}": the title must be one line`);
-    for (const problem of noteTextProblems(title, allowed)) errors.push(`note "${label}": the title ${problem}`);
-  }
+  if (errors.length > 0 || !topic || !title.title || !content.content) return { ok: false, errors };
+  return { ok: true, value: { topic, title: title.title, content: content.content } };
+}
 
-  const content = typeof fields.content === 'string' ? fields.content.replace(/\r\n?/g, '\n').trim() : undefined;
-  if (!content) errors.push(`note "${label}": the content is empty`);
-  else {
-    const max = maxCharsFor(ctx.scope, topic ?? '');
-    if (content.length > max) {
-      errors.push(`note "${label}": the content is ${content.length} characters, over the ${max} limit`);
-    }
-    for (const problem of noteTextProblems(content, allowed)) errors.push(`note "${label}": the content ${problem}`);
-  }
+/** Whether partial date `until` is before `since` (compared at the precision both have). */
+function endsBeforeStart(since: string, until: string): boolean {
+  const n = Math.min(since.length, until.length);
+  return until.slice(0, n) < since.slice(0, n);
+}
 
-  if (errors.length > 0 || !topic || !title || !content) return { ok: false, errors };
-  return { ok: true, value: { topic, title, content } };
+/** A partial date (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`), null for none, or 'invalid'. */
+function partialDate(raw: unknown): string | null | 'invalid' {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'number' && Number.isInteger(raw)) return partialDate(String(raw));
+  if (typeof raw !== 'string') return 'invalid';
+  const value = raw.trim();
+  if (value === '') return null;
+  return PARTIAL_DATE.test(value) ? value : 'invalid';
+}
+
+/** A short one-line plain label (alias, role), or 'invalid'. */
+function shortLabel(raw: unknown, max: number, allowed: ReadonlySet<string>): string | 'invalid' {
+  if (typeof raw !== 'string') return 'invalid';
+  const value = raw.trim().replace(/\s+/g, ' ');
+  if (!value || value.length > max || /[\r\n]/.test(raw.trim())) return 'invalid';
+  return noteTextProblems(value, allowed).length > 0 ? 'invalid' : value;
 }
 
 /**
- * A writer's whole output for one owner. Every note must pass validateNoteDraft, topics must be unique,
- * removed topics must be slugs that aren't also written, a person's profile can never be removed, and the
- * output can't hold more topics than the scope allows. With `requireProfile` (a dream's or bootstrap's
- * full rewrite of a person) the profile must be among the notes. The change summary is clamped to one
- * line of NOTE_LIMITS.changeSummaryMaxChars.
+ * One circle as proposed by a writer: slug, one-line title, markdown content within the circle limit,
+ * aliases (≤ NOTE_LIMITS.maxCircleAliases short one-line names), and its membership: 2–30 distinct
+ * snowflake-shaped ids, each with optional partial-date `since`/`until` (until not before since) and a
+ * short role; `merged_from` slugs other than its own. The members' own ids may appear in the text. Member
+ * ids are checked for shape only here: the store resolves linked accounts and refuses ids nobody knows.
+ */
+export function validateCircleDraft(
+  raw: unknown,
+  ctx: Pick<NoteValidationContext, 'allowedIds'> = {},
+): ValidationResult<CircleDraft> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+    return { ok: false, errors: ['a circle must be an object'] };
+  const fields = raw as Record<string, unknown>;
+  const slug = normalizeTopic(fields.slug);
+  const label = `circle "${slug ?? (typeof fields.slug === 'string' ? fields.slug.slice(0, 40) : '?')}"`;
+  const errors: string[] = [];
+  if (!slug) {
+    errors.push(
+      `${label}: the slug must be a lowercase slug (letters, digits, single hyphens; ≤${NOTE_LIMITS.topicSlugMaxChars} chars)`,
+    );
+  }
+
+  const members: CircleMemberDraft[] = [];
+  const rawMembers = fields.members;
+  if (!Array.isArray(rawMembers)) errors.push(`${label}: "members" must be an array`);
+  for (const entry of Array.isArray(rawMembers) ? rawMembers : []) {
+    const member =
+      entry && typeof entry === 'object' && !Array.isArray(entry) ? (entry as Record<string, unknown>) : {};
+    const id =
+      typeof member.id === 'number' ? String(member.id) : typeof member.id === 'string' ? member.id.trim() : '';
+    if (!MEMBER_ID.test(id)) {
+      errors.push(`${label}: a member id must be a Discord id (got "${String(member.id ?? '').slice(0, 30)}")`);
+      continue;
+    }
+    if (members.some((m) => m.id === id)) {
+      errors.push(`${label}: member ${id} is listed twice`);
+      continue;
+    }
+    const since = partialDate(member.since);
+    const until = partialDate(member.until);
+    if (since === 'invalid' || until === 'invalid') {
+      errors.push(`${label}: member ${id}'s since/until must be YYYY, YYYY-MM or YYYY-MM-DD`);
+      continue;
+    }
+    if (since && until && endsBeforeStart(since, until)) {
+      errors.push(`${label}: member ${id} leaves (${until}) before joining (${since})`);
+      continue;
+    }
+    let role: string | null = null;
+    if (member.role !== undefined && member.role !== null && member.role !== '') {
+      const parsed = shortLabel(member.role, NOTE_LIMITS.roleMaxChars, new Set());
+      if (parsed === 'invalid') {
+        errors.push(`${label}: member ${id}'s role must be plain text up to ${NOTE_LIMITS.roleMaxChars} characters`);
+        continue;
+      }
+      role = parsed;
+    }
+    members.push({ id, since, until, role });
+  }
+  if (Array.isArray(rawMembers)) {
+    if (members.length < NOTE_LIMITS.minCircleMembers && errors.length === 0) {
+      errors.push(`${label}: a circle has at least ${NOTE_LIMITS.minCircleMembers} members`);
+    }
+    if (members.length > NOTE_LIMITS.maxCircleMembers) {
+      errors.push(`${label}: ${members.length} members, over the limit of ${NOTE_LIMITS.maxCircleMembers}`);
+    }
+  }
+
+  const allowed = new Set([...(ctx.allowedIds ?? []), ...members.map((m) => m.id)]);
+  const title = titleProblems(fields.title, label, allowed);
+  const content = contentProblems(fields.content, label, NOTE_LIMITS.circleMaxChars, allowed);
+  errors.push(...title.errors, ...content.errors);
+
+  const aliases: string[] = [];
+  const rawAliases = fields.aliases ?? [];
+  if (!Array.isArray(rawAliases)) errors.push(`${label}: "aliases" must be an array of names`);
+  for (const entry of Array.isArray(rawAliases) ? rawAliases : []) {
+    const alias = shortLabel(entry, NOTE_LIMITS.aliasMaxChars, allowed);
+    if (alias === 'invalid') {
+      errors.push(`${label}: an alias must be plain one-line text up to ${NOTE_LIMITS.aliasMaxChars} characters`);
+      continue;
+    }
+    if (!aliases.some((a) => a.toLowerCase() === alias.toLowerCase())) aliases.push(alias);
+  }
+  if (aliases.length > NOTE_LIMITS.maxCircleAliases) {
+    errors.push(`${label}: ${aliases.length} aliases, over the limit of ${NOTE_LIMITS.maxCircleAliases}`);
+  }
+
+  const mergedFrom: string[] = [];
+  const rawMerged = fields.merged_from ?? [];
+  if (!Array.isArray(rawMerged)) errors.push(`${label}: "merged_from" must be an array of circle slugs`);
+  for (const entry of Array.isArray(rawMerged) ? rawMerged : []) {
+    const merged = normalizeTopic(entry);
+    if (!merged) errors.push(`${label}: merged_from "${String(entry).slice(0, 40)}" is not a slug`);
+    else if (merged === slug) errors.push(`${label}: a circle can't be merged into itself`);
+    else if (!mergedFrom.includes(merged)) mergedFrom.push(merged);
+  }
+
+  if (errors.length > 0 || !slug || !title.title || !content.content) return { ok: false, errors };
+  return {
+    ok: true,
+    value: { slug, title: title.title, content: content.content, aliases, members, merged_from: mergedFrom },
+  };
+}
+
+/**
+ * A writer's whole output for one owner (see NotesOutput). Every note must pass validateNoteDraft and every
+ * circle validateCircleDraft; topics and circle slugs must be unique, removed topics/circles must be slugs
+ * that aren't also written, a person's profile can never be removed, and the output can't hold more
+ * topics than the scope allows. An output for a circle (`ctx.scope === 'circle'`) carries no notes or
+ * removed topics. With `requireProfile` (a dream's or bootstrap's full rewrite of a person) the profile
+ * must be among the notes. The change summary is clamped to one line of NOTE_LIMITS.changeSummaryMaxChars.
+ * Cross-owner rules (a person's output only touches that person's circles; circle and member counts)
+ * are the store's (NotesStore.applyNotesOutput), which knows the current state.
  */
 export function validateNotesOutput(
   raw: unknown,
@@ -168,10 +383,14 @@ export function validateNotesOutput(
   const fields = raw as Record<string, unknown>;
   const errors: string[] = [];
 
-  if (!Array.isArray(fields.notes)) errors.push('"notes" must be an array');
+  if (!Array.isArray(fields.notes) && !(ctx.scope === 'circle' && fields.notes === undefined)) {
+    errors.push('"notes" must be an array');
+  }
   const notes: NoteDraft[] = [];
   const seen = new Set<string>();
-  for (const entry of Array.isArray(fields.notes) ? fields.notes : []) {
+  const rawNotes = Array.isArray(fields.notes) ? fields.notes : [];
+  if (ctx.scope === 'circle' && rawNotes.length > 0) errors.push('an edit of a circle writes only "circles"');
+  for (const entry of ctx.scope === 'circle' ? [] : rawNotes) {
     const result = validateNoteDraft(entry, ctx);
     if (!result.ok) {
       errors.push(...result.errors);
@@ -185,37 +404,76 @@ export function validateNotesOutput(
     notes.push(result.value);
   }
 
-  const removedRaw = fields.removed_topics ?? [];
-  if (!Array.isArray(removedRaw)) errors.push('"removed_topics" must be an array of topic slugs');
-  const removed: string[] = [];
-  for (const entry of Array.isArray(removedRaw) ? removedRaw : []) {
-    const topic = normalizeTopic(entry);
-    if (!topic) {
-      errors.push(`removed topic "${String(entry).slice(0, 40)}" is not a topic slug`);
-      continue;
-    }
-    if (ctx.scope === 'person' && topic === PROFILE_TOPIC) {
-      errors.push('the profile can never be removed');
-      continue;
-    }
-    if (seen.has(topic)) {
-      errors.push(`topic "${topic}" is both written and removed`);
-      continue;
-    }
-    if (!removed.includes(topic)) removed.push(topic);
+  const removed = slugList(fields.removed_topics, '"removed_topics"', 'removed topic', errors);
+  if (ctx.scope === 'circle' && removed.length > 0) errors.push('an edit of a circle removes no topics');
+  for (const topic of removed) {
+    if (ctx.scope === 'person' && topic === PROFILE_TOPIC) errors.push('the profile can never be removed');
+    else if (seen.has(topic)) errors.push(`topic "${topic}" is both written and removed`);
   }
+
+  const circles: CircleDraft[] = [];
+  const circleSlugs = new Set<string>();
+  const rawCircles = fields.circles ?? [];
+  if (!Array.isArray(rawCircles)) errors.push('"circles" must be an array');
+  for (const entry of Array.isArray(rawCircles) ? rawCircles : []) {
+    const result = validateCircleDraft(entry, ctx);
+    if (!result.ok) {
+      errors.push(...result.errors);
+      continue;
+    }
+    if (circleSlugs.has(result.value.slug)) {
+      errors.push(`circle "${result.value.slug}" appears twice`);
+      continue;
+    }
+    circleSlugs.add(result.value.slug);
+    circles.push(result.value);
+  }
+  const removedCircles = slugList(fields.removed_circles, '"removed_circles"', 'removed circle', errors);
+  for (const slug of removedCircles) {
+    if (circleSlugs.has(slug)) errors.push(`circle "${slug}" is both written and removed`);
+  }
+  for (const circle of circles) {
+    for (const merged of circle.merged_from) {
+      if (circleSlugs.has(merged)) errors.push(`circle "${merged}" is both written and merged into "${circle.slug}"`);
+    }
+  }
+  if (ctx.scope === 'circle' && circles.length !== 1) errors.push('an edit of a circle writes exactly that circle');
 
   if (ctx.requireProfile && ctx.scope === 'person' && !seen.has(PROFILE_TOPIC)) {
     errors.push('a person\'s notes must include the "profile" topic');
   }
-  const maxTopics = maxTopicsFor(ctx.scope);
-  if (notes.length > maxTopics) errors.push(`${notes.length} topics, over the limit of ${maxTopics}`);
+  if (ctx.scope !== 'circle') {
+    const maxTopics = maxTopicsFor(ctx.scope);
+    if (notes.length > maxTopics) errors.push(`${notes.length} topics, over the limit of ${maxTopics}`);
+  }
 
   if (errors.length > 0) return { ok: false, errors };
   return {
     ok: true,
-    value: { notes, removed_topics: removed, change_summary: clampSummary(fields.change_summary) },
+    value: {
+      notes,
+      removed_topics: removed,
+      circles,
+      removed_circles: removedCircles,
+      change_summary: clampSummary(fields.change_summary),
+    },
   };
+}
+
+/** An optional array of slugs (deduped); problems go to `errors`. */
+function slugList(raw: unknown, field: string, what: string, errors: string[]): string[] {
+  const list = raw ?? [];
+  if (!Array.isArray(list)) {
+    errors.push(`${field} must be an array of slugs`);
+    return [];
+  }
+  const slugs: string[] = [];
+  for (const entry of list) {
+    const slug = normalizeTopic(entry);
+    if (!slug) errors.push(`${what} "${String(entry).slice(0, 40)}" is not a slug`);
+    else if (!slugs.includes(slug)) slugs.push(slug);
+  }
+  return slugs;
 }
 
 /** A change summary as one clamped line ('' when missing). */

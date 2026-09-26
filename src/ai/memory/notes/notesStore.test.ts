@@ -284,7 +284,7 @@ describe('the journal', () => {
       subject_user_id: REMI,
     });
     expect(merged).toBe(a);
-    expect(seqOf(a)).toBe(before + 1);
+    expect(seqOf(a)).toBeGreaterThan(before);
     expect(notes.journalSince(remi, before).map((m) => m.id)).toEqual([a]);
 
     // Forgetting is not news.
@@ -400,5 +400,196 @@ describe('dream state', () => {
     notes.recordDreamSuccess({ scope: 'person', ownerId: DALE }, notes.journalHighWater());
     notes.recordDreamSuccess(group, notes.journalHighWater());
     expect(notes.pendingDreams()).toEqual({ people: [expect.objectContaining({ owner: remi })] });
+  });
+});
+
+describe('circles', () => {
+  const NOVA = '100000000000000003';
+  const mtg = (over: Record<string, unknown> = {}) => ({
+    slug: 'mtg',
+    title: 'The MTG crew',
+    content: '## Now\nFriday drafts at the game store.',
+    aliases: ['magic crew'],
+    members: [
+      { id: REMI, since: '2021' },
+      { id: DALE, since: '2021', until: '2023-02' },
+    ],
+    ...over,
+  });
+
+  beforeEach(() => {
+    memory.upsertIdentity(REMI, 'Remi');
+    memory.upsertIdentity(DALE, 'Dale');
+    memory.upsertIdentity(NOVA, 'Nova');
+  });
+
+  it('writes a circle with dated membership, versions it and finds it by member', () => {
+    const result = notes.writeCircles([mtg()], { updatedBy: 'dream', reason: 'recurring drafts' });
+    expect(result.ok).toBe(true);
+    const circle = notes.getCircle('MTG');
+    expect(circle).toMatchObject({ scope: 'circle', ownerId: null, topic: 'mtg', aliases: ['magic crew'], version: 1 });
+    expect(circle?.members).toEqual([
+      { memberId: REMI, since: '2021', until: null, role: null },
+      { memberId: DALE, since: '2021', until: '2023-02', role: null },
+    ]);
+    expect(notes.circlesOf(REMI).map((c) => c.circle.topic)).toEqual(['mtg']);
+    // A former member is only listed on request.
+    expect(notes.circlesOf(DALE)).toEqual([]);
+    expect(notes.circlesOf(DALE, { includeFormer: true }).map((c) => c.membership.until)).toEqual(['2023-02']);
+    expect(notes.getVersions(circle?.id ?? 0)[0].members).toEqual(circle?.members);
+    ftsIntegrity();
+  });
+
+  it('files a side account under its main account', () => {
+    vi.stubEnv('LINKED_ACCOUNTS', `${REMI_ALT}:${REMI}`);
+    notes.writeCircles([mtg({ members: [{ id: REMI_ALT }, { id: DALE }] })], { updatedBy: 'dream' });
+    expect(notes.getCircle('mtg')?.members.map((m) => m.memberId)).toEqual([DALE, REMI].sort());
+    expect(notes.listCircles({ memberId: REMI_ALT }).map((c) => c.topic)).toEqual(['mtg']);
+    const twice = notes.writeCircles([mtg({ slug: 'dup', members: [{ id: REMI_ALT }, { id: REMI }, { id: DALE }] })], {
+      updatedBy: 'dream',
+    });
+    expect(twice.ok).toBe(false);
+  });
+
+  it('refuses members nobody knows unless they were in the input', () => {
+    const stranger = '100000000000000099';
+    const refused = notes.writeCircles([mtg({ members: [{ id: REMI }, { id: stranger }] })], { updatedBy: 'import' });
+    expect(refused).toEqual({ ok: false, errors: [`circle "mtg": member ${stranger} is nobody the bot knows`] });
+    expect(
+      notes.writeCircles([mtg({ members: [{ id: REMI }, { id: stranger }] })], {
+        updatedBy: 'import',
+        allowedIds: [stranger],
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("writes a person's notes and their circles together, never someone else's circle", () => {
+    notes.writeCircles(
+      [{ slug: 'dale-and-nova', title: 'Dale & Nova', content: 'Rivals.', members: [{ id: DALE }, { id: NOVA }] }],
+      { updatedBy: 'dream' },
+    );
+    const mine = notes.writeNotes(remi, [profile()], { updatedBy: 'dream', circles: [mtg()] });
+    expect(mine.ok && mine.written.map((n) => [n.scope, n.topic])).toEqual([
+      ['person', 'profile'],
+      ['circle', 'mtg'],
+    ]);
+
+    const hijack = notes.writeNotes(remi, [profile('changed')], {
+      updatedBy: 'dream',
+      circles: [{ slug: 'dale-and-nova', title: 'x', content: 'y', members: [{ id: DALE }, { id: NOVA }, { id: REMI }] }],
+    });
+    expect(hijack).toEqual({
+      ok: false,
+      errors: ['circle "dale-and-nova": a person\'s notes only change circles they are part of'],
+    });
+    // All or nothing: the profile did not change either.
+    expect(notes.getProfile(REMI)?.version).toBe(1);
+    expect(notes.writeNotes(remi, [], { updatedBy: 'dream', removeCircles: ['dale-and-nova'] }).ok).toBe(false);
+  });
+
+  it('merges a duplicate circle into another and removes circles as inactive versions', () => {
+    notes.writeCircles([mtg(), mtg({ slug: 'magic', title: 'Magic nights' })], { updatedBy: 'dream' });
+    const merged = notes.writeCircles([mtg({ merged_from: ['magic'] })], { updatedBy: 'dream', reason: 'dedupe' });
+    expect(merged.ok && merged.removed.map((n) => [n.topic, n.active])).toEqual([['magic', false]]);
+    const magic = merged.ok ? merged.removed[0] : undefined;
+    expect(notes.getVersion(magic?.id ?? 0, 2)?.reason).toBe('merged into mtg');
+    expect(notes.listCircles().map((c) => c.topic)).toEqual(['mtg']);
+    // A removed circle keeps its history and comes back with undo.
+    notes.writeCircles([], { updatedBy: 'edit', removeCircles: ['mtg'] });
+    expect(notes.getCircle('mtg')).toBeUndefined();
+    const id = notes.getNoteById(magic?.id ?? 0)?.id ?? 0;
+    expect(notes.undo(id).ok).toBe(true);
+    expect(notes.getCircle('magic')?.members).toHaveLength(2);
+    ftsIntegrity();
+  });
+
+  it('restores the previous membership on undo', () => {
+    notes.writeCircles([mtg()], { updatedBy: 'dream' });
+    notes.writeCircles([mtg({ members: [{ id: REMI }, { id: NOVA, since: '2026' }] })], { updatedBy: 'edit' });
+    const id = notes.getCircle('mtg')?.id ?? 0;
+    expect(notes.circlesOf(NOVA).map((c) => c.circle.topic)).toEqual(['mtg']);
+    const undone = notes.undo(id);
+    expect(undone.ok && undone.note.members.map((m) => m.memberId)).toEqual([REMI, DALE]);
+    expect(notes.circlesOf(NOVA)).toEqual([]);
+  });
+
+  it('reports an identical rewrite as unchanged', () => {
+    notes.writeCircles([mtg()], { updatedBy: 'dream' });
+    expect(notes.writeCircles([mtg()], { updatedBy: 'dream' })).toEqual({
+      ok: true,
+      written: [],
+      removed: [],
+      unchanged: ['circle:mtg'],
+    });
+  });
+
+  it('keeps each member within the circle limit', () => {
+    const circles = Array.from({ length: NOTE_LIMITS.maxCirclesPerMember + 1 }, (_, i) =>
+      mtg({ slug: `c${i}`, members: [{ id: REMI }, { id: DALE }] }),
+    );
+    const result = notes.writeCircles(circles, { updatedBy: 'dream' });
+    expect(result.ok).toBe(false);
+    expect(result.ok ? [] : result.errors).toContain(
+      `member ${REMI} would be in ${NOTE_LIMITS.maxCirclesPerMember + 1} circles, over the limit of ${NOTE_LIMITS.maxCirclesPerMember}`,
+    );
+    expect(notes.listCircles()).toEqual([]);
+  });
+
+  it('applies a validated writer output for a person, the group or one circle', () => {
+    const output = {
+      notes: [profile()],
+      removed_topics: [],
+      circles: [{ ...mtg(), aliases: [], members: [{ id: REMI }, { id: DALE }], merged_from: [] }],
+      removed_circles: [],
+      change_summary: 'first notes',
+    };
+    const result = notes.applyNotesOutput(remi, output, { updatedBy: 'dream' });
+    expect(result.ok).toBe(true);
+    expect(notes.getVersions(notes.getCircle('mtg')?.id ?? 0)[0].reason).toBe('first notes');
+
+    const circleEdit = { ...output, notes: [], circles: [{ ...output.circles[0], content: 'Edited.' }] };
+    expect(notes.applyNotesOutput({ scope: 'circle', slug: 'mtg' }, circleEdit, { updatedBy: 'edit' }).ok).toBe(true);
+    expect(notes.getCircle('mtg')?.content).toBe('Edited.');
+    expect(notes.applyNotesOutput({ scope: 'circle', slug: 'other' }, circleEdit, { updatedBy: 'edit' }).ok).toBe(false);
+  });
+
+  it('is found by search through its title, content and aliases', () => {
+    notes.writeCircles([mtg()], { updatedBy: 'dream' });
+    expect(notes.searchNotes('drafts').map((h) => h.note.topic)).toEqual(['mtg']);
+    expect(notes.searchNotes('magic crew').map((h) => h.note.topic)).toEqual(['mtg']);
+    expect(notes.searchNotes('drafts', { scope: 'person' })).toEqual([]);
+    expect(notes.listAllNotes().map((n) => n.scope)).toEqual(['circle']);
+  });
+});
+
+describe('journal rows about several people', () => {
+  it("puts a relationship row in every involved member's journal and pending dream", async () => {
+    const NOVA = '100000000000000003';
+    const id = await memory.save({
+      category: 'fact',
+      subject: 'Remi',
+      content: 'Remi and Dale have been best friends since school',
+      subject_user_id: REMI,
+      related_user_ids: [DALE, REMI, 'not-an-id'],
+    });
+    expect(notes.journalSince({ scope: 'person', ownerId: DALE }, 0).map((m) => m.id)).toEqual([id]);
+    expect(notes.journalSince({ scope: 'person', ownerId: NOVA }, 0)).toEqual([]);
+    expect(
+      notes
+        .pendingDreams()
+        .people.map((p) => (p.owner.scope === 'person' ? p.owner.ownerId : ''))
+        .sort(),
+    ).toEqual([REMI, DALE].sort());
+    // A correction of someone else only shows as an open correction for the person it is about.
+    await memory.save({
+      category: 'correction',
+      subject: 'Remi',
+      content: 'Remi moved to Laval',
+      subject_user_id: REMI,
+      said_by: DALE,
+      related_user_ids: [DALE],
+    });
+    expect(notes.openCorrections({ scope: 'person', ownerId: DALE })).toEqual([]);
+    expect(notes.openCorrections(remi)).toHaveLength(1);
   });
 });

@@ -5,7 +5,8 @@ import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeEmbeddingProvider } from '../../test-support/fakeEmbeddings';
 import type { EmbeddingKind } from './embeddingProvider';
-import { buildEmbeddingInput, MemoryStore } from './memoryStore';
+import { buildEmbeddingInput, type Memory, MemoryStore, relatedUserIdsOf } from './memoryStore';
+import { parseEvidence } from './evidence';
 import { blobToVector, cosineSimilarity, vectorToBlob } from './vectorMath';
 import { wordOverlap } from './wordOverlap';
 
@@ -2144,5 +2145,113 @@ describe('journal clock (memory v2)', () => {
     expect(stamped).toBeGreaterThan(before);
     store.deactivate(id);
     expect(seq()).toBe(stamped);
+  });
+});
+
+describe('journal evidence, recurrence and related members (memory v2)', () => {
+  const REMI = '100000000000000001';
+  const DALE = '100000000000000002';
+  const MSG1 = '1200000000000000001';
+  const MSG2 = '1200000000000000002';
+  const row = (id: number) =>
+    // @ts-expect-error accessing private db
+    store.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Memory;
+
+  it('stores evidence, a first sighting and related members on insert', async () => {
+    const id = await store.save({
+      category: 'fact',
+      subject: 'Remi',
+      content: 'plays bass in a garage band',
+      subject_user_id: REMI,
+      evidence: { messageIds: [MSG1], quote: '  i finally  joined a band lol ' },
+      related_user_ids: [DALE],
+      observed_at: new Date('2019-05-04T20:00:00Z'),
+    });
+    const stored = row(id);
+    expect(parseEvidence(stored.evidence)).toEqual({ messageIds: [MSG1], quote: 'i finally joined a band lol' });
+    expect([stored.seen_count, stored.first_seen_at, stored.last_seen_at]).toEqual([
+      1,
+      '2019-05-04 20:00:00',
+      '2019-05-04 20:00:00',
+    ]);
+    expect(relatedUserIdsOf(stored)).toEqual([DALE]);
+  });
+
+  it('counts a merged re-observation, widens the span and keeps both passages', async () => {
+    const id = await store.save({
+      category: 'fact',
+      subject: 'Remi',
+      content: 'plays bass in a garage band',
+      subject_user_id: REMI,
+      evidence: { messageIds: [MSG1], quote: 'joined a band' },
+      observed_at: new Date('2019-05-04T20:00:00Z'),
+    });
+    const merged = await store.save({
+      category: 'fact',
+      subject: 'Remi',
+      content: 'plays bass in a garage band still',
+      subject_user_id: REMI,
+      evidence: { messageIds: [MSG2], quote: 'band practice tonight' },
+      related_user_ids: [DALE],
+      observed_at: new Date('2026-09-01T20:00:00Z'),
+    });
+    expect(merged).toBe(id);
+    const stored = row(id);
+    expect([stored.seen_count, stored.first_seen_at, stored.last_seen_at]).toEqual([
+      2,
+      '2019-05-04 20:00:00',
+      '2026-09-01 20:00:00',
+    ]);
+    expect(parseEvidence(stored.evidence)).toEqual({ messageIds: [MSG1, MSG2], quote: 'band practice tonight' });
+    expect(relatedUserIdsOf(stored)).toEqual([DALE]);
+  });
+
+  it('folds a compacted duplicate into the row it keeps', async () => {
+    // @ts-expect-error accessing private db
+    const db = store.db as Database.Database;
+    db.prepare(
+      `INSERT INTO memories (category, subject, content, subject_user_id, seen_count, first_seen_at, last_seen_at, evidence, created_at, updated_at)
+       VALUES ('fact', 'Remi', 'works nights at the bakery', ?, 3, '2020-01-01 00:00:00', '2021-01-01 00:00:00', ?, '2020-01-01 00:00:00', '2021-01-01 00:00:00')`,
+    ).run(REMI, JSON.stringify({ messageIds: [MSG1] }));
+    db.prepare(
+      `INSERT INTO memories (category, subject, content, subject_user_id, created_at, updated_at)
+       VALUES ('fact', 'Remi', 'works nights at the bakery downtown', ?, '2026-09-01 00:00:00', '2026-09-01 00:00:00')`,
+    ).run(REMI);
+    expect(store.compact().removed).toBe(1);
+    const [kept] = store.getAllActive();
+    expect(kept.content).toBe('works nights at the bakery downtown');
+    expect([kept.seen_count, kept.first_seen_at, kept.last_seen_at]).toEqual([
+      4,
+      '2020-01-01 00:00:00',
+      '2026-09-01 00:00:00',
+    ]);
+    expect(parseEvidence(kept.evidence)?.messageIds).toEqual([MSG1]);
+  });
+
+  it('starts existing rows at one sighting over their created/updated span', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'journal-cols-'));
+    const file = path.join(dir, 'memory.db');
+    try {
+      const old = new Database(file);
+      old.exec(`CREATE TABLE memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL, subject TEXT, content TEXT NOT NULL,
+        source TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+        active INTEGER DEFAULT 1)`);
+      old.exec(
+        "INSERT INTO memories (category, subject, content, created_at, updated_at) VALUES ('fact', 'Remi', 'a', '2024-01-01 00:00:00', '2025-01-01 00:00:00')",
+      );
+      old.close();
+      const migrated = new MemoryStore(file);
+      // @ts-expect-error accessing private db
+      expect(migrated.db.prepare('SELECT seen_count, first_seen_at, last_seen_at, evidence FROM memories').get()).toEqual({
+        seen_count: 1,
+        first_seen_at: '2024-01-01 00:00:00',
+        last_seen_at: '2025-01-01 00:00:00',
+        evidence: null,
+      });
+      migrated.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
