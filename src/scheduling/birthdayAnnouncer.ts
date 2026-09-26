@@ -13,7 +13,8 @@ import { chatExcerpt } from '../ai/memory/notes/context';
 import { getOpenRouterClient } from '../ai/openRouterClient';
 import { memoryKeyFor } from '../ai/people';
 import { featureRequestOptions } from '../ai/usage';
-import { easternParts, formatRelativeAge, parseSqliteUtc } from '../ai/utils';
+import { easternParts, easternWallClockToDate, formatRelativeAge, parseSqliteUtc } from '../ai/utils';
+import { type ArchivedMessage, getArchivedMessages } from '../archive';
 import { config } from '../config';
 import { logger } from '../logger';
 import { type Birthday, claimAnnouncement, isBirthdayOn, listBirthdays, releaseAnnouncement } from './birthdayStore';
@@ -47,6 +48,43 @@ const EASTERN_DATE = new Intl.DateTimeFormat('en-US', {
   day: 'numeric',
   year: 'numeric',
 });
+// Today's chat as writer context: the newest lines of the day, one line each, capped so a busy day stays cheap.
+const TODAYS_CHAT_MAX_LINES = 60;
+const TODAYS_CHAT_MAX_CHARS = 6_000;
+const TODAYS_CHAT_LINE_MAX_CHARS = 200;
+const EASTERN_TIME = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+/**
+ * One archived message as `HH:MM Name: text`: mentions become @names (or @someone), custom emojis :name:, a voice
+ * message its transcript, files their names. The bot's own lines are marked as the writer's. undefined when there's
+ * nothing to show.
+ */
+function renderChatLine(
+  message: ArchivedMessage,
+  botName: string,
+  nameOf: (userId: string) => string | undefined,
+): string | undefined {
+  const text = [
+    message.content,
+    message.transcript ? `[voice message: ${message.transcript}]` : '',
+    ...message.attachments.map((file) => `[file: ${file.name}]`),
+  ]
+    .filter((part) => part.trim().length > 0)
+    .join(' ')
+    .replace(/<@!?(\d+)>/g, (_, id: string) => `@${nameOf(id) ?? 'someone'}`)
+    .replace(/<a?:(\w+):\d+>/g, ':$1:')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return undefined;
+  const author = message.source === 'bot' ? `${botName} (you)` : message.authorName;
+  const clipped = text.length > TODAYS_CHAT_LINE_MAX_CHARS ? `${text.slice(0, TODAYS_CHAT_LINE_MAX_CHARS - 1)}…` : text;
+  return `${EASTERN_TIME.format(message.createdAt)} ${author}: ${clipped}`;
+}
 
 export type BirthdayMessageInput = {
   userId: string;
@@ -66,6 +104,11 @@ export type BirthdayMessageInput = {
   botName: string;
   /** Today's Eastern date, e.g. "Friday, September 25, 2026". */
   today: string;
+  /**
+   * The birthday channel's chat so far today (Eastern), newest last: `HH:MM Name: text` lines, capped. Plain
+   * background: the writer can bounce off it (or notice nobody said anything) without being told what to look for.
+   */
+  todaysChat?: string[];
 };
 
 /** Writes the announcement text, or undefined when it couldn't (the caller then uses the template). */
@@ -104,7 +147,11 @@ Reply with the message text only.`;
     : input.memories.length > 0
       ? `What you know about ${input.name} (background only; oldest first, each with when you first noted it):\n${newer}`
       : `You don't know much about ${input.name} beyond their name.`;
-  return { system, user: `Today is ${input.today}.\n\n${known}` };
+  const chat =
+    input.todaysChat && input.todaysChat.length > 0
+      ? `\n\nThe chat so far today (background):\n${input.todaysChat.join('\n')}`
+      : '';
+  return { system, user: `Today is ${input.today}.\n\n${known}${chat}` };
 }
 
 /** Cleans the model's text into a postable announcement; undefined when there's nothing usable. */
@@ -263,6 +310,7 @@ export class BirthdayAnnouncer {
           memories,
           botName,
           today: EASTERN_DATE.format(nowMs),
+          todaysChat: this.todaysChat(channel.id, nowMs, botName),
         });
       } catch (error) {
         logger.warn(`birthdays: writing ${userId}'s message failed; using the template:`, error);
@@ -321,6 +369,24 @@ export class BirthdayAnnouncer {
     } catch {
       return 'this friend';
     }
+  }
+
+  /** The birthday channel's messages since midnight Eastern, rendered compactly; [] when the archive has none. */
+  private todaysChat(channelId: string, nowMs: number, botName: string): string[] {
+    const { year, month, day } = easternParts(new Date(nowMs));
+    const midnight = easternWallClockToDate(year, month, day, 0, 0).getTime();
+    const lines = getArchivedMessages(channelId, midnight, nowMs + 1)
+      .map((message) => renderChatLine(message, botName, (id) => this.safeIdentity(id)?.display_name))
+      .filter((line): line is string => line !== undefined);
+    // The newest lines, within both caps: the latest part of the day is what the writer would bounce off.
+    const kept: string[] = [];
+    let chars = 0;
+    for (let i = lines.length - 1; i >= 0 && kept.length < TODAYS_CHAT_MAX_LINES; i--) {
+      if (chars + lines[i].length > TODAYS_CHAT_MAX_CHARS) break;
+      kept.unshift(lines[i]);
+      chars += lines[i].length + 1;
+    }
+    return kept;
   }
 
   private safeIdentity(userId: string) {

@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getNotesStore, setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
 import { FEATURE_HEADER } from '../ai/usage';
+import { ArchiveStore, setArchiveStoreForTesting } from '../archive/archiveStore';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
+import { archiveInput } from '../test-support/fakeArchive';
 import { createPostableChannel, createSchedulingClient } from '../test-support/fakeScheduling';
 import {
   BirthdayAnnouncer,
@@ -316,6 +318,69 @@ describe('BirthdayAnnouncer.run', () => {
     }
   });
 
+  it("hands the writer the birthday channel's chat so far today, newest last, as plain lines", async () => {
+    const archive = new ArchiveStore(':memory:');
+    setArchiveStoreForTesting(archive);
+    try {
+      memory.upsertIdentity(ALICE, 'Alice');
+      memory.upsertIdentity(BOB, 'Bob');
+      // Sept 25 ET runs from 04:00 UTC; the run is at 19:00 UTC (15:00 ET).
+      const at = (hour: number, minute: number) => Date.UTC(2026, 8, 25, hour, minute);
+      archive.upsertMessages([
+        archiveInput({ channelId: CHANNEL, authorId: BOB, authorName: 'Bob', content: 'yesterday stuff', createdAt: Date.UTC(2026, 8, 25, 3, 59) }),
+        archiveInput({ channelId: CHANNEL, authorId: BOB, authorName: 'Bob', content: `morning <@${ALICE}> <:kek:123456789012345678>`, createdAt: at(13, 5) }),
+        archiveInput({ channelId: CHANNEL, authorId: ALICE, authorName: 'Alice', content: '', transcript: 'nobody remembers anything', hasAudio: true, createdAt: at(14, 0) }),
+        archiveInput({ channelId: CHANNEL, authorId: BOB, authorName: 'Bob', content: '', attachments: [{ name: 'cake.png', type: 'image/png', size: 10, url: 'https://cdn.example/cake.png' }], createdAt: at(15, 30) }),
+        archiveInput({ channelId: CHANNEL, authorId: null, authorName: 'Frigidaire', source: 'bot', content: 'reminder: stretch', createdAt: at(16, 0) }),
+        archiveInput({ channelId: 'another-channel', authorId: BOB, authorName: 'Bob', content: 'elsewhere', createdAt: at(17, 0) }),
+        archiveInput({ channelId: CHANNEL, authorId: BOB, authorName: 'Bob', content: 'after the post', createdAt: at(19, 1) }),
+      ]);
+      birthday(ALICE, 9, 25);
+      const { writer, inputs } = writerSaying('🎂 hbd');
+      const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice' }] });
+
+      await announcer.run(SEPT25_1500);
+
+      expect(inputs[0].todaysChat).toEqual([
+        '09:05 Bob: morning @Alice :kek:',
+        '10:00 Alice: [voice message: nobody remembers anything]',
+        '11:30 Bob: [file: cake.png]',
+        '12:00 Frigidaire (you): reminder: stretch',
+      ]);
+    } finally {
+      setArchiveStoreForTesting(undefined);
+    }
+  });
+
+  it("keeps only the newest 60 lines of a busy day's chat, and nothing when the archive has none", async () => {
+    const archive = new ArchiveStore(':memory:');
+    setArchiveStoreForTesting(archive);
+    try {
+      archive.upsertMessages(
+        Array.from({ length: 80 }, (_, i) =>
+          archiveInput({ channelId: CHANNEL, content: `line ${i}`, createdAt: Date.UTC(2026, 8, 25, 12, i) }),
+        ),
+      );
+      birthday(ALICE, 9, 25);
+      const { writer, inputs } = writerSaying('🎂 hbd');
+      const { announcer } = setup({ writer, members: [{ id: ALICE, displayName: 'Alice' }] });
+
+      await announcer.run(SEPT25_1500);
+
+      expect(inputs[0].todaysChat).toHaveLength(60);
+      expect(inputs[0].todaysChat?.[0]).toMatch(/: line 20$/);
+      expect(inputs[0].todaysChat?.at(-1)).toMatch(/: line 79$/);
+    } finally {
+      setArchiveStoreForTesting(undefined);
+    }
+
+    const empty = writerSaying('🎂 hbd');
+    birthday(BOB, 9, 25);
+    const { announcer } = setup({ writer: empty.writer, members: [{ id: BOB, displayName: 'Bob' }] });
+    await announcer.run(SEPT25_1500);
+    expect(empty.inputs[0].todaysChat).toEqual([]);
+  });
+
   it('skips (and settles for the year) someone who left the server', async () => {
     birthday(ALICE, 9, 25);
     const { target, announcer } = setup({ members: [{ id: BOB, displayName: 'Bob' }] });
@@ -431,6 +496,7 @@ describe('createBirthdayWriter', () => {
     memories: ['Alice is a nurse (noted 2mo ago)', 'Alice hates cilantro (noted 1mo ago)'],
     botName: 'Frigidaire',
     today: 'Friday, September 25, 2026',
+    todaysChat: ['09:05 Bob: anyone know whose birthday it is'],
   };
 
   it('asks the chat model with ZDR routing, tags the call as birthday, and finalizes the text', async () => {
@@ -462,6 +528,7 @@ describe('createBirthdayWriter', () => {
     expect(messages[1].content).toMatch(/^Today is Friday, September 25, 2026\.\n/);
     expect(messages[1].content).toContain('What you know about Alice (background only; oldest first');
     expect(messages[1].content).toContain('- Alice hates cilantro (noted 1mo ago)');
+    expect(messages[1].content).toMatch(/\n\nThe chat so far today \(background\):\n09:05 Bob: anyone know whose birthday it is$/);
   });
 
   it('puts the profile first and what was picked up since after it', async () => {
