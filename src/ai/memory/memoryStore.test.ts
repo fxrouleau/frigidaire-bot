@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '../../logger';
 import { FakeEmbeddingProvider } from '../../test-support/fakeEmbeddings';
 import type { EmbeddingKind } from './embeddingProvider';
 import { buildEmbeddingInput, type Memory, MemoryStore, relatedUserIdsOf } from './memoryStore';
@@ -2253,5 +2254,70 @@ describe('journal evidence, recurrence and related members (memory v2)', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('two processes on one memory.db (the bootstrap CLI next to the running bot)', () => {
+  let dir: string;
+  const opened: MemoryStore[] = [];
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-2proc-'));
+  });
+
+  afterEach(() => {
+    for (const s of opened.splice(0)) s.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function open(): MemoryStore {
+    const s = new MemoryStore(path.join(dir, 'memory.db'), {
+      embeddings: new FakeEmbeddingProvider(),
+      dedupThreshold: 0.65,
+    });
+    opened.push(s);
+    return s;
+  }
+
+  const original = { category: 'fact', subject: 'Remi', content: 'Remi loves eating pizza with extra cheese on top' };
+  const paraphrase = { category: 'fact', subject: 'Remi', content: 'Remi loves eating pizza with mushrooms' };
+
+  it('never merges into a row the other process retired after this one cached its vector', async () => {
+    const cli = open();
+    const bot = open();
+    const warn = vi.spyOn(logger, 'warn');
+    const id = await cli.save(original);
+    // The bot forgets it (forget_memory, compact) while the CLI still holds its vector.
+    expect(bot.deactivate(id)).toBe(true);
+
+    const again = await cli.save(paraphrase);
+
+    // Merging into it would 'delete' a row the FTS index no longer has ("database disk image is malformed").
+    expect(warn).not.toHaveBeenCalled();
+    expect(again).not.toBe(id);
+    expect(getVectorInputText(cli, again)).toBe(buildEmbeddingInput(paraphrase));
+    expect(cli.getAllActive().map((m) => [m.id, m.content])).toEqual([[again, paraphrase.content]]);
+    expect(cli.sharedDatabase().prepare('SELECT content, active FROM memories WHERE id = ?').get(id)).toEqual({
+      content: original.content,
+      active: 0,
+    });
+    // The retired row was never 'delete'd from the FTS index a second time.
+    cli.sharedDatabase().exec("INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')");
+  });
+
+  it('never merges into a row the other process removed', async () => {
+    const cli = open();
+    const bot = open();
+    const warn = vi.spyOn(logger, 'warn');
+    const id = await cli.save(original);
+    bot.remove(id);
+
+    const again = await cli.save(paraphrase);
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(again).not.toBe(id);
+    expect(getVectorInputText(cli, again)).toBe(buildEmbeddingInput(paraphrase));
+    expect(cli.getAllActive().map((m) => m.content)).toEqual([paraphrase.content]);
   });
 });
