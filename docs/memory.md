@@ -270,7 +270,9 @@ they were in the input, circle membership shape and dates) and saved all or noth
 (`updated_by = 'dream'`). A refused answer (invalid JSON, a broken rule, a write the store refuses, an answer
 cut off at the length limit) gets one repair round with the errors. The watermark advances only on success
 (an answer that changes nothing still advances it); a failure is logged, kept in `dream_state` and retried the
-next night. A night stops early after three people failed in a row (an outage). Circles past a 60,000-char
+next night. A night stops early after three calls in a row failed with a model or network error (an outage);
+a refused answer is that person's problem and never stops the night, and people whose last dream failed are
+dreamed after everyone else, so a few stubborn failures can't starve the rest. Circles past a 60,000-char
 budget are shown as excerpts and may not be rewritten by that call.
 
 Dream rules (the prompt): merge new facts; resolve contradictions (newer wins; a self-correction beats

@@ -1280,6 +1280,9 @@ export class NotesStore {
    * junk ids (MemoryStore.stampSubjectUserIds: "456" copied from the old learner's prompt, a garbled
    * snowflake on a learner row) left in place when their name is ambiguous or unknown never become a
    * phantom person with a paid dream and notes of their own: their rows wait in the journal for the stamp.
+   *
+   * People whose last dream failed come after everyone else (then most recently active first), so a few
+   * people whose dreams keep failing never take the night's places (`limit`) from the rest.
    */
   pendingDreams(opts: { limit?: number } = {}): { people: PendingDream[]; group?: PendingDream } {
     const rows = this.stmt(
@@ -1288,17 +1291,17 @@ export class NotesStore {
          AND category NOT IN (${SELF_DIAGNOSIS_NOT_IN})`,
     ).all() as { uid: string | null; related: string | null; seq: number; source: string | null }[];
 
-    const watermarks = new Map<string, number>();
+    const states = new Map<string, DreamState>();
     const byOwner = new Map<string, { newRows: number; latestSeq: number }>();
     // Ids some row vouches for: stamped by a writer other than the old learner, or a related member.
     const vouched = new Set<string>();
-    const watermarkOf = (id: string) => {
-      let mark = watermarks.get(id);
-      if (mark === undefined) {
-        mark = this.getDreamState({ scope: 'person', ownerId: id }).journalWatermark;
-        watermarks.set(id, mark);
+    const stateOf = (id: string) => {
+      let state = states.get(id);
+      if (state === undefined) {
+        state = this.getDreamState({ scope: 'person', ownerId: id });
+        states.set(id, state);
       }
-      return mark;
+      return state;
     };
     for (const row of rows) {
       const related = parseJsonArray(row.related, isString).map((id) => canonicalUserId(id));
@@ -1307,7 +1310,7 @@ export class NotesStore {
       for (const id of related) vouched.add(id);
       const owners = new Set([...(uid ? [uid] : []), ...related]);
       for (const main of owners) {
-        if (row.seq <= watermarkOf(main)) continue;
+        if (row.seq <= stateOf(main).journalWatermark) continue;
         const entry = byOwner.get(main) ?? { newRows: 0, latestSeq: 0 };
         entry.newRows++;
         entry.latestSeq = Math.max(entry.latestSeq, row.seq);
@@ -1318,7 +1321,11 @@ export class NotesStore {
     const people: PendingDream[] = [...byOwner.entries()]
       .filter(([ownerId]) => isRealPerson(ownerId))
       .map(([ownerId, entry]) => ({ owner: { scope: 'person' as const, ownerId }, ...entry }))
-      .sort((a, b) => b.latestSeq - a.latestSeq)
+      .sort((a, b) => {
+        const failedA = stateOf(a.owner.ownerId).lastError !== null;
+        const failedB = stateOf(b.owner.ownerId).lastError !== null;
+        return failedA !== failedB ? (failedA ? 1 : -1) : b.latestSeq - a.latestSeq;
+      })
       .slice(0, opts.limit ?? Number.POSITIVE_INFINITY);
 
     const groupRows = this.newJournal({ scope: 'group' });
