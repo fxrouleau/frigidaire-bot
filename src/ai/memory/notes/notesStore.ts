@@ -28,6 +28,7 @@ import { logger } from '../../../logger';
 import { toSqliteUtc } from '../../utils';
 import {
   CORRECTION_CATEGORY,
+  everyoneGoingBy,
   IDENTITY_NAME_TIERS,
   LEARNER_SOURCES,
   type Memory,
@@ -1108,9 +1109,11 @@ export class NotesStore {
    * An owner's active journal rows with journal_seq above `afterSeq`, oldest first (by journal_seq).
    * A person's rows are the ones stamped with any of their account ids, the ones that name them among
    * their related members (a relationship or shared event filed under someone else), plus rows filed under
-   * one of their names that carry no id (getForPerson's rule: a shared name never claims another member's
-   * rows). The group's rows are the ones about the server as a whole. Self-diagnosis rows are never
-   * included.
+   * one of their names that carry no id (getForPerson's rule: a name never claims a row another member's id
+   * is on). Only names nobody else goes by, in any form, claim an id-less row (the startup stamp's rule): a
+   * row filed under a name two members share ("Rem", one's IRL name and the other's nickname) is left for
+   * the stamp, never read into both people's notes. The group's rows are the ones about the server as a
+   * whole. Self-diagnosis rows are never included.
    */
   journalSince(owner: JournalOwner, afterSeq: number, opts: JournalOptions = {}): Memory[] {
     const kinds = opts.kinds ?? 'all';
@@ -1134,7 +1137,7 @@ export class NotesStore {
       ).all(afterSeq, GROUP_SUBJECTS, limit) as Memory[];
     }
     const ids = JSON.stringify(accountIdsFor(owner.ownerId));
-    const names = owner.names ?? this.namesOf(accountIdsFor(owner.ownerId));
+    const names = this.ownNames(owner.ownerId, owner.names ?? this.namesOf(accountIdsFor(owner.ownerId)));
     return this.stmt(
       `SELECT * FROM (
          SELECT * FROM memories
@@ -1240,6 +1243,14 @@ export class NotesStore {
       [...links.values()].includes(mainId) ||
       accountIdsFor(mainId).some((id) => this.memory.getIdentityById(id) !== undefined)
     );
+  }
+
+  /** Of these names, the ones no other member goes by in any form (active identities, like the stamp). */
+  private ownNames(ownerId: string, names: string[]): string[] {
+    if (names.length === 0) return names;
+    const main = canonicalUserId(ownerId);
+    const identities = this.memory.getAllIdentities().filter((i) => i.active !== 0);
+    return names.filter((name) => everyoneGoingBy(identities, name).every((id) => id === main));
   }
 
   /** Every name any of these accounts goes by (display, handle, first-seen, IRL, nicknames). */

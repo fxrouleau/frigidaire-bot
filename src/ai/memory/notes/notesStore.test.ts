@@ -337,6 +337,23 @@ describe('the journal', () => {
     expect(notes.journalSince(remi, 0, { limit: 1 }).map((m) => m.id)).toEqual([byHandle]);
   });
 
+  it('never claims an id-less row under a name two members go by for either of them', async () => {
+    memory.upsertIdentity(REMI, 'Remi');
+    memory.upsertIdentity(DALE, 'Dale');
+    memory.updateIdentityMeta(REMI, { irl_name: 'Rem' });
+    memory.updateIdentityMeta(DALE, { aliases_add: ['Rem'] });
+    // An old row filed under "Rem" with no id: the stamp leaves it alone (ambiguous), and so must the dream.
+    const shared = await memory.save({ category: 'fact', subject: 'Rem', content: 'is moving to Laval' });
+    const own = await memory.save({ category: 'fact', subject: 'Remi', content: 'bakes sourdough' });
+    expect(memory.stampSubjectUserIds().ambiguous).toBe(1);
+
+    expect(notes.journalSince(remi, 0).map((m) => m.id)).toEqual([own]);
+    expect(notes.journalSince({ scope: 'person', ownerId: DALE }, 0)).toEqual([]);
+    // A caller's own name list (chat turns pass the live display name too) gets the same treatment.
+    expect(notes.journalSince({ ...remi, names: ['Remi', 'Rem'] }, 0).map((m) => m.id)).toEqual([own]);
+    expect(shared).not.toBe(own);
+  });
+
   it("counts a linked side account's rows as the main account's", async () => {
     vi.stubEnv('LINKED_ACCOUNTS', `${REMI_ALT}:${REMI}`);
     const id = await memory.save({ category: 'fact', subject: 'Remi', content: 'alt fact', subject_user_id: REMI_ALT });

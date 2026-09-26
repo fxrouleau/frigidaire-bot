@@ -221,8 +221,10 @@ For each person with journal rows above their watermark (most recently active fi
 `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`, default 20), one call to `MEMORY_DREAM_MODEL`. Only real people are
 dreamed: a member the bot knows (an identities row, a `LINKED_ACCOUNTS` id) or a Discord id a writer other than
 the old learner vouched for (remember_fact, "Remember this", a correction, related members); a junk id the old
-learner left on a row whose name the startup stamp couldn't resolve never becomes a person with notes. The call
-gets:
+learner left on a row whose name the startup stamp couldn't resolve never becomes a person with notes. A
+person's journal is the rows stamped with any of their ids, the rows naming them among related members, and
+id-less rows filed under a name only they go by: a row under a name two members share (one's IRL name, the
+other's nickname) is left for the stamp, never read into both people's notes. The call gets:
 - the rules (below), the person's names (identities), ALL their current notes and circles;
 - the new journal rows: dated, category, source and speaker, recurrence count and seen span, related members,
   the quote; corrections say who made them and whether they are authoritative (about themself) or a
