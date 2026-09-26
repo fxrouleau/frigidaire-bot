@@ -119,6 +119,50 @@ describe('config', () => {
     expect(config.models.messageJudge).toBe('typesafe/jev-1.13');
   });
 
+  it('defaults memory v2 to nightly Opus dreams at 4 ET and conversation-end capture', () => {
+    for (const name of [
+      'MEMORY_DREAM_ENABLED',
+      'MEMORY_DREAM_MODEL',
+      'MEMORY_DREAM_HOUR',
+      'MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT',
+      'MEMORY_DREAM_REPORT',
+      'MEMORY_EDIT_MODEL',
+      'MEMORY_BOOTSTRAP_MODEL',
+      'CAPTURE_IDLE_MINUTES',
+      'CAPTURE_MAX_SPAN_MINUTES',
+      'BOT_OWNER_USER_IDS',
+    ]) {
+      vi.stubEnv(name, undefined);
+    }
+    expect(config.dream).toMatchObject({
+      enabled: true,
+      model: 'anthropic/claude-opus-5.5',
+      hour: 4,
+      maxPeoplePerNight: 20,
+      reportEnabled: true,
+      editModel: 'anthropic/claude-opus-5.5',
+      bootstrapModel: 'anthropic/claude-opus-5.5',
+    });
+    expect(config.learner.captureIdleMinutes).toBe(20);
+    expect(config.learner.captureMaxSpanMinutes).toBe(120);
+    expect(config.server.ownerUserIds).toEqual([]);
+  });
+
+  it('derives the edit and bootstrap models from the dream model, and bounds the dream hour', () => {
+    vi.stubEnv('MEMORY_DREAM_MODEL', 'dream/model');
+    expect(config.dream.editModel).toBe('dream/model');
+    expect(config.dream.bootstrapModel).toBe('dream/model');
+    vi.stubEnv('MEMORY_BOOTSTRAP_MODEL', 'cheap/model');
+    expect(config.dream.bootstrapModel).toBe('cheap/model');
+    vi.stubEnv('MEMORY_DREAM_HOUR', '24');
+    expect(config.dream.hour).toBe(4);
+    vi.stubEnv('CAPTURE_IDLE_MINUTES', '0');
+    expect(config.learner.captureIdleMinutes).toBe(20);
+    // The old cadence still parses: a leftover LEARNING_INTERVAL_MS never breaks startup.
+    vi.stubEnv('LEARNING_INTERVAL_MS', '600000');
+    expect(config.learner.intervalMs).toBe(600_000);
+  });
+
   it('reads CHAT_FALLBACK_MODELS in order, without duplicates or the primary', () => {
     vi.stubEnv('CHAT_MODEL', 'primary/model');
     vi.stubEnv('CHAT_FALLBACK_MODELS', ' backup/one, primary/model ,backup/two,backup/one ');
@@ -210,6 +254,7 @@ describe('describeEffectiveConfig', () => {
     CHANNEL_NOTES: '{"212121212121212121":"note-SENTINEL"}',
     GIT_SHA: 'deadbeefSENTINEL',
     AUTO_REACT_CHANNELS: '232323232323232323',
+    BOT_OWNER_USER_IDS: '242424242424242424,252525252525252525',
   };
 
   function stubAll(values: Record<string, string>): void {
@@ -224,6 +269,7 @@ describe('describeEffectiveConfig', () => {
     models: /(^| )chat=.* learner=.* image=.* embedding=/,
     agent: /(^| )agent=/,
     learner: /(^| )learning=/,
+    dream: /(^| )dream=/,
     emoji: /(^| )forceRecaption=.* usageCaptions=.* recaptionFromUsage=/,
     memory: /(^| )semanticMemory=/,
     debugCapture: /(^| )debugCapture=/,
@@ -231,7 +277,7 @@ describe('describeEffectiveConfig', () => {
     links: /(^| )links=/,
     deleteRepost: /(^| )deleteRepost=/,
     logging: /(^| )logFile=/,
-    server: /(^| )mainChannel=.* linkedAccounts=/,
+    server: /(^| )mainChannel=.* linkedAccounts=.* owners=/,
     reminders: /(^| )reminders=/,
     birthdays: /(^| )birthdays=/,
     archive: /(^| )archive=/,
@@ -301,6 +347,7 @@ describe('describeEffectiveConfig', () => {
       'BIRTHDAY_CHANNEL_ID',
       'RAMBLE_USER_IDS',
       'AUTO_REACT_CHANNELS',
+      'BOT_OWNER_USER_IDS',
     ]) {
       vi.stubEnv(name, undefined);
     }
@@ -317,7 +364,9 @@ describe('describeEffectiveConfig', () => {
         'mainChannel=set',
         'linkedAccounts=1',
         'reportChannel=set(digest:on@7d,deploy:on)',
-        'learning=every:30m,ignore:2,selfImprovement:on',
+        'learning=idle:20m,span:2h,min:5,ignore:2,selfImprovement:on',
+        'dream=on(model:anthropic/claude-opus-5.5,hour:4,max:20,report:on)',
+        'owners=app',
         'links=verify:on,fixers:x3/ig3/tt3/rd2/bsky3,translate:en,alerts:on',
         'deleteRepost=off',
         'birthdays=announce:15h,channel:main,seed:2',
@@ -354,6 +403,18 @@ describe('describeEffectiveConfig', () => {
     expect(tokens).toContain('ramble=on(users:1,channels:1,run:3,long:900)');
     expect(tokens).toContain('linkReader=on(previews:on,videos:off)');
     expect(tokens).toContain('deleteRepost=on(users:1,mode:edgy,judge:typesafe/jev-1.13)');
+  });
+
+  it('shows the dream, its models when they differ, and where its report goes', () => {
+    stubAll({ MEMORY_EDIT_MODEL: 'edit/model', MEMORY_DREAM_HOUR: '5', BOT_OWNER_USER_IDS: '242424242424242424' });
+    for (const name of ['REPORT_CHANNEL_ID', 'MEMORY_DREAM_MODEL', 'MEMORY_BOOTSTRAP_MODEL']) vi.stubEnv(name, undefined);
+    const tokens = describeEffectiveConfig().split(' ');
+    expect(tokens).toContain(
+      'dream=on(model:anthropic/claude-opus-5.5,hour:5,max:20,report:no-channel,edit:edit/model)',
+    );
+    expect(tokens).toContain('owners=1');
+    vi.stubEnv('MEMORY_DREAM_ENABLED', 'off');
+    expect(describeEffectiveConfig().split(' ')).toContain('dream=off');
   });
 
   it('shows an uncapped video budget as unlimited', () => {

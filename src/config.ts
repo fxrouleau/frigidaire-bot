@@ -77,6 +77,12 @@ export const DEFAULT_LEARNER_MODEL = 'z-ai/glm-5.3-flash';
 export const DEFAULT_EMOJI_CAPTION_MODEL = 'anthropic/claude-opus-4.7';
 export const DEFAULT_EMBEDDING_MODEL = 'qwen/qwen3-embedding-8b';
 /**
+ * Memory v2's nightly dream (and, by default, owner edits and the built-in bootstrap): the strong model that
+ * turns the journal into per-person notes. On OpenRouter's zero-data-retention list; $4/M in, $20/M out, and
+ * it only runs nightly for people with new journal rows (docs/memory.md).
+ */
+export const DEFAULT_DREAM_MODEL = 'anthropic/claude-opus-5.5';
+/**
  * The TypeSafe decision model (src/ai/decisions.ts) for the deleted-message judge and the gate. Pinned
  * rather than `~typesafe/jev-latest`: thresholds are tuned against one model version.
  */
@@ -293,11 +299,25 @@ export const config = {
   },
 
   learner: {
+    /**
+     * LEARNING_INTERVAL_MS: the old fixed learner cadence. Memory v2 captures at conversation end instead
+     * (captureIdleMinutes/captureMaxSpanMinutes); only the legacy interval capture trigger reads this, and a
+     * set value never breaks startup.
+     */
     get intervalMs(): number {
       return envInt('LEARNING_INTERVAL_MS', 30 * MINUTE_MS, { min: 1 });
     },
+    /** New member messages a channel needs before its conversation is captured. */
     get minMessages(): number {
       return envInt('MIN_MESSAGES_FOR_OBSERVATION', 5, { min: 1 });
+    },
+    /** Capture: a channel's conversation is read once the channel has been quiet this long. */
+    get captureIdleMinutes(): number {
+      return envNumber('CAPTURE_IDLE_MINUTES', 20, { min: 1, max: 24 * 60 });
+    },
+    /** Capture: …or once its oldest un-captured message is this old (a conversation that never pauses). */
+    get captureMaxSpanMinutes(): number {
+      return envNumber('CAPTURE_MAX_SPAN_MINUTES', 120, { min: 1, max: 7 * 24 * 60 });
     },
     get ignoredChannels(): string[] {
       return envCsv('LEARNER_IGNORE_CHANNELS');
@@ -346,6 +366,39 @@ export const config = {
     /** Days before an `event` memory expires; 0 disables expiry. */
     get ttlEventDays(): number {
       return envNumber('MEMORY_TTL_EVENT_DAYS', 14, { min: 0 });
+    },
+  },
+
+  /**
+   * Memory v2 (src/ai/memory/notes/, docs/memory.md): the nightly dream that turns the journal into
+   * per-person and group notes, the owner's edits, and the built-in bootstrap from the message archive.
+   */
+  dream: {
+    get enabled(): boolean {
+      return envBool('MEMORY_DREAM_ENABLED', true);
+    },
+    get model(): string {
+      return envString('MEMORY_DREAM_MODEL') ?? DEFAULT_DREAM_MODEL;
+    },
+    /** Eastern hour (0–23) from which the day's dream runs: the first scheduler tick at/after it, once a day. */
+    get hour(): number {
+      return envInt('MEMORY_DREAM_HOUR', 4, { min: 0, max: 23 });
+    },
+    /** People dreamed per night (most recently active first); the rest wait for the next night. */
+    get maxPeoplePerNight(): number {
+      return envInt('MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT', 20, { min: 1, max: 500 });
+    },
+    /** One report-channel line after a night that changed notes (who, what, the cost). */
+    get reportEnabled(): boolean {
+      return envBool('MEMORY_DREAM_REPORT', true);
+    },
+    /** Drafts the owner's edits ("What does Fridge know?" → Edit); defaults to the dream model. */
+    get editModel(): string {
+      return envString('MEMORY_EDIT_MODEL') ?? this.model;
+    },
+    /** The built-in bootstrap (`yarn memory:bootstrap`); defaults to the dream model. */
+    get bootstrapModel(): string {
+      return envString('MEMORY_BOOTSTRAP_MODEL') ?? this.model;
     },
   },
 
@@ -519,6 +572,13 @@ export const config = {
         return `LINKED_ACCOUNTS: ignoring "${shown}" (${reason}); that account counts as its own person.`;
       });
       return [...unparsed, ...problems];
+    },
+    /**
+     * The bot's owner(s): who may edit notes (and anything else owner-only). BOT_OWNER_USER_IDS (csv) when
+     * set; empty ⇒ the Discord application's owner, or its team's members (src/botOwner.ts).
+     */
+    get ownerUserIds(): string[] {
+      return envCsv('BOT_OWNER_USER_IDS');
     },
   },
 
@@ -955,7 +1015,7 @@ export function configWarnings(): string[] {
  * section is left out: the bot never reads it.
  */
 export function describeEffectiveConfig(): string {
-  const { models, agent, learner, memory, report, links, deleteRepost, server } = config;
+  const { models, agent, learner, memory, report, links, deleteRepost, server, dream } = config;
   const { birthdays, archive, media, linkReader, gate, ramble, sandbox, featureRequests, autoReact } = config;
 
   const fallbacks = models.chatFallbacks;
@@ -973,6 +1033,8 @@ export function describeEffectiveConfig(): string {
   // VIDEO_DAILY_BUDGET_USD: 0 means no cap.
   const videoBudget = media.videoDailyBudgetUsd > 0 ? `$${media.videoDailyBudgetUsd.toFixed(2)}/day` : 'unlimited';
   const translate = links.twitterTranslateTo ?? 'off';
+  // The dream's report line goes to the report channel: say when it has nowhere to go.
+  const dreamReport = !dream.reportEnabled ? 'off' : report.channelId ? 'on' : 'no-channel';
   const fixers = [
     `x${links.twitterFixers.length}`,
     `ig${links.instagramFixers.length}`,
@@ -1000,13 +1062,23 @@ export function describeEffectiveConfig(): string {
     // Server layout
     `mainChannel=${server.mainChannelId ? 'set' : 'off'}`,
     `linkedAccounts=${server.linkedAccounts.size}${server.linkedAccountProblems.length > 0 ? `,ignored:${server.linkedAccountProblems.length}` : ''}`,
+    // BOT_OWNER_USER_IDS as a count; unset ⇒ the Discord application's owner.
+    `owners=${server.ownerUserIds.length > 0 ? server.ownerUserIds.length : 'app'}`,
     report.channelId
       ? `reportChannel=set(digest:${onOff(report.digestEnabled)}@${formatDuration(report.digestPeriodMs)},deploy:${deployAnnounce})`
       : 'reportChannel=off',
     // Chat, memory, learning
     `agent=rounds:${agent.maxToolRounds},history:${agent.historyTokenBudget ?? 'auto'},notes:${notes.invalid ? 'INVALID' : Object.keys(notes.notes).length}`,
     `semanticMemory=${onOff(memory.semanticEnabled)}`,
-    `learning=every:${formatDuration(learner.intervalMs)},ignore:${learner.ignoredChannels.length},selfImprovement:${onOff(learner.selfImprovementEnabled)}`,
+    `learning=idle:${formatDuration(learner.captureIdleMinutes * MINUTE_MS)},span:${formatDuration(learner.captureMaxSpanMinutes * MINUTE_MS)},min:${learner.minMessages},ignore:${learner.ignoredChannels.length},selfImprovement:${onOff(learner.selfImprovementEnabled)}`,
+    feature('dream', dream.enabled, [
+      `model:${dream.model}`,
+      `hour:${dream.hour}`,
+      `max:${dream.maxPeoplePerNight}`,
+      `report:${dreamReport}`,
+      ...(dream.editModel !== dream.model ? [`edit:${dream.editModel}`] : []),
+      ...(dream.bootstrapModel !== dream.model ? [`bootstrap:${dream.bootstrapModel}`] : []),
+    ]),
     `forceRecaption=${onOff(config.emoji.forceRecaption)}`,
     `usageCaptions=${onOff(config.emoji.usageCaptionsEnabled)}`,
     `recaptionFromUsage=${onOff(config.emoji.recaptionFromUsage)}`,
