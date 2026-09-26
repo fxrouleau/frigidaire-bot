@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_WORK_DIR } from './commands';
 import { checkNotesTree } from './importer';
 import { validateObservation } from './observations';
 
@@ -50,6 +51,35 @@ describe.skipIf(!present)('the memory bootstrap playbook', () => {
 
   it('has the front matter Claude Code needs to load it as a skill', () => {
     expect(skill.startsWith('---\nname: memory-bootstrap\ndescription: ')).toBe(true);
+  });
+
+  it('runs its helper commands on the real folders (paths are relative to the repo root)', () => {
+    const calls = [...skill.matchAll(/`memory ([a-z]+)([^`]*)`/g)];
+    expect(calls.length).toBeGreaterThanOrEqual(4);
+    for (const [call, command, rest] of calls) {
+      expect(['export', 'import', 'observations', 'bootstrap'], call).toContain(command);
+      // Every path handed to a helper is under data/memory-bootstrap/ (a bare `work` is ./work: empty views).
+      for (const arg of rest.trim().split(/\s+/).filter((a) => a && !a.startsWith('--'))) {
+        expect(arg, call).toMatch(/^data\/memory-bootstrap\//);
+      }
+    }
+    expect(DEFAULT_WORK_DIR).toBe('./data/memory-bootstrap/work');
+  });
+
+  it("bounds a scan step's reading", () => {
+    const scan = skill.slice(skill.indexOf('## Step 2: scan one chunk'), skill.indexOf('## Step 3'));
+    // The chunk is thousands of lines: read to its end, in pages.
+    expect(scan).toContain('until you have seen its last line');
+    // Only the working notes the chunk needs: the whole folder grows with every chunk.
+    expect(scan).toContain('never the whole `{WORK}/working/` folder');
+    expect(scan).toContain('`{WORK}/cast.md` when it exists');
+  });
+
+  it('always leaves a scan step the orchestrator can apply', () => {
+    const scan = skill.slice(skill.indexOf('## Step 2: scan one chunk'), skill.indexOf('## Step 3'));
+    // A chunk with nothing to keep still leaves observations.jsonl, and applying tolerates a step without one.
+    expect(scan).toContain('`observations.jsonl`, ALWAYS');
+    expect(skill).toContain('when the step\n     has no `observations.jsonl`, create an empty');
   });
 
   it('shows observation lines the observations helper accepts', () => {

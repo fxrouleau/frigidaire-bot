@@ -27,6 +27,9 @@ let out: string[];
 let err: string[];
 
 beforeEach(() => {
+  // No history import configured unless a test sets one.
+  vi.stubEnv('ARCHIVE_BACKFILL_CHANNELS', '');
+  vi.stubEnv('MAIN_CHANNEL_ID', '');
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-cli-'));
   memory = new MemoryStore(':memory:');
   notes = new NotesStore(memory);
@@ -139,6 +142,19 @@ describe('runCli', () => {
     expect(fs.readFileSync(path.join(work, 'by-person', `${DALE}.jsonl`), 'utf8')).toContain('Best friends');
   });
 
+  it('refuses a folder that is not the work folder, instead of rebuilding empty views there', async () => {
+    const wrong = path.join(tmp, 'work');
+    expect(await runCli(['observations', wrong], deps())).toBe(1);
+    expect(err.at(-1)).toContain('has no observations/ folder');
+    expect(err.at(-1)).toContain('./data/memory-bootstrap/work');
+    expect(fs.existsSync(wrong)).toBe(false);
+    // A file named like it doesn't count either.
+    fs.mkdirSync(wrong);
+    fs.writeFileSync(path.join(wrong, 'observations'), '');
+    expect(await runCli(['observations', wrong], deps())).toBe(1);
+    expect(fs.readdirSync(wrong)).toEqual(['observations']);
+  });
+
   it('prices a dry run without calling the model', async () => {
     const client = vi.fn();
     const code = await runCli(
@@ -168,7 +184,9 @@ describe('runCli', () => {
     expect(requests[0].body.model).toBe('test/bootstrap-model');
     expect(dream).toHaveBeenCalledWith({ archive, memory, notes }, client);
     expect(out.join('\n')).toContain('Done: 1 segment read, 1 journal row');
-    expect(out.at(-1)).toBe('Dreamed: 0 people updated.');
+    expect(out.at(-2)).toBe('Dreamed: 0 people updated.');
+    // The bot's search vectors live in its own process: it needs a restart to see rows written here.
+    expect(out.at(-1)).toContain('restart it (docker restart frigidaire-bot)');
 
     // Resuming a finished run reads nothing new.
     out = [];
@@ -202,7 +220,67 @@ describe('runCli', () => {
     expect(getNotesStore().getProfile(REMI)).toBeUndefined();
     expect(memory.getState(DREAM_NIGHT_KEY)).toBeUndefined();
     expect(getMemoryStore().getState(DREAM_NIGHT_KEY)).toBeUndefined();
-    expect(out.at(-1)).toBe('Dreamed: 1 person updated, the group updated.');
+    expect(out.at(-2)).toBe('Dreamed: 1 person updated, the group updated.');
+  });
+
+  describe('while the archive is still importing history', () => {
+    beforeEach(() => {
+      vi.stubEnv('ARCHIVE_BACKFILL_CHANNELS', GENERAL);
+      // The bot has paged part of #general's history backwards so far.
+      archive.saveBackfillPage(GENERAL, [], { cursorId: snowflake(MARCH), cursorAt: MARCH, fetched: 200, done: false });
+    });
+
+    it('refuses the export, and writes nothing', async () => {
+      const outDir = path.join(tmp, 'export');
+      expect(await runCli(['export', '--out', outDir], deps())).toBe(1);
+      expect(err.at(-1)).toContain('Not now: the archive is still importing history (#general (200 messages so far))');
+      expect(fs.existsSync(outDir)).toBe(false);
+    });
+
+    it('prices a dry run with a warning, and refuses a run before any model call', async () => {
+      expect(await runCli(['bootstrap', '--dry-run'], deps())).toBe(0);
+      expect(out.at(-1)).toContain('warning: the archive is still importing history (#general (200 messages so far))');
+
+      const client = vi.fn();
+      expect(await runCli(['bootstrap', '--run'], deps({ client }))).toBe(1);
+      expect(client).not.toHaveBeenCalled();
+      expect(err.at(-1)).toContain('history that lands later would never be read');
+      expect(memory.getState('memory_bootstrap:progress')).toBeUndefined();
+    });
+
+    it('waits for an import that has not started, and goes ahead once it is done', async () => {
+      vi.stubEnv('ARCHIVE_BACKFILL_CHANNELS', `${GENERAL},300000000000000002`);
+      expect(await runCli(['export', '--out', path.join(tmp, 'export')], deps())).toBe(1);
+      expect(err.at(-1)).toContain('channel 300000000000000002 (not started)');
+
+      vi.stubEnv('ARCHIVE_BACKFILL_CHANNELS', GENERAL);
+      archive.saveBackfillPage(GENERAL, [], { cursorId: null, cursorAt: null, fetched: 0, done: true });
+      expect(await runCli(['export', '--out', path.join(tmp, 'export')], deps())).toBe(0);
+    });
+
+    it('only warns about an import stuck on an error (it may never get through)', async () => {
+      archive.recordBackfillError(GENERAL, 'Missing Access');
+      expect(await runCli(['export', '--out', path.join(tmp, 'export')], deps())).toBe(0);
+      expect(out[0]).toBe(
+        'warning: the history import of #general (Missing Access) keeps failing: its older history is not in the archive.',
+      );
+    });
+
+    it('ignores the import state when the backfill is switched off', async () => {
+      vi.stubEnv('ARCHIVE_BACKFILL_ENABLED', 'false');
+      expect(await runCli(['export', '--out', path.join(tmp, 'export')], deps())).toBe(0);
+    });
+  });
+
+  it('refuses another --segment-tokens than the run under way started with', async () => {
+    memory.setState(
+      'memory_bootstrap:progress',
+      JSON.stringify({ version: 1, model: 'm', segmentTokens: 20_000, done: [], rows: 0, costUsd: 0 }),
+    );
+    expect(await runCli(['bootstrap', '--dry-run', '--segment-tokens', '5000'], deps())).toBe(2);
+    expect(err.join('\n')).toContain('cut the archive into segments of 20000 tokens');
+    expect(await runCli(['bootstrap', '--dry-run'], deps())).toBe(0);
+    expect(await runCli(['bootstrap', '--dry-run', '--segment-tokens', '20000'], deps())).toBe(0);
   });
 
   it('refuses a run without a key, and a bootstrap without a mode', async () => {

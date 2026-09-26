@@ -14,8 +14,10 @@ import {
   estimateBootstrap,
   parseBootstrapAnswer,
   planBootstrap,
+  type ParsedBootstrapAnswer,
   readProgress,
   runBootstrap,
+  splitSegment,
 } from './builtin';
 
 // Fictional cast, placeholder snowflakes.
@@ -74,6 +76,28 @@ function seedHistory(): string {
 
 function answer(observations: unknown[]): ScriptedReply {
   return { body: { ...(chatCompletionBody(JSON.stringify({ observations })) as object), usage: { cost: 0.0125 } } };
+}
+
+/** An answer the model had to stop at the output limit: JSON cut off mid-list. */
+function cutOff(): ScriptedReply {
+  const content = `{"observations": [{"category": "fact", "subject_user_id": "${REMI}", "content": "Works early shifts at a bakery.", "date": "2019-03-01"}, {"category": "fact", "subject_user_id": "${DALE}", "content": "Ask`;
+  return {
+    body: {
+      ...(chatCompletionBody(content) as object),
+      choices: [{ index: 0, finish_reason: 'length', message: { role: 'assistant', content } }],
+      usage: { cost: 0.2 },
+    },
+  };
+}
+
+/** The observations of an answer that parsed. */
+function accepted(result: ParsedBootstrapAnswer): Extract<ParsedBootstrapAnswer, { ok: true }> {
+  if (!result.ok) throw new Error(`refused: ${result.error}`);
+  return result;
+}
+
+function promptOf(request: { body: Record<string, unknown> }): string {
+  return (request.body.messages as { content: string }[])[0].content;
 }
 
 describe('planBootstrap', () => {
@@ -137,7 +161,7 @@ describe('parseBootstrapAnswer', () => {
 
   it('keeps well-formed observations about known people, citing the quoted messages', () => {
     const { segment: s, plan, job } = segment();
-    const { observations, dropped } = parseBootstrapAnswer(
+    const { observations, dropped } = accepted(parseBootstrapAnswer(
       JSON.stringify({
         observations: [
           {
@@ -153,7 +177,7 @@ describe('parseBootstrapAnswer', () => {
       }),
       s,
       plan.people,
-    );
+    ));
     expect(dropped).toBe(0);
     expect(observations[0]).toEqual({
       category: 'fact',
@@ -170,7 +194,7 @@ describe('parseBootstrapAnswer', () => {
 
   it("matches quotes and related members the way capture does (src/ai/capture)", () => {
     const { segment: s, plan, job } = segment();
-    const { observations } = parseBootstrapAnswer(
+    const { observations } = accepted(parseBootstrapAnswer(
       JSON.stringify({
         observations: [
           // Typographic quote marks and an elision still find the line; a related member by name.
@@ -187,7 +211,7 @@ describe('parseBootstrapAnswer', () => {
       }),
       s,
       plan.people,
-    );
+    ));
     expect(observations[0]).toMatchObject({
       relatedUserIds: [NOVA],
       observedAt: MARCH + MIN,
@@ -199,7 +223,7 @@ describe('parseBootstrapAnswer', () => {
 
   it('drops what it cannot trust', () => {
     const { segment: s, plan } = segment();
-    const { observations, dropped } = parseBootstrapAnswer(
+    const { observations, dropped } = accepted(parseBootstrapAnswer(
       `Sure! \`\`\`json\n${JSON.stringify({
         observations: [
           { category: 'image', subject_user_id: REMI, content: 'Shared a meme.' },
@@ -214,11 +238,24 @@ describe('parseBootstrapAnswer', () => {
       })}\n\`\`\``,
       s,
       plan.people,
-    );
+    ));
     expect(observations.map((o) => o.content)).toEqual(['Likes teasing Remi.']);
     expect(observations[0].observedAt).toBe(MARCH);
     expect(dropped).toBe(7);
-    expect(parseBootstrapAnswer('not json', s, plan.people)).toEqual({ observations: [], dropped: 0 });
+  });
+
+  it('refuses an answer that is not the JSON object asked for, instead of reading it as "nothing to save"', () => {
+    const { segment: s, plan } = segment();
+    expect(parseBootstrapAnswer('not json', s, plan.people)).toEqual({ ok: false, error: 'the answer is not a JSON object' });
+    expect(parseBootstrapAnswer("I can't help with reading private chats.", s, plan.people)).toMatchObject({ ok: false });
+    // Cut off mid-list: the slice from the first { to the last } is not JSON either.
+    const cut = '{"observations": [{"category": "fact", "content": "A."}, {"category": "fa';
+    expect(parseBootstrapAnswer(cut, s, plan.people)).toEqual({ ok: false, error: 'the answer is not a JSON object' });
+    expect(parseBootstrapAnswer('{"rows": []}', s, plan.people)).toEqual({
+      ok: false,
+      error: 'the answer has no "observations" list',
+    });
+    expect(parseBootstrapAnswer('{"observations": []}', s, plan.people)).toEqual({ ok: true, observations: [], dropped: 0 });
   });
 });
 
@@ -294,6 +331,15 @@ describe('runBootstrap', () => {
     expect(lines.at(-1)).toContain('dreaming 1 people');
   });
 
+  it("gives each call the dream's long timeout, not the shared client's 2-minute default", async () => {
+    seedHistory();
+    const { client } = createCapturingClient([answer([]), answer([])]);
+    const create = vi.spyOn(client.chat.completions, 'create');
+    await runBootstrap({ archive, memory, notes, client, model: MODEL, log: () => {} });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[0][1]).toMatchObject({ timeout: 600_000, maxRetries: 1 });
+  });
+
   it('reads only the months asked for, and leaves the dream to a run over the whole archive', async () => {
     seedHistory();
     const { client, requests } = createCapturingClient([answer([])]);
@@ -322,6 +368,33 @@ describe('runBootstrap', () => {
     expect(dream).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the segment size the run started with, so a resumed run never reads a stretch twice', async () => {
+    for (let day = 0; day < 20; day++) {
+      for (let i = 0; i < 20; i++) {
+        say(MARCH + day * DAY + i * MIN, i % 2 ? REMI : DALE, i % 2 ? 'Remi' : 'Dale', `message ${day}-${i} ${'x'.repeat(60)}`);
+      }
+    }
+    const small = planBootstrap(archive, memory, { segmentTokens: 2_000 });
+    expect(small.segments.length).toBeGreaterThan(3);
+
+    // A trial with small segments…
+    const trial = createCapturingClient([answer([])]);
+    await runBootstrap({ archive, memory, notes, client: trial.client, model: MODEL, segmentTokens: 2_000, maxSegments: 1, log: () => {} });
+    expect(readProgress(memory)?.segmentTokens).toBe(2_000);
+
+    // …then the rest without the flag: the same cut, so exactly the other segments.
+    const rest = createCapturingClient(small.segments.slice(1).map(() => answer([])));
+    const run = await runBootstrap({ archive, memory, notes, client: rest.client, model: MODEL, log: () => {} });
+    expect(run).toMatchObject({ segmentsDone: small.segments.length - 1, segmentsLeft: 0 });
+    expect(rest.requests).toHaveLength(small.segments.length - 1);
+    expect(readProgress(memory)?.done).toEqual(small.segments.map((s) => s.key));
+
+    // Another size would cut the month anew and read it again: refused.
+    await expect(
+      runBootstrap({ archive, memory, notes, client: rest.client, model: MODEL, segmentTokens: 60_000, log: () => {} }),
+    ).rejects.toThrow('segments of 2000 tokens');
+  });
+
   it('stops after maxSegments for a trial run, and reports a dream failure without throwing', async () => {
     seedHistory();
     const trial = createCapturingClient([answer([])]);
@@ -341,5 +414,106 @@ describe('runBootstrap', () => {
     const { client } = createCapturingClient([{ body: chatCompletionBody('') }, answer([])]);
     const run = await runBootstrap({ archive, memory, notes, client, model: MODEL, log: () => {} });
     expect(run).toMatchObject({ segmentsDone: 1, segmentsFailed: 1 });
+  });
+
+  it('fails a segment whose answer is unusable, keeps it out of the progress, and reads it again next run', async () => {
+    seedHistory();
+    const plan = planBootstrap(archive, memory);
+    const lines: string[] = [];
+    const refusal: ScriptedReply = {
+      body: { ...(chatCompletionBody("Sorry, I can't go through private chat logs.") as object), usage: { cost: 0.01 } },
+    };
+    const first = createCapturingClient([refusal, answer([])]);
+    const run1 = await runBootstrap({ archive, memory, notes, client: first.client, model: MODEL, log: (l) => lines.push(l) });
+    expect(run1).toMatchObject({ segmentsDone: 1, segmentsFailed: 1, segmentsLeft: 1, rows: 0 });
+    // Its cost still counts.
+    expect(run1.costUsd).toBeCloseTo(0.0225);
+    expect(readProgress(memory)?.done).toEqual([plan.segments[1].key]);
+    expect(readProgress(memory)?.costUsd).toBeCloseTo(0.0225);
+    expect(lines.find((l) => l.includes('FAILED'))).toContain('the answer is not a JSON object');
+
+    const second = createCapturingClient([answer([])]);
+    const run2 = await runBootstrap({ archive, memory, notes, client: second.client, model: MODEL, log: () => {} });
+    expect(run2).toMatchObject({ segmentsDone: 1, segmentsLeft: 0 });
+    expect(promptOf(second.requests[0])).toContain('(2019-03)');
+  });
+
+  it('reads a segment whose answer was cut off again in two halves, and journals it once both are read', async () => {
+    const job = seedHistory();
+    const plan = planBootstrap(archive, memory);
+    const march = plan.segments[0];
+    const halves = splitSegment(march);
+    expect(halves).toBeDefined();
+    const [firstHalf, secondHalf] = halves ?? [march, march];
+    expect([...firstHalf.lines, ...secondHalf.lines]).toEqual(march.lines);
+    // The first line (with its day header) is already half of this small month.
+    expect(firstHalf.lines.map((l) => l.author)).toEqual(['Dale']);
+    expect(secondHalf.lines.map((l) => l.author)).toEqual(['Remi', 'Nova']);
+    expect(secondHalf.leadIn).toEqual(firstHalf.lines);
+    const lines: string[] = [];
+    const { client, requests } = createCapturingClient([
+      cutOff(),
+      answer([]),
+      answer([
+        { category: 'fact', subject_user_id: REMI, content: 'Works early shifts at a bakery.', quote: 'the bakery shift starts at 5am' },
+        { category: 'personality', subject_user_id: NOVA, content: 'Answers bad news with "rip".' },
+      ]),
+      answer([]),
+    ]);
+
+    const run = await runBootstrap({ archive, memory, notes, client, model: MODEL, log: (l) => lines.push(l) });
+
+    expect(run).toMatchObject({ segmentsDone: 2, segmentsFailed: 0, segmentsLeft: 0, rows: 2 });
+    expect(run.costUsd).toBeCloseTo(0.2 + 3 * 0.0125);
+    expect(requests).toHaveLength(4);
+    // Each half is its own transcript: the second opens with the end of the first as context.
+    const [whole, one, two] = requests.map(promptOf);
+    expect(whole).toContain('the bakery shift starts at 5am');
+    expect(one).toContain('how was the first week');
+    expect(one).not.toContain('the bakery shift');
+    expect(one).not.toContain('## ALREADY COVERED');
+    expect(two.split('## NEW')[0]).toContain('## ALREADY COVERED');
+    expect(two.split('## NEW')[0]).toContain('how was the first week');
+    expect(two.split('## NEW')[1]).toContain('the bakery shift starts at 5am');
+    const rows = memory.getForPerson({ userId: REMI, names: ['Remi'] });
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].evidence ?? '{}').messageIds).toEqual([job]);
+    expect(memory.getForPerson({ userId: NOVA, names: ['Nova'] })).toHaveLength(1);
+    expect(readProgress(memory)?.done).toEqual(plan.segments.map((s) => s.key));
+    expect(lines.find((l) => l.startsWith('2019-03'))).toContain('read in 2 parts');
+  });
+
+  it('fails a cut-off segment it cannot split, and writes nothing of it', async () => {
+    say(MARCH, REMI, 'Remi', 'the bakery shift starts at 5am');
+    const plan = planBootstrap(archive, memory);
+    expect(plan.segments[0].lines).toHaveLength(1);
+    expect(splitSegment(plan.segments[0])).toBeUndefined();
+    const lines: string[] = [];
+    const { client, requests } = createCapturingClient([cutOff()]);
+    const run = await runBootstrap({ archive, memory, notes, client, model: MODEL, log: (l) => lines.push(l) });
+    expect(requests).toHaveLength(1);
+    expect(run).toMatchObject({ segmentsDone: 0, segmentsFailed: 1, segmentsLeft: 1, rows: 0 });
+    expect(run.costUsd).toBeCloseTo(0.2);
+    expect(memory.getForPerson({ userId: REMI, names: ['Remi'] })).toHaveLength(0);
+    expect(readProgress(memory)?.done).toEqual([]);
+    expect(lines.at(-1)).toContain('FAILED, left for the next run: the answer was cut off at the length limit');
+  });
+
+  it('writes nothing of a split segment when one of its halves fails', async () => {
+    seedHistory();
+    const plan = planBootstrap(archive, memory);
+    const { client, requests } = createCapturingClient([
+      cutOff(),
+      answer([{ category: 'fact', subject_user_id: REMI, content: 'Works early shifts at a bakery.' }]),
+      // The second half's call, and its one retry.
+      { error: new Error('socket hang up') },
+      { error: new Error('socket hang up') },
+    ]);
+    const run = await runBootstrap({ archive, memory, notes, client, model: MODEL, maxSegments: 1, log: () => {} });
+    expect(requests).toHaveLength(4);
+    expect(run).toMatchObject({ segmentsDone: 0, segmentsFailed: 1, rows: 0 });
+    expect(run.costUsd).toBeCloseTo(0.2125);
+    expect(memory.getForPerson({ userId: REMI, names: ['Remi'] })).toHaveLength(0);
+    expect(readProgress(memory)?.done ?? []).not.toContain(plan.segments[0].key);
   });
 });

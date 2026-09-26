@@ -18,7 +18,14 @@ import { MemoryStore } from '../memoryStore';
 import { type NightlyDreamResult, runDreamsUntilCaughtUp } from '../notes/dreamer';
 import { NotesStore } from '../notes/notesStore';
 import { loadEvidencePassages } from '../notes/passages';
-import { type BootstrapEstimate, estimateBootstrap, planBootstrap, readProgress, runBootstrap } from './builtin';
+import {
+  type BootstrapEstimate,
+  estimateBootstrap,
+  planBootstrap,
+  readProgress,
+  resolveSegmentTokens,
+  runBootstrap,
+} from './builtin';
 import { CHUNK_DEFAULTS } from './chunks';
 import { DEFAULT_EXPORT_DIR, runExport } from './export';
 import {
@@ -173,6 +180,51 @@ export function dreamOverStores(
   });
 }
 
+/**
+ * The archive's history import (ARCHIVE_BACKFILL_CHANNELS, src/archive/backfill.ts) as the bot has left it in
+ * archive.db: `running` = channels whose import hasn't started or finished (the bot is still paging them
+ * backwards), `failing` = channels stuck on an error (usually a missing permission; the bot retries hourly,
+ * but nothing says it will ever get through). Both the export and the built-in bootstrap read the archive as
+ * it is: history that lands afterwards is never read (a finished segment is never read again), and a month
+ * that grows shifts the segments' boundaries. So they wait for a running import, and warn about a failing one.
+ */
+export function historyImportState(archive: ArchiveStore): { running: string[]; failing: string[] } {
+  const running: string[] = [];
+  const failing: string[] = [];
+  if (!config.archive.enabled || !config.archive.backfillEnabled) return { running, failing };
+  for (const channelId of config.archive.backfillChannels) {
+    const name = archive.getChannel(channelId)?.name;
+    const label = name ? `#${name}` : `channel ${channelId}`;
+    const state = archive.getBackfillState(channelId);
+    if (state?.done) continue;
+    if (!state) running.push(`${label} (not started)`);
+    else if (state.lastError) failing.push(`${label} (${state.lastError})`);
+    else running.push(`${label} (${counted(state.fetched, 'message')} so far)`);
+  }
+  return { running, failing };
+}
+
+/**
+ * Prints the history import's problems. Returns false (after an error line) when an import is still
+ * running and `refuse` is set; a dry run only gets the warning.
+ */
+function checkHistoryImport(archive: ArchiveStore, deps: CliDeps, what: string, refuse: boolean): boolean {
+  const { running, failing } = historyImportState(archive);
+  for (const channel of failing) {
+    deps.io.out(`warning: the history import of ${channel} keeps failing: its older history is not in the archive.`);
+  }
+  if (running.length === 0) return true;
+  const line = `the archive is still importing history (${running.join(', ')})`;
+  if (!refuse) {
+    deps.io.out(`warning: ${line}: these numbers will grow; run it once the import is finished.`);
+    return true;
+  }
+  deps.io.err(
+    `Not now: ${line}. ${what} reads the archive as it is, and history that lands later would never be read. Keep the bot running until its log says the import is done, then run this again.`,
+  );
+  return false;
+}
+
 function describeEstimate(e: BootstrapEstimate): string[] {
   const price = (pricing: ModelPricing | undefined) =>
     pricing
@@ -190,6 +242,7 @@ function describeEstimate(e: BootstrapEstimate): string[] {
 async function exportCommand(args: Args, deps: CliDeps): Promise<number> {
   const stores = (deps.openStores ?? (() => openDataStores(deps.dataDir ?? DEFAULT_DATA_DIR)))();
   const outDir = stringFlag(args, 'out') ?? DEFAULT_EXPORT_DIR;
+  if (!checkHistoryImport(stores.archive, deps, 'The export', true)) return 1;
   const manifest = runExport({
     ...stores,
     outDir,
@@ -257,6 +310,14 @@ async function importCommand(args: Args, deps: CliDeps): Promise<number> {
 
 async function observationsCommand(args: Args, deps: CliDeps): Promise<number> {
   const workDir = args.positional[0] ?? DEFAULT_WORK_DIR;
+  // A wrong path must never look like an empty log: the views would be rebuilt empty (in a stray folder)
+  // and the command would still succeed.
+  if (!fs.statSync(path.join(workDir, 'observations'), { throwIfNoEntry: false })?.isDirectory()) {
+    deps.io.err(
+      `${path.resolve(workDir)} has no observations/ folder: that is not the playbook's work folder (the default is ${DEFAULT_WORK_DIR}). Nothing was written.`,
+    );
+    return 1;
+  }
   const peopleFile = stringFlag(args, 'people') ?? path.join(workDir, '..', 'export', 'people.json');
   let known: ReadonlySet<string> | undefined;
   if (fs.existsSync(peopleFile)) {
@@ -282,12 +343,14 @@ async function bootstrapCommand(args: Args, deps: CliDeps): Promise<number> {
   const stores = (deps.openStores ?? (() => openDataStores(deps.dataDir ?? DEFAULT_DATA_DIR)))();
   const from = monthFlag(args, 'from');
   const to = monthFlag(args, 'to');
-  const segmentTokens = intFlag(args, 'segment-tokens', 1_000);
   const model = config.dream.bootstrapModel;
   const priceOf = deps.priceOf ?? (async () => undefined);
 
-  const plan = planBootstrap(stores.archive, stores.memory, { segmentTokens, from, to });
   const progress = readProgress(stores.memory);
+  const size = resolveSegmentTokens(progress, intFlag(args, 'segment-tokens', 1_000));
+  if (!size.ok) throw new UsageError(size.error);
+  const segmentTokens = size.value;
+  const plan = planBootstrap(stores.archive, stores.memory, { segmentTokens, from, to });
   const estimate = estimateBootstrap(plan, {
     model,
     pricing: await priceOf(model),
@@ -301,6 +364,7 @@ async function bootstrapCommand(args: Args, deps: CliDeps): Promise<number> {
       `A run is under way: ${counted(progress.done.length, 'segment')} done so far (${counted(progress.rows, 'journal row')}, ${formatUsd(progress.costUsd)}).`,
     );
   }
+  if (!checkHistoryImport(stores.archive, deps, 'The bootstrap', run)) return 1;
   if (dryRun) return 0;
 
   const client = (deps.client ?? (() => undefined))();
@@ -344,6 +408,12 @@ async function bootstrapCommand(args: Args, deps: CliDeps): Promise<number> {
         : '';
     deps.io.out(
       `Dreamed: ${counted(updated, 'person', 'people')} updated${failed > 0 ? `, ${failed} failed` : ''}${result.dream.group?.status === 'updated' ? ', the group updated' : ''}${result.dream.costUsd !== undefined ? `, ${formatUsd(result.dream.costUsd)}` : ''}.${left}`,
+    );
+  }
+  if (result.rows > 0) {
+    // The bot keeps its journal's search vectors in memory, write-through for its own writes only.
+    deps.io.out(
+      'The running bot does not see these rows in its memory searches until it restarts: restart it (docker restart frigidaire-bot) once the run is done.',
     );
   }
   return result.segmentsFailed > 0 ? 1 : 0;

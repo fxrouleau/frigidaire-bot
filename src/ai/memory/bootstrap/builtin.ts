@@ -10,8 +10,10 @@
 //
 // `--dry-run` only counts: messages, segments, estimated tokens and cost from the model catalog's prices.
 // A run is resumable: finished segments are recorded in memory.db (bot_state), so a stopped run picks up
-// at the next one. Everything the model returns is untrusted: fields are checked, unknown people dropped,
-// nothing with Discord markup saved.
+// at the next one. Only a segment that was really read counts as finished: an answer cut off at the output
+// limit is read again in halves, and an answer that isn't the JSON asked for fails the segment, which the
+// next run reads again. Everything the model returns is untrusted: fields are checked, unknown people
+// dropped, nothing with Discord markup saved.
 //
 // The prompt is its own (history read years later: dated rows, notable history, recurrence), but the
 // mechanics are capture's (src/ai/capture/): segments are cut by its splitter (chunks.ts), a quote is
@@ -32,7 +34,7 @@ import { type Identity, type Memory, type MemoryStore, nameKey } from '../memory
 import type { NightlyDreamResult } from '../notes/dreamer';
 import type { NotesStore } from '../notes/notesStore';
 import { noteTextProblems } from '../notes/schema';
-import { lineCosts, planChunks } from './chunks';
+import { leadInStart, lineCosts, planChunks } from './chunks';
 import { easternDay } from './dates';
 import { transcriptContext } from './export';
 import { buildExportPeople, type ExportPeople, type ExportPerson } from './people';
@@ -46,6 +48,14 @@ export const BOOTSTRAP_SOURCE = 'bootstrap';
 // The output room per call. The default model (Opus) only reasons when asked, so this is all JSON; a
 // reasoning model in MEMORY_BOOTSTRAP_MODEL still has room for a pass at its default effort.
 const MAX_OUTPUT_TOKENS = 8_000;
+// A segment's call reads tens of thousands of tokens and writes up to 8,000: minutes, well past the shared
+// client's per-attempt default (OPENROUTER_TIMEOUT_MS, 2 minutes), which would abort a long answer and pay
+// for it again on each retry. The dream's allowance, and like the dream one retry.
+const MODEL_TIMEOUT_MS = 10 * 60_000;
+const MODEL_MAX_RETRIES = 1;
+// A segment whose answer is cut off at that limit is read again in halves, each half the same way, at most
+// this many times over (down to an eighth of it).
+const MAX_SPLIT_DEPTH = 3;
 
 export const BOOTSTRAP_DEFAULTS = {
   /** A month bigger than this is split at its quiet gaps. */
@@ -199,6 +209,8 @@ export function estimateBootstrap(
 export type BootstrapProgress = {
   version: 1;
   model: string;
+  /** The segment size the run plans with (resolveSegmentTokens): a resumed run cuts the archive the same way. */
+  segmentTokens?: number;
   /** Keys of finished segments. */
   done: string[];
   rows: number;
@@ -216,6 +228,7 @@ export function readProgress(memory: MemoryStore): BootstrapProgress | undefined
     return {
       version: 1,
       model: typeof parsed.model === 'string' ? parsed.model : '',
+      ...(typeof parsed.segmentTokens === 'number' ? { segmentTokens: parsed.segmentTokens } : {}),
       done: parsed.done.filter((k): k is string => typeof k === 'string'),
       rows: typeof parsed.rows === 'number' ? parsed.rows : 0,
       costUsd: typeof parsed.costUsd === 'number' ? parsed.costUsd : 0,
@@ -225,6 +238,26 @@ export function readProgress(memory: MemoryStore): BootstrapProgress | undefined
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The segment size a run plans with: the one asked for, else the one the run under way started with, else
+ * the default. A run keeps the size it started with, since segments are recorded by key: cut differently,
+ * the archive gives new keys for stretches already read, which would be read (and journaled) again. So a
+ * different size is refused once a run has recorded one.
+ */
+export function resolveSegmentTokens(
+  progress: BootstrapProgress | undefined,
+  requested?: number,
+): { ok: true; value: number } | { ok: false; error: string } {
+  const value = Math.max(1_000, requested ?? progress?.segmentTokens ?? BOOTSTRAP_DEFAULTS.segmentTokens);
+  if (progress?.segmentTokens !== undefined && value !== progress.segmentTokens) {
+    return {
+      ok: false,
+      error: `the bootstrap run under way cut the archive into segments of ${progress.segmentTokens} tokens (--segment-tokens ${progress.segmentTokens}); another size would read what it already read again. Leave --segment-tokens out.`,
+    };
+  }
+  return { ok: true, value };
 }
 
 function writeProgress(memory: MemoryStore, progress: BootstrapProgress): void {
@@ -409,8 +442,15 @@ function dateMs(raw: unknown, min: number, max: number): number | undefined {
   return Number.isFinite(ms) && ms >= min - slack && ms <= max + slack ? ms : undefined;
 }
 
+export type ParsedBootstrapAnswer =
+  | { ok: true; observations: BootstrapObservation[]; dropped: number }
+  /** An answer that isn't the JSON object asked for (prose, a refusal, cut-off JSON): nothing can be trusted. */
+  | { ok: false; error: string };
+
 /**
- * The model's answer as observations about known people. Anything malformed is dropped (and counted): an
+ * The model's answer as observations about known people. An answer that isn't a JSON object with an
+ * "observations" list is refused as a whole (the segment then fails and is read again on the next run,
+ * never recorded as read with nothing in it). Inside it, anything malformed is dropped (and counted): an
  * unknown category, a subject nobody in the export has, content that is empty, too long or carries
  * Discord markup or ids. Related members are capture's relatedMembers() over the export's people (ids or
  * unique names; unknown ones and the subject left out). The quote is capture's citedEvidence(): kept only
@@ -421,17 +461,17 @@ export function parseBootstrapAnswer(
   text: string,
   segment: BootstrapSegment,
   people: ExportPeople,
-): { observations: BootstrapObservation[]; dropped: number } {
+): ParsedBootstrapAnswer {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   let parsed: unknown;
   try {
     parsed = JSON.parse(start >= 0 && end > start ? text.slice(start, end + 1) : text);
   } catch {
-    return { observations: [], dropped: 0 };
+    return { ok: false, error: 'the answer is not a JSON object' };
   }
   const raw = (parsed as { observations?: unknown } | null)?.observations;
-  if (!Array.isArray(raw)) return { observations: [], dropped: 0 };
+  if (!Array.isArray(raw)) return { ok: false, error: 'the answer has no "observations" list' };
 
   const first = segment.lines[0]?.startMs ?? 0;
   const last = segment.lines.at(-1)?.endMs ?? first;
@@ -475,7 +515,7 @@ export function parseBootstrapAnswer(
       ...(cited.evidence ? { evidence: cited.evidence } : {}),
     });
   }
-  return { observations, dropped };
+  return { ok: true, observations, dropped };
 }
 
 // ---- Running ----
@@ -490,6 +530,7 @@ export type BootstrapRunDeps = {
   /** Only these months (YYYY-MM, inclusive). */
   from?: string;
   to?: string;
+  /** Default: the size the run under way started with (resolveSegmentTokens); a different one throws. */
   segmentTokens?: number;
   /**
    * Dreams everyone with new journal rows until nothing is pending (runDreamsUntilCaughtUp: a person with
@@ -521,12 +562,52 @@ type ChatBody = {
   provider: { zdr: true };
 };
 
-/** One segment: the model call and the journal rows it yields. Throws on a failed call. */
-async function extractSegment(
+/** A segment that could not be read; `costUsd` is what its calls cost anyway. */
+class SegmentFailure extends Error {
+  constructor(
+    message: string,
+    readonly costUsd: number,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * A segment's lines in two, cut at the longest quiet gap near the middle (capture's splitter, as the plan
+ * cuts a month), the second half opening with the end of the first as its lead-in; undefined for a
+ * single line.
+ */
+export function splitSegment(segment: BootstrapSegment): [BootstrapSegment, BootstrapSegment] | undefined {
+  if (segment.lines.length < 2) return undefined;
+  const costs = lineCosts(segment.lines);
+  const total = costs.reduce((a, b) => a + b, 0);
+  const cut = Math.min(
+    segment.lines.length - 1,
+    Math.max(1, planChunks(segment.lines, { targetTokens: Math.ceil(total / 2), leadInTokens: 0 })[0]?.end ?? 1),
+  );
+  const leadInTokens = segment.leadIn.length > 0 ? lineCosts(segment.leadIn).reduce((a, b) => a + b, 0) : 0;
+  const lead = leadInStart(costs, cut, BOOTSTRAP_DEFAULTS.leadInTokens);
+  const part = (n: number, lines: TranscriptLine[], leadIn: TranscriptLine[], tokens: number): BootstrapSegment => ({
+    key: `${segment.key}/${n}`,
+    month: segment.month,
+    lines,
+    leadIn,
+    messages: lines.reduce((sum, l) => sum + l.messageIds.length, 0),
+    tokens,
+  });
+  const sum = (from: number, to: number) => costs.slice(from, to).reduce((a, b) => a + b, 0);
+  return [
+    part(1, segment.lines.slice(0, cut), segment.leadIn, leadInTokens + sum(0, cut)),
+    part(2, segment.lines.slice(cut), segment.lines.slice(lead, cut), sum(lead, segment.lines.length)),
+  ];
+}
+
+/** One model call over one segment: the answer's text, and whether it was cut off at the length limit. */
+async function askAboutSegment(
   segment: BootstrapSegment,
   plan: BootstrapPlan,
   deps: BootstrapRunDeps,
-): Promise<{ rows: number; dropped: number; costUsd: number }> {
+): Promise<{ text: string; truncated: boolean; finish: string; costUsd: number }> {
   const involved = peopleIn(segment, plan.people);
   const prompt = buildBootstrapPrompt({
     month: segment.month,
@@ -544,12 +625,74 @@ async function extractSegment(
   // The SDK's types don't know OpenRouter's `provider` routing: bridged here, once.
   const response = await deps.client.chat.completions.create(
     body as unknown as ChatCompletionCreateParamsNonStreaming,
-    featureRequestOptions('memory_bootstrap'),
+    {
+      ...featureRequestOptions('memory_bootstrap'),
+      timeout: MODEL_TIMEOUT_MS,
+      maxRetries: MODEL_MAX_RETRIES,
+    },
   );
-  const costUsd = Number((response.usage as { cost?: unknown } | undefined)?.cost) || 0;
-  const text = response.choices?.[0]?.message?.content?.trim() ?? '';
-  if (!text) throw new Error(`empty answer (finish=${response.choices?.[0]?.finish_reason ?? 'none'})`);
-  const { observations, dropped } = parseBootstrapAnswer(text, segment, plan.people);
+  const choice = response.choices?.[0];
+  return {
+    text: choice?.message?.content?.trim() ?? '',
+    truncated: choice?.finish_reason === 'length',
+    finish: choice?.finish_reason ?? 'none',
+    costUsd: Number((response.usage as { cost?: unknown } | undefined)?.cost) || 0,
+  };
+}
+
+/**
+ * The observations of one segment. An answer cut off at the length limit (a dense stretch has more to say
+ * than one answer holds) is never parsed as it is: the segment is read again in two halves, each half the
+ * same way, at most MAX_SPLIT_DEPTH times over. An empty or unparseable answer throws (a SegmentFailure
+ * carrying what the calls cost), so the segment is left for the next run instead of recorded as read.
+ */
+async function readSegment(
+  segment: BootstrapSegment,
+  plan: BootstrapPlan,
+  deps: BootstrapRunDeps,
+  depth = 0,
+): Promise<{ observations: BootstrapObservation[]; dropped: number; costUsd: number; parts: number }> {
+  let answer: Awaited<ReturnType<typeof askAboutSegment>>;
+  try {
+    answer = await askAboutSegment(segment, plan, deps);
+  } catch (error) {
+    throw new SegmentFailure(error instanceof Error ? error.message : String(error), 0);
+  }
+  if (answer.truncated) {
+    const halves = depth < MAX_SPLIT_DEPTH ? splitSegment(segment) : undefined;
+    if (!halves) throw new SegmentFailure('the answer was cut off at the length limit', answer.costUsd);
+    const out = { observations: [] as BootstrapObservation[], dropped: 0, costUsd: answer.costUsd, parts: 0 };
+    for (const half of halves) {
+      try {
+        const read = await readSegment(half, plan, deps, depth + 1);
+        out.observations.push(...read.observations);
+        out.dropped += read.dropped;
+        out.costUsd += read.costUsd;
+        out.parts += read.parts;
+      } catch (error) {
+        const spent = error instanceof SegmentFailure ? error.costUsd : 0;
+        throw new SegmentFailure(error instanceof Error ? error.message : String(error), out.costUsd + spent);
+      }
+    }
+    return out;
+  }
+  if (!answer.text) throw new SegmentFailure(`empty answer (finish=${answer.finish})`, answer.costUsd);
+  const parsed = parseBootstrapAnswer(answer.text, segment, plan.people);
+  if (!parsed.ok) throw new SegmentFailure(`${parsed.error} (finish=${answer.finish})`, answer.costUsd);
+  return { observations: parsed.observations, dropped: parsed.dropped, costUsd: answer.costUsd, parts: 1 };
+}
+
+/**
+ * One segment: its observations (readSegment), then the journal rows they become, written only once the
+ * whole segment was read, so a failure never leaves half a segment in the journal to be written again by
+ * the next run. Throws a SegmentFailure.
+ */
+async function extractSegment(
+  segment: BootstrapSegment,
+  plan: BootstrapPlan,
+  deps: BootstrapRunDeps,
+): Promise<{ rows: number; dropped: number; costUsd: number; parts: number }> {
+  const { observations, dropped, costUsd, parts } = await readSegment(segment, plan, deps);
 
   let rows = 0;
   for (const obs of observations) {
@@ -566,24 +709,28 @@ async function extractSegment(
     });
     rows++;
   }
-  return { rows, dropped, costUsd };
+  return { rows, dropped, costUsd, parts };
 }
 
 /**
- * A run (see the file comment): every unfinished segment, oldest first, one call each; finished segments
- * are recorded as they complete, so an interrupted run resumes at the next one. A failed segment is logged
- * and left for the next run (the run goes on). The dream runs only once nothing of the archive is left.
+ * A run (see the file comment): every unfinished segment, oldest first, one call each (in halves when the
+ * answer was cut off); finished segments are recorded as they complete, so an interrupted run resumes at
+ * the next one. A failed segment (a failed call, an empty or unparseable answer) is logged and left for the
+ * next run (the run goes on). The dream runs only once nothing of the archive is left.
  */
 export async function runBootstrap(deps: BootstrapRunDeps): Promise<BootstrapRunResult> {
   const log = deps.log ?? ((line: string) => logger.info(`memory bootstrap: ${line}`));
   const now = deps.now ?? (() => new Date());
+  const recorded = readProgress(deps.memory);
+  const size = resolveSegmentTokens(recorded, deps.segmentTokens);
+  if (!size.ok) throw new Error(size.error);
   const plan = planBootstrap(deps.archive, deps.memory, {
-    segmentTokens: deps.segmentTokens,
+    segmentTokens: size.value,
     from: deps.from,
     to: deps.to,
   });
   const stamp = now().toISOString();
-  const progress = readProgress(deps.memory) ?? {
+  const progress: BootstrapProgress = recorded ?? {
     version: 1 as const,
     model: deps.model,
     done: [],
@@ -592,6 +739,7 @@ export async function runBootstrap(deps: BootstrapRunDeps): Promise<BootstrapRun
     startedAt: stamp,
     updatedAt: stamp,
   };
+  progress.segmentTokens = size.value;
   const done = new Set(progress.done);
   const todo = plan.segments.filter((s) => !done.has(s.key));
   const result: BootstrapRunResult = {
@@ -621,11 +769,21 @@ export async function runBootstrap(deps: BootstrapRunDeps): Promise<BootstrapRun
       progress.updatedAt = now().toISOString();
       writeProgress(deps.memory, progress);
       log(
-        `${label}: ${outcome.rows} rows${outcome.dropped > 0 ? ` (${outcome.dropped} dropped)` : ''}${outcome.costUsd > 0 ? ` · $${outcome.costUsd.toFixed(4)}` : ''} · ${result.segmentsLeft} left`,
+        `${label}: ${outcome.rows} rows${outcome.dropped > 0 ? ` (${outcome.dropped} dropped)` : ''}${outcome.parts > 1 ? ` (read in ${outcome.parts} parts: one answer could not hold it)` : ''}${outcome.costUsd > 0 ? ` · $${outcome.costUsd.toFixed(4)}` : ''} · ${result.segmentsLeft} left`,
       );
     } catch (error) {
       result.segmentsFailed++;
-      log(`${label}: FAILED, left for the next run: ${error instanceof Error ? error.message : String(error)}`);
+      // What a failed segment's calls cost still counts (a cut-off or unusable answer is billed).
+      const spent = error instanceof SegmentFailure ? error.costUsd : 0;
+      if (spent > 0) {
+        result.costUsd += spent;
+        progress.costUsd += spent;
+        progress.updatedAt = now().toISOString();
+        writeProgress(deps.memory, progress);
+      }
+      log(
+        `${label}: FAILED, left for the next run: ${error instanceof Error ? error.message : String(error)}${spent > 0 ? ` · $${spent.toFixed(4)}` : ''}`,
+      );
     }
   }
 

@@ -346,6 +346,12 @@ Code playbook (export → playbook → import) and the built-in bootstrap. Every
 the files it writes in the data volume stay the bot's). It reads `./data`, prints what it did, and never
 creates empty databases where the data folder is missing.
 
+Both routes read the archive as it is when they run, and a bootstrap never reads a finished segment again,
+so they wait for the archive's history import: while a channel of `ARCHIVE_BACKFILL_CHANNELS` is still being
+imported (or not started), `export` and `bootstrap --run` refuse and say which (a dry run only warns). A
+channel whose import is stuck on an error (a missing permission) only gets a warning: its older history is
+missing, and nothing says the bot will ever get it.
+
 | Command | What |
 |---|---|
 | `export [--out DIR] [--chunk-tokens N] [--lead-in-tokens N]` (`yarn memory:export`) | the archive as compact transcripts (below) |
@@ -389,9 +395,12 @@ Token counts are estimates (3.5 ASCII characters per token, one per other charac
 subscription; it holds every format and rule verbatim. An orchestrator that stays lean (it reads only the
 manifest, `progress.json` and the observation index, launches one fresh subagent per step, records each
 finished step, and never reads transcripts, observations or notes) runs, in `data/memory-bootstrap/work/`:
-- **Sequential scan**, chunk by chunk in date order, one fresh subagent each. Input: the chunk,
-  `people.json` and the current working notes (every profile, circle and group note). It appends dated
-  observations to `observations/NNNN.jsonl` (`people`: the main ids involved, one or several, or
+- **Sequential scan**, chunk by chunk in date order, one fresh subagent each. Input: the whole chunk (read
+  in pages to its last line), `people.json`, and the working notes it needs: the cast sheet, the group notes,
+  and the profiles and circles of the people in the chunk (the whole working folder grows with every chunk
+  and would not fit one context; working notes are capped: profile 3,000 characters, a topic note 2,000,
+  circle 4,000, group topic 5,000). It appends dated observations to `observations/NNNN.jsonl` (always
+  written, empty when the chunk has nothing; `people`: the main ids involved, one or several, or
   `["group"]`; `category`; `kind` (`trait` \| `fact` \| `event` \| `joke` \| `relationship` \| `history`);
   `content`; `date`; optional `confidence`; `evidence: [{chunk, lines: [from, to]}]`; an optional `quote`;
   an optional `circle` slug), interpreting references with what the working notes know (a callback to an old
@@ -459,7 +468,8 @@ estimated input and output tokens and cost from the model catalog's per-token pr
 `MEMORY_BOOTSTRAP_MODEL` (default the dream model), plus a rough figure for the dream afterwards.
 
 `--run` reads the segments oldest first, one call each (ZDR, tag `memory_bootstrap`, 8k output tokens, no
-reasoning override: the default model only reasons when asked). The prompt keeps the capture extractor's
+reasoning override: the default model only reasons when asked; the dream's 10-minute timeout and one retry,
+since a segment's answer takes minutes). The prompt keeps the capture extractor's
 rules (the 30-day test, atomic rows, what a message reveals rather than what it did, no censoring) adapted to
 history: notable history is worth keeping and dated, and a fact seen again is repeated with the same
 wording so it merges into the existing row as a recurrence (seen count, first/last seen widened). The
@@ -470,16 +480,24 @@ corrections; the newest rows for someone without notes), with each row's seen sp
 matched to its line by `citedEvidence()` (kept only when it occurs in the segment), and related members are
 resolved by `relatedMembers()`. The answer is untrusted: rows about people outside the export, unknown
 categories (only fact, preference, personality and vibe), Discord markup, ids or over-long content are
-dropped. Rows are saved with source `bootstrap`, `first_seen_at` backdated to the quoted line's time (or the
-given date), evidence (the quoted line's message ids and the quote) and the other members involved. Finished
+dropped; an answer that isn't the JSON object asked for (prose, a refusal) fails the segment, and an answer
+cut off at the output limit (a dense stretch with more to say than one answer holds) is never parsed: the
+segment is read again in two halves at its quietest gap near the middle (each half the same way, down to an
+eighth). Rows are saved with source `bootstrap`, `first_seen_at` backdated to the quoted line's time (or the
+given date), evidence (the quoted line's message ids and the quote) and the other members involved, once the
+whole segment is read (a failure writes nothing of it). Finished
 segments are recorded in memory.db (`bot_state` `memory_bootstrap:progress`), so a stopped run resumes at the
 next one and a failed segment is retried on the next run; `--from`/`--to` and `--max-segments` make a trial
-run. Once the whole archive is read (not after a
-range), it dreams everyone with new journal rows until nothing is pending (`runDreamsUntilCaughtUp`): a
+run. A run keeps the segment size it started with (recorded in its progress): cut differently, the archive
+gives new keys for stretches already read, so another `--segment-tokens` is refused. Once the whole archive
+is read (not after a range), it dreams everyone with new journal rows until nothing is pending (`runDreamsUntilCaughtUp`): a
 night's dream reads at most 300 rows per person, so someone with thousands of history rows gets pass after
 pass, then the group the same way. A person whose dream fails is left for the nightly dream, and three
 failures in a row stop it, as on a night. It uses the CLI's own stores and never claims the nightly
-schedule's day (`--no-dream` skips it; a failure leaves it to the nightly dream).
+schedule's day (`--no-dream` skips it; a failure leaves it to the nightly dream). The running bot keeps the
+journal's search vectors in memory, in step with its own writes only, so after a run that wrote rows the
+command says to restart it: until then its memory searches don't see the new rows (and fall back to keyword
+search while they are over a fifth of the journal).
 
 ## Configuration
 

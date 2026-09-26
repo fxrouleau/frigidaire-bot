@@ -32,10 +32,12 @@ owner asked for it.
    ```
    (Locally with the bot's data folder: `yarn memory:export`.) It writes `manifest.json`, `people.json`,
    `months/YYYY-MM.md` and `chunks/NNNN.md`. Show the owner the manifest's totals (messages, chunks,
-   estimated tokens) before starting: that is roughly what the scan reads.
+   estimated tokens) before starting: that is roughly what the scan reads. While the bot is still importing
+   the archive's history, the export refuses and says so: tell the owner, and export once the import is done.
 2. **The helper commands** run from the repo root: `yarn memory <command>` when Node and the dependencies
    are installed, otherwise `docker compose run --rm test yarn memory <command>` (same arguments). Below,
-   `memory …` means either form.
+   `memory …` means either form. Their paths are relative to the repo root: `memory observations` works on
+   `data/memory-bootstrap/work` (its default; give that full path if you pass one, never a bare `work`).
 3. `data/` is gitignored: everything here stays out of git. Never commit, paste or upload any of it.
 
 ## Folder layout
@@ -51,7 +53,7 @@ data/memory-bootstrap/
     working/                   the working notes (an interpretation aid, same format as final notes)
       people/<id>/profile.md (+ topics)   group/<topic>.md   circles/<slug>.md
     by-person/<id>.jsonl, by-person/group.jsonl, by-person/index.json, by-circle/<slug>.jsonl, cast.md
-                               derived views, rebuilt by `memory observations work` (never edit them)
+                               derived views, rebuilt by `memory observations` (never edit them)
     eras/<id>/<from>_<to>.md   era summaries for people with very long logs
     final/                     the notes tree the bot imports (manifest.json, people/, group/, circles/)
     critic/report.md
@@ -95,11 +97,12 @@ You stay lean so your context never fills up:
    - `work/steps/N/` exists → the step committed but was not applied: **apply** it (below).
    - `work/steps/N.tmp/` exists → the step was interrupted: `rm -rf work/steps/N.tmp`, then scan `N` again.
    - Otherwise launch the **scan subagent** for `N`. When it returns, apply the step.
-   - **Apply** (idempotent): `cp work/steps/N/observations.jsonl work/observations/N.jsonl`, then
+   - **Apply** (idempotent): `cp work/steps/N/observations.jsonl work/observations/N.jsonl` (when the step
+     has no `observations.jsonl`, create an empty `work/observations/N.jsonl` instead), then
      `cp -R work/steps/N/working/. work/working/` (when that folder exists), then add `N` to `scan.done`.
    - After applying a chunk whose number is a multiple of `reground.every` (0010, 0020, …) and isn't in
      `reground.after`: **re-ground**, then add it to `reground.after`.
-3. When every chunk is scanned: run `memory observations work` (validates the log, rebuilds by-person/,
+3. When every chunk is scanned: run `memory observations` (validates the log, rebuilds by-person/,
    by-circle/ and cast.md). Problems in the log are listed by file and line: have a fixer subagent correct
    those lines in `observations/NNNN.jsonl` (the one exception to append-only: fixing a malformed line),
    and run it again until it reports none.
@@ -117,13 +120,25 @@ the chunk id, and `{FROM}`/`{TO}` with the chunk's dates from the manifest):
 > Read, in this order:
 > 1. `{EXPORT}/people.json`: transcript names → main ids (use the ids in everything you write), their other
 >    names, real names and nicknames.
-> 2. Every file under `{WORK}/working/` (the working notes so far: profiles, circles, group notes). They are
->    what earlier chunks learned; use them to interpret references.
-> 3. `{EXPORT}/chunks/{N}.md` (chunk {N}, {FROM} → {TO}). Use the Read tool so you see line numbers. The
->    quoted lines under "ALREADY COVERED" are context from the previous chunk: never extract from them.
+> 2. `{EXPORT}/chunks/{N}.md` (chunk {N}, {FROM} → {TO}), ALL of it. It runs to thousands of lines, more
+>    than one Read returns: check its length first (`wc -l`), then read it in pages with the Read tool
+>    (offset/limit, about 1,000 lines at a time) until you have seen its last line. The Read tool shows the
+>    line numbers you cite. The quoted lines under "ALREADY COVERED" are context from the previous chunk:
+>    never extract from them.
+> 3. The working notes this chunk needs (what earlier chunks learned; use them to interpret references),
+>    never the whole `{WORK}/working/` folder (it grows with every chunk and would not fit):
+>    - `{WORK}/cast.md` when it exists (one line per person: who they are);
+>    - the group notes, `{WORK}/working/group/*.md`;
+>    - the profile of everyone who posts in or is named in the chunk,
+>      `{WORK}/working/people/<id>/profile.md`, and their topic notes only for topics the chunk touches;
+>    - the circles those people are in (search `{WORK}/working/circles/` for their ids) or that the chunk
+>      talks about;
+>    - when the chunk calls someone by a name people.json doesn't list, search the working notes for it
+>      (`grep -ril`).
 >
 > Then write, and ONLY write, inside `{WORK}/steps/{N}.tmp/`:
-> - `observations.jsonl`: one JSON object per line, per the OBSERVATION FORMAT and the KNOWLEDGE RULES
+> - `observations.jsonl`, ALWAYS (an empty file when the chunk has nothing worth keeping): one JSON object
+>   per line, per the OBSERVATION FORMAT and the KNOWLEDGE RULES
 >   below. Every observation is dated and cites the chunk lines it comes from (`"chunk": "{N}"`, line
 >   numbers as the Read tool shows them). Interpret references with the working notes: a callback to an
 >   earlier joke is recorded as that joke, with its origin. Relationships and shared events list everyone
@@ -132,8 +147,8 @@ the chunk id, and `{FROM}`/`{TO}` with the chunk's dates from the manifest):
 > - `working/…`: the FULL new content of every working note you changed or created (same relative paths as
 >   under `{WORK}/working/`, NOTE FORMAT below): merge what this chunk showed into the profiles of the people
 >   it touched, their circles and the group notes, like a small dream (DREAM RULES below). Keep working
->   notes concise: profile ≤ 3,000 characters, circle ≤ 4,000, group topic ≤ 5,000. Do not write notes you
->   didn't change.
+>   notes concise: profile ≤ 3,000 characters, a person's topic note ≤ 2,000, circle ≤ 4,000, group topic
+>   ≤ 5,000 (later chunks read them). Do not write notes you didn't change.
 >
 > When both are written, commit the step as your LAST action: `mv {WORK}/steps/{N}.tmp {WORK}/steps/{N}`.
 > Reply with one line: `chunk {N}: <observations> observations, <notes> notes updated`. Nothing else.
@@ -147,25 +162,27 @@ the chunk id, and `{FROM}`/`{TO}` with the chunk's dates from the manifest):
 Repeated re-summarizing drifts. Every 10 chunks, rebuild the working notes of everyone the last 10 chunks
 touched from their FULL observation log, not from the previous notes:
 
-1. Run `memory observations work` (rebuilds by-person/, by-circle/, cast.md).
+1. Run `memory observations` (rebuilds by-person/, by-circle/, cast.md).
 2. The people to re-ground: the ids that appear in `people` of the last 10 `observations/NNNN.jsonl` files.
    Have ONE small subagent list them (it may read those 10 files) and return the ids as one line; or re-ground
    everyone in `by-person/index.json` when that list is short.
 3. For each id (up to 4 subagents at a time):
 
 > Rebuild the working notes of person `{ID}` from their full observation log. Read `{EXPORT}/people.json`,
-> `{WORK}/cast.md`, and `{WORK}/by-person/{ID}.jsonl` (every observation about them, oldest first, including
-> relationships and shared events from anyone's side). Ignore their current working notes. Write
+> `{WORK}/cast.md`, and ALL of `{WORK}/by-person/{ID}.jsonl` (every observation about them, oldest first,
+> including relationships and shared events from anyone's side; in pages of about 1,000 lines until its
+> last line when it is long). Ignore their current working notes. Write
 > `{WORK}/working/people/{ID}/profile.md` (and topic notes under the same folder when details don't fit the
 > profile), per NOTE FORMAT, following the DREAM RULES and the NOTE SHAPE, weighting by RECENCY × RECURRENCE.
-> Working profile ≤ 3,000 characters. Reply with one line: `{ID}: re-grounded from <n> observations`.
+> Working profile ≤ 3,000 characters, each topic note ≤ 2,000. Reply with one line:
+> `{ID}: re-grounded from <n> observations`.
 
 4. Then one subagent for the circles in `by-circle/` touched in those chunks and one for the group
    (`by-person/group.jsonl`), same instructions with their working files and formats.
 
 ## Step 4: final build
 
-Run `memory observations work` first (fresh by-person/, by-circle/, cast.md). The final tree goes in
+Run `memory observations` first (fresh by-person/, by-circle/, cast.md). The final tree goes in
 `work/final/` in the import layout (NOTE FORMAT, CIRCLE FORMAT, FINAL MANIFEST).
 
 ### 4a. Circles
@@ -174,7 +191,8 @@ List `work/by-circle/*.jsonl` and `work/working/circles/*.md`; one subagent per 
 
 > Write the final note of circle `{SLUG}`. Read `{EXPORT}/people.json`, `{WORK}/cast.md`,
 > `{WORK}/by-circle/{SLUG}.jsonl` (its observations, oldest first), `{WORK}/working/circles/{SLUG}.md` when it
-> exists, and the by-person logs of its members for observations about the shared thing. For the key and
+> exists, and in the by-person logs of its members only the observations about the shared thing (search them
+> for its names and aliases rather than reading whole logs). For the key and
 > contested points (who is in it and since when, how it started, anything the observations disagree on),
 > read the cited chunk lines ±5 lines in `{EXPORT}/chunks/` (at most 10 passages) and follow what was
 > actually said. Write `{WORK}/final/circles/{SLUG}.md` per CIRCLE FORMAT, following the DREAM RULES: dated
@@ -186,8 +204,10 @@ Record each slug in `final.circles` (also the "not a circle" ones).
 
 ### 4b. People
 
-For each owner in `work/by-person/index.json` → `people` (skip people with fewer than 3 observations;
-their journal rows will reach the dream anyway):
+For each owner in `work/by-person/index.json` → `people`, except people with fewer than 3 observations.
+Those are skipped, and what the scan saw of them is NOT imported (nothing in this playbook writes the bot's
+journal): the bot builds their notes from whatever memories it already had about them and learns them from
+what it captures from now on. Count them for the hand-over.
 
 - **Long logs** (`tokens` > 60,000): build eras first. From the index's `years` (estimated tokens per year),
   group consecutive years into eras of at most ~40,000 tokens. For each era not in `final.eras`
@@ -203,10 +223,11 @@ their journal rows will reach the dream anyway):
 
 > Write the final notes of person `{ID}` (their entry in people.json has this `id`). Read `{EXPORT}/people.json`,
 > `{WORK}/cast.md` (everyone, so relationships read consistently), the final circles they are in
-> (`{WORK}/final/circles/*.md` whose front matter lists `{ID}`), and their full observation log
+> (`{WORK}/final/circles/*.md` whose front matter lists `{ID}`), and ALL of their observation log
 > `{WORK}/by-person/{ID}.jsonl` (oldest first; it includes every relationship and shared event involving
-> them, from either side) [long logs: instead the era summaries in `{WORK}/eras/{ID}/` in date order, plus
-> the raw observations of the most recent era and every `"kind": "relationship"` line].
+> them, from either side; in pages of about 1,000 lines until its last line when it is long) [long logs:
+> instead the era summaries in `{WORK}/eras/{ID}/` in date order, plus the raw observations of the most
+> recent era and every `"kind": "relationship"` line].
 > For the key and contested items (contradictions, low confidence, anything about to become a Now or Traits
 > fact), read the cited chunk lines ±5 lines in `{EXPORT}/chunks/` (at most 15 passages) and follow what was
 > actually said. Write `{WORK}/final/people/{ID}/profile.md` and any topic notes
@@ -258,8 +279,9 @@ Set `critic` to true.
    `docker exec frigidaire-bot chown -R node:node /app/data/memory-import`) and restart the bot. At startup
    the bot validates it again, loads it as the notes' first version, moves it to
    `data/memory-import/imported-<timestamp>/` and posts one line in the report channel; a tree with any
-   problem loads nothing and stays in place (the log says why). The export and the work folder are private
-   chat: delete them once the import is done.
+   problem loads nothing and stays in place (the log says why). Say how many people were skipped for having
+   fewer than 3 observations (Step 4b): the tree has nothing on them. The export and the work folder are
+   private chat: delete them once the import is done.
 
 ## Reference
 

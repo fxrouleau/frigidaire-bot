@@ -647,9 +647,16 @@ export class MemoryStore {
       candidates.sort((a, b) => b.score - a.score);
 
       for (const { id: bestId, score: bestScore } of candidates) {
-        const existing = this.stmt('SELECT content, subject_user_id, said_by FROM memories WHERE id = ?').get(
+        const existing = this.stmt('SELECT content, subject_user_id, said_by, active FROM memories WHERE id = ?').get(
           bestId,
-        ) as Pick<Memory, 'content' | 'subject_user_id' | 'said_by'>;
+        ) as Pick<Memory, 'content' | 'subject_user_id' | 'said_by' | 'active'> | undefined;
+        // Another process on this file (the bootstrap CLI next to the running bot) may have retired or
+        // removed the row since this one cached its vector: never merge into it (its FTS entry is gone, and
+        // a second 'delete' corrupts the index), and drop the stale vector.
+        if (existing?.active !== 1) {
+          cache.delete(bestId);
+          continue;
+        }
         // subject_user_id is not in the cache (the startup stamp can change it): checked per candidate.
         if (!samePerson(existing.subject_user_id, memory.subject_user_id)) continue;
         if (!sameSpeaker(existing.said_by, memory.said_by)) continue;
