@@ -178,12 +178,12 @@ it finds against the minimum), and a deploy never strands a conversation. `LEARN
 and only drives the old interval trigger, which the bot no longer uses.
 
 **How much**: everything after the channel's watermark, paged past Discord's 100-message fetch, up to 2,000
-messages per capture (a longer backlog is read at the next tick). A channel never captured is read back to the
-start of its last conversation; older history is the bootstrap's job. A conversation longer than one request
-(~48k characters of transcript) is split into parts at its longest quiet gap once a part is at least 60%
-full, and each later part opens with the end of the previous one (~2k characters) under
-`## ALREADY COVERED — context only, do not extract`. The watermark moves after each part, so a failure
-part-way neither loses nor repeats anything.
+messages per capture (the rest is reported as a backlog and read once the channel is quiet). A channel never
+captured is read back to the start of its last conversation; older history is the bootstrap's job. A
+conversation longer than one request (~48k characters of transcript) is split into parts at its longest quiet
+gap once a part is at least 60% full, and each later part opens with the end of the previous one (~2k
+characters) under `## ALREADY COVERED — context only, do not extract`. The watermark moves after each part, so
+a failure part-way neither loses nor repeats anything.
 
 **Evidence and related members**: the transcript's lines are numbered (`#N [time] [Name (id:…)] text`), and each
 observation cites `evidence: {lines, quote}` plus, for a relationship or something shared, `related_user_ids`.
