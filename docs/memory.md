@@ -467,8 +467,12 @@ corrections; the newest rows for someone without notes), with each row's seen sp
 matched to its line by `citedEvidence()` (kept only when it occurs in the segment), and related members are
 resolved by `relatedMembers()`. The answer is untrusted: rows about people outside the export, unknown
 categories (only fact, preference, personality and vibe), Discord markup, ids or over-long content are
-dropped. Rows are saved with source `bootstrap`, `first_seen_at` backdated to the quoted line's time (or the
-given date), evidence (the quoted line's message ids and the quote) and the other members involved. Finished
+dropped; an answer that isn't the JSON object asked for (prose, a refusal) fails the segment, and an answer
+cut off at the output limit (a dense stretch with more to say than one answer holds) is never parsed: the
+segment is read again in two halves at its quietest gap near the middle (each half the same way, down to an
+eighth). Rows are saved with source `bootstrap`, `first_seen_at` backdated to the quoted line's time (or the
+given date), evidence (the quoted line's message ids and the quote) and the other members involved, once the
+whole segment is read (a failure writes nothing of it). Finished
 segments are recorded in memory.db (`bot_state` `memory_bootstrap:progress`), so a stopped run resumes at the
 next one and a failed segment is retried on the next run; `--from`/`--to` and `--max-segments` make a trial
 run. Once the whole archive is read (not after a
