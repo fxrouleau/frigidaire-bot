@@ -432,6 +432,32 @@ describe('dream state', () => {
     notes.recordDreamSuccess(group, notes.journalHighWater());
     expect(notes.pendingDreams()).toEqual({ people: [expect.objectContaining({ owner: remi })] });
   });
+
+  it("never dreams a junk id the old learner left behind, only people the bot knows or a writer vouched for", async () => {
+    memory.upsertIdentity(REMI, 'Remi');
+    const GARBLED = '100000000000000777';
+    const LURKER = '100000000000000888';
+    // The old learner copied "456" from its prompt examples, or garbled a snowflake; the stamp leaves such
+    // an id in place when the row's name is ambiguous or unknown.
+    await memory.save({ category: 'fact', subject: 'Jasper', subject_user_id: '456', content: 'still plays on PS4', source: 'observation' });
+    await memory.save({ category: 'fact', subject: 'Nobody', subject_user_id: GARBLED, content: 'likes kites', source: 'observation' });
+    // remember_fact about a member who never posted: a real account without an identities row yet.
+    await memory.save({ category: 'fact', subject: 'Lurker', subject_user_id: LURKER, content: 'owns a canoe', source: 'conversation' });
+    await memory.save({ category: 'fact', subject: 'Remi', subject_user_id: REMI, content: 'bakery', source: 'observation' });
+
+    expect(
+      notes
+        .pendingDreams()
+        .people.map((p) => (p.owner.scope === 'person' ? p.owner.ownerId : ''))
+        .sort(),
+    ).toEqual([REMI, LURKER].sort());
+
+    // Once the stamp (or a later identities row) makes the garbled id a member, it is dreamed like anyone.
+    memory.upsertIdentity(GARBLED, 'Nobody');
+    expect(notes.pendingDreams().people.map((p) => (p.owner.scope === 'person' ? p.owner.ownerId : ''))).toContain(
+      GARBLED,
+    );
+  });
 });
 
 describe('circles', () => {

@@ -29,6 +29,7 @@ import { toSqliteUtc } from '../../utils';
 import {
   CORRECTION_CATEGORY,
   IDENTITY_NAME_TIERS,
+  LEARNER_SOURCES,
   type Memory,
   type MemoryStore,
   NON_PERSON_SUBJECTS,
@@ -214,6 +215,10 @@ type MemberRow = {
 };
 
 const SELF_DIAGNOSIS_NOT_IN = SELF_DIAGNOSIS_CATEGORIES.map((c) => `'${c}'`).join(', ');
+/** The shape of a Discord id (snowflake). */
+const DISCORD_ID = /^\d{15,21}$/;
+/** Sources the old learner (and capture) write: the only writers that ever stored an unchecked id. */
+const LEARNER_SOURCE_SET: ReadonlySet<string> = new Set(Object.values(LEARNER_SOURCES));
 /** Versions pruneVersions() keeps per note by default (the current one included). */
 export const NOTE_VERSIONS_KEPT = 50;
 /**
@@ -1167,16 +1172,25 @@ export class NotesStore {
    * rows are stamped with, a linked side account's counting for its main, and by the related members of
    * relationship rows; name-only rows get an id from the startup stamp) and the group. `limit` caps the
    * people.
+   *
+   * Only real people: a member the bot knows (an identities row on any of their accounts, or a
+   * LINKED_ACCOUNTS id), or a Discord-shaped id that a writer other than the old learner vouched for
+   * (remember_fact, "Remember this", a correction, a capture's related members). The startup stamp's
+   * junk ids (MemoryStore.stampSubjectUserIds: "456" copied from the old learner's prompt, a garbled
+   * snowflake on a learner row) left in place when their name is ambiguous or unknown never become a
+   * phantom person with a paid dream and notes of their own: their rows wait in the journal for the stamp.
    */
   pendingDreams(opts: { limit?: number } = {}): { people: PendingDream[]; group?: PendingDream } {
     const rows = this.stmt(
-      `SELECT subject_user_id AS uid, related_user_ids AS related, journal_seq AS seq FROM memories
+      `SELECT subject_user_id AS uid, related_user_ids AS related, journal_seq AS seq, source FROM memories
        WHERE active = 1 AND (subject_user_id IS NOT NULL OR related_user_ids IS NOT NULL)
          AND category NOT IN (${SELF_DIAGNOSIS_NOT_IN})`,
-    ).all() as { uid: string | null; related: string | null; seq: number }[];
+    ).all() as { uid: string | null; related: string | null; seq: number; source: string | null }[];
 
     const watermarks = new Map<string, number>();
     const byOwner = new Map<string, { newRows: number; latestSeq: number }>();
+    // Ids some row vouches for: stamped by a writer other than the old learner, or a related member.
+    const vouched = new Set<string>();
     const watermarkOf = (id: string) => {
       let mark = watermarks.get(id);
       if (mark === undefined) {
@@ -1186,11 +1200,11 @@ export class NotesStore {
       return mark;
     };
     for (const row of rows) {
-      const owners = new Set(
-        [row.uid, ...parseJsonArray(row.related, isString)]
-          .filter((id): id is string => !!id)
-          .map((id) => canonicalUserId(id)),
-      );
+      const related = parseJsonArray(row.related, isString).map((id) => canonicalUserId(id));
+      const uid = row.uid ? canonicalUserId(row.uid) : undefined;
+      if (uid && !LEARNER_SOURCE_SET.has(row.source ?? '')) vouched.add(uid);
+      for (const id of related) vouched.add(id);
+      const owners = new Set([...(uid ? [uid] : []), ...related]);
       for (const main of owners) {
         if (row.seq <= watermarkOf(main)) continue;
         const entry = byOwner.get(main) ?? { newRows: 0, latestSeq: 0 };
@@ -1199,7 +1213,9 @@ export class NotesStore {
         byOwner.set(main, entry);
       }
     }
+    const isRealPerson = (main: string) => this.isKnownMember(main) || (DISCORD_ID.test(main) && vouched.has(main));
     const people: PendingDream[] = [...byOwner.entries()]
+      .filter(([ownerId]) => isRealPerson(ownerId))
       .map(([ownerId, entry]) => ({ owner: { scope: 'person' as const, ownerId }, ...entry }))
       .sort((a, b) => b.latestSeq - a.latestSeq)
       .slice(0, opts.limit ?? Number.POSITIVE_INFINITY);
@@ -1214,6 +1230,16 @@ export class NotesStore {
           }
         : undefined;
     return { people, ...(group ? { group } : {}) };
+  }
+
+  /** A member the bot knows: an identities row on any of their accounts, or a LINKED_ACCOUNTS id. */
+  private isKnownMember(mainId: string): boolean {
+    const links = config.server.linkedAccounts;
+    return (
+      links.has(mainId) ||
+      [...links.values()].includes(mainId) ||
+      accountIdsFor(mainId).some((id) => this.memory.getIdentityById(id) !== undefined)
+    );
   }
 
   /** Every name any of these accounts goes by (display, handle, first-seen, IRL, nicknames). */
