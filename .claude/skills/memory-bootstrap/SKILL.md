@@ -32,7 +32,8 @@ owner asked for it.
    ```
    (Locally with the bot's data folder: `yarn memory:export`.) It writes `manifest.json`, `people.json`,
    `months/YYYY-MM.md` and `chunks/NNNN.md`. Show the owner the manifest's totals (messages, chunks,
-   estimated tokens) before starting: that is roughly what the scan reads.
+   estimated tokens) before starting: that is roughly what the scan reads. While the bot is still importing
+   the archive's history, the export refuses and says so: tell the owner, and export once the import is done.
 2. **The helper commands** run from the repo root: `yarn memory <command>` when Node and the dependencies
    are installed, otherwise `docker compose run --rm test yarn memory <command>` (same arguments). Below,
    `memory …` means either form. Their paths are relative to the repo root: `memory observations` works on

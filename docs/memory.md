@@ -343,6 +343,12 @@ Code playbook (export → playbook → import) and the built-in bootstrap. Every
 the files it writes in the data volume stay the bot's). It reads `./data`, prints what it did, and never
 creates empty databases where the data folder is missing.
 
+Both routes read the archive as it is when they run, and a bootstrap never reads a finished segment again,
+so they wait for the archive's history import: while a channel of `ARCHIVE_BACKFILL_CHANNELS` is still being
+imported (or not started), `export` and `bootstrap --run` refuse and say which (a dry run only warns). A
+channel whose import is stuck on an error (a missing permission) only gets a warning: its older history is
+missing, and nothing says the bot will ever get it.
+
 | Command | What |
 |---|---|
 | `export [--out DIR] [--chunk-tokens N] [--lead-in-tokens N]` (`yarn memory:export`) | the archive as compact transcripts (below) |
