@@ -6,10 +6,12 @@ import { ArchiveStore } from '../../../archive/archiveStore';
 import { logger } from '../../../logger';
 import { chatCompletionBody, createCapturingClient } from '../../../test-support/capturingClient';
 import { archiveInput, snowflake } from '../../../test-support/fakeArchive';
+import { getMemoryStore, getNotesStore } from '../index';
 import { MemoryStore } from '../memoryStore';
 import type { NightlyDreamResult } from '../notes/dreamer';
+import { DREAM_NIGHT_KEY } from '../notes/dreamSchedule';
 import { NotesStore } from '../notes/notesStore';
-import { type CliDeps, openDataStores, parseArgs, runCli } from './commands';
+import { type CliDeps, dreamOverStores, openDataStores, parseArgs, runCli } from './commands';
 
 // Fictional cast, placeholder snowflakes.
 const REMI = '100000000000000001';
@@ -173,6 +175,34 @@ describe('runCli', () => {
     expect(await runCli(['bootstrap', '--dry-run'], deps())).toBe(0);
     expect(out[0]).toContain('(0 still to read)');
     expect(out.at(-1)).toContain('A run is under way: 1 segment done so far (1 journal row');
+  });
+
+  it("dreams over the CLI's own stores (passages from its archive) and never claims the nightly dream's day", async () => {
+    const answer = (content: unknown) => ({ body: chatCompletionBody(JSON.stringify(content)) });
+    const { client, requests } = createCapturingClient([
+      answer({
+        observations: [{ category: 'fact', subject_user_id: REMI, content: 'Works at a bakery.', quote: 'bakery at 5am' }],
+      }),
+      answer({
+        notes: [{ topic: 'profile', title: 'Remi', content: '## Now\nWorks at a bakery (since 2019-03).' }],
+        change_summary: 'bakery',
+      }),
+      answer({ notes: [{ topic: 'vibe', title: 'Vibe', content: '## Now\nEarly risers.' }], change_summary: 'vibe' }),
+    ]);
+    expect(await runCli(['bootstrap', '--run'], deps({ client: () => client, dream: dreamOverStores }))).toBe(0);
+
+    // The cited message came from the CLI's archive (the shared one under Vitest is empty).
+    const dreamPrompt = (requests[1].body.messages as { content: string }[])[1].content;
+    expect(requests[1].headers.get('X-Frigidaire-Feature')).toBe('memory_dream');
+    expect(dreamPrompt).toContain('PASSAGES');
+    expect(dreamPrompt).toContain('Remi: bakery at 5am');
+    // Written to the CLI's stores, nowhere else; the nightly schedule's day is untouched.
+    expect(notes.getProfile(REMI)?.content).toContain('Works at a bakery');
+    expect(notes.pendingDreams()).toEqual({ people: [] });
+    expect(getNotesStore().getProfile(REMI)).toBeUndefined();
+    expect(memory.getState(DREAM_NIGHT_KEY)).toBeUndefined();
+    expect(getMemoryStore().getState(DREAM_NIGHT_KEY)).toBeUndefined();
+    expect(out.at(-1)).toBe('Dreamed: 1 person updated, the group updated.');
   });
 
   it('refuses a run without a key, and a bootstrap without a mode', async () => {

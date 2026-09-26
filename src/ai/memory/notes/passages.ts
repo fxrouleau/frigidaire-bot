@@ -3,7 +3,7 @@
 // them for claims that are contested, low-confidence or about to become core profile facts, so its
 // rewrite is grounded in what was actually said rather than in a chain of summaries. Internal input for
 // the dream model only (never posted); deleted messages are left out, like everywhere else.
-import { type ArchivedMessage, getArchiveStore } from '../../../archive/archiveStore';
+import { type ArchivedMessage, type ArchiveStore, getArchiveStore } from '../../../archive/archiveStore';
 import { config } from '../../../config';
 import { logger } from '../../../logger';
 import { formatTimestampET } from '../../utils';
@@ -26,6 +26,8 @@ export type EvidencePassageOptions = {
   after?: number;
   /** Passages at most (default 8): the first cited ids win, so callers order ids by importance. */
   maxPassages?: number;
+  /** The archive to read (default: the bot's shared one). The bootstrap CLI passes its own. */
+  archive?: ArchiveStore;
 };
 
 export const EVIDENCE_PASSAGE_DEFAULTS = { before: 3, after: 2, maxPassages: 8, maxLineChars: 500 } as const;
@@ -41,7 +43,7 @@ export function loadEvidencePassages(messageIds: string[], opts: EvidencePassage
   const after = Math.max(0, Math.floor(opts.after ?? EVIDENCE_PASSAGE_DEFAULTS.after));
   const max = Math.max(0, Math.floor(opts.maxPassages ?? EVIDENCE_PASSAGE_DEFAULTS.maxPassages));
   try {
-    const store = getArchiveStore();
+    const store = opts.archive ?? getArchiveStore();
     const passages: EvidencePassage[] = [];
     const shown = new Set<string>();
     for (const id of messageIds) {

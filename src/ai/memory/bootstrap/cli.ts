@@ -8,8 +8,7 @@ import process from 'node:process';
 import { getModelCatalog } from '../../modelCatalog';
 import { getOpenRouterClient } from '../../openRouterClient';
 import { flushPendingUsage } from '../../usageFetch';
-import { runDreamsUntilCaughtUp } from '../notes/dreamer';
-import { DEFAULT_DATA_DIR, openDataStores, runCli } from './commands';
+import { DEFAULT_DATA_DIR, dreamOverStores, openDataStores, runCli } from './commands';
 
 async function main(): Promise<number> {
   // The CLI prints its own output: the bot's rotated log file and error captures stay the bot's.
@@ -25,7 +24,7 @@ async function main(): Promise<number> {
       },
       client: () => getOpenRouterClient(),
       priceOf: (model) => getModelCatalog().pricing(model),
-      dream: ({ memory, notes }, client) => runDreamsUntilCaughtUp({ memory, notes, client }),
+      dream: dreamOverStores,
     });
   } finally {
     // The usage ledger records each call's cost in the background: let it land before exiting.

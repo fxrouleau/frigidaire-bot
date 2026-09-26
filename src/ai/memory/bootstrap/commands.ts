@@ -15,8 +15,9 @@ import { config } from '../../../config';
 import type { ModelPricing } from '../../modelCatalog';
 import { makeDefaultEmbeddingProvider } from '../embeddingProvider';
 import { MemoryStore } from '../memoryStore';
-import type { NightlyDreamResult } from '../notes/dreamer';
+import { type NightlyDreamResult, runDreamsUntilCaughtUp } from '../notes/dreamer';
 import { NotesStore } from '../notes/notesStore';
+import { loadEvidencePassages } from '../notes/passages';
 import { type BootstrapEstimate, estimateBootstrap, planBootstrap, readProgress, runBootstrap } from './builtin';
 import { CHUNK_DEFAULTS } from './chunks';
 import { DEFAULT_EXPORT_DIR, runExport } from './export';
@@ -150,6 +151,26 @@ export function openDataStores(dataDir: string): { archive: ArchiveStore; memory
   }
   const memory = new MemoryStore(path.join(dataDir, 'memory.db'), { embeddings: makeDefaultEmbeddingProvider() });
   return { archive: new ArchiveStore(path.join(dataDir, 'archive.db')), memory, notes: new NotesStore(memory) };
+}
+
+/**
+ * The dream after a finished `bootstrap --run`: runDreamsUntilCaughtUp over the CLI's own stores (its
+ * memory.db and notes, and its archive.db for the cited passages), never the bot's shared singletons. It
+ * doesn't touch the nightly schedule's once-a-day claim (bot_state `dream:last_night`, which only
+ * dreamSchedule.ts sets), so the bot's own dream still runs that night for whatever is new by then.
+ */
+export function dreamOverStores(
+  stores: { archive: ArchiveStore; memory: MemoryStore; notes: NotesStore },
+  client: OpenAI,
+  opts: { now?: () => Date } = {},
+): Promise<NightlyDreamResult & { caughtUp: boolean }> {
+  return runDreamsUntilCaughtUp({
+    memory: stores.memory,
+    notes: stores.notes,
+    client,
+    ...(opts.now ? { now: opts.now } : {}),
+    loadPassages: (ids, passageOpts) => loadEvidencePassages(ids, { ...passageOpts, archive: stores.archive }),
+  });
 }
 
 function describeEstimate(e: BootstrapEstimate): string[] {
