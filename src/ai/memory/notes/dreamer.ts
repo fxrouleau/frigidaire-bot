@@ -32,6 +32,7 @@ import { featureRequestOptions, type UsageFeature } from '../../usage';
 import { extractUsage } from '../../usageFetch';
 import { parseSqliteUtc } from '../../utils';
 import type { Identity, Memory, MemoryStore } from '../memoryStore';
+import { type DreamLeaseHolder, takeDreamLease } from './dreamLease';
 import {
   buildEditPrompt,
   buildGroupDreamPrompt,
@@ -752,8 +753,8 @@ async function dreamGroupIfDue(deps: DreamDeps, now: Date): Promise<DreamOutcome
  * One night: NotesStore.pendingDreams({ limit: maxPeople ?? MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT }) people,
  * one at a time (most recently active first), then the group when it is due (planGroupDream: new server
  * rows, or the weekly refresh). Stops early after MAX_FAILURES_IN_A_ROW failed people in a row (an outage:
- * everyone left waits for the next night). Never throws. The scheduler
- * that calls it (once per Eastern day) and the report line are dreamSchedule.ts's.
+ * everyone left waits for the next night). Never throws. The scheduler that calls it (once per Eastern
+ * day, holding the dream lease: dreamLease.ts) and the report line are dreamSchedule.ts's.
  */
 export async function runNightlyDream(deps: DreamDeps & { maxPeople?: number }): Promise<NightlyDreamResult> {
   const now = (deps.now ?? (() => new Date()))();
@@ -817,6 +818,8 @@ async function dreamPeople(
 
 /** Passes runDreamsUntilCaughtUp makes at most (each reads up to MAX_JOURNAL_ROWS_PER_DREAM rows per owner). */
 export const MAX_CATCH_UP_PASSES = 100;
+/** runDreamsUntilCaughtUp's dream-lease holder label by default (what the bot's scheduler logs while it waits). */
+export const CATCH_UP_HOLDER = 'a catch-up dream (memory bootstrap)';
 
 /**
  * Dreams until nothing is pending (the built-in bootstrap, whose history leaves people thousands of rows
@@ -824,12 +827,13 @@ export const MAX_CATCH_UP_PASSES = 100;
  * everyone still pending (no per-night cap), then the group pass the same way, until no owner has rows
  * above their watermark. Someone whose dream fails is not retried in this run (they wait for the nightly
  * dream); MAX_FAILURES_IN_A_ROW failures in a row stop everything, as on a night. Uses only the stores and
- * client in `deps`, and never touches the nightly schedule's once-a-day claim (dreamSchedule.ts).
- * Never throws.
+ * client in `deps`, and never touches the nightly schedule's once-a-day claim (dreamSchedule.ts). It holds
+ * the dream lease (dreamLease.ts, as `holder`) while it runs, so the bot's nightly dream waits for it; when
+ * someone else holds it (the nightly dream is running), nothing is dreamed and `busy` says who. Never throws.
  */
 export async function runDreamsUntilCaughtUp(
-  deps: DreamDeps & { maxPasses?: number },
-): Promise<NightlyDreamResult & { passes: number; caughtUp: boolean }> {
+  deps: DreamDeps & { maxPasses?: number; holder?: string },
+): Promise<NightlyDreamResult & { passes: number; caughtUp: boolean; busy?: DreamLeaseHolder }> {
   const now = (deps.now ?? (() => new Date()))();
   const day = easternDay(now);
   const client = deps.client ?? getOpenRouterClient();
@@ -837,8 +841,33 @@ export async function runDreamsUntilCaughtUp(
     logger.warn('dream: OPENROUTER_API_KEY is not set; nothing dreamed.');
     return { day, people: [], passes: 0, caughtUp: false };
   }
-  const withClient: DreamDeps = { ...deps, client };
-  const maxPasses = Math.max(1, deps.maxPasses ?? MAX_CATCH_UP_PASSES);
+  let taken: ReturnType<typeof takeDreamLease>;
+  try {
+    taken = takeDreamLease(deps.memory, deps.holder ?? CATCH_UP_HOLDER);
+  } catch (error) {
+    logger.warn('dream: taking the dream lease failed; nothing dreamed:', error);
+    return { day, people: [], passes: 0, caughtUp: false };
+  }
+  if (!taken.ok) {
+    logger.warn(
+      `dream: ${taken.heldBy.holder} has been running since ${taken.heldBy.since} (Eastern); not catching up alongside it.`,
+    );
+    return { day, people: [], passes: 0, caughtUp: false, busy: taken.heldBy };
+  }
+  try {
+    return await catchUp({ ...deps, client }, day, now, Math.max(1, deps.maxPasses ?? MAX_CATCH_UP_PASSES));
+  } finally {
+    taken.lease.release();
+  }
+}
+
+/** runDreamsUntilCaughtUp's passes, under the lease. */
+async function catchUp(
+  deps: DreamDeps,
+  day: string,
+  now: Date,
+  maxPasses: number,
+): Promise<NightlyDreamResult & { passes: number; caughtUp: boolean }> {
   const people: DreamOutcome[] = [];
   const groups: DreamOutcome[] = [];
   // Not retried in this run: a failed dream (the nightly dream retries it), or one that found nothing.
@@ -855,7 +884,7 @@ export async function runDreamsUntilCaughtUp(
       passes++;
       logger.info(`dream: catch-up pass ${passes}: ${pending.length} ${pending.length === 1 ? 'person' : 'people'}.`);
       const from = people.length;
-      const run = await dreamPeople(pending, withClient, people, failuresInARow);
+      const run = await dreamPeople(pending, deps, people, failuresInARow);
       failuresInARow = run.failuresInARow;
       stopped = run.stopped;
       for (const outcome of people.slice(from)) {
@@ -864,7 +893,7 @@ export async function runDreamsUntilCaughtUp(
       }
     }
     while (!stopped && passes < maxPasses) {
-      const outcome = await dreamGroupIfDue(withClient, now);
+      const outcome = await dreamGroupIfDue(deps, now);
       if (outcome.status === 'skipped') break;
       passes++;
       groups.push(outcome);

@@ -9,6 +9,7 @@ import { archiveInput, snowflake } from '../../../test-support/fakeArchive';
 import { getMemoryStore, getNotesStore } from '../index';
 import { MemoryStore } from '../memoryStore';
 import type { NightlyDreamResult } from '../notes/dreamer';
+import { takeDreamLease } from '../notes/dreamLease';
 import { DREAM_NIGHT_KEY } from '../notes/dreamSchedule';
 import { NotesStore } from '../notes/notesStore';
 import { type CliDeps, dreamOverStores, openDataStores, parseArgs, runCli } from './commands';
@@ -203,6 +204,24 @@ describe('runCli', () => {
     expect(memory.getState(DREAM_NIGHT_KEY)).toBeUndefined();
     expect(getMemoryStore().getState(DREAM_NIGHT_KEY)).toBeUndefined();
     expect(out.at(-1)).toBe('Dreamed: 1 person updated, the group updated.');
+  });
+
+  it("doesn't dream alongside the bot's nightly dream, and says how to resume", async () => {
+    const answer = (content: unknown) => ({ body: chatCompletionBody(JSON.stringify(content)) });
+    const { client, requests } = createCapturingClient([
+      answer({
+        observations: [{ category: 'fact', subject_user_id: REMI, content: 'Works at a bakery.', quote: 'bakery at 5am' }],
+      }),
+    ]);
+    const nightly = takeDreamLease(memory, 'the nightly dream');
+    if (!nightly.ok) throw new Error('lease busy');
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    expect(await runCli(['bootstrap', '--run'], deps({ client: () => client, dream: dreamOverStores }))).toBe(0);
+    nightly.lease.release();
+    expect(requests).toHaveLength(1);
+    expect(err.at(-1)).toContain('The dream did not run: the nightly dream has been running since');
+    expect(err.at(-1)).toContain('Run `memory bootstrap --run` again once it is done');
+    expect(notes.pendingDreams().people).toHaveLength(1);
   });
 
   it('refuses a run without a key, and a bootstrap without a mode', async () => {

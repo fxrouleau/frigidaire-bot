@@ -2,7 +2,9 @@
 // day, on the first check at or after MEMORY_DREAM_HOUR (4): a bot that was down at 4 catches up the same
 // day, and a day that already ran (or started to) never runs again. The day is claimed in memory.db's
 // bot_state BEFORE the run, so a night that crashes or fails is not retried the same day: its people are
-// still above their watermarks and wait for the next night. After a night that changed notes (or failed
+// still above their watermarks and wait for the next night. While another process dreams over the same
+// memory.db (a `memory bootstrap --run` catching up: dreamLease.ts), the day stays unclaimed and the night
+// runs on the first check after it is done. After a night that changed notes (or failed
 // for someone), one line goes to the report channel (MEMORY_DREAM_REPORT), never pinging anyone:
 //
 //   🌙 dream · updated 2 profiles (Remi: new job at the bakery; Dale: quit Valorant) · group: new lore · $0.18
@@ -18,6 +20,7 @@ import { getReportChannelId, sendToReportChannel } from '../../reportChannel';
 import { easternParts } from '../../utils';
 import { getMemoryStore, getNotesStore } from '../index';
 import { type DreamOutcome, type NightlyDreamResult, runNightlyDream } from './dreamer';
+import { type DreamLeaseHolder, type DreamLeaseResult, takeDreamLease } from './dreamLease';
 import { easternDay } from './dreamPrompts';
 import { NOTE_VERSIONS_KEPT } from './notesStore';
 
@@ -107,6 +110,11 @@ export type DreamSchedulerOptions = {
   /** Runs one night (runNightlyDream over the shared stores by default). */
   run?: () => Promise<NightlyDreamResult>;
   /**
+   * Takes the dream lease for the night (takeDreamLease on the shared memory store by default), so the
+   * night never runs while another process on the same memory.db is dreaming.
+   */
+  lease?: () => DreamLeaseResult;
+  /**
    * After the night: trims the notes' version history (NotesStore.pruneVersions on the shared store by
    * default); resolves how many versions went.
    */
@@ -124,6 +132,13 @@ function defaultState(): DreamStateStore {
   return { get: (key) => store.getState(key), set: (key, value) => store.setState(key, value) };
 }
 
+/** The holder label of the nightly dream's lease (what another process is told). */
+export const NIGHTLY_DREAM_HOLDER = 'the nightly dream';
+
+function defaultLease(): DreamLeaseResult {
+  return takeDreamLease(getMemoryStore(), NIGHTLY_DREAM_HOLDER);
+}
+
 function defaultNameOf(userId: string): string | undefined {
   return getMemoryStore().getIdentityById(canonicalUserId(userId))?.display_name;
 }
@@ -131,6 +146,8 @@ function defaultNameOf(userId: string): string | undefined {
 /** Runs the nightly dream once per Eastern day. */
 export class DreamScheduler {
   private running = false;
+  /** The other holder last logged as dreaming, so a wait is logged once, not every tick. */
+  private waitingFor: string | undefined;
   private firstCheck: NodeJS.Timeout | undefined;
   private interval: NodeJS.Timeout | undefined;
 
@@ -138,8 +155,8 @@ export class DreamScheduler {
 
   /**
    * Runs the day's dream when it is due (MEMORY_DREAM_ENABLED, at/after MEMORY_DREAM_HOUR Eastern, not yet
-   * run today, not already running), then logs and reports it. Resolves with the night's result, or
-   * undefined when nothing ran. Never throws.
+   * run today, not already running here or in another process: the dream lease), then logs and reports it.
+   * Resolves with the night's result, or undefined when nothing ran. Never throws.
    */
   async check(): Promise<NightlyDreamResult | undefined> {
     if (!config.dream.enabled || this.running) return undefined;
@@ -149,20 +166,40 @@ export class DreamScheduler {
       const now = (this.opts.now ?? (() => new Date()))();
       const night = dueNight(now, config.dream.hour, state.get(DREAM_NIGHT_KEY));
       if (!night) return undefined;
-      // Claimed first: never twice a day, even when the run below crashes or fails.
-      state.set(DREAM_NIGHT_KEY, night);
-      const run = this.opts.run ?? (() => runNightlyDream({ notes: getNotesStore(), memory: getMemoryStore() }));
-      const result = await run();
-      logger.info(summaryLine(result));
-      await this.report(result);
-      this.prune();
-      return result;
+      // Someone else is dreaming (a bootstrap catching up): the day stays unclaimed, tried again next tick.
+      const taken = (this.opts.lease ?? defaultLease)();
+      if (!taken.ok) {
+        this.noteWaiting(night, taken.heldBy);
+        return undefined;
+      }
+      this.waitingFor = undefined;
+      try {
+        // Claimed first: never twice a day, even when the run below crashes or fails.
+        state.set(DREAM_NIGHT_KEY, night);
+        const run = this.opts.run ?? (() => runNightlyDream({ notes: getNotesStore(), memory: getMemoryStore() }));
+        const result = await run();
+        logger.info(summaryLine(result));
+        await this.report(result);
+        this.prune();
+        return result;
+      } finally {
+        taken.lease.release();
+      }
     } catch (error) {
       logger.warn('dream: the nightly check failed:', error);
       return undefined;
     } finally {
       this.running = false;
     }
+  }
+
+  private noteWaiting(night: string, heldBy: DreamLeaseHolder): void {
+    const key = `${heldBy.holder}@${heldBy.since}`;
+    if (this.waitingFor === key) return;
+    this.waitingFor = key;
+    logger.info(
+      `dream: ${heldBy.holder} has been running since ${heldBy.since} (Eastern); the night of ${night} waits until it is done.`,
+    );
   }
 
   /** Trims the notes' version history after the night; a failure is only logged. */

@@ -25,6 +25,7 @@ import {
   runNightlyDream,
   summarizePersonChanges,
 } from './dreamer';
+import { DREAM_LEASE_KEY, takeDreamLease } from './dreamLease';
 import { MAX_JOURNAL_ROWS_PER_DREAM } from './dreamPrompts';
 import { type NoteChange, NotesStore } from './notesStore';
 import type { EvidencePassage } from './passages';
@@ -884,6 +885,41 @@ describe('runDreamsUntilCaughtUp (the built-in bootstrap)', () => {
     expect(stopped.people.map((o) => o.status)).toEqual(['failed', 'failed', 'failed']);
     expect(stopped.group).toBeUndefined();
     expect(down.requests).toHaveLength(3);
+  });
+
+  it('dreams nothing while the nightly dream holds the lease, and holds it itself while it runs', async () => {
+    insertRows(2, 'Remi', REMI);
+    const nightly = takeDreamLease(memory, 'the nightly dream');
+    if (!nightly.ok) throw new Error('lease busy');
+    const { client, requests } = createCapturingClient([
+      reply({ notes: [newProfile()], change_summary: 'x' }),
+      reply({ notes: [{ topic: 'vibe', title: 'Vibe', content: '## Now\nChill.' }], change_summary: 'vibe' }),
+    ]);
+    const busy = await runDreamsUntilCaughtUp(deps(client));
+    expect(busy).toMatchObject({ people: [], passes: 0, caughtUp: false, busy: { holder: 'the nightly dream' } });
+    expect(requests).toHaveLength(0);
+    nightly.lease.release();
+
+    let heldDuringRun: boolean | undefined;
+    const watching = createCapturingClient(
+      [
+        reply({ notes: [newProfile()], change_summary: 'x' }),
+        reply({ notes: [{ topic: 'vibe', title: 'Vibe', content: '## Now\nChill.' }], change_summary: 'vibe' }),
+      ],
+      {
+        onRequest: (_request, index) => {
+          if (index > 0) return;
+          const other = takeDreamLease(memory, 'the nightly dream');
+          heldDuringRun = !other.ok;
+          if (other.ok) other.lease.release();
+        },
+      },
+    );
+    const run = await runDreamsUntilCaughtUp({ ...deps(watching.client), holder: 'the memory bootstrap (CLI)' });
+    expect(run.busy).toBeUndefined();
+    expect(run.people.map((o) => o.status)).toEqual(['updated']);
+    expect(heldDuringRun).toBe(true);
+    expect(memory.getState(DREAM_LEASE_KEY)).toBe('');
   });
 });
 
