@@ -28,7 +28,7 @@ memories.zip
 .claude
 .editorconfig
 .gitattributes
-.gitignore
+# .gitignore stays: Biome 2 (vcs.useIgnoreFile) refuses to run without it, and `yarn check:ci` runs in the image.
 lefthook.yml
 REFACTOR_PLAN.md
 

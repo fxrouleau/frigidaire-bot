@@ -10,8 +10,9 @@ FROM node:26-trixie-slim AS node
 
 FROM python:3.14-slim-trixie
 
+# libatomic1: the official Node binary links libatomic.so.1, which the python image doesn't ship.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends bc ca-certificates curl jq \
+ && apt-get install -y --no-install-recommends bc ca-certificates curl jq libatomic1 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
