@@ -544,6 +544,8 @@ Everything here is off unless `REPORT_CHANNEL_ID` is set. `sendToReportChannel()
 
 ## Long-term memory & learning
 
+> **Memory v2 (in progress):** per-person notes, circles (notes shared by a set of members, dated membership), conversation-end capture and a nightly dream, with the journal (`memories`) as the source of truth. The design, data model and code map are in [docs/memory.md](docs/memory.md); read it before touching memory. Already in: the notes tables and `NotesStore` (`src/ai/memory/notes/`), journal evidence/recurrence/related members, notes and circles in chat turns, the `list_notes`/`read_note`/`search_notes`/`record_correction` tools, the birthday writer and WHO'S WHO on profiles, the `CaptureTrigger` seam, the dream/edit contract (`dreamer.ts`), the config and `src/botOwner.ts`. This section still describes v1 where the two differ; it is rewritten when v2 lands.
+
 - `MemoryStore` (`./data/memory.db`): memories (+ FTS5 index + embedding vectors), member identities, emoji rows (name/caption/use count), learner state, generic `bot_state` key/values. The prompt builder injects capped, relevance-ranked memories each turn.
 - **Memory tools**:
   - `recall_memories`: resolves a subject (or a query that is a person's name) through `getForPerson`, plus keyword and category search; every line prefixed `[id:N]`.
@@ -968,7 +970,7 @@ Both image workflows build the `ci` Docker stage (GHA layer cache), which runs `
 - There is no `CLAUDE.md`; this file is the project instruction file (the harness and the Claude feature-request workflow read `AGENTS.md`).
 - **Done in this batch** (don't redo): usage-grounded emoji captions (what emoji means what), the people resolver + linked accounts, replying without a mention, the message archive, reminders/polls/birthdays, media, the link reader, the sandbox, context-menu commands, feature requests → GitHub, the usage ledger, the file log, the persona and gate evals.
 - **Deliberately deferred** (future tasks, not incremental work):
-  - The memory *architecture* rework toward per-member profile documents + a consolidation job (today: atomic facts + retrieval injection).
+  - The memory *architecture* rework toward per-member profile documents + a consolidation job: now in progress as memory v2 (see [docs/memory.md](docs/memory.md)).
   - A backlog of scheduled events: recurring reminders, DM reminders, scheduled events beyond reminders and birthdays.
   - Thread history backfill in the archive.
   - An offline eval set for the ramble judge (hold out real rambles as positives).
