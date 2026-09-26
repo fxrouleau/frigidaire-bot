@@ -306,7 +306,8 @@ the dream only processes rows added after it.
 - A footer with the version, its age and who last changed it (the nightly dream, an owner edit, the bootstrap,
   an import, an undo). A circle also shows its members (dated, with roles) and its other names.
 
-Right-clicking the bot shows the group's notes, then every circle. People without notes see their raw
+Right-clicking the bot shows the group's notes, then every circle (before the group has notes of its own, it
+opens on an empty **Group notes** entry, where the owner's Edit starts them). People without notes see their raw
 memories; someone the bot knows nothing about gets one plain line. Everyone can view everyone.
 
 Owner-only buttons (the owner: `BOT_OWNER_USER_IDS`, else the Discord application's owner or its team's

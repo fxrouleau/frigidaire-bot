@@ -574,6 +574,51 @@ describe('owner edit through the real proposeEdit (dreamer.ts)', () => {
   });
 });
 
+describe('the group before its first notes (circles already exist)', () => {
+  const GROUP_HOME: ViewerState = { subject: { kind: 'group' }, screen: { kind: 'home' }, page: 0 };
+
+  function menu(sent: Sent): string[] {
+    for (const row of sent.components ?? []) {
+      for (const c of row.components) if (c.type === ComponentType.StringSelect) return c.options.map((o) => o.label);
+    }
+    return [];
+  }
+
+  it('opens on the empty group notes, with the circles one pick away, for anyone', () => {
+    const sent = view(GROUP_HOME, false);
+    expect(sent.embeds?.[0]).toMatchObject({
+      author: { name: "The group's notes" },
+      description: 'no group notes yet, the nightly dream writes them',
+    });
+    expect(menu(sent)).toEqual(['Group notes', 'The MTG crew']);
+    expect(selected(sent)).toBe('Group notes');
+    expect(labels(sent)).toEqual(['select']);
+  });
+
+  it("lets the owner start the group's notes with Edit, even after opening a circle", async () => {
+    const lore = output({
+      notes: [{ topic: 'lore', title: 'Lore', content: '## Now\nThe server started as a study group.' }],
+      change_summary: 'first lore',
+    });
+    const fake = fakeDeps(async (target) => proposal(target, lore));
+    const home = view(GROUP_HOME);
+    const onCircle = sentOf((await choose(componentId(home, 'select'), `n${notes.getCircle('mtg')?.id}`, fake, OWNER))[0]);
+    expect(onCircle.embeds?.[0].author?.name).toBe('Circle');
+    const back = sentOf((await choose(componentId(onCircle, 'select'), 'h', fake, OWNER))[0]);
+    expect(back.embeds?.[0].description).toBe('no group notes yet, the nightly dream writes them');
+
+    const { modal, preview } = await draft(fake, 'start the lore: we began as a study group', back);
+    expect(modal.title).toBe("Edit the group's notes");
+    expect(fake.recorders.proposeEdit.calls[0][0].target).toEqual({ scope: 'group' });
+    const confirmed = await click(componentId(preview, 'Confirm'), fake);
+    expect(confirmed[0].content).toBe('done, saved lore v1');
+    expect(notes.getNote({ scope: 'group' }, 'lore')).toMatchObject({ version: 1, updatedBy: 'edit' });
+    expect(notes.getCircle('mtg')?.version).toBe(1);
+    // With a group note, the placeholder entry is gone.
+    expect(menu(sentOf(confirmed[0]))).toEqual(['Lore', 'The MTG crew']);
+  });
+});
+
 describe('owner-only', () => {
   it('never offers Edit or Undo to anyone else, and refuses them when clicked anyway', async () => {
     notes.writeNotes({ scope: 'person', ownerId: REMI }, [{ topic: 'profile', title: 'Remi', content: '## Now\nv2.' }], {

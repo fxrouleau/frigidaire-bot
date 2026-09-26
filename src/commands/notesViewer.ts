@@ -370,7 +370,20 @@ function circleDescription(membership: CircleMembership | undefined, circle: Not
   return `${place} · ${age(circle.updatedAt, now)}`;
 }
 
-/** The select menu's entries for a subject, at most 25: notes first, then circles, then (a person) the journal. */
+/**
+ * The group's own (empty) screen while it has no notes but circles exist: without it the menu would only
+ * lead to circles, and the owner's Edit there, which starts the group's notes, would be out of reach.
+ */
+const GROUP_HOME_OPTION: ViewerOption = {
+  screen: { kind: 'home' },
+  label: 'Group notes',
+  description: 'none yet · the nightly dream writes them',
+};
+
+/**
+ * The select menu's entries for a subject, at most 25: notes first (the group's empty screen while it has
+ * none), then circles, then (a person) the journal.
+ */
 export function viewerOptions(subject: ViewerSubject, ctx: ViewerContext): ViewerOption[] {
   const noteOption = (note: Note): ViewerOption => ({
     screen: { kind: 'note', noteId: note.id },
@@ -383,14 +396,13 @@ export function viewerOptions(subject: ViewerSubject, ctx: ViewerContext): Viewe
   const max = DISCORD_LIMITS.selectOptions;
   if (subject.kind === 'group') {
     const topics = ctx.notes.listNotes({ scope: 'group' }).map(noteOption);
-    const circles = ctx.notes
-      .listCircles()
-      .slice(0, Math.max(0, max - topics.length))
-      .map((circle) => ({
-        ...noteOption(circle),
-        description: clip(circleDescription(undefined, circle, ctx.now), DISCORD_LIMITS.optionText),
-      }));
-    return [...topics, ...circles];
+    const allCircles = ctx.notes.listCircles();
+    const home = topics.length === 0 && allCircles.length > 0 ? [GROUP_HOME_OPTION] : [];
+    const circles = allCircles.slice(0, Math.max(0, max - topics.length - home.length)).map((circle) => ({
+      ...noteOption(circle),
+      description: clip(circleDescription(undefined, circle, ctx.now), DISCORD_LIMITS.optionText),
+    }));
+    return [...home, ...topics, ...circles];
   }
   const topics = personNotes(ctx, subject.id).map(noteOption);
   const circles = ctx.notes
@@ -414,30 +426,27 @@ type Resolved =
   | { kind: 'journal'; notice?: string }
   | { kind: 'empty'; notice?: string };
 
-function resolveHome(subject: ViewerSubject, ctx: ViewerContext, options: ViewerOption[]): Resolved {
+function resolveHome(subject: ViewerSubject, ctx: ViewerContext): Resolved {
   if (subject.kind === 'person') {
     // The profile first; no notes of their own yet → the raw memories (their circles stay in the menu).
     const profile = personNotes(ctx, subject.id).find((n) => n.topic === PROFILE_TOPIC);
     return profile ? { kind: 'note', note: profile } : { kind: 'journal' };
   }
-  // The group: its first topic, else the first circle.
-  for (const option of options) {
-    if (option.screen.kind !== 'note') continue;
-    const note = ctx.notes.getNoteById(option.screen.noteId);
-    if (note?.active) return { kind: 'note', note };
-  }
-  return { kind: 'empty' };
+  // The group: its first topic; none yet → its empty screen (never a circle: Edit there would edit the
+  // circle, not start the group's notes). The circles stay in the menu.
+  const first = ctx.notes.listNotes({ scope: 'group' })[0];
+  return first ? { kind: 'note', note: first } : { kind: 'empty' };
 }
 
-function resolveScreen(state: ViewerState, ctx: ViewerContext, options: ViewerOption[]): Resolved {
+function resolveScreen(state: ViewerState, ctx: ViewerContext): Resolved {
   const { screen, subject } = state;
   if (screen.kind === 'journal' && subject.kind === 'person') return { kind: 'journal' };
   if (screen.kind === 'note') {
     const note = ctx.notes.getNoteById(screen.noteId);
     if (note?.active) return { kind: 'note', note };
-    return { ...resolveHome(subject, ctx, options), notice: VIEWER_LINES.noteGone };
+    return { ...resolveHome(subject, ctx), notice: VIEWER_LINES.noteGone };
   }
-  return resolveHome(subject, ctx, options);
+  return resolveHome(subject, ctx);
 }
 
 function footerFor(note: Note, page: number, pages: number, now: Date): string {
@@ -534,7 +543,7 @@ export function renderViewer(state: ViewerState, ctx: ViewerContext, notice?: st
   const name = subjectName(subject, ctx);
   const issued = encodeTime(ctx.now);
   const options = viewerOptions(subject, ctx);
-  const resolved = resolveScreen(state, ctx, options);
+  const resolved = resolveScreen(state, ctx);
   const text = [notice, resolved.notice].filter((line): line is string => !!line).join('\n');
 
   let screen: ViewerScreen;
