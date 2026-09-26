@@ -293,20 +293,39 @@ the dream only processes rows added after it.
 
 ## Viewer and owner edits
 
-"What does Fridge know?" (right-click a member) becomes a private viewer: the person's `profile` first, a
-select menu of their topics and circles, Prev/Next when a note is longer than one page (~3,800 chars), and a
-footer with version, age and who last changed it. Right-clicking the bot shows the group notes. People without
-notes see today's memory list. Everyone can view everyone.
+"What does Fridge know?" (right-click a member) is a private viewer: one ephemeral message, updated in place.
+- The person's `profile` first. Its first page also says what the notes don't reflect yet: how many journal
+  rows are newer, and the open corrections with who made them.
+- A select menu (at most 25 entries): their topics, their circles (current ones, then former ones with their
+  spans), and **Raw memories**, the journal list with the ids `forget_memory` takes.
+- Prev/Next when a note is longer than one page (~3,800 characters, cut before a heading or at a paragraph).
+- A footer with the version, its age and who last changed it (the nightly dream, an owner edit, the bootstrap,
+  an import, an undo). A circle also shows its members (dated, with roles) and its other names.
+
+Right-clicking the bot shows the group's notes, then every circle. People without notes see their raw
+memories; someone the bot knows nothing about gets one plain line. Everyone can view everyone.
 
 Owner-only buttons (the owner: `BOT_OWNER_USER_IDS`, else the Discord application's owner or its team's
 members; a linked side account counts):
 - **Edit**: a modal ("What should change?", ≤ 4,000 chars) → the edit model gets the target's notes (a
-  person's with their circles) and the instruction → an ephemeral before/after preview → **Confirm** saves new
-  versions (`updated_by = 'edit'`, reason = the instruction) / **Cancel**.
-- **Undo**: restores the previous version of the shown note (membership included for a circle).
+  person's with their circles) and the instruction → the message becomes a before/after preview, one change
+  per page: a line diff (`-` before, `+` after) and, for a circle, its membership and other names before and
+  after → **Confirm** saves new versions (`updated_by = 'edit'`, reason = the instruction) / **Cancel**. Edit
+  on a circle edits that circle; anywhere else it edits the person's (or the group's) notes.
+- **Undo vN**: restores the version before the shown one as a new version (membership included for a circle).
+  The button carries the version it was shown for, so a double click never undoes twice.
 
-Components encode the note id, page and action in `custom_id` (≤ 100 chars); interactions expire after 15
-minutes (said in character); paging uses `interaction.update()`.
+Safety:
+- Owner actions are re-checked on every click; a button being there proves nothing. The owner check is bounded
+  at 1.5 s so Discord's 3-second window holds: past it, the viewer leaves the owner buttons out, and an owner
+  action says to try again.
+- A drafted edit is held in memory for 15 minutes (not across restarts). Confirm refuses it when a note it
+  covers changed since the draft (the dream, another edit, an undo), and a draft that comes back for another
+  target than the one asked about is dropped.
+- A component's `custom_id` (≤ 100 chars) carries everything a click needs: the action, the subject (a
+  person's main id or the group), the screen (a note id or the raw memories), the page and when it was
+  issued. The viewer holds no state between clicks. Its buttons expire 15 minutes after the render that
+  issued them (said in character), and paging and the menu use `interaction.update()`.
 
 ## Bootstrap
 
@@ -415,6 +434,9 @@ Spend section and `query_costs` automatically; the dream's report line carries t
 | `src/ai/capture/citations.ts` | resolving an observation's cited lines, quote and related members |
 | `src/ai/capture/knowledge.ts` | what the extractor already knows about the people in a conversation |
 | `src/ai/tools/notes.ts` | `list_notes`, `read_note`, `search_notes`, `record_correction` |
+| `src/commands/whatDoesFridgeKnow.ts`, `src/commands/notesViewer.ts` | the viewer: the command, its custom ids and rendering |
+| `src/commands/notesViewerActions.ts`, `src/commands/noteDiff.ts` | the viewer's clicks: paging, the owner's Edit (draft, diff preview, Confirm/Cancel) and Undo |
+| `src/events/notesViewerInteraction.ts` | routes the viewer's buttons, menu and modal |
 | `src/botOwner.ts` | the owner resolution |
 
 Tests use a fictional cast and placeholder snowflakes; everything is hermetic (in-memory stores, injected
