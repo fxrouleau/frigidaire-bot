@@ -161,7 +161,7 @@ describe('PersonalityLearner observation cycle', () => {
     await learner.observeOnce(client);
 
     const texts = partsOf(requests[0]).map((p) => p.text);
-    const at = texts.findIndex((t) => t?.startsWith('[') && t.includes('[Wheelie (id:100000000000000002)]'));
+    const at = texts.findIndex((t) => t?.startsWith('#') && t.includes('[Wheelie (id:100000000000000002)]'));
     expect(texts[at + 1]).toBe('[voice message transcript: I got the job]');
   });
 
@@ -210,7 +210,7 @@ describe('PersonalityLearner observation cycle', () => {
     // The default learner model reasons at 'max' unless told otherwise, which could spend the whole cap.
     expect(requests.map((r) => r.body.reasoning)).toEqual([{ effort: 'low' }, { effort: 'low' }]);
     expect(requests.map((r) => r.body.max_tokens)).toEqual([4096, 4096]);
-    expect(requests.map((r) => r.headers.get(FEATURE_HEADER))).toEqual(['learner', 'self_improvement']);
+    expect(requests.map((r) => r.headers.get(FEATURE_HEADER))).toEqual(['memory_capture', 'self_improvement']);
   });
 
   it("gives the self-improvement pass the bot's mention id and the asked rule", async () => {
@@ -262,7 +262,8 @@ describe('PersonalityLearner observation cycle', () => {
       webhookId: 'wh-1',
       authorUsername: 'Wheelie',
       channelId: CHANNEL_ID,
-      createdAt: new Date(BASE),
+      // In the same conversation as the messages below (a first capture reads only the last one).
+      createdAt: new Date(BASE + ++seq * 60_000),
       content: 'https://fixvx.com/x/status/1',
     }).message;
     const { client } = channelServing([
@@ -389,6 +390,7 @@ describe('PersonalityLearner observation cycle', () => {
       tickMs: 60_000,
       describe: () => 'test',
       noteActivity: (activity) => noted.push(activity),
+      noteBacklog: () => {},
       takeDue: (now) => {
         asked.push(now);
         const taken = due;

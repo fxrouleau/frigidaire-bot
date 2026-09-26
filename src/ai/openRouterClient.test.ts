@@ -86,14 +86,14 @@ describe('usage tracking through the real SDK', () => {
 
     const response = await client.chat.completions.create(
       { model: 'qwen/qwen3-vl-235b-a22b-instruct', messages: [{ role: 'user', content: 'hi' }] },
-      featureRequestOptions('learner'),
+      featureRequestOptions('memory_capture'),
     );
     await flushPendingUsage();
 
     expect(response.choices[0].message.content).toBe('ok');
     expect(seen[0].has(FEATURE_HEADER)).toBe(false);
     expect(seen[0].get('X-Title')).toBe('Frigidaire Bot');
-    expect(ledgerByFeature()).toEqual({ learner: { requests: 1, costUsd: 0.0021 } });
+    expect(ledgerByFeature()).toEqual({ memory_capture: { requests: 1, costUsd: 0.0021 } });
     expect(getUsageSummary(NOW - DAY, NOW + DAY).byModel[0].model).toBe('qwen/qwen3-vl-235b-a22b-instruct');
   });
 
