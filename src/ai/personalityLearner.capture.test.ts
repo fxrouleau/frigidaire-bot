@@ -411,6 +411,33 @@ describe('capture keeps what it cites', () => {
     expect(drafts?.related_user_ids ?? null).toBeNull();
   });
 
+  it('drops what a later part takes from its already-covered lead-in', async () => {
+    store.setLastObserved(CHANNEL, idAt(0));
+    // Two stretches with a pause between them, too long for one request: the second part opens with the
+    // end of the first (#1, #2) under ALREADY COVERED.
+    const text = (i: number) => (i === 30 ? 'I adopted a husky named Pepper' : `message ${i}`);
+    const log = [post(0, REMI, 0), ...chat(1, 30, 10, text), ...chat(31, 30, 52, text)];
+    const dale = (content: string, evidence: unknown) => ({ category: 'fact', subject: 'Dale', subject_user_id: DALE, content, evidence });
+    const first = { observations: [dale('Owns a husky named Pepper', { lines: [30] })] };
+    const second = {
+      observations: [
+        dale('Has a dog called Pepper', { lines: [2] }),
+        dale('Adopted a husky', { quote: 'adopted a husky named Pepper' }),
+        dale('Walks Pepper before drafts', { lines: [2, 3] }),
+      ],
+    };
+    const { client } = clientServing(log);
+    const { learner, requests } = learnerWith([reply(first), reply(second)], { sizes: { segmentMaxChars: 40 * 60, leadInChars: 200 } });
+
+    await learner.observeOnce(client, BASE + 300 * MIN);
+
+    expect(requests).toHaveLength(2);
+    expect(linesOf(requests[1])[2]).toMatch(/^#2 .* I adopted a husky named Pepper$/);
+    const rows = store.getAllActive();
+    expect(rows.map((m) => m.content).sort()).toEqual(['Owns a husky named Pepper', 'Walks Pepper before drafts']);
+    expect(rows.find((m) => m.content === 'Owns a husky named Pepper')?.seen_count).toBe(1);
+  });
+
   it('puts a relationship row in every member’s journal', async () => {
     store.setLastObserved(CHANNEL, idAt(0));
     const output = {

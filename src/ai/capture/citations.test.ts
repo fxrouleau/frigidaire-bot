@@ -51,8 +51,8 @@ describe('citedEvidence', () => {
   it('drops line numbers the request never showed, and junk', () => {
     const result = citedEvidence({ evidence: { lines: [0, 9, -1, 2.5, 'two', null, '#1'] } }, LINES);
     expect(result.evidence?.messageIds).toEqual([msgId(1)]);
-    expect(citedEvidence({ evidence: 'line 2' }, LINES)).toEqual({});
-    expect(citedEvidence({}, LINES)).toEqual({});
+    expect(citedEvidence({ evidence: 'line 2' }, LINES)).toEqual({ leadInOnly: false });
+    expect(citedEvidence({}, LINES)).toEqual({ leadInOnly: false });
   });
 
   it('matches quotes whatever their case, spacing, quote marks and elisions', () => {
@@ -86,6 +86,20 @@ describe('citedEvidence', () => {
     expect(citedEvidence({ evidence: { quote: 'that was close' } }, lines).evidence?.messageIds).toEqual([msgId(2)]);
   });
 
+  it('flags an observation that rests on lead-in lines only', () => {
+    const lines = transcript(['I adopted a husky', 'her name is Pepper', 'anyway drafts friday?'], 2);
+    // Cited by number, or found by its quote: taken from what the previous segment already covered.
+    expect(citedEvidence({ evidence: { lines: [1, 2] } }, lines).leadInOnly).toBe(true);
+    expect(citedEvidence({ evidence: { quote: 'adopted a husky' } }, lines)).toMatchObject({
+      evidence: { messageIds: [msgId(1)] },
+      leadInOnly: true,
+    });
+    // A lead-in line cited with a conversation line is context for something new.
+    expect(citedEvidence({ evidence: { lines: [2, 3] } }, lines).leadInOnly).toBe(false);
+    expect(citedEvidence({ evidence: { lines: [3], quote: 'husky' } }, lines).leadInOnly).toBe(false);
+    expect(citedEvidence({}, lines).leadInOnly).toBe(false);
+  });
+
   it('cites every message of a line that merges several (the bootstrap)', () => {
     const merged = new Map<number, TranscriptLine>([
       [1, { line: 1, messageId: msgId(1), messageIds: [msgId(1), msgId(2)], at: BASE, text: '21:40 Remi: bakery at 5am / send help', leadIn: false }],
@@ -94,13 +108,14 @@ describe('citedEvidence', () => {
     expect(citedEvidence({ quote: 'Remi: bakery at 5am' }, merged)).toEqual({
       evidence: { messageIds: [msgId(1), msgId(2)], quote: 'Remi: bakery at 5am' },
       observedAt: new Date(BASE),
+      leadInOnly: false,
     });
   });
 
   it('drops an invented quote but keeps the cited lines', () => {
     const result = citedEvidence({ evidence: { lines: [2], quote: 'I love working at the bakery' } }, LINES);
     expect(result.evidence).toEqual({ messageIds: [msgId(2)] });
-    expect(citedEvidence({ evidence: { quote: 'never said' } }, LINES)).toEqual({});
+    expect(citedEvidence({ evidence: { quote: 'never said' } }, LINES)).toEqual({ leadInOnly: false });
   });
 
   it('clamps the quote and caps the cited lines', () => {

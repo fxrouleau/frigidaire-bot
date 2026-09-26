@@ -886,8 +886,14 @@ export class PersonalityLearner {
         continue;
       }
 
+      const { evidence, observedAt, leadInOnly } = citedEvidence(obs, lines);
+      if (leadInOnly) {
+        // Taken from the "ALREADY COVERED" lead-in, which the previous part already read: saved again, it
+        // would count one message as a second sighting, or file a reworded duplicate.
+        logger.info(`${label}: dropping an observation that cites only already-covered lines: ${obs.content}`);
+        continue;
+      }
       const { subject, subjectUserId } = this.normalizeSubject(obs.subject, obs.subject_user_id, members);
-      const { evidence, observedAt } = citedEvidence(obs, lines);
       // Self-improvement rows are about the bot: nobody's journal.
       const related = SELF_IMPROVEMENT_CATEGORIES.includes(category) ? [] : relatedMembers(obs, members, subjectUserId);
       await this.store.save({

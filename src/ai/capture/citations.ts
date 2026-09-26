@@ -90,12 +90,14 @@ function lineNumbers(raw: unknown): number[] {
  * Unknown line numbers are dropped. The quote is kept only when it occurs in a cited line (or across the
  * cited lines read together); one that occurs in another shown line cites that line too; one that occurs
  * nowhere is dropped (the dream rereads quotes as what was actually said). `observedAt` is when the newest
- * cited message was posted, for the row's first/last seen.
+ * cited message was posted, for the row's first/last seen. `leadInOnly`: every line it resolved to is a
+ * lead-in line (shown as context only, already read with the previous segment), so the observation was
+ * extracted from what the previous segment covered; the caller drops it.
  */
 export function citedEvidence(
   observation: Record<string, unknown>,
   lines: ReadonlyMap<number, TranscriptLine>,
-): { evidence?: JournalEvidence; observedAt?: Date } {
+): { evidence?: JournalEvidence; observedAt?: Date; leadInOnly: boolean } {
   const raw = observation.evidence;
   const fields: Record<string, unknown> =
     raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
@@ -133,7 +135,11 @@ export function citedEvidence(
     (max, line) => (max === undefined || line.at > max ? line.at : max),
     undefined,
   );
-  return { ...(evidence ? { evidence } : {}), ...(newest !== undefined ? { observedAt: new Date(newest) } : {}) };
+  return {
+    ...(evidence ? { evidence } : {}),
+    ...(newest !== undefined ? { observedAt: new Date(newest) } : {}),
+    leadInOnly: citedLines.length > 0 && citedLines.every((line) => line.leadIn),
+  };
 }
 
 /**

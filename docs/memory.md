@@ -200,7 +200,9 @@ All of it is untrusted model output:
 - line numbers resolve only to lines the request showed, so the model never types a message id;
 - a quote is kept only when it occurs in the cited messages (case, spacing, quote marks and "…" elisions
   tolerated); one found in another shown line cites that line too, and an invented one is dropped;
-- related members must be known members (ids or unique names; a side account counts as its main).
+- related members must be known members (ids or unique names; a side account counts as its main);
+- an observation whose lines (cited, or found by its quote) are all in the already-covered lead-in is dropped:
+  the previous part read them, and saving it again would count one message as a second sighting.
 
 A row's first and last seen are when the newest message it cites was posted.
 
