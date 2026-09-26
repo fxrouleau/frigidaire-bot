@@ -25,7 +25,7 @@ docker run -d --name "$NAME" \
   --tmpfs /tmp:size=256m,mode=1777,exec \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  --memory 1g --cpus 1 --pids-limit 256 \
+  --memory 2g --memory-swap 2g --cpus 1 --pids-limit 256 \
   -e SANDBOX_TOKEN="$TOKEN" \
   -e SANDBOX_WORKSPACE_MAX_MB=64 \
   -p 127.0.0.1:18080:8080 \

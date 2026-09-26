@@ -42,13 +42,18 @@ Environment (all optional):
     SANDBOX_HOST / _PORT     bind address (default 0.0.0.0:8080; port 0 picks a free port). Bound to a
                              loopback address (local development, tests), local clients are allowed.
     SANDBOX_WORKSPACE        working directory and HOME for runs (default /workspace)
-    SANDBOX_MEMORY_MB        per-process RLIMIT_DATA (default 768)
-    SANDBOX_FILE_SIZE_MB     per-file RLIMIT_FSIZE (default 100)
-    SANDBOX_WORKSPACE_MAX_MB     disk the whole workspace may use (default 2048)
+    SANDBOX_MAX_TIMEOUT_SECONDS  the longest a run may go; longer requests are cut to it (default 900 = 15 min)
+    SANDBOX_MEMORY_MB        per-process RLIMIT_DATA (default 1792: a clean MemoryError before the container's
+                             2 GB limit)
+    SANDBOX_FILE_SIZE_MB     per-file RLIMIT_FSIZE (default 0 = no per-file cap; the workspace limit applies)
+    SANDBOX_WORKSPACE_MAX_MB     disk the whole workspace may use (default 20480)
     SANDBOX_WORKSPACE_MAX_FILES  files and directories the workspace may hold (default 200000)
     SANDBOX_MAX_PROCESSES    RLIMIT_NPROC for the run's user (default 128)
     SANDBOX_QUEUE_SIZE       runs allowed to wait for the lock (default 3)
-    SANDBOX_QUEUE_WAIT_SECONDS  how long a queued run waits before giving up (default 30)
+    SANDBOX_QUEUE_WAIT_SECONDS  how long a queued run waits before giving up (default 30). A refused request
+                             gets HTTP 429/503 with "busy_for_seconds" and "busy_limit_seconds" (how long the
+                             current run has been going and its own time limit), so the caller can say when
+                             to try again.
 """
 
 from __future__ import annotations
@@ -77,16 +82,19 @@ from typing import Any
 
 log = logging.getLogger('sandbox')
 
+# A request without timeout_seconds (the bot always sends one) gets this, capped at SANDBOX_MAX_TIMEOUT_SECONDS.
 DEFAULT_TIMEOUT_SECONDS = 20
-MAX_TIMEOUT_SECONDS = 60
 MAX_BODY_BYTES = 1024 * 1024
 MAX_CODE_BYTES = 256 * 1024
 # Output kept per stream. The head carries most of the signal; a short tail keeps the last lines (a final
 # answer after a long loop, the exception at the end of a traceback) when a run is chatty.
 OUTPUT_HEAD_BYTES = 12 * 1024
 OUTPUT_TAIL_BYTES = 4 * 1024
-MAX_OUT_FILES = 5
-MAX_OUT_BYTES = 8 * 1024 * 1024
+# Files from out/ ride on the bot's Discord reply: at most 10 attachments per message, each within Discord's
+# default 10 MB upload limit, 25 MB in all. Anything over is listed as omitted, with the reason.
+MAX_OUT_FILES = 10
+MAX_OUT_FILE_BYTES = 10 * 1024 * 1024
+MAX_OUT_BYTES = 25 * 1024 * 1024
 # How long to wait for the output pipes to drain after every process of the run is gone.
 READER_JOIN_SECONDS = 2.0
 
@@ -142,14 +150,18 @@ spec = sys.argv[1]
 for item in spec.split(','):
     name, value = item.split('=')
     res = getattr(resource, name)
-    want = int(value)
     soft, hard = resource.getrlimit(res)
-    if hard != resource.RLIM_INFINITY:
-        want = min(want, hard)
-    extra = 2 if name == 'RLIMIT_CPU' else 0
-    new_hard = want + extra
-    if hard != resource.RLIM_INFINITY:
-        new_hard = min(new_hard, hard)
+    if value == 'inf':
+        # No cap of our own: as much as this process may have (unlimited in the container).
+        want = new_hard = hard
+    else:
+        want = int(value)
+        if hard != resource.RLIM_INFINITY:
+            want = min(want, hard)
+        extra = 2 if name == 'RLIMIT_CPU' else 0
+        new_hard = want + extra
+        if hard != resource.RLIM_INFINITY:
+            new_hard = min(new_hard, hard)
     resource.setrlimit(res, (want, new_hard))
 os.execvp(sys.argv[2], sys.argv[2:])
 """
@@ -172,9 +184,11 @@ class Settings:
         self.host = os.environ.get('SANDBOX_HOST', '').strip() or '0.0.0.0'
         self.port = env_int('SANDBOX_PORT', 8080, 0, 65535)
         self.workspace = os.path.abspath(os.environ.get('SANDBOX_WORKSPACE', '').strip() or '/workspace')
-        self.memory_bytes = env_int('SANDBOX_MEMORY_MB', 768, 64, 65536) * 1024 * 1024
-        self.file_size_bytes = env_int('SANDBOX_FILE_SIZE_MB', 100, 1, 65536) * 1024 * 1024
-        self.workspace_max_bytes = env_int('SANDBOX_WORKSPACE_MAX_MB', 2048, 16, 1_048_576) * 1024 * 1024
+        self.max_timeout_seconds = env_int('SANDBOX_MAX_TIMEOUT_SECONDS', 900, 1, 86_400)
+        self.memory_bytes = env_int('SANDBOX_MEMORY_MB', 1792, 64, 65536) * 1024 * 1024
+        # 0 (the default): no per-file cap. The workspace limit below still bounds what a run can write.
+        self.file_size_bytes = env_int('SANDBOX_FILE_SIZE_MB', 0, 0, 1_048_576) * 1024 * 1024
+        self.workspace_max_bytes = env_int('SANDBOX_WORKSPACE_MAX_MB', 20480, 16, 1_048_576) * 1024 * 1024
         self.workspace_max_files = env_int('SANDBOX_WORKSPACE_MAX_FILES', 200_000, 100, 100_000_000)
         self.max_processes = env_int('SANDBOX_MAX_PROCESSES', 128, 8, 1_000_000)
         self.queue_size = env_int('SANDBOX_QUEUE_SIZE', 3, 0, 100)
@@ -471,6 +485,15 @@ def collect_out_files(out_dir: str) -> tuple[list[dict[str, Any]], list[dict[str
         if len(files) >= MAX_OUT_FILES:
             omitted.append({'name': entry.name, 'size': info.st_size, 'reason': f'more than {MAX_OUT_FILES} files'})
             continue
+        if info.st_size > MAX_OUT_FILE_BYTES:
+            omitted.append(
+                {
+                    'name': entry.name,
+                    'size': info.st_size,
+                    'reason': f'over the {MAX_OUT_FILE_BYTES // (1024 * 1024)} MB per-file limit',
+                }
+            )
+            continue
         if total + info.st_size > MAX_OUT_BYTES:
             omitted.append(
                 {
@@ -606,8 +629,8 @@ def _filesystem_usage(path: str) -> tuple[int, int]:
 class WorkspaceQuota:
     """Keeps the workspace under SANDBOX_WORKSPACE_MAX_MB / _MAX_FILES.
 
-    RLIMIT_FSIZE only caps each file, and the workspace is a volume on the host's disk: without this, one
-    60 s run (or a few runs in a row) could write tens of GB there and fill the disk the bot's databases
+    RLIMIT_FSIZE caps each file at most (and by default not at all), and the workspace is a volume on the
+    host's disk: without this, one long run (or a few runs in a row) could fill the disk the bot's databases
     live on. The exact size comes from walking the workspace after every run. During a run, the
     filesystem's own usage (statvfs, cheap) is polled; only when the last exact size plus that growth
     could be over the limit is the workspace walked again, and the run is killed if it really is.
@@ -690,10 +713,11 @@ def child_env(settings: Settings, run_dir: str) -> dict[str, str]:
 
 
 def rlimit_spec(settings: Settings, timeout_seconds: float) -> str:
-    limits = {
+    limits: dict[str, int | str] = {
         'RLIMIT_CPU': math.ceil(timeout_seconds) + 1,
         'RLIMIT_DATA': settings.memory_bytes,
-        'RLIMIT_FSIZE': settings.file_size_bytes,
+        # 0 means no per-file cap: the launcher leaves RLIMIT_FSIZE at what the server itself has.
+        'RLIMIT_FSIZE': settings.file_size_bytes or 'inf',
         'RLIMIT_NPROC': settings.max_processes,
         'RLIMIT_NOFILE': 1024,
         'RLIMIT_CORE': 0,
@@ -877,13 +901,16 @@ class RunGate:
         self._cond = threading.Condition()
         self._busy = False
         self._waiting = 0
+        # The current holder: when it got the lock, and its run's time limit (for "busy, try again in …").
+        self._since = 0.0
+        self._limit = 0.0
         self.queue_size = queue_size
         self.wait_seconds = wait_seconds
 
-    def acquire(self) -> str:
+    def acquire(self, limit_seconds: float = 0.0) -> str:
         with self._cond:
             if not self._busy:
-                self._busy = True
+                self._take(limit_seconds)
                 return 'ok'
             if self._waiting >= self.queue_size:
                 return 'queue_full'
@@ -895,10 +922,15 @@ class RunGate:
                     if remaining <= 0:
                         return 'timeout'
                     self._cond.wait(remaining)
-                self._busy = True
+                self._take(limit_seconds)
                 return 'ok'
             finally:
                 self._waiting -= 1
+
+    def _take(self, limit_seconds: float) -> None:
+        self._busy = True
+        self._since = time.monotonic()
+        self._limit = limit_seconds
 
     def release(self) -> None:
         with self._cond:
@@ -908,6 +940,13 @@ class RunGate:
     def snapshot(self) -> tuple[bool, int]:
         with self._cond:
             return self._busy, self._waiting
+
+    def holder(self) -> tuple[int, int] | None:
+        """(seconds the current run has held the lock, its time limit), or None when nothing holds it."""
+        with self._cond:
+            if not self._busy:
+                return None
+            return int(time.monotonic() - self._since), math.ceil(self._limit)
 
 
 # ---- HTTP -------------------------------------------------------------------------------------------
@@ -919,7 +958,7 @@ class RequestError(Exception):
         self.status = status
 
 
-def parse_run_request(body: bytes) -> tuple[str, str, float, bool]:
+def parse_run_request(body: bytes, max_timeout_seconds: float) -> tuple[str, str, float, bool]:
     try:
         payload = json.loads(body.decode('utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -944,7 +983,7 @@ def parse_run_request(body: bytes) -> tuple[str, str, float, bool]:
         reset = False
     if not isinstance(reset, bool):
         raise RequestError(HTTPStatus.BAD_REQUEST, 'reset_workspace must be a boolean')
-    return language, code, float(min(MAX_TIMEOUT_SECONDS, max(1, timeout))), reset
+    return language, code, float(min(max_timeout_seconds, max(1, timeout))), reset
 
 
 def make_handler(settings: Settings, gate: RunGate, quota: WorkspaceQuota) -> type[BaseHTTPRequestHandler]:
@@ -998,17 +1037,22 @@ def make_handler(settings: Settings, gate: RunGate, quota: WorkspaceQuota) -> ty
                 self.send_json(HTTPStatus.UNAUTHORIZED, {'error': 'unauthorized'})
                 return
             try:
-                language, code, timeout, reset = parse_run_request(self.read_body())
+                language, code, timeout, reset = parse_run_request(self.read_body(), settings.max_timeout_seconds)
             except RequestError as error:
                 self.send_json(error.status, {'error': str(error)})
                 return
 
             queued_at = time.monotonic()
-            verdict = gate.acquire()
+            verdict = gate.acquire(timeout)
             if verdict != 'ok':
                 log.warning('run refused: sandbox busy (%s)', verdict)
                 status = HTTPStatus.TOO_MANY_REQUESTS if verdict == 'queue_full' else HTTPStatus.SERVICE_UNAVAILABLE
-                self.send_json(status, {'error': 'sandbox is busy with another run'})
+                payload: dict[str, Any] = {'error': 'sandbox is busy with another run'}
+                # Runs can take many minutes: say how far along the current one is, so "try again" means something.
+                holder = gate.holder()
+                if holder is not None:
+                    payload['busy_for_seconds'], payload['busy_limit_seconds'] = holder
+                self.send_json(status, payload)
                 return
             try:
                 waited_ms = int((time.monotonic() - queued_at) * 1000)
@@ -1112,6 +1156,13 @@ def main() -> None:
         enforce_quota(settings, quota)
         log.info('workspace holds %s (limit %d MB / %d entries)', quota.describe(), quota.limit_mb, quota.max_files)
 
+    log.info(
+        'run limits: %d s, %d MB of memory per process, %s per file, %d processes',
+        settings.max_timeout_seconds,
+        settings.memory_bytes // (1024 * 1024),
+        f'{settings.file_size_bytes // (1024 * 1024)} MB' if settings.file_size_bytes else 'no cap',
+        settings.max_processes,
+    )
     gate = RunGate(settings.queue_size, settings.queue_wait_seconds)
     server = SandboxServer((settings.host, settings.port), make_handler(settings, gate, quota))
     host, port = server.server_address[:2]

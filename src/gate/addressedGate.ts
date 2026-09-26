@@ -32,10 +32,11 @@ import { createNameMatcher, readableMarkup, truncate } from './text';
 const CAP_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_CONTEXT_SIZE = 6;
 // A routed turn keeps its channel's exchange open while it runs, but a turn that never reports back
-// (aiChat always does; this is the backstop) stops counting after this long. The clock starts when the
-// turn is queued, so a slow turn (a video, a long tool loop, a wait behind other turns) can outlast it:
-// its answer still counts once it reports back (noteTurnDone).
-const PENDING_TURN_TTL_MS = 5 * 60 * 1000;
+// (aiChat always does; this is the backstop) stops counting after this long: longer than a run_code call
+// may take (15 min) plus the model's own rounds. The clock starts when the turn is queued, so a slower turn
+// (several long runs, a wait behind other turns) can outlast it: its answer still counts once it reports
+// back (noteTurnDone).
+const PENDING_TURN_TTL_MS = 20 * 60 * 1000;
 const LOG_EXCERPT_CHARS = 80;
 // Who a reply to the bot's transcript of a voice message is aimed at: the voice message, not the bot.
 const VOICE_MESSAGE_TARGET = 'a voice message';

@@ -49,6 +49,7 @@ describe('the Dockerfile base stage (the CI test image)', () => {
 function startServer(
   workspace: string,
   host = '127.0.0.1',
+  extraEnv: Record<string, string> = {},
 ): Promise<{ child: ChildProcess; baseUrl: string; logs: () => string }> {
   const child = spawn('python3', [SERVER_SCRIPT], {
     env: {
@@ -63,6 +64,7 @@ function startServer(
       // Small enough for the disk-limit test to cross cheaply; far above what the other tests write.
       SANDBOX_WORKSPACE_MAX_MB: '64',
       SANDBOX_WORKSPACE_MAX_FILES: '2000',
+      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -151,6 +153,64 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     const next = await runInSandbox({ language: 'bash', code: 'cat note.txt; ls out | wc -l', timeoutSeconds: 10 }, client());
     expect(next.ok && next.result.stdout.split(/\s+/).filter(Boolean)).toEqual(['kept', '0']);
     expect(readFileSync(path.join(workspace, 'note.txt'), 'utf8')).toBe('kept\n');
+  });
+
+  it('runs with 1792 MB of data per process and no per-file size cap by default', async () => {
+    const outcome = await runInSandbox(
+      {
+        language: 'python',
+        code: [
+          'import resource',
+          'soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)',
+          // No cap of its own: whatever the server may have (unlimited outside odd test hosts).
+          'print(soft == hard, soft == resource.RLIM_INFINITY)',
+          'print(resource.getrlimit(resource.RLIMIT_DATA)[0] // (1024 * 1024))',
+        ].join('\n'),
+        timeoutSeconds: 10,
+      },
+      client(),
+    );
+
+    expect(outcome).toMatchObject({ ok: true, result: { exit_code: 0 } });
+    if (!outcome.ok) return;
+    const [fsize, data] = outcome.result.stdout.trim().split('\n');
+    expect(fsize.split(' ')[0]).toBe('True');
+    expect(data).toBe('1792');
+    await expectLog(server, /run limits: 900 s, 1792 MB of memory per process, no cap per file, 1000000 processes/);
+  });
+
+  it('returns up to 10 files from out/, each up to 10 MB and 25 MB in all, and names the rest', async () => {
+    const many = await runInSandbox(
+      { language: 'bash', code: 'for i in $(seq -w 0 10); do echo $i > out/f$i.txt; done', timeoutSeconds: 10 },
+      client(),
+    );
+    expect(many.ok && many.result.files.map((f) => f.name)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `f${String(i).padStart(2, '0')}.txt`),
+    );
+    expect(many.ok && many.result.files_omitted).toEqual([{ name: 'f10.txt', size: 3, reason: 'more than 10 files' }]);
+
+    const MB = 1024 * 1024;
+    const big = await runInSandbox(
+      {
+        language: 'python',
+        code: [
+          `open('out/a_huge.bin', 'wb').write(b'x' * (10 * ${MB} + 1))`,
+          `for name in ('b1', 'b2', 'b3'): open(f'out/{name}.bin', 'wb').write(b'y' * (9 * ${MB}))`,
+        ].join('\n'),
+        timeoutSeconds: 30,
+      },
+      client(),
+    );
+    expect(big).toMatchObject({ ok: true, result: { exit_code: 0, disk_limit_exceeded: false } });
+    if (!big.ok) return;
+    expect(big.result.files.map((f) => [f.name, f.size])).toEqual([
+      ['b1.bin', 9 * MB],
+      ['b2.bin', 9 * MB],
+    ]);
+    expect(big.result.files_omitted).toEqual([
+      { name: 'a_huge.bin', size: 10 * MB + 1, reason: 'over the 10 MB per-file limit' },
+      { name: 'b3.bin', size: 9 * MB, reason: 'over the 25 MB total limit' },
+    ]);
   });
 
   it('kills a run at its timeout and keeps the output so far', async () => {
@@ -384,6 +444,45 @@ describe.skipIf(!canRunServer)('sandbox/server.py', () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe.skipIf(!canRunServer)('sandbox/server.py with a short run limit and no waiting line', () => {
+  let workspace: string;
+  let server: Awaited<ReturnType<typeof startServer>>;
+
+  beforeAll(async () => {
+    workspace = realpathSync(mkdtempSync(path.join(tmpdir(), 'sandbox-server-test-')));
+    server = await startServer(workspace, '127.0.0.1', { SANDBOX_MAX_TIMEOUT_SECONDS: '2', SANDBOX_QUEUE_SIZE: '0' });
+  });
+
+  afterAll(async () => {
+    if (server?.child.exitCode === null) {
+      const exited = new Promise((resolve) => server.child.once('exit', resolve));
+      server.child.kill('SIGTERM');
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
+      server.child.kill('SIGKILL');
+    }
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it("cuts a longer request to SANDBOX_MAX_TIMEOUT_SECONDS, and a request refused as busy learns the run's progress", async () => {
+    const client = { url: server.baseUrl, token: TOKEN };
+    const long = runInSandbox({ language: 'bash', code: 'echo started; sleep 30', timeoutSeconds: 60 }, client);
+    await expectLog(server, /run limits: 2 s/);
+    // Let the first run take the lock.
+    await vi.waitFor(
+      async () => expect((await (await fetch(`${server.baseUrl}/health`)).json()).busy).toBe(true),
+      { timeout: 2000, interval: 25 },
+    );
+
+    const refused = await runInSandbox({ language: 'bash', code: 'true', timeoutSeconds: 1 }, client);
+    const first = await long;
+
+    expect(refused).toMatchObject({ ok: false, kind: 'busy', busy: { limitSeconds: 2 } });
+    if (!refused.ok) expect(refused.busy?.runningSeconds).toBeLessThanOrEqual(2);
+    expect(first).toMatchObject({ ok: true, result: { timed_out: true, stdout: 'started\n' } });
+    if (first.ok) expect(first.result.duration_ms).toBeLessThan(5000);
   });
 });
 

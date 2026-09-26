@@ -382,19 +382,31 @@ describe('AddressedGate exchanges (follow-ups without a name)', () => {
     });
   });
 
-  it('stops counting a turn that never reports back after 5 minutes', async () => {
+  it('keeps counting a turn that is still running after 15 minutes (a long run_code call)', async () => {
     const h = harness();
-    h.clock.now = T0 - 301_000;
+    h.clock.now = T0 - 15 * 60_000;
+    h.gate.noteRouted(human('<@bot-1> crunch this dataset', { at: h.clock.now }).message);
+    h.clock.now = T0;
+    expect(await h.gate.evaluate(human('also add a chart').message)).toMatchObject({
+      respond: true,
+      trigger: 'followup',
+      cold: false,
+    });
+  });
+
+  it('stops counting a turn that never reports back after 20 minutes', async () => {
+    const h = harness();
+    h.clock.now = T0 - 20 * 60_000 - 1_000;
     h.gate.noteRouted(human('<@bot-1> think hard about this', { at: h.clock.now }).message);
     h.clock.now = T0;
     expect(await h.gate.evaluate(human('so?').message)).toEqual({ respond: false, reason: 'no_trigger' });
   });
 
-  it("still counts a slow turn's answer when it reports back after those 5 minutes", async () => {
+  it("still counts a slow turn's answer when it reports back after those 20 minutes", async () => {
     const h = harness();
-    // Queued behind other turns, then a video watch: the answer lands 6 minutes after the ping.
-    const slow = human('<@bot-1> watch this and tell me', { at: T0 - 360_000 }).message;
-    h.clock.now = T0 - 360_000;
+    // Queued behind other turns, then two long runs: the answer lands 21 minutes after the ping.
+    const slow = human('<@bot-1> run the numbers both ways', { at: T0 - 21 * 60_000 }).message;
+    h.clock.now = T0 - 21 * 60_000;
     h.gate.noteRouted(slow);
     // Meanwhile the channel state is read (someone else's message), which drops the stale turn.
     h.clock.now = T0 - 30_000;

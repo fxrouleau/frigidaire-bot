@@ -49,8 +49,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 1g
-    memswap_limit: 1g
+    # 2 GB for the container; one process gets SANDBOX_MEMORY_MB (1792) of data, so a program that wants more
+    # gets a clean MemoryError first. Runs last up to 15 minutes (SANDBOX_MAX_TIMEOUT_SECONDS).
+    mem_limit: 2g
+    memswap_limit: 2g
     cpus: 1
     pids_limit: 256
 
@@ -72,6 +74,6 @@ services:
 volumes:
   # Files the sandbox's runs keep between calls (pip --user installs, downloads, scratch data). A fresh named
   # volume inherits the image's /workspace ownership (uid 10001); a host bind mount would need a chown.
-  # It lives on the host's disk, so the sidecar caps it (SANDBOX_WORKSPACE_MAX_MB, default 2048; a run that
-  # goes over is killed and the workspace wiped).
+  # It lives on the host's disk, so the sidecar caps it (SANDBOX_WORKSPACE_MAX_MB, default 20480 = 20 GB: keep
+  # that much free on the host; a run that goes over is killed and the workspace wiped).
   sandbox-workspace:
