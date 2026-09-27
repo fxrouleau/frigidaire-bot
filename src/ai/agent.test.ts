@@ -136,22 +136,20 @@ describe('AgentOrchestrator.handleMention', () => {
     expect(developerPromptText(provider)).toContain('how long ago it was last confirmed');
   });
 
-  it('tells the model to forget the stale memory when a fact is corrected', async () => {
+  it('tells the model to record corrections, and never to argue with a self-correction', async () => {
     const provider = new FakeProvider([textResponse('Hi')]);
     const orchestrator = makeOrchestrator(provider);
     const fake = createFakeMessage({ content: 'hello' });
 
     await orchestrator.handleMention(fake.message);
 
-    const developerEntry = provider.calls[0].messages.find(
-      (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'developer',
-    );
-    expect(developerEntry).toBeDefined();
-    const promptText = developerEntry!.content.map((p) => (p.type === 'text' ? p.text : '')).join('\n');
-
-    // The correction guidance now names forget_memory and the distinctive 'has to go' phrasing.
-    expect(promptText).toContain('forget_memory');
-    expect(promptText).toContain('has to go');
+    const promptText = developerPromptText(provider);
+    expect(promptText).toContain('record it with record_correction');
+    expect(promptText).toContain('Never argue with someone correcting a fact about themselves');
+    expect(promptText).toContain('A correction about someone else is that person\'s claim');
+    // A joke is never a reason to delete anything.
+    expect(promptText).toContain('never a reason to forget_memory anything');
+    expect(promptText).toContain('list_notes, read_note and search_notes');
   });
 
   it('executes a single tool round then replies', async () => {

@@ -6,6 +6,7 @@ import {
   type Observation,
   type ObservationCategory,
   parseLearnerOutput,
+  salvageTruncatedObservations,
 } from './personalityLearner';
 
 describe('Observation type', () => {
@@ -155,6 +156,39 @@ describe('parseLearnerOutput', () => {
   it('accepts empty observations array', () => {
     const parsed = parseLearnerOutput('{"observations": []}');
     expect(parsed?.observations).toEqual([]);
+  });
+});
+
+describe('salvageTruncatedObservations', () => {
+  const entries = [
+    { category: 'fact', subject: 'Remi', content: 'Says "}]" when stuck', evidence: { lines: [1, 2], quote: 'a \\"quoted\\" }] bit' } },
+    { category: 'fact', subject: 'Dale', content: 'Owns a husky', related_user_ids: ['100000000000000001'] },
+    { category: 'event', subject: 'server', content: 'Road trip planned', evidence: { lines: [7], quote: 'road trip' } },
+  ];
+  const full = JSON.stringify({ observations: entries, identity_updates: [{ discord_user_id: '1', irl_name: 'Remi' }] }, null, 2);
+
+  it('keeps the entries that closed before the cut, whatever the braces inside their strings', () => {
+    const cut = full.slice(0, full.indexOf('road trip"') + 4);
+    expect(parseLearnerOutput(cut)).toBeUndefined();
+    expect(salvageTruncatedObservations(cut)).toEqual(entries.slice(0, 2));
+  });
+
+  it('keeps the whole array when the cut came after it', () => {
+    const cut = full.slice(0, full.indexOf('"irl_name"'));
+    expect(salvageTruncatedObservations(cut)).toEqual(entries);
+  });
+
+  it('finds the array after prose or a code fence', () => {
+    const cut = `Here you go:\n\`\`\`json\n${full.slice(0, full.indexOf('"Owns a husky"'))}`;
+    expect(salvageTruncatedObservations(cut)).toEqual(entries.slice(0, 1));
+  });
+
+  it('keeps nothing when no entry closed or there is no observations array', () => {
+    expect(salvageTruncatedObservations(full.slice(0, full.indexOf('"Says')))).toBeUndefined();
+    expect(salvageTruncatedObservations('{"observations": [')).toBeUndefined();
+    expect(salvageTruncatedObservations('{"observations": []')).toBeUndefined();
+    expect(salvageTruncatedObservations('[{"category": "fact", "subject": "A", "content": "b"}, {"cat')).toBeUndefined();
+    expect(salvageTruncatedObservations('not json')).toBeUndefined();
   });
 });
 

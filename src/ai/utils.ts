@@ -126,6 +126,11 @@ export function parseSqliteUtc(sqliteUtcTimestamp: string | null | undefined): n
   return Number.isFinite(ms) ? ms : undefined;
 }
 
+/** A Date in the SQLite UTC format every memory.db timestamp uses: "2026-09-25 14:03:00". */
+export function toSqliteUtc(date: Date): string {
+  return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
 /**
  * Renders a SQLite `datetime('now')` timestamp as a terse relative age for prompt injection. Garbage or
  * missing input yields '' so prompt building never throws.

@@ -5,7 +5,7 @@
 A Discord bot built in **TypeScript** that lives in one private friend server as "one of the group". Features (each has a section under [Architecture](#architecture)):
 
 1. **AI chat** — mention or reply to the bot, or just talk to it: a cheap *gate* decides when a message without a mention is still meant for it. One provider (OpenRouter), multi-round tool calling, vision, native web search. Each turn sees what was said since the last one, the reply chain it answers, link previews, voice transcripts and video descriptions.
-2. **Long-term memory** — facts, member identities (every name a person goes by, side accounts folded in) and emoji captions in SQLite. Hybrid retrieval (embeddings fused with FTS5) and a background personality learner. See [Long-term memory](#long-term-memory--learning).
+2. **Long-term memory** — a journal of observations captured when each conversation ends, folded every night by a strong model ("the dream") into per-person notes (a profile plus topic notes), group notes and circles (notes shared by a set of members), grounded in the messages they came from and weighted by recency × recurrence. Chat turns see the notes plus anything newer; corrections count at once; everyone can view the notes, the owner can edit and undo them; years of archive history can bootstrap them. Also member identities (every name a person goes by, side accounts folded in) and hybrid journal search (embeddings fused with FTS5). See [Long-term memory](#long-term-memory--learning) and [docs/memory.md](docs/memory.md).
 3. **Media** — voice messages are transcribed (Whisper, plus a quiet transcript reply) and videos are watched by Gemini (a description, and answers to follow-up questions), within a daily video budget.
 4. **Link reader** — tweets, TikToks/Reels, YouTube, Reddit, Bluesky, GIFs and articles are read through an SSRF-guarded fetch. The model gets a preview automatically and can open the full content with `read_link`.
 5. **Link fixing** — Twitter/X, Instagram, TikTok, Reddit and Bluesky links are rewritten to probed embed fixers and reposted faithfully as the author (attachments, spoilers, threads, reply line, tweet translation). Fixer outages are reported.
@@ -14,16 +14,16 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 8. **Spontaneous reactions** — auto-react learns how the group reacts and, rarely, adds one emoji to a standout post. It ships in **shadow** mode: it only reports what it would do. Emoji captions are re-grounded in real usage.
 9. **Ramble redirect** — a configured member's rambles get an in-character nudge toward their own channel.
 10. **Code sandbox** — `run_code` runs Python/bash/node in a secret-free sidecar container (math, charts, data): up to 15 minutes, 2 GB, a 20 GB workspace.
-11. **Right-click commands** — Ask Fridge, Summarize from here, Transcribe, Translate, Remember this, What does Fridge know?
+11. **Right-click commands** — Ask Fridge, Summarize from here, Transcribe, Translate, Remember this, What does Fridge know? (a notes viewer; the owner can edit and undo).
 12. **Feature requests → GitHub** — members' requests become public issues (or +1s on existing ones). The owner's `claude-implement` label has Claude implement them in a PR.
 13. **Deleted-message repost** — a configured member's message deleted right after posting is judged ("was that edgy?") and reposted as them. Off unless `DELETE_REPOST_USER_IDS` is set.
-14. **Report channel & ops** — the weekly self-diagnosis digest with OpenRouter spend, a "🚀 Deployed `<sha>`" line with the channel configuration, fixer alerts, auto-react shadow lines, `!wrapped` previews. Also a per-feature usage ledger and a rotated log file.
+14. **Report channel & ops** — the weekly self-diagnosis digest with OpenRouter spend, a "🚀 Deployed `<sha>`" line with the channel configuration, the nightly dream's line, the owner's note edits and undos, notes imports, fixer alerts, auto-react shadow lines, `!wrapped` previews. Also a per-feature usage ledger and a rotated log file.
 
 ## Hard rules
 
-- **Zero data retention.** Every OpenRouter request that carries member content is routed with `provider: { zdr: true }`: chat, summaries, images, embeddings, learner, captions, judges, media, commands, evals. OpenRouter's `/audio/transcriptions` endpoint ignores provider routing, so it is used only while the model catalog shows **every** host serving `TRANSCRIPTION_MODEL` on OpenRouter's ZDR list. That is checked at startup, daily and before each request; otherwise transcription falls back to a chat model with `zdr: true`. `src/ai/openRouterCallSites.test.ts` enforces tagging and ZDR on every call site: fix the call site, never loosen the test.
+- **Zero data retention.** Every OpenRouter request that carries member content is routed with `provider: { zdr: true }`: chat, summaries, images, embeddings, memory capture, the dream, owner edits, the built-in bootstrap, captions, judges, media, commands, evals. OpenRouter's `/audio/transcriptions` endpoint ignores provider routing, so it is used only while the model catalog shows **every** host serving `TRANSCRIPTION_MODEL` on OpenRouter's ZDR list. That is checked at startup, daily and before each request; otherwise transcription falls back to a chat model with `zdr: true`. `src/ai/openRouterCallSites.test.ts` enforces tagging and ZDR on every call site: fix the call site, never loosen the test.
 - **The repo is public.** No real member names (the owner, Felix, is the only exception), Discord ids, server channel names or private chat content in code, tests, fixtures, comments, commit messages or docs. Ids live in env only. Tests use a fictional cast and placeholder snowflakes; `scenarioFile.test.ts` and `cases.test.ts` enforce parts of this. The learner prompt's GOOD/BAD examples are the one grandfathered exception (see [Notes for agents](#notes-for-agents)): don't add to it.
-- **No censoring in the learner.** Observations stay verbatim: there is deliberately **no censoring or paraphrasing rule** (Felix's explicit call; do not add one).
+- **No censoring in memory.** Capture observations stay verbatim, and the dream, owner edits and the bootstrap describe people as they are: there is deliberately **no censoring or paraphrasing rule** anywhere in memory (Felix's explicit call; do not add one).
 - **Bot posts never ping @everyone, @here or roles.** The client-wide default `allowedMentions: { parse: ['users'], repliedUser: true }` (`src/discordClient.ts`) covers every plain send, because chat replies carry model-written text. Relays, reminders, commands, transcripts, polls, Wrapped and report lines pass stricter values (`parse: []`).
 - **Paid judges fail closed.** No verdict means no action (gate, deleted-message judge, ramble, auto-react), and every cap or cooldown is checked before the paid call and again right after it.
 - **Failures are in character, and silent when nobody asked.** User-facing errors are in-character lines. An unprompted (gate-routed) turn that fails or has nothing to say posts nothing.
@@ -40,7 +40,7 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 - **Media**: `sharp` (images); `ffmpeg`/`ffprobe` in the prod image (keyframes, MP3 transcodes)
 - **Sandbox sidecar**: its own image (`sandbox/`): Python 3.14 + Node 26 behind a stdlib-only HTTP server; the compose service is capped at 2 GB / 1 CPU, runs at 15 minutes, the workspace at 20 GB
 - **Lint/format**: Biome 2 (120 cols, 2 spaces, single quotes, trailing commas; `noUnusedImports`/`noUnusedVariables` are errors; `check` also sorts imports through the organizeImports assist)
-- **Tests**: Vitest 5 (with `vite` as an explicit dev dependency: Yarn does not install peers), ~2,800 tests in ~170 files colocated as `src/**/*.test.ts`
+- **Tests**: Vitest 5 (with `vite` as an explicit dev dependency: Yarn does not install peers), ~3,300 tests in ~200 files colocated as `src/**/*.test.ts`
 - **Deployment**: two Docker images (the bot, the sandbox sidecar) built and pushed by CI; dev/test toolchain fully containerized (host needs only Docker)
 
 ## Project structure
@@ -55,6 +55,7 @@ src/
 ├── logger.ts  logFile.ts      # Console logger, mirrored into the size-rotated ./data/logs/bot.log
 ├── channelEnv.ts              # Every channel variable resolved to #names (startup log + deploy ping)
 ├── linkedAccounts.ts          # LINKED_ACCOUNTS: canonicalUserId(), accountIdsFor(), isSamePerson()
+├── botOwner.ts                # Who the owner is: BOT_OWNER_USER_IDS, else the Discord application's owner/team (fails closed)
 ├── relay.ts                   # Registry of the bot's webhook relays + attributeMessage(): who really wrote a message
 ├── utils.ts                   # splitMessage(), sendViaWebhook(), repostMessage()/repostBlocker(), mentionsInText()
 ├── deletedMessages.ts         # DeletedMessageReposter — snapshot cache + judge + webhook repost for watched users
@@ -73,17 +74,26 @@ src/
 │   ├── decisions.ts           # The one caller of /api/alpha/decisions (ZDR, 6 s timeout, one retry, usage recorded)
 │   ├── messageJudge.ts        # "Was this deleted message edgy?": decision model, chat-model fallback
 │   ├── tools.ts               # Tool registry + the memory, summary, image and emoji tools
-│   ├── tools/                 # One file per feature's tools: birthdays, costs, featureRequest, linkReader, messageSearch, react,
+│   ├── tools/                 # One file per feature's tools: birthdays, costs, featureRequest, linkReader, messageSearch, notes, react,
 │   │                          #   reminders, sandbox, video; summary.ts (THE summary pipeline); localImageGenerator.ts
 │   ├── emojiPolicy.ts         # applyEmojiPolicy() — deterministic guardrail on custom-emoji use in replies
 │   ├── emojiSync.ts emojiCaptioner.ts  # Reconcile guild emojis to the DB; caption them (visual + usage halves) with a vision model
 │   ├── promptSections.ts      # Shared SERVER PEOPLE / emoji glossary lines, custom-emoji parsing, CDN URLs
-│   ├── personalityLearner.ts learnerInstance.ts  # Off-mention observer: observations, identity updates, self-improvement
+│   ├── personalityLearner.ts learnerInstance.ts  # Memory capture: observations, identity updates, self-improvement
+│   ├── captureTrigger.ts      # When capture reads a channel: ConversationEndTrigger (idle / max span, 1-minute tick)
+│   ├── capture/               # conversation.ts (paging, splitting into parts with lead-ins), citations.ts (evidence, related
+│   │                          #   members), knowledge.ts (what the extractor already knows)
 │   ├── digest.ts reportChannel.ts  # Weekly digest rendering; report-channel sending (returns whether it posted)
 │   ├── debugCapture.ts failureLogger.ts  # Error captures for replay; self-diagnosis memories
 │   ├── types.ts utils.ts      # Core types (CONVERSATION_STATE_SCHEMA_VERSION); Eastern-time helpers
-│   ├── memory/                # memoryStore.ts (memories + FTS5 + vectors, identities, emojis, state), embeddingProvider.ts,
-│   │                          #   startupMaintenance.ts (stamp, then compact), vectorMath.ts, wordOverlap.ts, index.ts
+│   ├── memory/                # memoryStore.ts (the journal + FTS5 + vectors, identities, emojis, state), evidence.ts,
+│   │                          #   embeddingProvider.ts, startupMaintenance.ts (stamp, then compact), vectorMath.ts, wordOverlap.ts, index.ts
+│   │   ├── notes/             # notesStore.ts (notes, circles, versions, dream state), schema.ts (validators), sections.ts,
+│   │   │                      #   context.ts (prompt rendering), passages.ts (cited messages), dreamer.ts + dreamPrompts.ts
+│   │   │                      #   (the dream, the group pass, owner edits), dreamSchedule.ts (once a night, report line),
+│   │   │                      #   dreamLease.ts (one dream at a time across processes)
+│   │   └── bootstrap/         # cli.ts + commands.ts (`yarn memory …`), transcript.ts, people.ts, chunks.ts, export.ts, notesTree.ts,
+│   │                          #   importer.ts (startup import), observations.ts (playbook bookkeeping), builtin.ts, dates.ts, tokens.ts
 │   ├── media/                 # Voice and video: index.ts (entry points + routing), transcriber.ts + speechToText.ts (Whisper / chat
 │   │                          #   fallback), video.ts + videoBudget.ts + clipCache.ts, enricher.ts, autoTranscribe.ts, download.ts,
 │   │                          #   transcoder.ts (ffmpeg), formats.ts, voice.ts, store.ts (bot.db), modelCall.ts
@@ -99,7 +109,8 @@ src/
 ├── scheduling/                # scheduler.ts (one 30 s tick), reminderStore.ts + reminderDelivery.ts, birthdayStore.ts +
 │                              #   birthdayAnnouncer.ts, polls.ts, time.ts (Eastern rendering), discord.ts
 ├── commands/                  # Context menus: index.ts (registry, dispatch, repeat guard), one file per command, respond.ts,
-│                              #   targets.ts, completion.ts (one-shot ZDR call), summary.ts, types.ts
+│                              #   targets.ts, completion.ts (one-shot ZDR call), summary.ts, types.ts; the notes viewer:
+│                              #   notesViewer.ts (state, custom ids, rendering), notesViewerActions.ts (clicks, edit, undo), noteDiff.ts
 ├── github/                    # client.ts (REST), featureRequests.ts (caps, matching, filing, +1s), issueMatching.ts, issueText.ts
 ├── links/                     # embedFixers.ts (patterns, canonical paths, probing, fixLinksInContent()), platforms.ts, markdown.ts,
 │                              #   tweetTranslation.ts, attachments.ts, replyContext.ts, fixerHealth.ts, fixerAlerts.ts
@@ -109,6 +120,8 @@ src/
 sandbox/                       # The run_code sidecar image: Dockerfile, server.py (stdlib HTTP server), requirements.txt,
                                #   smoke_test.py + ci-smoke.sh (hardened end-to-end check of a built image)
 docker/entrypoint.sh           # prod entrypoint: chown the data volume, drop to the `node` user
+docs/memory.md                 # Memory v2: design, data model, capture, dream, viewer, bootstrap, code map
+.claude/skills/memory-bootstrap/  # The Claude Code playbook for bootstrapping notes from the archive (SKILL.md)
 .github/workflows/             # docker-build.yml (PRs), docker-push.yml (master), claude-feature-request.yml (owner-gated Claude)
 .semgrep/                      # the repo's own exfiltration rules (CI)
 ```
@@ -124,7 +137,7 @@ Every env var the bot reads is parsed here, in its feature's section. Values are
 
 ### Startup, events, shutdown (`src/app.ts`, `src/eventModule.ts`)
 
-- Order: `loadEnv` → the Effective config line and warnings → the client → load every event file → startup memory maintenance (subject-id stamp, then `compact()`) → embedding backfill (and its periodic re-run) → login. A missing or rejected token exits with code 1 (fail fast; the restart policy takes it from there). SIGTERM/SIGINT close all four SQLite handles, then the client.
+- Order: `loadEnv` → the Effective config line and warnings → the client → load every event file → startup memory maintenance (subject-id stamp, then `compact()`) → the notes import from `data/memory-import/` when one is there → embedding backfill (and its periodic re-run) → login. A missing or rejected token exits with code 1 (fail fast; the restart policy takes it from there). SIGTERM/SIGINT close all four SQLite handles, then the client.
 - Every non-test file in `src/events/` must `export default defineEvent(Events.X, { once?, execute })`; `execute`'s arguments are typed from the event name. An invalid file fails startup with a clear error (`eventModule.test.ts` checks every file). `registerEventModules()` puts ONE client listener on each (event, once) that hands the event to every module for it, in load order; each handler runs behind a dispatcher that logs a throwing or rejecting handler, on its own promise chain, so they stay concurrent and one that fails or hangs never stops or delays the others. A listener per file used to trip Node's MaxListenersExceededWarning (11 each on messageCreate and clientReady): don't raise `setMaxListeners` instead, the warning should mean a real leak. A `process.on('unhandledRejection')` logger covers everything else, so one missing permission can't take the process down.
 - **Partials** (Message, Channel, Reaction, User) make reaction, delete and update events fire for messages sent before the last restart, which means before every deploy. Handlers of MessageReactionAdd/Remove, MessageDelete and MessageUpdate must check `.partial` (or `fetch()`) before reading anything but ids. MessageCreate is never partial.
 
@@ -137,19 +150,19 @@ Every env var the bot reads is parsed here, in its feature's section. Values are
 | Reactions | `reactionTracker` (emoji use counts), `archiveReactionAdd` / `Remove` / `RemoveAll` / `RemoveEmoji` |
 | ChannelDelete, ThreadDelete | `archiveChannelDelete`, `archiveThreadDelete` |
 | Guild emoji create/update/delete | `emojiCreate`, `emojiUpdate`, `emojiDelete` |
-| InteractionCreate | `interactionCreate` (context-menu commands) |
-| ClientReady (once) | `ready`, `emojiReady` (reconcile + caption; schedules usage captions), `archiveBackfill`, `archiveWrapped`, `channelEnvLog`, `commandsRegister`, `deployAnnounce`, `linkFixAlerts`, `reportDigest`, `schedulerStart`, `transcriptionRouteCheck`; app.ts also starts the learner |
+| InteractionCreate | `interactionCreate` (context-menu commands), `notesViewerInteraction` (the notes viewer's buttons, menu and Edit modal) |
+| ClientReady (once) | `ready`, `emojiReady` (reconcile + caption; schedules usage captions), `archiveBackfill`, `archiveWrapped`, `channelEnvLog`, `commandsRegister`, `deployAnnounce`, `linkFixAlerts`, `memoryDream` (the nightly dream's schedule), `memoryImportReport` (the notes import's report line), `reportDigest`, `schedulerStart`, `transcriptionRouteCheck`; app.ts also starts capture (the learner) |
 
 ### Storage
 
 | File | Owner | Holds |
 |---|---|---|
-| `memory.db` | `MemoryStore` | memories + FTS5 + vectors, identities, emojis, learner watermarks, `bot_state` key/values |
+| `memory.db` | `MemoryStore`, `NotesStore` | the journal (memories + FTS5 + vectors), notes, circles and their versions, dream state, identities, emojis, capture watermarks, `bot_state` key/values |
 | `conversations.db` | `ConversationPersistence` | the per-channel conversation cache (disposable) |
 | `bot.db` | `src/storage/botDb.ts` | small feature tables, each created lazily by its feature (`ensureSchema`, additive `ensureColumn`) |
 | `archive.db` | `ArchiveStore` | the message archive; its own file because it grows to hundreds of MB once history is imported |
 
-Under Vitest every default handle is `:memory:`; tests inject their own through `setMemoryStoreForTesting()`, `setBotDbForTesting()`, `setArchiveStoreForTesting()` and friends. Tables and columns: [Storage schema](#storage-schema).
+Under Vitest every default handle is `:memory:`; tests inject their own through `setMemoryStoreForTesting()`, `setNotesStoreForTesting()`, `setBotDbForTesting()`, `setArchiveStoreForTesting()` and friends. Tables and columns: [Storage schema](#storage-schema).
 
 ### OpenRouter plumbing
 
@@ -171,9 +184,10 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
   A failed fetch keeps the previous copy and retries after 10 minutes. A ZDR verdict older than 3 days doesn't count. It never fetches under Vitest.
 - **Decisions endpoint** (`decisions.ts`): TypeSafe decision models answer typed questions about a small JSON state with a calibrated probability: text-only, ~$0.04 per million input tokens, free output, on the ZDR list. `typesafe/jev-1.13` is pinned (`DEFAULT_DECISION_MODEL`) because thresholds are tuned against one version. Every call is ZDR with a 6 s timeout and one retry (network, timeout, 408, 429, 5xx), and records usage. It resolves to `undefined` on no answer, and callers fail closed. Following TypeSafe's guidance, arithmetic stays in code and the state stays small.
 - **Reasoning budgets**: the default chat/learner model (`z-ai/glm-5.3-flash`) reasons mandatorily, at `max` effort by default, and reasoning is billed as output and counts toward `max_tokens`. A small `max_tokens` without an effort override can come back empty (`finish_reason: length`), so:
-  - One-shot calls send `reasoning: { effort: 'low' }` with `max_tokens` ≥ 1500: the ramble judge, the auto-react judge, the message-judge fallback, the Wrapped intro, the birthday writer and the command completions (Translate, Remember this). The learner and self-improvement passes do too, with 4096.
+  - One-shot calls send `reasoning: { effort: 'low' }` with `max_tokens` ≥ 1500: the ramble judge, the auto-react judge, the message-judge fallback, the Wrapped intro, the birthday writer and the command completions (Translate, Remember this). Capture (the learner) and the self-improvement pass do too, with 16,384 (a part is a whole conversation).
   - Media calls send the catalog's lowest effort.
   - The emoji captioner sends none: its default model (Claude Opus) only reasons when asked, and an effort would switch paid thinking on. A reasoning model in `EMOJI_CAPTION_MODEL` needs an override there.
+  - The dream and owner edits (16,000 `max_tokens`) and the built-in bootstrap (8,000) send none either, for the same reason (their default model is Claude Opus): everything generated is the answer.
   - Summaries (`max_tokens` 4000) and the chat turn (no cap) run at the model's default effort.
 
 ### Chat turn (`src/events/aiChat.ts`, `AgentOrchestrator`)
@@ -185,15 +199,15 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
    - aiChat tells the gate about every routed turn and its end (`noteRouted` / `noteTurnDone`).
 2. **Per-channel queue**: two turns in one channel run back to back, so the second sees the first's reply (no lost-update race).
 3. **The window**:
-   - A new window is seeded from the 25 messages before the ping. It lives for `CONVERSATION_TIMEOUT_MS` (15 min) and is persisted across restarts (schema v3).
+   - A new window is seeded from the 25 messages before the ping. It lives for `CONVERSATION_TIMEOUT_MS` (15 min) and is persisted across restarts (schema v4).
    - A live window **catches up** on everything posted since its last turn: the newest 100 messages, rendered as history even though nobody pinged. Up to 4 more pages are only counted, into one "N earlier messages were skipped" line.
    - Messages already in the window are skipped by Discord id (entries carry `messageIds`). So is a relay whose original is already there (`relayed_messages.original_id`: a link-fixed ping must not reappear as a second copy).
    - Transcript replies never enter history.
 4. **Prompt**:
-   - `entries[0]` is the static prompt: persona, SERVER PEOPLE, emoji glossary and the vibe/personality bucket. It is byte-identical for the whole window, so the provider's prefix cache survives, and it has no timestamp.
-   - Every turn adds a **dynamic context** developer entry: the current Eastern time, `Channel: #name — topic` plus its `CHANNEL_NOTES` note (a thread inherits its parent's), `UNPROMPTED_NOTE` or `LATE_MESSAGE_NOTE` when they apply, then memories.
-   - Memories come from the speaker (`getForPerson(memoryKeyFor(…))`), a hybrid search of the message, @-mentioned people (≤3) and people **named in plain text** (≤3, `findPeopleInText`). Everything is deduped against what this window already injected.
-   - The persona tells the model to call `recall_memories` when someone is discussed and nothing about them is in context.
+   - `entries[0]` is the static prompt: persona, SERVER PEOPLE, emoji glossary and the group's `vibe`/`lore` notes (the vibe/personality bucket before the first dream). It is byte-identical for the whole window, so the provider's prefix cache survives, and it has no timestamp.
+   - Every turn adds a **dynamic context** developer entry: the current Eastern time, `Channel: #name — topic` plus its `CHANNEL_NOTES` note (a thread inherits its parent's), `UNPROMPTED_NOTE` or `LATE_MESSAGE_NOTE` when they apply, then what the bot knows.
+   - What it knows (see [Long-term memory](#long-term-memory--learning)): for the speaker, @-mentioned people (≤3) and people **named in plain text** (≤3, `findPeopleInText`), their notes (profile without Earlier, circles, newer journal rows, open corrections) or, without notes, their newest memories; the circles the message names or whose members are present; a hybrid journal search of the message. Everything is deduped against what this window already showed (memory ids and note versions).
+   - The persona tells the model to look someone up (`read_note`, `recall_memories`) when they are discussed and nothing about them is in context, and to `record_correction` when someone corrects something it knows (never arguing with a self-correction).
 5. **Reply context**: when the ping replies to a message outside the window, a REPLY CONTEXT entry shows:
    - the chain, root first, up to 5 levels;
    - 3 messages before and 2 after the replied-to one, with jump links;
@@ -453,7 +467,7 @@ Every member message the bot can see (guild text and announcement channels and t
 The bot's only summary pipeline. `summarizeChannelResult()` does the history fetch (≤50 pages, ranges ≤7 days), renders a transcript and makes one ZDR call tagged `summary`. It returns data (`ok`, `summary`, `header`, `caveats`, `peopleFooter`, or a failure `reason`); `summarizeChannel()` formats that for the `summarize_messages` tool.
 - **Tool arguments**: `start_time`/`end_time` are Eastern wall-clock `YYYY-MM-DD HH:MM`, or `since_my_last_message` (the requester's previous visit; their messages from the current visit, 15-minute gaps, are skipped).
 - **Transcript**: relays are attributed, other bots excluded, the bot's lines short and marked, transcript replies skipped. It carries embeds, attachments, stickers, cached voice transcripts and "(replying to X)". Over ~200k chars the oldest messages are dropped, with a note.
-- **WHO'S WHO**: up to 25 people (everyone who talked, then everyone referenced). The 8 most prominent get ≤4 durable memories each (fact/preference/personality), fenced as background never to be stated unless the chat says it. The result ends with `People in this stretch: …; mentioned without talking: …`.
+- **WHO'S WHO**: up to 25 people (everyone who talked, then everyone referenced). The 8 most prominent get background: the first lines of their profile (without Earlier), or ≤4 durable memories (fact/preference/personality) before they have notes, fenced as background never to be stated unless the chat says it. The result ends with `People in this stretch: …; mentioned without talking: …`.
 - "Summarize from here" passes `messageRole: 'target'` (the target message is included) and `audience: 'group'` (the text is posted as-is: casual, short, no headings or @-mentions).
 
 ### Scheduling: reminders, polls, birthdays (`src/scheduling/`, `src/ai/tools/reminders.ts`, `birthdays.ts`)
@@ -472,7 +486,7 @@ Everyone lives in America/New_York, so every time a tool takes or shows is Easte
 - **`create_poll({question, answers, duration_hours?, allow_multiselect?})`**: a native poll, validated against Discord's limits first (question ≤300, 1–10 unique answers ≤55, 1–768 h, default 24). It needs the Create Polls permission.
 - **Birthdays** (bot.db `birthdays`): `set_birthday` (`MM-DD` or `YYYY-MM-DD`), `list_birthdays` (by next occurrence, with the age they'll turn) and `forget_birthday`.
   - The announcement starts once ET reaches `BIRTHDAY_ANNOUNCE_HOUR`, for birthdays that are **today** (Feb 29 → Feb 28 in common years), so a bot down all afternoon announces late the same day, never the next. It goes to `BIRTHDAY_CHANNEL_ID` (default main).
-  - The text is written by `CHAT_MODEL` (ZDR, low reasoning effort, tagged `birthday`), then cleaned and 🎂-prefixed; a template is used on failure. The writer gets today's Eastern date and what the bot knows about the person nearly whole: up to 40 memories (past that, the 20 oldest and the 20 newest; no `image` or self-diagnosis rows), oldest first, each tagged with when it was first noted (`created_at`, so re-confirmed lore stays old). It picks for itself: long-running things (a trait, a running joke, old lore) first, and anything from the last couple of weeks only as recent news. Undated and limited to the newest 5, it once told yesterday's story as old lore.
+  - The text is written by `CHAT_MODEL` (ZDR, low reasoning effort, tagged `birthday`), then cleaned and 🎂-prefixed; a template is used on failure. The writer gets today's Eastern date and what the bot knows about the person: their profile (without Earlier) plus the journal rows newer than it, or, before they have notes, up to 40 memories (past that, the 20 oldest and the 20 newest; no `image` or self-diagnosis rows); rows oldest first, each tagged with when it was first noted (first sighting, so re-confirmed lore stays old). It picks for itself: long-running things (a trait, a running joke, old lore) first, and anything from the last couple of weeks only as recent news. Undated and limited to the newest 5, it once told yesterday's story as old lore. It also gets the birthday channel's chat so far today (the newest 60 lines from the archive, `HH:MM Name: text`, mentions as @names) as plain background, so it can bounce off the day's conversation, or notice nobody said anything, without being told what to look for.
   - The year is claimed before posting and released if the send fails. A birthday set in chat on the day is marked announced (the reply was the wish). Members who left are skipped.
   - **`BIRTHDAYS_SEED`** (`userId:MM-DD` / `userId:YYYY-MM-DD`) is applied **once per user** (`birthday_seed_applied`): chat corrections and `forget_birthday` stick. A seed entry that differs from a saved birthday is logged as a WARN (use `set_birthday` to change it).
 
@@ -492,7 +506,7 @@ Everyone lives in America/New_York, so every time a tool takes or shows is Easte
 - **Compose hardening**: read-only root, `/tmp` tmpfs, the named volume `sandbox-workspace`, `cap_drop: [ALL]`, `no-new-privileges`, 2 GB (`mem_limit` = `memswap_limit`: no swap) / 1 CPU / 256 pids, no published ports. Only the bot reaches it at `http://sandbox:8080`. **Egress is open** by design (pip, curl); on a bridge network that also reaches the Docker host and cloud metadata. The compose comment gives the two options (an internal network, or a host firewall). The link reader's SSRF guard keeps the *bot's* fetches away from the sandbox.
 - **Tests**: `sandbox.test.ts` (fake fetch, plus the `node:http` transport against a local server); `sandboxServer.test.ts` drives the real `server.py` with python3 and bash (skipped where missing); `sandbox/ci-smoke.sh <image>` runs a built image with the compose hardening. Runs over 5 minutes aren't in the suite: the transport was proven once with a 330 s run against the real sidecar.
 
-### Context-menu commands (`src/commands/`, events `commandsRegister`, `interactionCreate`)
+### Context-menu commands (`src/commands/`, events `commandsRegister`, `interactionCreate`, `notesViewerInteraction`)
 
 Right-click (long-press on mobile) → **Apps**:
 
@@ -503,13 +517,19 @@ Right-click (long-press on mobile) → **Apps**:
 | Transcribe | message | public reply: voice/audio transcript (cache first) + video descriptions; over-budget/too-long/too-large get the media note |
 | Translate | message | private English translation of text + transcript + embed text (one ZDR call, `ALREADY_ENGLISH` short-circuit) |
 | Remember this | message | one ≤80-char `fact` under the learner's 30-day rule (subject = current display name, `subject_user_id`, source `command`) |
-| What does Fridge know? | user | private list of the newest 25 memories (id, category, age), matched through `memoryKeyFor` |
+| What does Fridge know? | user | private notes viewer: the profile first (plus the journal rows newer than it and open corrections), a menu of topics, circles and Raw memories, Prev/Next, a footer with version, age and who changed it; the group's notes and every circle when the bot itself is right-clicked; raw memories for people without notes. The owner also gets Edit and Undo |
 
 - **Registration**: on ClientReady, `guild.commands.set([...])` per guild, a bulk overwrite: idempotent, instant, and it replaces ALL of the app's commands in the guild, so every command must be listed in `COMMANDS`. `COMMANDS_ENABLED=false` registers an empty set. A Missing Access error logs the `applications.commands` authorization link.
 - **Responses**: every interaction response is **ephemeral**. Public output is posted as a normal reply to the target (with `parse: []`): Discord locks visibility at `deferReply()`, so a public deferral could never end in a private error. Posting needs Send Messages + Read Message History there; a refusal becomes a private "not allowed to post in here".
 - **Errors**: one boundary in `handleContextMenuCommand()`. A `CommandError` becomes a private in-character line and an INFO log; anything else a private "that broke" and a WARN. It never rejects.
 - **Repeat clicks**: turned away privately, per target for public-output commands and per invoker+target for private ones. Ask Fridge holds its target until the answer is done.
-- Handlers take their collaborators through `CommandDeps`. Tests use `fakeInteraction.ts`, which enforces discord.js's reply state machine.
+- Handlers take their collaborators through `CommandDeps` (also `notesStore`, `isOwner`, `proposeEdit`, `report`). Tests use `fakeInteraction.ts`, which enforces discord.js's reply state machine.
+- **Notes viewer** (`notesViewer.ts`, `notesViewerActions.ts`, event `notesViewerInteraction`): one ephemeral message, redrawn in place with `interaction.update()`. Each component's custom_id (≤100 chars, `nv:…`) holds the action, the subject (`g` or `p<main id>`), the screen (a note id or the raw memories), the page and when it was drawn: nothing is stored between clicks. Buttons expire 15 min after the render that issued them (said in character). Pages are ~3,800 characters, cut before a heading or at a paragraph, and every embed is checked against Discord's limits (25 menu entries, 4,096 description, 6,000 per embed).
+- **Owner Edit and Undo**: the owner is `BOT_OWNER_USER_IDS`, else the application's owner or its team (`src/botOwner.ts`; a linked side account counts), re-checked on every click with a 1.5 s limit so the reply stays inside Discord's 3 s (past it, owner buttons are hidden and owner actions say to try again).
+  - Edit opens a modal ("What should change?", ≤4,000 chars). The message says "drafting…", then `proposeEdit` (dreamer.ts: `MEMORY_EDIT_MODEL`, tag `memory_edit`) drafts it against the target's notes: the circle on screen, else the person's (with their circles) or the group's. The draft is dry-run against the store in a rolled-back transaction, so the preview never shows what Confirm would refuse, and refused when the notes changed while it was drafted (a dream saved meanwhile: Confirm would put back what the dream replaced; the owner asks again). A draft that comes back for another target is dropped.
+  - The preview shows one change per page as a `diff` code block, plus a circle's members and other names before and after. Confirm saves it (`applyEdit`: `updated_by='edit'`, reason = the instruction); Cancel drops it. Drafts live in memory for 15 min (≤20, lost on restart) and save once; Confirm refuses a draft whose notes got a new version since (the dream got there first).
+  - Undo vN restores the previous version as a new `undo` version; the button carries the version it was drawn for, so a double click does nothing extra. A merge is undone whole: the circles it merged away (recorded in `note_versions.linked`) come back in the same transaction, and a circle a merge created offers Undo v1 (it goes, what it merged comes back).
+  - Every saved edit and undo posts one audit line to the report channel (who, whose notes, the versions saved, the change summary and instruction, capped; `parse: []`), besides the INFO log.
 
 ### Feature requests → GitHub (`src/ai/tools/featureRequest.ts`, `src/github/`, `.github/workflows/claude-feature-request.yml`)
 
@@ -537,38 +557,79 @@ Flow: a member asks → `request_feature` files an issue, or backs or links an e
 Everything here is off unless `REPORT_CHANNEL_ID` is set. `sendToReportChannel()` posts with `parse: []` and returns whether it posted, and callers only record success when it did.
 - **Digest** (`reportDigest`, `digest.ts`): self-diagnosis signals and failures plus a **Spend** section (total, by feature, top models; complete Eastern days since the last digest, so no day counts twice). It is "weekly … this week" only for a 6–8 day period; otherwise "since the last digest" with the real span. The watermark only advances when the post landed.
 - **Deploy ping** (`deployAnnounce`): `🚀 Deployed <sha> · <ET time>` the first time the bot boots on a new `GIT_SHA`, followed by the channel configuration in a code block. An undelivered ping is retried on the next boot.
-- Fixer alerts, auto-react shadow lines and `!wrapped` previews also land here.
+- Fixer alerts, auto-react shadow lines, `!wrapped` previews, the nightly dream's line (`🌙 dream · …`), the owner's note edit/undo audit lines and a notes import's result also land here.
 - **`query_costs({period: today|week|month})`**: rolling whole Eastern days from the ledger.
 - **Log file** (`logFile.ts`): every logger line is also appended to `LOG_FILE` (`./data/logs/bot.log`, 5 MB × 3), because watchtower recreates the container on each update and that wipes `docker logs`. Writes are synchronous, each start writes a marker line, it's off under Vitest, and a filesystem error pauses it for 60 s instead of throwing. It holds the same text as the console (memory contents included): treat it like the rest of `./data`.
 - **Error capture & replay**: when a turn throws, `debugCapture.ts` writes the conversation + raw error to `data/debug/error-<timestamp>-<rand>.json` (newest 50 kept; `DEBUG_CAPTURE=false` disables, `DEBUG_CAPTURE_DIR` relocates). `yarn replay <file>` reproduces it offline. Captures hold full private chats; the digest reads only their timestamp/status/message.
 
 ## Long-term memory & learning
 
-- `MemoryStore` (`./data/memory.db`): memories (+ FTS5 index + embedding vectors), member identities, emoji rows (name/caption/use count), learner state, generic `bot_state` key/values. The prompt builder injects capped, relevance-ranked memories each turn.
-- **Memory tools**:
-  - `recall_memories`: resolves a subject (or a query that is a person's name) through `getForPerson`, plus keyword and category search; every line prefixed `[id:N]`.
-  - `remember_fact`: files person memories under the member's current display name with `subject_user_id`. The category whitelist is `fact`/`preference`/`personality`/`event`/`vibe`, so the model can't write `image` or self-diagnosis rows.
-  - `forget_memory`: "no active memory" for unknown or already-forgotten ids.
-  - `query_self_diagnosis`: limit clamped 1..50.
-  - `set_member_info({person, real_name?, add_nickname?})`: refuses markup, links, over-48-char names, and a nickname that is another member's display name, handle or first-seen name; notes (allows) one shared with someone's IRL name or nickname. It logs an audit line on every change.
-- `PersonalityLearner` runs every `LEARNING_INTERVAL_MS` over channels with ≥ `MIN_MESSAGES_FOR_OBSERVATION` new messages, with `LEARNER_MODEL`, plus an optional self-improvement pass.
-  - Messages go through `attributeMessage()`: relays count as their author; other bots and the bot's own replies are dropped. Cached voice transcripts ride along (the learner never pays for transcription). At most 8 images per request; a re-entrancy guard skips a tick while a cycle runs.
-  - Model output is untrusted: fields are type-checked, and a malformed entry is skipped, never allowed to stall the watermark.
-  - `identity_updates` only *fill* a missing IRL name, and a real name or alias another member already uses is dropped (no human confirmed it). Changing a real name stays with `set_member_info`.
-  - A `subject_user_id` is used only when it belongs to a member.
-- Emojis are reconciled at startup and captioned by `EMOJI_CAPTION_MODEL`; meanings are then re-grounded from usage (see above).
+Memory v2. The design, the data model, the prompts' rules and the reasons are in [docs/memory.md](docs/memory.md): read it before touching memory. In short, memory.db holds three layers:
+- **The journal** (`memories`, `MemoryStore`): atomic rows (fact, preference, personality, event, image, vibe, `correction`, and the self-diagnosis categories), the **source of truth**. Nothing but the TTL sweep, `forget_memory` and dedup ever deactivates a row, and the dream never does. v2 rows carry `journal_seq` (the journal clock, moved by a trigger on insert and on any change of content, subject id, recurrence or related members), `said_by` (a correction's speaker), `evidence` (archive message ids + a verbatim quote ≤240 chars), `seen_count` with `first_seen_at`/`last_seen_at` (recurrence and span: a merge counts a sighting and widens the span) and `related_user_ids` (a relationship row shows up in every involved member's journal and pending dream).
+- **Notes** (`NotesStore`, `src/ai/memory/notes/`), derived from the journal and always regenerable: per person a `profile` plus topic notes (`games`, `work`, …; ≤10), the group's notes (`vibe`, `lore`, …; ≤8), and **circles**: a note owned by a set of members with dated membership (`since`/`until`/`role`): an interest or sub-group, or a pair with a history (a relationship is a circle of two). Every write is validated (`schema.ts`: sizes, slugs, markdown only, no Discord markup, no ids that weren't in the writer's input) and all or nothing, and keeps a version (`note_versions`; undo restores the previous one as a new version). A person's write only touches circles they are or were in.
+- **Dream state** (`dream_state`): per person and for the group, the highest `journal_seq` folded into the notes, the last dream and its last error.
+
+Weight = recency × recurrence: the notes keep spans and counts in their text ("since 2024", "2019–2026, constant", "once, in 2021"). A profile reads: an intro line · **Now** · **Traits** · **Circles & people** · **Earlier** (dated footnotes: superseded facts, old eras); topic notes and circles have Now and Earlier. Chat turns get notes without Earlier; `read_note` and search reach it.
+
+**Chat-time use** (`agent.ts`, `notes/context.ts`):
+- The dynamic context, for the speaker, the people @-mentioned (≤3) and the people named in plain text (≤3): their profile without Earlier (3,000 chars for the speaker, 1,500 for others) with a line of their circles, their journal rows newer than their notes (≤10, dated), and their open corrections (always shown, with who made them: their own win over the notes, others' claims are headed as their word, not settled). Someone without notes yet gets their newest memories instead (5 for the speaker, 3 for others).
+- Then circles (≤3, 1,500 chars each): the ones the message names (title, slug or alias as whole words), then the ones with ≥2 current members in the conversation (the speaker, the people above, the window's recent participants). Plus a hybrid journal search of the message (10 rows).
+- Everything is shown once per window per note version (`noteKeys`, persisted with the window: conversation state v4), deduped against what the window already showed.
+- The static prompt carries the group's `vibe` and `lore` notes (Earlier left out, ≤2,500 chars; they change at most nightly, so the prefix cache survives). Before the first dream wrote any, it carries the old vibe/personality bucket.
+- Other readers: the birthday writer gets the profile (without Earlier) plus the journal rows newer than it, dated by first sighting; summaries' WHO'S WHO gets each profile's first lines. Both fall back to memories for people without notes.
+
+**Tools**: `list_notes({person?})` (topics with size and age, circles incl. former ones, how much is newer than the notes; without a person, everyone plus the group and every circle), `read_note({person?, topic?, circle?})` (a whole note, Earlier included; a person's topic, `person: "group"`, or a circle by slug, title or alias), `search_notes({query})` (FTS over every note with snippets), `record_correction({person, correction})` (below), and the journal tools:
+- `recall_memories`: resolves a subject (or a query that is a person's name) through `getForPerson`, plus keyword and category search; every line prefixed `[id:N]`.
+- `remember_fact`: files person memories under the member's current display name with `subject_user_id`, the triggering message as evidence. The category whitelist is `fact`/`preference`/`personality`/`event`/`vibe`, so the model can't write `image`, `correction` or self-diagnosis rows.
+- `forget_memory`: "no active memory" for unknown or already-forgotten ids.
+- `query_self_diagnosis`: limit clamped 1..50.
+- `set_member_info({person, real_name?, add_nickname?})`: refuses markup, links, over-48-char names, and a nickname that is another member's display name, handle or first-seen name; notes (allows) one shared with someone's IRL name or nickname. It logs an audit line on every change.
+
+**Corrections** (`record_correction`, `src/ai/tools/notes.ts`): "that's wrong, I quit Valorant in August" becomes a `correction` journal row at once (what is wrong and what is right; `said_by` = the speaker's main id, `subject_user_id` = who it is about, the message as evidence) and is shown next to the notes until the dream folds it in (for the group: in the dynamic context, since the group notes sit in the static prompt, and after the group note in `read_note`). A correction about yourself is authoritative; one about someone else is a claim the dream weighs, never blindly applies. The persona: record it, never argue with a self-correction. At most `MAX_CORRECTIONS_PER_DAY` (15) per member (main id) per rolling 24 h, counted from the journal right before the save (each one can pull a person into the night's dream); at the cap the bot says so in its own voice.
+
+**Capture** (`PersonalityLearner`, `learnerInstance.ts`; the schedule in `src/ai/captureTrigger.ts`, the helpers in `src/ai/capture/`): the learner reads a conversation once it has ended, with `LEARNER_MODEL` (tag `memory_capture`, low effort, 16,384 tokens), plus the optional self-improvement pass (tag `self_improvement`, once per part). An answer that is empty, not JSON or cut off at the length limit is asked for once more; after that the complete observations of a cut-off answer are kept and the part counts as read (a part that always fails would hold the channel's watermark back for good).
+- **When** (`ConversationEndTrigger`, a 1-minute unref'd tick, oldest conversation first): a channel is due once it holds `MIN_MESSAGES_FOR_OBSERVATION` new member messages and has been quiet for `CAPTURE_IDLE_MINUTES` (20), or its oldest uncaptured message is `CAPTURE_MAX_SPAN_MINUTES` (120) old. `LEARNER_IGNORE_CHANNELS` is respected; only text channels are read (threads and announcement channels aren't captured). Activity is kept in memory, so at startup every channel captured in the last 14 days is re-checked once it has been quiet (usually an empty fetch): a deploy never strands a conversation. A failed capture (a Discord read, an extractor outage) is reported back the same way and retried once the channel is quiet again, up to 3 times in a row. `LEARNING_INTERVAL_MS` still parses but only feeds the unused `IntervalCaptureTrigger`.
+- **How much** (`conversation.ts`): everything after the channel's watermark, paged past the 100-message fetch, up to 2,000 messages (the rest is a backlog read once the channel is quiet). A channel never captured is read back to the start of its last conversation, and its watermark is anchored just before it before the first part runs (a failed first capture is never left behind by the next conversation). Over ~48k characters, the conversation is split at its longest quiet gap (once a part is ≥60% full); each later part opens with the previous part's last ~2k characters under `## ALREADY COVERED — context only, do not extract`. The watermark moves after each part, so a failure part-way neither loses nor repeats anything. A full read with almost no member messages (a bot flood) is stepped over.
+- **Evidence** (`citations.ts`): transcript lines are numbered (`#N [time] [Name (id:…)] text`); an observation cites `evidence: {lines, quote}` and, for a relationship or a shared thing, `related_user_ids`. Line numbers resolve only to lines the request showed (the model never types a message id); a quote is kept only when it occurs in the messages (case, spacing, quote marks and elisions tolerated; one found in another shown line cites that line); related members must be known members (ids or unique names, main ids, the subject left out, ≤10); an observation resting only on lead-in lines is dropped (the previous part read them). A row's first/last seen is when its newest cited message was posted.
+- **Already known** (`knowledge.ts`): for a part's authors and up to 5 members it talks about, the profile without Earlier (≤1,000 chars), their circles, and the journal rows (≤12) and open corrections (≤5) newer than their notes; without notes, their 25 newest memories. For the server, its notes (≤1,500 chars) and the newer server rows.
+- Messages go through `attributeMessage()`: relays count as their author; other bots and the bot's own replies are dropped. Cached voice transcripts ride along (capture never pays for transcription). At most 8 images per request; a re-entrancy guard skips a tick while a capture runs.
+- Model output is untrusted: fields are type-checked, and a malformed entry is skipped, never allowed to stall the watermark. `identity_updates` only *fill* a missing IRL name, and a real name or alias another member already uses is dropped (no human confirmed it); changing a real name stays with `set_member_info`. A `subject_user_id` is used only when it belongs to a member.
+- One log line per capture: `capture: channel=… messages=… parts=… observations=… identity_updates=… capped=yes|no`.
 
 **Learner prompt rules** (why the prompts are rule-heavy: the originals filled prod with per-message transcription):
 - **30-day test**: only knowledge still true and useful in 30 days is saved; "someone asked/confirmed/shared X" is transcription, never a memory.
 - **Ephemeral categories**: time-bound observations MUST be `event` (TTL ~14 days), image/GIF shares MUST be `image` (TTL ~24 h). A durable fact revealed by an image is saved as `fact`.
-- **No re-saves** of traits already in the injected existing-memories context; save-time dedup is the backstop.
+- **No re-saves** of what the "already known" section holds; save-time dedup is the backstop (and a re-sighting merged there counts as a recurrence).
 - **Subject normalization**: subjects are the person's **current display name** (+ `subject_user_id` as the stable anchor), never nicknames, handles or stale names. Emoji style is described in words; emoji syntax never goes into a memory.
+- **Lead-in and evidence**: nothing is extracted from an ALREADY COVERED lead-in; every observation cites its lines and a short verbatim quote.
 - **Self-improvement "asked" rule**: a `capability_gap` needs someone to have addressed the bot (mention, reply, its name) AND a failure or a "can't". Posts nobody pointed the bot at are never gaps. The bot's own replies aren't in the transcript, so a ping with no visible answer proves nothing.
 - Observations stay verbatim: **no censoring or paraphrasing rule** (see Hard rules).
 
+**Dreaming** (`notes/dreamer.ts`, `dreamPrompts.ts`, `dreamSchedule.ts`; event `memoryDream`): the strong model folds the journal into the notes once a night.
+- **Schedule** (`DreamScheduler`, off with `MEMORY_DREAM_ENABLED=false`): a one-minute unref'd check, the first 5 min after startup (after any import). The dream runs on the first check at or after `MEMORY_DREAM_HOUR` (4) Eastern, catching up the same day after downtime. The day is claimed in memory.db `bot_state` (`dream:last_night`) BEFORE the run, so a night that crashes or fails (a 4 am outage included) is never retried the same day: nothing is lost (watermarks don't move) and the next night catches up.
+- **One dream at a time** (`dreamLease.ts`): the night and a `bootstrap --run` catch-up (another process on the same memory.db) hold a lease in `bot_state` (`dream:running`, taken in an IMMEDIATE transaction, renewed every minute, taken over after 10 min without renewal). While the bootstrap holds it, the day stays unclaimed and the night runs on the first check after; while the night holds it, the bootstrap doesn't dream and tells the owner to run `--run` again.
+- **A night** (`runNightlyDream`): the people with journal rows above their watermark (`pendingDreams`, most recently active first, ≤ `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`; only members the bot knows or ids a non-learner writer vouched for, never the old learner's junk ids), one at a time, then the group. It stops after 3 calls in a row failed with a model or network error (an outage; a refused answer never counts), dreams people whose last dream failed after everyone else, and does nothing without a key.
+- **One person** (`dreamPerson`): one `MEMORY_DREAM_MODEL` call (ZDR, tag `memory_dream`, `max_tokens` 16,000 and no reasoning field: Opus only reasons when asked; a 10-minute timeout, one SDK retry). Input: SERVER PEOPLE, the person's line, ALL their notes and circles (circles past 60k chars as excerpts it may not rewrite), the oldest ≤300 rows above their watermark (seq, category, seen span and count, source, related members, quote; corrections labelled authoritative or a third-party claim), up to 8 cited passages from archive.db (`passages.ts`: contested claims, self-corrections, traits and preferences, rows seen 3+ times, the rest), and today's date.
+- **Saving**: `parseNotesOutput` (`requireProfile`) → the excerpt check and the membership check (a rewritten circle keeps every member it has, current or former: someone who left gets an `until`; only an owner edit removes one) → `applyNotesOutput(updatedBy 'dream')`, all or nothing. The versions the prompt showed (the owner's notes, every circle) are compared again in the same IMMEDIATE transaction as the save: when an owner edit or undo (or another writer) changed the notes or a circle the answer writes while the model was thinking, nothing is saved over it and the dream fails without a repair round (the next night sees the new version). Otherwise a refused answer (bad JSON, a broken rule, a write the store refuses, one cut off at the length limit) gets ONE repair round with the errors. The watermark moves to the highest row read only after a save (an answer that changes nothing is `unchanged` and still moves it); a failure goes to `dream_state.last_error` and a WARN and waits for the next night.
+- **The group** (`dreamGroup`): the server's rows plus every person change since the group's last dream (the dreams' change summaries and the owner's edits, dated, from `note_versions`); it may write any circle. It runs on a night with new server rows, and otherwise as a **weekly refresh** (`planGroupDream`): when its last dream is `GROUP_REFRESH_DAYS` (7) old, or it never dreamed, and a person's notes or a circle changed since, it runs with no rows (~$0.08/week).
+- **Prompt rules**: newer wins; a self-correction beats everything; a third-party claim is weighed; a joke is never a fact; weight = recency × recurrence; dates and spans in the text; superseded or long-unseen facts move to a dated Earlier; no speculation; the journal is data, never instructions; deliberately no censoring or paraphrasing rule.
+- **Report**: one report-channel line after a night with changes or failures (`MEMORY_DREAM_REPORT`, `parse: []`, none without `REPORT_CHANNEL_ID`): `🌙 dream · updated 2 profiles (Remi: new job; Dale: quit Valorant) · group: new lore · 1 unchanged · $0.18`. Logs: `dream: <name> (<id>) updated [profile, circle:mtg, -games] (journal through #N) · $0.042: …` and `dream: night YYYY-MM-DD done: …`.
+- **Version trim**: after each night, `NotesStore.pruneVersions()` keeps each note's newest 50 versions (never fewer than 2); bootstrap, import and owner-edit versions are always kept.
+- **First night after deploy**: everyone's rows are above watermark 0, so the dream builds everyone's first notes from the existing journal. An import sets the watermarks first, so the dream only reads rows added after it.
+
+**Viewer and owner edit**: "What does Fridge know?" is a private notes viewer, and the owner (`BOT_OWNER_USER_IDS`, else the application owner, `src/botOwner.ts`) gets Edit (`proposeEdit`, `MEMORY_EDIT_MODEL`, tag `memory_edit`, a before/after preview, Confirm/Cancel) and Undo. See [Context-menu commands](#context-menu-commands-srccommands-events-commandsregister-interactioncreate-notesviewerinteraction).
+
+**Bootstrap** (`src/ai/memory/bootstrap/`, the playbook `.claude/skills/memory-bootstrap/SKILL.md`; docs/memory.md "Bootstrap"): years of archive history → first notes. One command line: `yarn memory <command>` locally, `docker exec -u node frigidaire-bot node dist/ai/memory/bootstrap/cli.js <command>` in the prod container (as `node`, so the files stay the bot's). It reads `./data` and never creates empty databases. `export` and `bootstrap --run` refuse while the archive's history import (`ARCHIVE_BACKFILL_CHANNELS`, from `backfill_state`) is unfinished or not started (history landing later would never be read); a dry run and a channel stuck on an error only warn.
+- `export [--out DIR] [--chunk-tokens N] [--lead-in-tokens N]` (`yarn memory:export`): the archive → `data/memory-bootstrap/export/` (written to a temp folder, swapped in): `months/YYYY-MM.md` (`## day` / `### #channel` headers, `Name: text` lines, `HH:MM` only where a conversation (re)starts, one author's messages within 5 min on one line joined by ` / `, ids never per line; framing ~12% of the text, a test keeps it under 15%), `chunks/NNNN.md` (token-sized, default 80k, cut at the longest quiet gap by capture's splitter, each opening with a ~2k-token ALREADY COVERED lead-in; stable line numbers for evidence), `people.json` (name → main id, accounts, every other name) and `manifest.json` (sizes, chunks, `journal_high_water`). It is private chat: delete it after.
+- **Playbook** (the owner's Claude Code on his subscription, not the bot; a consumer plan is not ZDR, his informed choice): a lean orchestrator (manifest, `progress.json`, the index) launches one fresh subagent per step: a sequential scan with an append-only observation log (atomic steps: `steps/N.tmp` → `steps/N`), re-grounding each person from their full log every 10 chunks, the final build (circles, then people, hierarchical past ~60k tokens, then the group) with cited passages reconciled, a critic, then `import --check`. `observations [WORKDIR]` validates the log and rebuilds `by-person/`, `by-circle/`, the index and `cast.md`. `playbook.test.ts` runs the skill's examples through the real validators.
+- **Import** (`importer.ts`, `notesTree.ts`): at startup (app.ts, before login), a tree in `data/memory-import/` (`manifest.json` `frigidaire-notes` v1 with `journal_high_water`, `people/<main id>/*.md`, `group/*.md`, `circles/*.md`, front matter `title`, and `aliases`/`members` as one-line JSON for circles) is checked (shapes, limits, every person and member a main id the bot knows: identities, `LINKED_ACCOUNTS`, archive authors, who then get an identities row) and loaded in ONE transaction as `bootstrap` versions. The tree is authoritative for what it holds: an imported person's missing topics are removed, and so are the group's or all circles when it has those folders (as versions, so undoable). The imported owners' watermarks move to `journal_high_water` (a mark above the live journal's is refused: an export of another database). The folder becomes `imported-<timestamp>/`; a log summary and one report line (`memoryImportReport`). Any problem loads nothing and leaves the folder in place. `import --check [DIR]` (`yarn memory:check`) runs the same loader against a scratch store.
+- **Built-in bootstrap** (`builtin.ts`; `bootstrap --dry-run | --run [--from YYYY-MM] [--to YYYY-MM] [--segment-tokens N] [--max-segments N] [--no-dream]`, `yarn memory:bootstrap`): `MEMORY_BOOTSTRAP_MODEL`, ZDR, tag `memory_bootstrap`, 8k output tokens, the dream's 10-minute timeout and one retry. `--dry-run` prices it from the model catalog's per-token prices. `--run` reads month segments oldest first (a month over 60k tokens split by capture's splitter, each with a lead-in) with its own history prompt (dated rows, notable history, a fact seen again repeated so it merges as a recurrence; fact/preference/personality/vibe only) and capture's helpers: "already known" (`buildCaptureKnowledge`, rows with span and count), quote matching (`citedEvidence`) and related members (`relatedMembers`). Rows: source `bootstrap`, first seen backdated, written once the whole segment is read. An answer cut off at the output limit is read again in halves (down to an eighth); an unparseable one fails the segment, never "nothing to save". Resumable through `bot_state` `memory_bootstrap:progress`, which also keeps the run's segment size (another `--segment-tokens` is refused: new cuts would read stretches again); a failed segment is retried on the next run. After a whole-archive run (not a range) it dreams until nothing is pending (`runDreamsUntilCaughtUp`: pass after pass, the group too, the same failure cap), over the CLI's own stores (its archive for the passages), without claiming the nightly schedule's day, holding the dream lease. Restart the bot after a `--run` that wrote rows (the command says so): its in-memory vector cache only follows its own writes.
+
+**Emojis** are reconciled at startup and captioned by `EMOJI_CAPTION_MODEL`; meanings are then re-grounded from usage (see above).
+
 **Embeddings** (`embeddingProvider.ts`): `OpenRouterEmbeddingProvider` calls `/embeddings` (`EMBEDDING_MODEL`, default `qwen/qwen3-embedding-8b`) with `provider: { zdr: true }`, which is non-negotiable. Retrieval is asymmetric: queries get the qwen3 instruct prefix, documents are embedded bare. Vectors are L2-normalized, so cosine is a dot product. `makeDefaultEmbeddingProvider()` returns `undefined` (FTS5-only mode) without a key, with `SEMANTIC_MEMORY_ENABLED=false`, or inside Vitest.
 
-**Hybrid search** (`MemoryStore.search()`):
+**Hybrid journal search** (`MemoryStore.search()`; notes have their own FTS, `NotesStore.searchNotes`):
 1. Keyword leg in two tiers: rows matching **every** query term (implicit AND), then rows matching **any** non-stop-word term (OR, BM25-ranked). The second tier is what keeps keyword search useful for message-length queries; before it existed the keyword leg matched nothing for real messages.
 2. Vector leg: cosine over the in-memory vector cache.
 3. Reciprocal-rank fusion (k=60; vector 1.0, exact keyword 0.5, partial keyword 0.25).
@@ -576,9 +637,9 @@ Everything here is off unless `REPORT_CHANNEL_ID` is set. `sendToReportChannel()
 5. Ungated keyword fallback (both tiers) when there is no embedder, the query embed fails, or fewer than 80% of searchable memories have current-model vectors (logged at WARN).
 - Self-diagnosis categories (`SELF_DIAGNOSIS_CATEGORIES`) are excluded from search; `query_self_diagnosis` is their only path.
 
-**Save** (`save()`): phase 1 is synchronous: word-overlap dedup + INSERT/UPDATE + FTS sync in one transaction (durable before the first `await`). Phase 2 is best-effort: embed, cosine dedup (≥ `MEMORY_DEDUP_THRESHOLD`, same category + person; a duplicate merges into the **existing** id), store the vector. Rows with different member ids never merge. Failures never lose the row; backfill heals it.
+**Save** (`save()`): phase 1 is synchronous: word-overlap dedup + INSERT/UPDATE + FTS sync in one transaction (durable before the first `await`). Phase 2 is best-effort: embed, cosine dedup (≥ `MEMORY_DEDUP_THRESHOLD`, same category + person; a duplicate merges into the **existing** id), store the vector. A merge is a recurrence: `seen_count` +1, first/last seen widened to the observed time (`observed_at` backdates it for the bootstrap), evidence merged (ids unioned: the first 3 and the newest 9 kept; the newer quote wins), related members merged. Rows with different member ids, or different `said_by`, never merge. Failures never lose the row; backfill heals it.
 
-**Deactivate / FTS integrity**: `deactivate(id)` returns `false` and does nothing for unknown or already-inactive rows. This guard matters: the external-content FTS5 index only holds active rows, and a repeated `'delete'` command corrupts it ("database disk image is malformed" on the next MATCH). `compact()` also rebuilds the FTS index from the active rows at every startup (`rebuildFtsIndex()`, milliseconds at prod scale), so the index is correct by construction.
+**Deactivate / FTS integrity**: `deactivate(id)` returns `false` and does nothing for unknown or already-inactive rows. This guard matters: the external-content FTS5 index only holds active rows, and a repeated `'delete'` command corrupts it ("database disk image is malformed" on the next MATCH). `compact()` also rebuilds the FTS index from the active rows at every startup (`rebuildFtsIndex()`, milliseconds at prod scale), so the index is correct by construction. The notes' FTS is a plain FTS5 table kept by triggers on `notes` alone, correct by construction too.
 
 **Startup maintenance** (`startupMaintenance.ts`): the subject-id stamp, **then** `compact()`, so rows the stamp links dedup on the same start; each step survives the other's failure.
 - The stamp first moves rows keyed on a side account's id to the main id.
@@ -586,11 +647,11 @@ Everything here is off unless `REPORT_CHANNEL_ID` is set. `sendToReportChannel()
 - An id no identity or link knows is treated as missing only when it isn't snowflake-shaped or sits on a learner-written row. Ids stored by `remember_fact` or "Remember this" are never taken away.
 - It never touches `updated_at` (the TTL clock). Logged as `Subject-id stamp: linked N memories …`.
 
-**Compaction** (`compact()`): rebuild FTS index → TTL sweep → orphan-vector sweep → dedup within (`subject_user_id ?? subject`, category) groups (cosine when both sides have vectors, word overlap otherwise; a row deactivated in a pass is never compared again) → `PRAGMA optimize`.
+**Compaction** (`compact()`): rebuild FTS index → TTL sweep → orphan-vector sweep → dedup within (`subject_user_id ?? subject`, category) groups (cosine when both sides have vectors, word overlap otherwise; a row deactivated in a pass is never compared again; the kept row absorbs the other's sightings, span and evidence) → `PRAGMA optimize`.
 
 **Backfill** (`backfillEmbeddings()`): idempotent, batched (32/request); embeds every active memory lacking a current-model vector. Runs at startup and every `BACKFILL_INTERVAL_MS`; expand-contract on `EMBEDDING_MODEL` switches.
 
-**Ephemeral TTL** (`sweepExpiredMemories()`): `image` after `MEMORY_TTL_IMAGE_HOURS`, `event` after `MEMORY_TTL_EVENT_DAYS`, measured on `updated_at` with a strict `<`. It also runs before each periodic backfill. `0` disables a category's expiry.
+**Ephemeral TTL** (`sweepExpiredMemories()`): `image` after `MEMORY_TTL_IMAGE_HOURS`, `event` after `MEMORY_TTL_EVENT_DAYS`, measured on `updated_at` with a strict `<`. It also runs before each periodic backfill. `0` disables a category's expiry. Corrections never expire.
 
 **Model-switch runbook** (`EMBEDDING_MODEL`):
 1. Run the live calibration test (`RUN_LIVE=1 EMBEDDING_MODEL=<new> … yarn test:live`, grep `CALIBRATION`) to confirm ZDR endpoints and sane thresholds.
@@ -608,13 +669,18 @@ Rollback is reverting the variable.
 
 | Table | Contents |
 |---|---|
-| `memories` | id, category, subject, content, source, timestamps, active flag, subject_user_id (main account id) |
+| `memories` | the journal: id, category (incl. `correction`), subject, content, source, timestamps, active flag, subject_user_id (main account id), `journal_seq` (the clock, by trigger), `said_by`, `evidence` JSON (`{messageIds, quote}`), `seen_count`, `first_seen_at`/`last_seen_at`, `related_user_ids` JSON |
 | `memories_fts` | FTS5 external-content index over memories (content/subject/category); active rows only |
 | `memory_embeddings` | memory_id (FK, cascade), model, dims, input_text, vector BLOB (L2-normalized LE Float32, `CHECK(length = dims*4)`), `UNIQUE(memory_id, model)` |
+| `notes` | one row per note: scope (`person`/`group`/`circle`), owner_id (main id; `''` for the group and circles), topic (a slug; a circle's unique slug), title, content (markdown), aliases JSON (circles), version, updated_at, updated_by (`dream`/`edit`/`bootstrap`/`import`/`undo`), active; `UNIQUE(scope, owner_id, topic)` |
+| `note_members` | a circle's members: (note_id, member_id, since, until, role); `until` NULL = current |
+| `note_versions` | every kept version (the current one included) with a circle's membership snapshot, who and why (`reason`), and `linked` (the circles a merge deactivated in the same write, for undo); trimmed to 50 per note after each night, bootstrap/import/edit versions always kept |
+| `notes_fts` | plain FTS5 over active notes (title, content, aliases), kept by triggers on `notes` |
+| `dream_state` | per person and for the group: journal_watermark, last_dream_at, last_error |
 | `identities` | discord_user_id, display_name, canonical_name (first seen), username (handle), irl_name, aliases JSON, active |
-| `emojis` / `learner_state` / `bot_state` | emoji name/caption/use count, learner watermarks, key/values (digest watermark, last announced sha) |
+| `emojis` / `learner_state` / `bot_state` | emoji name/caption/use count; capture watermarks per channel; key/values (digest watermark, last announced sha, `dream:last_night`, `dream:running`, `memory_bootstrap:progress`) |
 
-**conversations.db**: `conversation_state(channel_id, schema_version, state_json, updated_at)`. Rows with an old `CONVERSATION_STATE_SCHEMA_VERSION` (now 3) are discarded on load; a v1 table is dropped and recreated.
+**conversations.db**: `conversation_state(channel_id, schema_version, state_json, updated_at)`. Rows with an old `CONVERSATION_STATE_SCHEMA_VERSION` (now 4: entries carry the note versions shown) are discarded on load; a v1 table is dropped and recreated.
 
 **bot.db** (each table created by its feature on first use; columns added later go through `ensureColumn`)
 
@@ -653,13 +719,21 @@ docker build -t frigidaire-sandbox:ci sandbox && sh sandbox/ci-smoke.sh frigidai
 
 # Live tests (paid, cents; each file is skipped without RUN_LIVE=1 + its key). Grep the output for:
 #   CALIBRATION (embeddings ZDR canary, ramble judge), FALLBACK (fallback chain), MEDIA_LIVE (stt-zdr allZdr=true is
-#   the Whisper privacy canary), WRAPPED_INTRO, LIVE-AUTOREACT, LIVE (link reader, free), GITHUB_* (read-only)
+#   the Whisper privacy canary), WRAPPED_INTRO, LIVE-AUTOREACT, DREAM_LIVE (a person dream, the group pass and an
+#   owner edit with the real MEMORY_DREAM_MODEL, ~10 cents), LIVE (link reader, free), GITHUB_* (read-only)
 docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... test yarn test:live
 docker compose run --rm -e RUN_LIVE=1 -e GITHUB_TOKEN=github_pat_... -e GITHUB_REPO=owner/name test yarn test:live
 
 # Evals (paid; RUN_LIVE=1 + key)
 docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... test yarn eval:gate [extra-cases.json …]
 docker compose run --rm -e RUN_LIVE=1 -e OPENROUTER_API_KEY=sk-... -e EVAL_MODELS=a,b test yarn eval:persona
+
+# Memory bootstrap (docs/memory.md "Bootstrap"): locally against ./data, or in the prod container as the node user
+docker compose run --rm test yarn memory:export                   # archive → data/memory-bootstrap/export/ (private: delete after)
+docker compose run --rm test yarn memory:check [DIR]              # validate a notes tree exactly as the startup import would
+docker compose run --rm test yarn memory observations [WORKDIR]   # the playbook's observation log bookkeeping
+docker compose run --rm test yarn memory:bootstrap --dry-run      # the built-in bootstrap's estimate (then --run; paid)
+docker exec -u node frigidaire-bot node dist/ai/memory/bootstrap/cli.js export   # the same commands in prod
 
 # Update yarn.lock after editing package.json
 docker compose run --rm test yarn install --mode=update-lockfile   # then rebuild the test image
@@ -687,6 +761,7 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 |---|---|---|
 | `MAIN_CHANNEL_ID` | unset | the channel the group talks in: default for the gate, ramble watch, auto-react, birthdays, archive backfill, reminder fallback |
 | `LINKED_ACCOUNTS` | empty | csv of `sideId:mainId` (`;`/newlines also separate); a side account counts as its main everywhere |
+| `BOT_OWNER_USER_IDS` | empty ⇒ the application owner | csv of who may edit and undo notes (the owner); unset ⇒ the Discord application's owner, or its team's accepted members |
 
 **OpenRouter and models**
 
@@ -698,7 +773,7 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 | `CHAT_FALLBACK_MODELS` | empty | csv of chat models OpenRouter falls back to, in order |
 | `IMAGE_MODEL` | `google/gemini-3.1-flash-image` | `generate_image` (only ZDR host: Vertex) |
 | `EMOJI_CAPTION_MODEL` | `anthropic/claude-opus-4.7` | emoji captions (one-shot per emoji) and usage re-grounding |
-| `LEARNER_MODEL` | `z-ai/glm-5.3-flash` | personality learner |
+| `LEARNER_MODEL` | `z-ai/glm-5.3-flash` | memory capture (the learner's extractor) |
 | `SELF_IMPROVEMENT_MODEL` | = `LEARNER_MODEL` | self-improvement pass |
 | `EMBEDDING_MODEL` | `qwen/qwen3-embedding-8b` | memory vectors; must have ZDR endpoints |
 | `DELETE_REPOST_MODEL` | `typesafe/jev-1.13` | deleted-message judge: a decision model, or any chat model id |
@@ -751,19 +826,33 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 | `AUTO_REACT_MIN_PROFILE_MESSAGES` | 200 | learn first: reacted member posts the archive must hold |
 | `AUTO_REACT_DELAY_SECONDS` | 10 | wait before judging (1..300) |
 
-**Learner and emojis**
+**Memory capture and emojis**
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LEARNING_INTERVAL_MS` | 1800000 (30 min) | learner cycle |
-| `MIN_MESSAGES_FOR_OBSERVATION` | 5 | new messages a channel needs per cycle |
-| `LEARNER_IGNORE_CHANNELS` | empty | csv of channels the learner skips |
+| `CAPTURE_IDLE_MINUTES` | 20 | a channel's conversation is captured once it has been quiet this long (1..1440) |
+| `CAPTURE_MAX_SPAN_MINUTES` | 120 | …or once its oldest uncaptured message is this old (long conversations) |
+| `MIN_MESSAGES_FOR_OBSERVATION` | 5 | new member messages a conversation needs before it is captured |
+| `LEARNER_IGNORE_CHANNELS` | empty | csv of channels capture skips |
 | `SELF_IMPROVEMENT_ENABLED` | true | the self-improvement pass |
+| `LEARNING_INTERVAL_MS` | 1800000 (30 min) | obsolete: still parsed so an old `.env` keeps working, unused since capture runs at conversation end |
 | `EMOJI_FORCE_RECAPTION` | false | ONE-SHOT: clears every caption at startup; unset it again |
 | `EMOJI_USAGE_CAPTIONS_ENABLED` | true | the usage-grounded caption job |
 | `EMOJI_RECAPTION_FROM_USAGE` | false | ONE-SHOT: re-ground every eligible caption at startup; unset it again |
 
-**Memory**
+**Memory: dream, edits, bootstrap**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MEMORY_DREAM_ENABLED` | true | the nightly dream (off ⇒ notes only change through edits and imports) |
+| `MEMORY_DREAM_MODEL` | `anthropic/claude-opus-5.5` | the dream (ZDR); no reasoning field is sent |
+| `MEMORY_DREAM_HOUR` | 4 | Eastern hour (0..23) from which the day's dream runs, catching up the same day |
+| `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT` | 20 | people dreamed per night, most recently active first (1..500) |
+| `MEMORY_DREAM_REPORT` | true | the report-channel line after a night with changes or failures |
+| `MEMORY_EDIT_MODEL` | = `MEMORY_DREAM_MODEL` | the owner's edits |
+| `MEMORY_BOOTSTRAP_MODEL` | = `MEMORY_DREAM_MODEL` | the built-in bootstrap |
+
+**Memory: journal search**
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -908,19 +997,20 @@ Sidecar-only (the `sandbox` service's own environment, read by `server.py`): `SA
 - Vitest 5; tests colocated as `src/**/*.test.ts`. Convention: code at the **OpenRouter, Discord or GitHub boundary ships with fixture/fake-based tests**.
 - **Hermeticity**: tests never touch `./data` or the network.
   - Every default store (memory, conversations, bot.db, archive) is `:memory:` under Vitest; `makeDefaultEmbeddingProvider()` returns `undefined`; the media and link-reader singletons can't reach the network; the log file is off.
-  - Tests needing memory inject `new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() })` via `setMemoryStoreForTesting()`.
+  - Tests needing memory inject `new MemoryStore(':memory:', { embeddings: new FakeEmbeddingProvider() })` via `setMemoryStoreForTesting()`, and `new NotesStore(memory, { now })` (the same handle, an injected clock) where notes matter. Circle members must be known: upsert identities first, or pass `allowedIds`.
   - Anything that can write an error capture stubs `DEBUG_CAPTURE_DIR` (or sets `DEBUG_CAPTURE=0`).
   - Clocks are injected, or faked with `vi.useFakeTimers({ toFake: ['Date'] })`.
-- **Guard tests** worth knowing: `openRouterCallSites.test.ts` (tags, ZDR, reasoning under a small cap, no unused `UsageFeature`), `config.test.ts` (a startup-summary token per config section, no secrets in it, no `process.env` read outside `config.ts`), `eventModule.test.ts` (every event file), `claudeWorkflow.test.ts` (the owner-only guard, the auth default, no `@` in bot comments), `dockerPushPaths.test.ts` (push triggers cover every build input), `scenarioFile.test.ts` / `cases.test.ts` (placeholder ids, no links), `loadEnv.test.ts` (dotenv first).
+- **Guard tests** worth knowing: `openRouterCallSites.test.ts` (tags, ZDR, reasoning under a small cap, no unused `UsageFeature`), `config.test.ts` (a startup-summary token per config section, no secrets in it, no `process.env` read outside `config.ts`), `eventModule.test.ts` (every event file), `claudeWorkflow.test.ts` (the owner-only guard, the auth default, no `@` in bot comments), `dockerPushPaths.test.ts` (push triggers cover every build input), `scenarioFile.test.ts` / `cases.test.ts` (placeholder ids, no links), `loadEnv.test.ts` (dotenv first in every entry point, the bootstrap CLI included), `playbook.test.ts` (the bootstrap skill's examples pass the real validators; skipped outside a checkout, since `.claude` isn't in the Docker context).
 - `src/test-support/`:
   - `fakeProvider.ts`: scripted `AiProvider` (`textResponse()`, `toolCallResponse()`, `errorStep()`), records every `chat()` input.
   - `fakeDiscord.ts`: `createFakeMessage()` (typed as the exact `MessageCreate` argument). Its options cover channel types incl. threads and parents, attachments with size/duration, embeds incl. `proxyURL`, mentions, `replyPinged`, `cachedMessages`, a channel message log with Discord's before/after/around fetch rules, reference details, flags, polls, webhook recorders and send failures. Also `createFakeChannel()`, `createFakeClient()` (a ready `Client<true>`), `createFakeBotMessage()`, `sentContent()`.
   - `fakeEmbeddings.ts`: deterministic bag-of-words embeddings; `failWith` simulates outages.
   - `openRouterFetch.ts`: replay/record OpenAI-SDK clients backed by JSON fixtures (`loadFixture()`). `capturingClient.ts` is the capturing client: scripted replies (or fixtures through `fixtureReply()`), every request's body and headers (the feature tag) recorded.
   - `fakeMedia.ts`: scripted/missing ffmpeg, file fetches, `createFileSafeFetch()` (the real guarded fetch over an in-memory transport), `createFakeCatalog()` with ZDR endpoint coverage. Synthetic samples live in `fixtures/media/`.
-  - `fakeSafeFetch.ts` (link-reader routes, `htmlPage()`), `fakeArchive.ts` (archive rows, archivable messages, snowflakes), `fakeScheduling.ts` (postable channels, Discord error codes), `fakeInteraction.ts` (context-menu interactions that enforce the reply state machine; `createFakeCommandDeps()`), `fakeGitHub.ts` (in-memory GitHub endpoints with scripted failures).
+  - `fakeSafeFetch.ts` (link-reader routes, `htmlPage()`), `fakeArchive.ts` (archive rows, archivable messages, snowflakes), `fakeScheduling.ts` (postable channels, Discord error codes), `fakeInteraction.ts` (context-menu, button, select-menu and modal-submit interactions that refuse what Discord refuses: nothing after `showModal`, `update` only on components or modals opened from a message; `createFakeCommandDeps({owners, notes, proposeEdit, report, now})`), `fakeGitHub.ts` (in-memory GitHub endpoints with scripted failures).
   - `replayCli.ts` backs `yarn replay`; `recorder.ts` is the call-recorder util.
 - Link fixers are tested with an injected `FixerDeps` (fake fetch + clock). The message judge takes a fake decisions fetch and a replay chat client. The deleted-message reposter, the auto-reactor, the gate, the scheduler and the command handlers take every dependency through their constructors or options.
+- Memory v2: the dream, the group pass, owner edits and the bootstrap run against `capturingClient.ts` (scripted answers with `usage.cost`), in-memory stores, injected clocks and passage loaders; the viewer's edit flow is tested through the real `proposeEdit` too. `personalityLearner.capture.test.ts` runs capture end to end over a Discord-semantics channel log; `src/ai/capture/*.test.ts` cover paging, splitting, citations and knowledge; `DreamScheduler` takes run/report/state/prune/lease/clock; `capturingClient`'s `onRequest` hook stages a write "while the model is thinking".
 - **Live tests** (`*.live.test.ts`, `yarn test:live`) are `describe.skipIf`-gated on `RUN_LIVE=1` plus their key; see [Commands](#commands) for the grep tags.
 
 ### Prod-error → regression-test workflow
@@ -966,13 +1056,13 @@ Both image workflows build the `ci` Docker stage (GHA layer cache), which runs `
 ## Notes for agents
 
 - There is no `CLAUDE.md`; this file is the project instruction file (the harness and the Claude feature-request workflow read `AGENTS.md`).
-- **Done in this batch** (don't redo): usage-grounded emoji captions (what emoji means what), the people resolver + linked accounts, replying without a mention, the message archive, reminders/polls/birthdays, media, the link reader, the sandbox, context-menu commands, feature requests → GitHub, the usage ledger, the file log, the persona and gate evals.
+- **Done in this batch** (don't redo): usage-grounded emoji captions (what emoji means what), the people resolver + linked accounts, replying without a mention, the message archive, reminders/polls/birthdays, media, the link reader, the sandbox, context-menu commands, feature requests → GitHub, the usage ledger, the file log, the persona and gate evals, and the **memory rework (memory v2)**: journal evidence and recurrence, per-person notes, group notes and circles, capture at conversation end, the nightly dream with the weekly group refresh, corrections, the notes viewer with the owner's edit and undo, and the bootstrap (export, playbook, startup import, built-in run). [docs/memory.md](docs/memory.md) is its design and code map; keep it in step with the code.
+- **Memory v2, deliberately not done** (docs/memory.md "Not yet"): threads and announcement channels aren't captured (text channels only, as before); journal rows have no confidence field (the dream picks passages by heuristic); drafted edits live in memory (a restart drops one awaiting Confirm); an outage at the dream hour costs that night (nothing is lost; the next night catches up); the import has no override for a manifest from another database; token counts are estimates.
 - **Deliberately deferred** (future tasks, not incremental work):
-  - The memory *architecture* rework toward per-member profile documents + a consolidation job (today: atomic facts + retrieval injection).
   - A backlog of scheduled events: recurring reminders, DM reminders, scheduled events beyond reminders and birthdays.
   - Thread history backfill in the archive.
   - An offline eval set for the ramble judge (hold out real rambles as positives).
   - Unifying the helpers that remain duplicated per module (small truncate/one-line helpers; a few test files still build a local capturing client instead of using `capturingClient.ts`).
-- **Tuning is owner-driven from the logs**: `GATE_THRESHOLD` (`gate: REPLY|skip` lines + `yarn eval:gate`), `RAMBLE_THRESHOLD` (`ramble:` lines), auto-react (shadow lines, then `AUTO_REACT_MODE=on`), fixer order (`*_FIXERS`, alerts).
-- **Grandfathered public-repo exception**: the learner prompt's GOOD/BAD examples in `personalityLearner.ts` still use a few real first names; the owner kept them as-is for now. Don't copy them anywhere, and don't add more.
+- **Tuning is owner-driven from the logs**: `GATE_THRESHOLD` (`gate: REPLY|skip` lines + `yarn eval:gate`), `RAMBLE_THRESHOLD` (`ramble:` lines), auto-react (shadow lines, then `AUTO_REACT_MODE=on`), fixer order (`*_FIXERS`, alerts), memory (the `🌙 dream` report lines and `dream:`/`capture:` log lines; `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`, `CAPTURE_IDLE_MINUTES`).
+- **Grandfathered public-repo exception**: the learner prompt's GOOD/BAD examples in `personalityLearner.ts` still use a few real first names; the owner kept them as-is for now. Don't copy them anywhere (the dream, edit and bootstrap prompts use the fictional cast), and don't add more.
 - Cloud / no-Docker fallback: `npm install && npx vitest run && npx tsc -p tsconfig.test.json && npx biome check --fix src/`; set `LEFTHOOK=0` when committing; never commit `package-lock.json`; regenerate `yarn.lock` with a Yarn 4 binary from npm (`npm pack @yarnpkg/cli-dist@4.18.1`) when dependencies change. The sandbox server tests need `python3` and `bash`.

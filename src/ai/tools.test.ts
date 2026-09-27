@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeMessage, type FakeMessageOptions } from '../test-support/fakeDiscord';
 import { FakeEmbeddingProvider } from '../test-support/fakeEmbeddings';
 import { getMemoryStore, setMemoryStoreForTesting } from './memory';
+import { parseEvidence } from './memory/evidence';
 import { MemoryStore } from './memory/memoryStore';
 import { toolDefinitions } from './tools';
 import type { ToolHandlerContext } from './types';
@@ -136,6 +137,33 @@ describe('recall_memories tool', () => {
     const result = await recallMemoriesTool!.handler(stubCtx, { query: 'vintage harmonicas', subject: 'Margo_test' });
     const firstLine = result.split('\n')[1];
     expect(firstLine).toContain('Margo_test');
+  });
+
+  it("labels a correction with who made it: someone's claim never reads as the person's fact", async () => {
+    const REMI = '100000000000000001';
+    const DALE = '100000000000000002';
+    const store = new MemoryStore(':memory:');
+    setMemoryStoreForTesting(store);
+    store.upsertIdentity(REMI, 'Remi');
+    store.upsertIdentity(DALE, 'Dale');
+    await store.save({
+      category: 'correction',
+      subject: 'Dale',
+      content: 'Moved to Quillport, not Brackenfield',
+      subject_user_id: DALE,
+      said_by: REMI,
+    });
+    await store.save({
+      category: 'correction',
+      subject: 'Dale',
+      content: 'Quit the Quillport choir in August',
+      subject_user_id: DALE,
+      said_by: DALE,
+    });
+
+    const result = await recallMemoriesTool!.handler(stubCtx, { query: 'Quillport' });
+    expect(result).toMatch(/\[id:\d+\] \[correction, Remi's claim, not settled\] Dale: Moved to Quillport, not Brackenfield/);
+    expect(result).toMatch(/\[id:\d+\] \[correction, their own word\] Dale: Quit the Quillport choir in August/);
   });
 
   it('returns "no memories found" for a nonexistent query', async () => {
@@ -364,11 +392,14 @@ describe('memories keyed by stable member id', () => {
   });
 
   it('remember_fact files a memory about "me" under the speaker’s id and current display name', async () => {
-    const result = await rememberFactTool!.handler(ctxFor(), { category: 'fact', subject: 'me', content: 'Works nights' });
+    const ctx = ctxFor({ messageId: '1300000000000000001', content: 'i work nights now' });
+    const result = await rememberFactTool!.handler(ctx, { category: 'fact', subject: 'me', content: 'Works nights' });
     expect(result).toMatch(/^Saved to memory \(id: \d+\) about Jasper\.$/);
     const [row] = getMemoryStore().getAllActive();
     expect(row.subject).toBe('Jasper');
     expect(row.subject_user_id).toBe('222222222222222222');
+    // The triggering message is kept as evidence (memory v2): the dream can read the passage back.
+    expect(parseEvidence(row.evidence)).toEqual({ messageIds: ['1300000000000000001'], quote: 'i work nights now' });
   });
 
   it('remember_fact resolves a real name, nickname or old name to the member', async () => {

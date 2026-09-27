@@ -1,4 +1,4 @@
-import { ChannelType, type Client, type Collection, type Message, type TextChannel } from 'discord.js';
+import { ChannelType, type Client, type Message, type TextChannel } from 'discord.js';
 import type OpenAI from 'openai';
 import type {
   ChatCompletionContentPart,
@@ -8,16 +8,28 @@ import { config } from '../config';
 import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
 import { attributeMessage } from '../relay';
+import { citedEvidence, relatedMembers, type TranscriptLine } from './capture/citations';
+import {
+  CAPTURE_LIMITS,
+  conversationStartIndex,
+  readUncaptured,
+  type Segment,
+  type SizedItem,
+  splitIntoSegments,
+} from './capture/conversation';
+import { buildCaptureKnowledge, type CapturePerson, KNOWN_LIMITS } from './capture/knowledge';
+import { type CaptureActivity, type CaptureTrigger, IntervalCaptureTrigger } from './captureTrigger';
 import { getCachedTranscript } from './media';
+import { getNotesStore } from './memory';
 import { type Identity, LEARNER_SOURCES, type MemoryStore, NON_PERSON_SUBJECTS, nameKey } from './memory/memoryStore';
 import { getOpenRouterClient } from './openRouterClient';
 import {
   checkNickname,
   checkRealName,
+  createPeopleMatcher,
   foldMembers,
   type Member,
   matchMemberByName,
-  memoryKeyFor,
   parseMemberName,
 } from './people';
 import { formatEmojiLines, formatIdentityLines } from './promptSections';
@@ -44,8 +56,13 @@ export type ObservationCategory = (typeof OBSERVATION_CATEGORIES)[number];
 
 // The default learner model (z-ai/glm-5.3-flash) reasons at 'max' unless told otherwise, and reasoning
 // counts toward max_tokens: at 'max', the old 1536-token cap could be spent before any JSON was written.
-// Each pass asks for 'low' and keeps room for the observations after it (only generated tokens are billed).
-const LEARNER_MAX_TOKENS = 4096;
+// Each pass asks for 'low' and keeps room for the observations after it: a part is a whole conversation
+// (up to ~48k characters) and every observation carries its evidence, so a busy one can run to dozens of
+// ~100-token rows. Only generated tokens are billed: the room costs nothing unless it is used.
+const LEARNER_MAX_TOKENS = 16_384;
+// Requests per pass: an answer that is empty, not the JSON asked for, or cut off at the length limit is
+// asked for once more (see analyzeAndSave).
+const LEARNER_ATTEMPTS = 2;
 
 type LearnerRequestBody = {
   model: string;
@@ -132,6 +149,45 @@ export function parseLearnerOutput(raw: string): LearnerOutput | undefined {
 }
 
 /**
+ * The complete observations of an answer cut off at the length limit: the entries of its "observations"
+ * array up to the last one that closed (the whole array when the cut came after it, e.g. in
+ * identity_updates). Undefined when there is no such array or the cut came before its first entry closed.
+ * Strings are skipped with their escapes, so a brace or bracket inside a quote never counts.
+ */
+export function salvageTruncatedObservations(raw: string): Observation[] | undefined {
+  const key = /"observations"\s*:\s*\[/.exec(raw);
+  if (!key) return undefined;
+  const start = key.index + key[0].length;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let lastEntryEnd = -1;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') {
+      if (depth === 0) break; // the observations array itself closed
+      depth--;
+      if (depth === 0) lastEntryEnd = i;
+    }
+  }
+  if (lastEntryEnd < 0) return undefined;
+  try {
+    const entries: unknown = JSON.parse(`[${raw.slice(start, lastEntryEnd + 1)}]`);
+    return Array.isArray(entries) && entries.length > 0 ? (entries as Observation[]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Builds the pass-1 (personality/observation) prompt. Exported as a pure function so tests can assert
  * the memory-quality rules (30-day test, ephemeral categories, subject normalization) are present.
  */
@@ -141,7 +197,8 @@ export function buildPersonalityPrompt(args: {
   existingMemoriesSummary: string;
 }): string {
   return `You are extracting atomic long-term memories from a Discord conversation.
-Messages are labeled: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Images appear after the message that shared them.
+Messages are labeled: #N [timestamp] [DisplayName (id:DISCORD_USER_ID)] content, where #N is the line number you cite as evidence. Images appear after the message that shared them.
+A part headed "ALREADY COVERED" is the end of the previous part of this conversation, already read: use it to understand what follows, never extract anything from it.
 
 THE 30-DAY TEST (apply this before everything else):
 Save only knowledge that will still be true and useful in 30 days — jobs, preferences, relationships, recurring
@@ -160,7 +217,7 @@ OUTPUT RULES (the most important part):
    - "indicating a/his/her ..."
    - "suggesting a preference for ..."
    Describe what someone DID or IS, not what it signals or reinforces.
-4. Skip if already known (see existing memories below). "Already known" means the same fact with different wording,
+4. Skip if already known (see what is already known, below). "Already known" means the same fact with different wording,
    examples, or emojis. If you'd write a 5th version of "Jason uses racially charged humor", DON'T. Save a
    personality memory only for a NEW trait or a clear CHANGE in a known one.
 5. Subject normalization: "subject" MUST be the person's CURRENT display name — the name their identities entry
@@ -208,14 +265,18 @@ GOOD vs BAD examples:
   BAD:  {"category":"vibe","subject":"server","content":"Group frequently engages in playful teasing of Dillon in a boundary-pushing manner."}
 
 IDENTITY UPDATES: If someone reveals or is consistently called by a real name / alias / nickname, add an entry in "identity_updates" keyed on their Discord ID. Use "irl_name" for a real name ("Derrick"), "aliases_add" for nicknames. Direct evidence only.
+
+EVIDENCE: every observation cites where it comes from: "evidence": {"lines": [the #N numbers of the message(s) it is based on], "quote": "the key words, copied character for character from one of those lines (at most 200 characters)"}. The quote is kept as the source of the memory: copy it exactly, never reword it.
+
+PEOPLE AN OBSERVATION IS ALSO ABOUT: a relationship or something shared (dating, roommates, siblings, a rivalry, a trip, a game they play together) is ONE observation filed under one person, with the other members' Discord IDs in "related_user_ids". Leave the field out when the observation is about one person only, and never list someone who is only mentioned in passing.
 ${args.identitiesSection}${args.emojisSection}
-Existing memories (skip if semantically covered):
+Already known about these people and the server (skip anything semantically covered). "Your notes" are consolidated notes; rows under them are newer:
 ${args.existingMemoriesSummary}
 
 Respond ONLY with a JSON object. If nothing worth saving, respond with {"observations": []}.
 {
   "observations": [
-    {"category": "fact|preference|personality|event|vibe|image", "subject": "CurrentDisplayName|server", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char statement"}
+    {"category": "fact|preference|personality|event|vibe|image", "subject": "CurrentDisplayName|server", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char statement", "evidence": {"lines": [12], "quote": "exact words from line 12"}, "related_user_ids": ["other-member-discord-id-if-shared"]}
   ],
   "identity_updates": [
     {"discord_user_id": "123", "irl_name": "Derrick", "aliases_add": ["Derek", "D"]}
@@ -240,7 +301,8 @@ export function buildSelfImprovementPrompt(args: {
 }): string {
   const mention = args.botUserId ? `; it is mentioned as <@${args.botUserId}>` : '';
   return `You are looking for bot self-improvement signals in a Discord conversation for a bot called "${args.botName}".
-Messages: [timestamp] [DisplayName (id:DISCORD_USER_ID)] content. Bot name: "${args.botName}" (also "fridge", "fridge bot", "bot")${mention}.
+Messages: #N [timestamp] [DisplayName (id:DISCORD_USER_ID)] content (#N is a line number). Bot name: "${args.botName}" (also "fridge", "fridge bot", "bot")${mention}.
+A part headed "ALREADY COVERED" was already read: context only, never extract anything from it.
 The bot's own replies are NOT shown in this transcript, so a message without a visible answer tells you nothing about whether the bot answered it.
 
 OUTPUT RULES:
@@ -293,7 +355,15 @@ Respond ONLY with a JSON object. If nothing actionable, respond with {"observati
 export const MAX_LEARNER_IMAGES = 8;
 const IMAGE_PLACEHOLDER = '[image not shown]';
 const MAX_VOICE_TRANSCRIPT_CHARS = 2_000;
-const PER_PERSON_MEMORY_LIMIT = 25;
+// The headers around a segment's lead-in (src/ai/capture/conversation.ts): the end of the previous segment,
+// shown so the new one doesn't start abruptly, never extracted from (the prompts say so).
+const LEAD_IN_HEADER =
+  '## ALREADY COVERED — context only, do not extract (the end of the previous part of this conversation)';
+const CONTINUES_HEADER = '## THE CONVERSATION CONTINUES — extract from here';
+// A recently captured channel is re-read after a restart (see PersonalityLearner.start()).
+const RESUME_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
+// A failed capture is retried this many times in a row, each once the channel has been quiet again.
+const MAX_CAPTURE_RETRIES = 3;
 
 /**
  * Keeps the `max` most recent image parts (parts are in chronological order) and replaces older ones
@@ -343,12 +413,6 @@ function cachedTranscript(messageId: string): string | undefined {
   }
 }
 
-/** Snowflake order: timestamp first, then the id itself (equal-length decimal strings compare lexically). */
-function isNewer(a: Message, b: Message): boolean {
-  if (a.createdTimestamp !== b.createdTimestamp) return a.createdTimestamp > b.createdTimestamp;
-  return a.id.length !== b.id.length ? a.id.length > b.id.length : a.id > b.id;
-}
-
 /** A fetched message the learner looks at, attributed to the person who wrote it. */
 type ObservedMessage = {
   msg: Message;
@@ -358,41 +422,101 @@ type ObservedMessage = {
   source: 'human' | 'relay';
 };
 
+/** An observed message as a capture transcript line, weighed for the segment split. */
+type CaptureItem = SizedItem & {
+  observed: ObservedMessage;
+  /** `[timestamp] [Name (id:…)] content`: the line without its #N. */
+  line: string;
+  /** A cached voice transcript, clamped. */
+  transcript?: string;
+};
+
+/** Sizes a capture works within (tests shrink them); defaults in CAPTURE_LIMITS. */
+export type CaptureSizes = {
+  /** Messages one capture reads at most. */
+  maxMessages?: number;
+  /** Characters of transcript per extractor request. */
+  segmentMaxChars?: number;
+  /** Characters of the previous segment each later one opens with. */
+  leadInChars?: number;
+};
+
 export type PersonalityLearnerOptions = {
+  /** The default trigger's interval (LEARNING_INTERVAL_MS); ignored when `trigger` is given. */
   intervalMs?: number;
   minMessages?: number;
   /** OpenRouter client; defaults to the shared one (tests inject a replay client). */
   client?: OpenAI;
+  /**
+   * When a channel is read (src/ai/captureTrigger.ts). Defaults to the original fixed interval over every
+   * channel with activity; the bot passes memory v2's ConversationEndTrigger (src/ai/learnerInstance.ts).
+   */
+  trigger?: CaptureTrigger;
+  /** The quiet time that separates two conversations (CAPTURE_IDLE_MINUTES): where a first capture starts. */
+  idleMs?: number;
+  sizes?: CaptureSizes;
 };
 
 export class PersonalityLearner {
   private readonly store: MemoryStore;
-  private readonly intervalMs: number;
+  private readonly trigger: CaptureTrigger;
   private readonly minMessages: number;
+  private readonly idleMs: number;
+  private readonly sizes: Required<CaptureSizes>;
   private timer: NodeJS.Timeout | undefined;
-  private readonly activeChannels = new Set<string>();
   private readonly ignoredChannels: Set<string>;
   private client: OpenAI | undefined;
   // A cycle can outlast the interval (slow model, many channels); the next tick must not start a
   // second one that re-reads the same watermarks and saves every observation twice.
   private cycleInFlight = false;
+  // Failed captures in a row per channel (see retryLater); cleared by a capture that finishes.
+  private readonly captureFailures = new Map<string, number>();
 
   constructor(store: MemoryStore, opts: PersonalityLearnerOptions = {}) {
     this.store = store;
-    this.intervalMs = opts.intervalMs ?? config.learner.intervalMs;
+    this.trigger = opts.trigger ?? new IntervalCaptureTrigger(opts.intervalMs ?? config.learner.intervalMs);
     this.minMessages = opts.minMessages ?? config.learner.minMessages;
+    this.idleMs = opts.idleMs ?? config.learner.captureIdleMinutes * 60_000;
+    this.sizes = {
+      maxMessages: opts.sizes?.maxMessages ?? CAPTURE_LIMITS.maxMessages,
+      segmentMaxChars: opts.sizes?.segmentMaxChars ?? CAPTURE_LIMITS.segmentMaxChars,
+      leadInChars: opts.sizes?.leadInChars ?? CAPTURE_LIMITS.leadInChars,
+    };
     this.ignoredChannels = new Set(config.learner.ignoredChannels);
     this.client = opts.client;
   }
 
-  start(discordClient: Client): void {
+  start(discordClient: Client, now: number = Date.now()): void {
     if (this.timer) return;
 
-    logger.info(`PersonalityLearner started (interval: ${this.intervalMs}ms, min messages: ${this.minMessages})`);
+    logger.info(`PersonalityLearner started (capture: ${this.trigger.describe()}, min messages: ${this.minMessages})`);
+    this.resumeRecentChannels(now);
 
     this.timer = setInterval(() => {
       void this.observeOnce(discordClient);
-    }, this.intervalMs);
+    }, this.trigger.tickMs);
+  }
+
+  /**
+   * Activity lives in memory, so a restart (every deploy) forgets conversations still waiting for their
+   * capture. The channels captured in the last two weeks are reported to the trigger as a possible backlog:
+   * each is read once it has been quiet (a fetch from its watermark, usually empty), and the learner counts
+   * what it finds against the minimum itself.
+   */
+  private resumeRecentChannels(now: number): void {
+    try {
+      const channels = this.store
+        .observedChannelsSince(new Date(now - RESUME_LOOKBACK_MS))
+        .filter((channelId) => !this.ignoredChannels.has(channelId));
+      for (const channelId of channels) this.trigger.noteBacklog(channelId, now);
+      if (channels.length > 0) {
+        logger.info(
+          `PersonalityLearner: ${channels.length} recently captured channel(s) will be checked for messages missed while offline`,
+        );
+      }
+    } catch (error) {
+      logger.warn('PersonalityLearner: could not list recently captured channels:', error);
+    }
   }
 
   stop(): void {
@@ -403,66 +527,34 @@ export class PersonalityLearner {
     }
   }
 
-  trackActivity(channelId: string): void {
+  /**
+   * A member posted in `channelId` (the learnerActivityTracker event): reported to the capture trigger
+   * unless the channel is in LEARNER_IGNORE_CHANNELS.
+   */
+  trackActivity(channelId: string, activity: Omit<CaptureActivity, 'channelId'> = { at: Date.now() }): void {
     if (this.ignoredChannels.has(channelId)) return;
-    this.activeChannels.add(channelId);
+    this.trigger.noteActivity({ ...activity, channelId });
   }
 
   /**
-   * One observation cycle over the channels that saw activity since the last one. Never throws. When
-   * the previous cycle is still running this one is skipped, and the channels it would have handled
-   * stay queued for the next tick.
+   * One observation cycle over the channels the capture trigger says are due. Never throws. When the
+   * previous cycle is still running this one is skipped and takes nothing, so the pending channels stay
+   * with the trigger for the next tick.
    */
-  async observeOnce(discordClient: Client): Promise<void> {
+  async observeOnce(discordClient: Client, now: number = Date.now()): Promise<void> {
     if (this.cycleInFlight) {
-      logger.warn('PersonalityLearner: previous observation cycle still running, skipping this tick');
+      // Routine on the 1-minute capture tick while a long conversation is being read: not worth a WARN.
+      logger.debug('PersonalityLearner: previous observation cycle still running, skipping this tick');
       return;
     }
     this.cycleInFlight = true;
     try {
-      await this.observe(discordClient);
+      await this.observe(discordClient, this.trigger.takeDue(now), now);
     } catch (error) {
       logger.error('PersonalityLearner observation failed:', error);
     } finally {
       this.cycleInFlight = false;
     }
-  }
-
-  private buildRelevantMemoriesSummary(observed: ObservedMessage[]): string {
-    // Fetch memories keyed on who actually participated in this batch, plus server-wide
-    // and bot-subject context. Avoids dumping all ~1000 memories into every prompt. A participant's
-    // memories are looked up by their Discord id and every name they have had, so rows filed under an
-    // old display name still count as "already known".
-    const seen = new Set<number>();
-    const chunks: string[] = [];
-
-    const push = (rows: { id: number; category: string; subject: string; content: string }[]) => {
-      for (const m of rows) {
-        if (seen.has(m.id)) continue;
-        seen.add(m.id);
-        chunks.push(`- [${m.category}] ${m.subject}: ${m.content}`);
-      }
-    };
-
-    // authorId is already the main account (attributeMessage), and memoryKeyFor adds the names of
-    // every linked account.
-    const participants = new Map<string, { userId?: string; names: string[] }>();
-    for (const o of observed) {
-      const key = o.authorId ?? `name:${o.authorName}`;
-      if (participants.has(key)) continue;
-      participants.set(
-        key,
-        o.authorId ? memoryKeyFor(this.store, o.authorId, [o.authorName]) : { names: [o.authorName] },
-      );
-    }
-
-    for (const participant of participants.values()) {
-      push(this.store.getForPerson(participant, PER_PERSON_MEMORY_LIMIT));
-    }
-    push(this.store.getBySubject('server', 25));
-
-    if (chunks.length === 0) return '(none yet)';
-    return chunks.join('\n');
   }
 
   private formatLearnerIdentitiesSection(identities: Identity[]): string {
@@ -536,22 +628,52 @@ export class PersonalityLearner {
     }
   }
 
+  /** An observed message as a transcript line (without its #N), with its cached transcript and its size. */
+  private toItem(o: ObservedMessage): CaptureItem {
+    const ts = formatTimestampET(o.msg.createdAt);
+    const idSuffix = o.authorId ? ` (id:${o.authorId})` : '';
+    const line = `[${ts}] [${o.authorName}${idSuffix}] ${o.msg.content}`;
+    const transcript = cachedTranscript(o.msg.id);
+    // "#N " before the line, and the transcript's own part.
+    const chars = line.length + 6 + (transcript ? transcript.length + 30 : 0);
+    return { observed: o, line, transcript, at: o.msg.createdTimestamp, chars };
+  }
+
   /**
-   * Interleaved content parts, one text line per message (plus a cached voice transcript when there is
-   * one) followed by its images, capped at MAX_LEARNER_IMAGES image parts.
+   * One extractor request's messages: the lead-in (text only, under its "ALREADY COVERED" header) then the
+   * segment, one numbered text line per message (plus a cached voice transcript when there is one)
+   * followed by its images, capped at MAX_LEARNER_IMAGES image parts. `lines` maps each #N to its message,
+   * for the evidence the model cites.
    */
-  private buildMessageParts(observed: ObservedMessage[], channelId: string): ChatCompletionContentPart[] {
+  private renderSegment(
+    segment: Segment<CaptureItem>,
+    channelId: string,
+  ): { parts: ChatCompletionContentPart[]; lines: Map<number, TranscriptLine> } {
     const parts: ChatCompletionContentPart[] = [];
-    for (const o of observed) {
-      const ts = formatTimestampET(o.msg.createdAt);
-      const idSuffix = o.authorId ? ` (id:${o.authorId})` : '';
-      parts.push({ type: 'text', text: `[${ts}] [${o.authorName}${idSuffix}] ${o.msg.content}` });
-      const transcript = cachedTranscript(o.msg.id);
-      if (transcript) parts.push({ type: 'text', text: `[voice message transcript: ${transcript}]` });
-      for (const url of imageUrls(o.msg)) {
+    const lines = new Map<number, TranscriptLine>();
+    const add = (item: CaptureItem, leadIn: boolean) => {
+      const n = lines.size + 1;
+      parts.push({ type: 'text', text: `#${n} ${item.line}` });
+      if (item.transcript) parts.push({ type: 'text', text: `[voice message transcript: ${item.transcript}]` });
+      const { msg } = item.observed;
+      lines.set(n, {
+        line: n,
+        messageId: msg.id,
+        at: item.at,
+        text: item.transcript ? `${msg.content}\n${item.transcript}` : msg.content,
+        leadIn,
+      });
+      if (leadIn) return;
+      for (const url of imageUrls(msg)) {
         parts.push({ type: 'image_url', image_url: { url } });
       }
+    };
+    if (segment.leadIn.length > 0) {
+      parts.push({ type: 'text', text: LEAD_IN_HEADER });
+      for (const item of segment.leadIn) add(item, true);
+      parts.push({ type: 'text', text: CONTINUES_HEADER });
     }
+    for (const item of segment.items) add(item, false);
 
     const capped = capImageParts(parts, MAX_LEARNER_IMAGES);
     if (capped.dropped > 0) {
@@ -561,7 +683,39 @@ export class PersonalityLearner {
     } else if (capped.kept > 0) {
       logger.info(`PersonalityLearner: Including ${capped.kept} images from channel ${channelId}`);
     }
-    return capped.parts;
+    return { parts: capped.parts, lines };
+  }
+
+  /**
+   * Whose knowledge the extractor gets for a segment: its authors, in the order they first speak (main
+   * ids; a relay counts as its author), then up to KNOWN_LIMITS.referencedPeople members the segment talks
+   * about (mentions and names, most referenced first).
+   */
+  private peopleIn(segment: Segment<CaptureItem>, matcher: (text: string) => Map<string, number>): CapturePerson[] {
+    const people: CapturePerson[] = [];
+    const authors = new Set<string>();
+    for (const { observed } of segment.items) {
+      const key = observed.authorId ?? `name:${observed.authorName}`;
+      if (authors.has(key)) continue;
+      authors.add(key);
+      people.push(
+        observed.authorId ? { userId: observed.authorId, name: observed.authorName } : { name: observed.authorName },
+      );
+    }
+    const counts = new Map<string, number>();
+    for (const item of segment.items) {
+      for (const [userId, count] of matcher(`${item.observed.msg.content} ${item.transcript ?? ''}`)) {
+        counts.set(userId, (counts.get(userId) ?? 0) + count);
+      }
+    }
+    const referenced = [...counts.entries()]
+      .filter(([userId]) => !authors.has(userId))
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, KNOWN_LIMITS.referencedPeople);
+    for (const [userId] of referenced) {
+      people.push({ userId, name: this.store.getIdentityById(userId)?.display_name ?? userId });
+    }
+    return people;
   }
 
   /**
@@ -653,7 +807,9 @@ export class PersonalityLearner {
 
   /**
    * Sends content parts to an LLM, parses the JSON response, and saves valid observations +
-   * identity updates. Returns counts of what was saved.
+   * identity updates. Each observation keeps the evidence it cites (resolved through `lines`, the
+   * request's numbered messages) and, for a relationship or shared thing, the other members involved.
+   * Returns counts of what was saved.
    */
   private async analyzeAndSave(
     openai: OpenAI,
@@ -663,6 +819,7 @@ export class PersonalityLearner {
     source: string,
     label: string,
     feature: UsageFeature,
+    lines: ReadonlyMap<number, TranscriptLine>,
   ): Promise<{ observations: number; identityUpdates: number }> {
     logger.info(`${label}: Sending request to ${model} for channel ${channelId}`);
 
@@ -674,26 +831,42 @@ export class PersonalityLearner {
       reasoning: { effort: 'low' },
       provider: { zdr: true },
     };
-    // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
-    const response = await openai.chat.completions.create(
-      body as unknown as ChatCompletionCreateParamsNonStreaming,
-      featureRequestOptions(feature),
-    );
-
-    const choice = response.choices?.[0];
-    const text = choice?.message?.content?.trim();
-    if (!text) {
-      logger.warn(
-        `${label}: ${model} returned nothing for channel ${channelId} (finish=${choice?.finish_reason ?? 'none'}).`,
+    // An answer that is empty, not the JSON asked for, or cut off at the length limit is asked for once
+    // more (a fresh sample: a cut at this cap is a runaway, not a long answer). When no answer parses,
+    // the complete observations of a cut-off one are kept. Either way the part then counts as read: the
+    // same part would fail the same way at every later capture and hold the channel's watermark, and
+    // every conversation after it, back for good. A failed call throws (the part is retried later).
+    let parsed: LearnerOutput | undefined;
+    let salvaged: Observation[] = [];
+    for (let attempt = 1; attempt <= LEARNER_ATTEMPTS; attempt++) {
+      // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
+      const response = await openai.chat.completions.create(
+        body as unknown as ChatCompletionCreateParamsNonStreaming,
+        featureRequestOptions(feature),
       );
-      return { observations: 0, identityUpdates: 0 };
+      const choice = response.choices?.[0];
+      const text = choice?.message?.content?.trim() ?? '';
+      const finish = choice?.finish_reason ?? 'none';
+      parsed = text ? parseLearnerOutput(text) : undefined;
+      if (parsed) break;
+      const cut = finish === 'length';
+      if (cut) {
+        const complete = salvageTruncatedObservations(text) ?? [];
+        if (complete.length > salvaged.length) salvaged = complete;
+      }
+      const problem = !text ? 'returned nothing' : cut ? 'was cut off at the length limit' : 'returned no JSON';
+      const next = attempt < LEARNER_ATTEMPTS ? 'asking again' : 'no attempt left';
+      logger.warn(
+        `${label}: ${model} ${problem} for channel ${channelId} (finish=${finish}, attempt ${attempt}/${LEARNER_ATTEMPTS}), ${next}.${text && !cut ? ` Raw: ${text.slice(0, 200)}` : ''}`,
+      );
     }
-
-    const parsed = parseLearnerOutput(text);
-    if (!parsed) {
-      logger.warn(`${label}: Failed to parse JSON for channel ${channelId}. Raw: ${text.slice(0, 200)}`);
-      return { observations: 0, identityUpdates: 0 };
+    if (!parsed && salvaged.length > 0) {
+      logger.warn(
+        `${label}: keeping the ${salvaged.length} complete observation(s) of a cut-off answer for channel ${channelId}`,
+      );
+      parsed = { observations: salvaged };
     }
+    if (!parsed) return { observations: 0, identityUpdates: 0 };
 
     const members = foldMembers(this.store.getAllIdentities());
     let observations = 0;
@@ -713,13 +886,25 @@ export class PersonalityLearner {
         continue;
       }
 
+      const { evidence, observedAt, leadInOnly } = citedEvidence(obs, lines);
+      if (leadInOnly) {
+        // Taken from the "ALREADY COVERED" lead-in, which the previous part already read: saved again, it
+        // would count one message as a second sighting, or file a reworded duplicate.
+        logger.info(`${label}: dropping an observation that cites only already-covered lines: ${obs.content}`);
+        continue;
+      }
       const { subject, subjectUserId } = this.normalizeSubject(obs.subject, obs.subject_user_id, members);
+      // Self-improvement rows are about the bot: nobody's journal.
+      const related = SELF_IMPROVEMENT_CATEGORIES.includes(category) ? [] : relatedMembers(obs, members, subjectUserId);
       await this.store.save({
         category,
         subject,
         content: obs.content,
         source,
         subject_user_id: subjectUserId,
+        ...(evidence ? { evidence } : {}),
+        ...(observedAt ? { observed_at: observedAt } : {}),
+        ...(related.length > 0 ? { related_user_ids: related } : {}),
       });
       observations++;
     }
@@ -736,10 +921,7 @@ export class PersonalityLearner {
     return { observations, identityUpdates };
   }
 
-  private async observe(discordClient: Client): Promise<void> {
-    const channelsToProcess = [...this.activeChannels];
-    this.activeChannels.clear();
-
+  private async observe(discordClient: Client, channelsToProcess: string[], now: number): Promise<void> {
     if (channelsToProcess.length === 0) return;
 
     logger.info(`PersonalityLearner: Observation cycle started — ${channelsToProcess.length} active channel(s)`);
@@ -753,50 +935,96 @@ export class PersonalityLearner {
     const botName = discordClient.user?.displayName ?? 'Frigidaire';
     const selfImprovementEnabled = config.learner.selfImprovementEnabled;
 
+    const started = Date.now();
     for (const channelId of channelsToProcess) {
       try {
-        await this.observeChannel(discordClient, openai, channelId, botName, selfImprovementEnabled);
+        await this.observeChannel(discordClient, openai, channelId, botName, selfImprovementEnabled, now);
+        this.captureFailures.delete(channelId);
       } catch (error) {
         logger.error(`PersonalityLearner: Error processing channel ${channelId}:`, error);
+        this.retryLater(channelId, now + (Date.now() - started));
       }
     }
   }
 
+  /**
+   * A capture that failed (a Discord read, or an extractor call: an outage) has already been taken from the
+   * trigger, and nothing new may be posted in the channel for days: it is reported as a backlog again, so
+   * the channel is read once it has been quiet for the idle time after the failure. After
+   * MAX_CAPTURE_RETRIES failures in a row (a lasting error, such as lost access) it waits for new activity
+   * or a restart instead, so a broken channel never costs a call every twenty minutes.
+   */
+  private retryLater(channelId: string, at: number): void {
+    const failures = (this.captureFailures.get(channelId) ?? 0) + 1;
+    if (failures > MAX_CAPTURE_RETRIES) {
+      this.captureFailures.delete(channelId);
+      logger.warn(
+        `PersonalityLearner: capture of channel ${channelId} failed ${failures} times in a row; waiting for new activity`,
+      );
+      return;
+    }
+    this.captureFailures.set(channelId, failures);
+    this.trigger.noteBacklog(channelId, at);
+    logger.info(
+      `PersonalityLearner: capture of channel ${channelId} will be retried once it is quiet (retry ${failures}/${MAX_CAPTURE_RETRIES})`,
+    );
+  }
+
+  /**
+   * Captures a due channel: reads everything after its watermark (paged, up to the capture's cap; a channel
+   * never captured is read back to the start of its last conversation), splits it into segments when it is
+   * too long for one request, and runs the extractor (then the self-improvement pass) on each. The
+   * watermark moves after each segment (a first capture's is anchored before the first one), so a failure
+   * part-way loses nothing and repeats nothing: the rest is read at the channel's next capture, which the
+   * caller schedules (retryLater). A read that stopped at its cap reports the rest as a backlog.
+   */
   private async observeChannel(
     discordClient: Client,
     openai: OpenAI,
     channelId: string,
     botName: string,
     selfImprovementEnabled: boolean,
+    now: number,
   ): Promise<void> {
     const channel = await discordClient.channels.fetch(channelId);
     if (!channel || channel.type !== ChannelType.GuildText) return;
 
     const textChannel = channel as TextChannel;
-    const lastMessageId = this.store.getLastObserved(channelId);
+    const watermark = this.store.getLastObserved(channelId);
+    const read = await readUncaptured(textChannel.messages, watermark, {
+      idleMs: this.idleMs,
+      maxMessages: this.sizes.maxMessages,
+    });
+    if (read.messages.length === 0) return;
+    const newestFetched = read.messages[read.messages.length - 1];
 
-    const fetchOptions: { limit: number; after?: string } = { limit: 100 };
-    if (lastMessageId) {
-      fetchOptions.after = lastMessageId;
+    let messages = read.messages;
+    let observed = this.attributeAll(messages, this.identitiesById());
+    // A first capture's anchor: the newest message before the conversation it reads.
+    let anchor: Message | undefined;
+    if (!watermark && observed.length > 0) {
+      // A first capture reads only the channel's last conversation; the history before it is the bootstrap's.
+      const startAt = observed[conversationStartIndex(this.timed(observed), this.idleMs)].msg.createdTimestamp;
+      anchor = messages.filter((m) => m.createdTimestamp < startAt).at(-1);
+      messages = messages.filter((m) => m.createdTimestamp >= startAt);
+      observed = observed.filter((o) => o.msg.createdTimestamp >= startAt);
     }
-
-    const messages: Collection<string, Message> = await textChannel.messages.fetch(fetchOptions);
-    if (messages.size === 0) return;
-
-    const fetched = [...messages.values()];
-    let observed = this.attributeAll(fetched, this.identitiesById());
 
     if (observed.length < this.minMessages) {
-      logger.info(
-        `PersonalityLearner: Skipping channel ${channelId} — only ${observed.length}/${this.minMessages} messages`,
-      );
+      if (!read.capped) {
+        logger.info(
+          `PersonalityLearner: Skipping channel ${channelId} — only ${observed.length}/${this.minMessages} messages`,
+        );
+        return;
+      }
+      // A full read with hardly any member messages in it (a bot flood): stepped over, not reread forever.
+      this.store.setLastObserved(channelId, newestFetched.id);
+      this.trigger.noteBacklog(channelId, now);
       return;
     }
-
-    const relayed = observed.filter((o) => o.source === 'relay').length;
-    logger.info(
-      `PersonalityLearner: Processing ${observed.length} messages (${relayed} relayed) from channel ${channelId} (#${textChannel.name})`,
-    );
+    // Set before any part runs: when one fails, the next capture reads on from the anchor (this conversation
+    // and whatever followed it) instead of reading back to the newest conversation and leaving this one out.
+    if (anchor) this.store.setLastObserved(channelId, anchor.id);
 
     // Mechanically upsert identities for every observed author, then re-attribute so labels use the
     // refreshed names.
@@ -804,26 +1032,95 @@ export class PersonalityLearner {
       if (o.source === 'human') this.refreshIdentity(o.msg);
     }
     const identitiesById = this.identitiesById();
-    observed = this.attributeAll(fetched, identitiesById);
+    observed = this.attributeAll(messages, identitiesById);
 
-    const messageParts = this.buildMessageParts(observed, channelId);
+    const segments = splitIntoSegments(
+      observed.map((o) => this.toItem(o)),
+      { maxChars: this.sizes.segmentMaxChars, leadInChars: this.sizes.leadInChars },
+    );
+    const relayed = observed.filter((o) => o.source === 'relay').length;
+    logger.info(
+      `PersonalityLearner: Processing ${observed.length} messages (${relayed} relayed) from channel ${channelId} (#${textChannel.name}) in ${segments.length} part(s)`,
+    );
 
-    // --- Pass 1: Personality analysis ---
     const activeIdentities = [...identitiesById.values()].filter((i) => i.active !== 0);
-    const personalityPrompt = buildPersonalityPrompt({
+    const shared = {
+      openai,
+      channelId,
+      botName,
+      botUserId: discordClient.user?.id,
+      selfImprovementEnabled,
       identitiesSection: this.formatLearnerIdentitiesSection(activeIdentities),
       emojisSection: this.formatLearnerEmojisSection(),
-      existingMemoriesSummary: this.buildRelevantMemoriesSummary(observed),
+      matcher: createPeopleMatcher([...identitiesById.values()], { excludeNames: [botName] }),
+      now: new Date(now),
+    };
+    const totals = { observations: 0, identityUpdates: 0 };
+    for (const [index, segment] of segments.entries()) {
+      const result = await this.captureSegment(segment, shared);
+      totals.observations += result.observations;
+      totals.identityUpdates += result.identityUpdates;
+      // Up to the newest message read (bot messages included: they were seen) once the last part is done;
+      // up to the part's own last message before that.
+      const last = index === segments.length - 1;
+      const through = last ? newestFetched : segment.items[segment.items.length - 1].observed.msg;
+      this.store.setLastObserved(channelId, through.id);
+    }
+    if (read.capped) this.trigger.noteBacklog(channelId, now);
+
+    logger.info(
+      `capture: channel=${channelId} messages=${observed.length} parts=${segments.length} observations=${totals.observations} identity_updates=${totals.identityUpdates} capped=${read.capped ? 'yes' : 'no'}`,
+    );
+  }
+
+  /** Observed messages as the timed items the conversation helpers take. */
+  private timed(observed: ObservedMessage[]): { at: number }[] {
+    return observed.map((o) => ({ at: o.msg.createdTimestamp }));
+  }
+
+  /**
+   * One extractor request (and the self-improvement pass) over one segment. Throws when the extractor call
+   * fails (the caller keeps the watermark before this segment); a failed self-improvement pass is logged.
+   */
+  private async captureSegment(
+    segment: Segment<CaptureItem>,
+    ctx: {
+      openai: OpenAI;
+      channelId: string;
+      botName: string;
+      botUserId?: string;
+      selfImprovementEnabled: boolean;
+      identitiesSection: string;
+      emojisSection: string;
+      matcher: (text: string) => Map<string, number>;
+      now: Date;
+    },
+  ): Promise<{ observations: number; identityUpdates: number }> {
+    const { openai, channelId } = ctx;
+    const { parts, lines } = this.renderSegment(segment, channelId);
+
+    // --- Pass 1: Personality analysis ---
+    const knowledge = buildCaptureKnowledge({
+      store: this.store,
+      notes: getNotesStore(this.store),
+      people: this.peopleIn(segment, ctx.matcher),
+      now: ctx.now,
+    });
+    const personalityPrompt = buildPersonalityPrompt({
+      identitiesSection: ctx.identitiesSection,
+      emojisSection: ctx.emojisSection,
+      existingMemoriesSummary: knowledge,
     });
 
     const personalityResult = await this.analyzeAndSave(
       openai,
       config.models.learner,
-      [{ type: 'text', text: personalityPrompt }, ...messageParts],
+      [{ type: 'text', text: personalityPrompt }, ...parts],
       channelId,
       LEARNER_SOURCES.observation,
       'PersonalityLearner',
-      'learner',
+      'memory_capture',
+      lines,
     );
 
     if (personalityResult.observations > 0 || personalityResult.identityUpdates > 0) {
@@ -835,7 +1132,7 @@ export class PersonalityLearner {
     }
 
     // --- Pass 2: Self-improvement analysis (optional) ---
-    if (selfImprovementEnabled) {
+    if (ctx.selfImprovementEnabled) {
       try {
         const existingSelfImprovement = SELF_IMPROVEMENT_CATEGORIES.flatMap((cat) => this.store.getByCategory(cat, 60));
         const existingSelfImprovementSummary =
@@ -844,19 +1141,20 @@ export class PersonalityLearner {
             : '(none yet)';
 
         const selfImprovementPrompt = buildSelfImprovementPrompt({
-          botName,
-          botUserId: discordClient.user?.id,
+          botName: ctx.botName,
+          botUserId: ctx.botUserId,
           existingSelfImprovementSummary,
         });
 
         const selfImprovementResult = await this.analyzeAndSave(
           openai,
           config.models.selfImprovement,
-          [{ type: 'text', text: selfImprovementPrompt }, ...messageParts],
+          [{ type: 'text', text: selfImprovementPrompt }, ...parts],
           channelId,
           LEARNER_SOURCES.selfImprovement,
           'SelfImprovementLearner',
           'self_improvement',
+          lines,
         );
 
         if (selfImprovementResult.observations > 0) {
@@ -871,9 +1169,7 @@ export class PersonalityLearner {
       }
     }
 
-    // Advance the watermark to the newest fetched message (bot messages included: they were seen).
-    const newestMessage = fetched.reduce((newest, msg) => (isNewer(msg, newest) ? msg : newest));
-    this.store.setLastObserved(channelId, newestMessage.id);
+    return personalityResult;
   }
 
   private identitiesById(): Map<string, Identity> {

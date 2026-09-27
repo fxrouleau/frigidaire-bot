@@ -10,6 +10,7 @@ import { CONVERSATION_STATE_SCHEMA_VERSION } from './types';
 type SerializedState = {
   entries: ConversationState['entries'];
   injectedMemoryIds?: number[];
+  injectedNoteKeys?: string[];
   lastSeenMessageId?: string;
 };
 
@@ -81,6 +82,7 @@ export class ConversationPersistence {
     const serializable: SerializedState = {
       entries: state.entries,
       injectedMemoryIds: state.injectedMemoryIds,
+      injectedNoteKeys: state.injectedNoteKeys,
       lastSeenMessageId: state.lastSeenMessageId,
     };
 
@@ -149,6 +151,7 @@ export class ConversationPersistence {
       entries: parsed.entries ?? [],
       timestamp: row.updated_at,
       injectedMemoryIds: parsed.injectedMemoryIds,
+      injectedNoteKeys: parsed.injectedNoteKeys,
       lastSeenMessageId: parsed.lastSeenMessageId,
     };
   }

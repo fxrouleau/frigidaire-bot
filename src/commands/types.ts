@@ -4,12 +4,15 @@
 // memory store, clock) and never touch the network or ./data.
 import type {
   ApplicationCommandType,
+  Client,
   Message,
   MessageContextMenuCommandInteraction,
   UserContextMenuCommandInteraction,
 } from 'discord.js';
 import type { AudioInput, VideoInput, VideoOutcome } from '../ai/media';
 import type { MemoryStore } from '../ai/memory/memoryStore';
+import type { EditProposal, EditRequest } from '../ai/memory/notes/dreamer';
+import type { NotesStore } from '../ai/memory/notes/notesStore';
 
 /** Result of the channel summary pipeline: the summary text, or why there is none (shown privately). */
 export type ChannelSummary = { ok: true; text: string } | { ok: false; reason: string };
@@ -34,6 +37,17 @@ export type CommandDeps = {
   /** One chat-model call (ZDR, tagged 'command'). Resolves to the trimmed answer, undefined when empty; throws on API errors. */
   complete: (request: CompletionRequest) => Promise<string | undefined>;
   memoryStore: () => MemoryStore;
+  /** Memory v2 notes (on memory.db, next to the journal): the "What does Fridge know?" viewer. */
+  notesStore: () => NotesStore;
+  /** Whether a user (any linked account) is the bot's owner (src/botOwner.ts). Fails closed: false when unsure. */
+  isOwner: (client: Client, userId: string) => Promise<boolean>;
+  /** Drafts an owner edit of someone's notes with MEMORY_EDIT_MODEL; nothing is saved (dreamer.ts). */
+  proposeEdit: (request: EditRequest) => Promise<EditProposal>;
+  /**
+   * Posts one line to the report channel (sendToReportChannel: `parse: []`, false when none is set or the
+   * send failed): the audit line of the owner's note edits and undos.
+   */
+  report: (client: Client, text: string) => Promise<boolean>;
   now: () => Date;
 };
 

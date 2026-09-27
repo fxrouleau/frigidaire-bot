@@ -1109,6 +1109,76 @@ export class ArchiveStore {
     return row.t ?? undefined;
   }
 
+  /**
+   * Every live (not deleted) message of every channel the archive may be read from (ARCHIVE_IGNORE_CHANNELS
+   * left out), oldest first, every source. Read in keyset-paged batches, so a whole archive streams
+   * without holding it in memory or keeping a statement open between batches (the memory v2 export).
+   */
+  *iterateMessages(opts: { batchSize?: number } = {}): Generator<ArchivedMessage> {
+    const batchSize = Math.max(1, Math.floor(opts.batchSize ?? 2000));
+    const ignored = notIgnoredChannelsFilter('m');
+    const where = ['m.deleted_at IS NULL', ...(ignored ? [ignored.sql] : [])];
+    const first = this.stmt(
+      `SELECT m.* FROM messages m WHERE ${where.join(' AND ')}
+       ORDER BY m.created_at ASC, length(m.id) ASC, m.id ASC LIMIT @limit`,
+    );
+    const next = this.stmt(
+      `SELECT m.* FROM messages m
+       WHERE ${where.join(' AND ')} AND (m.created_at, length(m.id), m.id) > (@at, @len, @id)
+       ORDER BY m.created_at ASC, length(m.id) ASC, m.id ASC LIMIT @limit`,
+    );
+    let last: MessageRow | undefined;
+    for (;;) {
+      const params = { ...(ignored?.params ?? {}), limit: batchSize };
+      const rows = (
+        last ? next.all({ ...params, at: last.created_at, len: last.id.length, id: last.id }) : first.all(params)
+      ) as MessageRow[];
+      for (const row of rows) yield toMessage(row);
+      if (rows.length < batchSize) return;
+      last = rows[rows.length - 1];
+    }
+  }
+
+  /**
+   * Who wrote the live messages (ARCHIVE_IGNORE_CHANNELS left out): one row per (author id, archived name,
+   * whether it is the bot's own) with its message count and first/last message time, most messages first.
+   * A member who renamed has one row per name; member rows without an author id are names the archive
+   * couldn't tie to an account.
+   */
+  authorSummary(): {
+    authorId: string | null;
+    authorName: string;
+    bot: boolean;
+    count: number;
+    firstAt: number;
+    lastAt: number;
+  }[] {
+    const ignored = notIgnoredChannelsFilter('m');
+    const rows = this.stmt(
+      `SELECT m.author_id, m.author_name, m.source = 'bot' AS bot, COUNT(*) AS n,
+              MIN(m.created_at) AS first_at, MAX(m.created_at) AS last_at
+       FROM messages m
+       WHERE m.deleted_at IS NULL${ignored ? ` AND ${ignored.sql}` : ''}
+       GROUP BY m.author_id, m.author_name, m.source = 'bot'
+       ORDER BY n DESC, last_at DESC, m.author_name ASC`,
+    ).all(ignored?.params ?? {}) as {
+      author_id: string | null;
+      author_name: string;
+      bot: number;
+      n: number;
+      first_at: number;
+      last_at: number;
+    }[];
+    return rows.map((r) => ({
+      authorId: r.author_id,
+      authorName: r.author_name,
+      bot: r.bot === 1,
+      count: r.n,
+      firstAt: r.first_at,
+      lastAt: r.last_at,
+    }));
+  }
+
   /** Database size in bytes (page_count × page_size; excludes the WAL). */
   sizeBytes(): number {
     const pages = this.db.pragma('page_count', { simple: true }) as number;

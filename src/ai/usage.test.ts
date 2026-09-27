@@ -47,7 +47,7 @@ afterEach(() => {
 
 describe('featureRequestOptions', () => {
   it('tags the request with the feature header', () => {
-    expect(featureRequestOptions('learner')).toEqual({ headers: { [FEATURE_HEADER]: 'learner' } });
+    expect(featureRequestOptions('memory_capture')).toEqual({ headers: { [FEATURE_HEADER]: 'memory_capture' } });
   });
 });
 
@@ -114,7 +114,7 @@ describe('recordUsage', () => {
   it('keeps separate rows for different days, features and models', () => {
     recordUsage({ feature: 'chat', model: 'm1', cost: 0.01, at: NOON_SEP_24 });
     recordUsage({ feature: 'chat', model: 'm2', cost: 0.01, at: NOON_SEP_24 });
-    recordUsage({ feature: 'learner', model: 'm1', cost: 0.01, at: NOON_SEP_24 });
+    recordUsage({ feature: 'memory_capture', model: 'm1', cost: 0.01, at: NOON_SEP_24 });
     // 23:30 EDT on the 24th is still the 24th; 00:30 EDT on the 25th is not.
     recordUsage({ feature: 'chat', model: 'm1', cost: 0.01, at: Date.parse('2026-09-25T03:30:00Z') });
     recordUsage({ feature: 'chat', model: 'm1', cost: 0.01, at: Date.parse('2026-09-25T04:30:00Z') });
@@ -122,7 +122,7 @@ describe('recordUsage', () => {
     expect(rows().map((r) => `${r.day} ${r.feature} ${r.model} ${r.requests}`)).toEqual([
       '2026-09-24 chat m1 2',
       '2026-09-24 chat m2 1',
-      '2026-09-24 learner m1 1',
+      '2026-09-24 memory_capture m1 1',
       '2026-09-25 chat m1 1',
     ]);
   });
@@ -165,7 +165,7 @@ describe('getUsageSummary', () => {
   function seedWeek(): void {
     recordUsage({ feature: 'chat', model: 'deepseek', promptTokens: 1000, completionTokens: 100, cost: 0.5, at: NOON_SEP_24 });
     recordUsage({ feature: 'chat', model: 'deepseek', promptTokens: 1000, completionTokens: 100, cost: 0.5, at: NOON_SEP_24 - DAY });
-    recordUsage({ feature: 'learner', model: 'qwen', promptTokens: 5000, completionTokens: 500, cost: 0.2, at: NOON_SEP_24 });
+    recordUsage({ feature: 'memory_capture', model: 'qwen', promptTokens: 5000, completionTokens: 500, cost: 0.2, at: NOON_SEP_24 });
     recordUsage({ feature: 'embedding', model: 'qwen-embed', promptTokens: 300, cost: 0.0001, at: NOON_SEP_24 });
     recordUsage({ feature: 'embedding', model: 'qwen-embed', promptTokens: 300, at: NOON_SEP_24 });
     // Outside the ranges below.
@@ -182,7 +182,7 @@ describe('getUsageSummary', () => {
     expect(summary.total.costUsd).toBeCloseTo(1.2001, 10);
     expect(summary.byFeature.map((f) => [f.feature, f.requests])).toEqual([
       ['chat', 2],
-      ['learner', 1],
+      ['memory_capture', 1],
       ['embedding', 2],
     ]);
     expect(summary.byModel.map((m) => m.model)).toEqual(['deepseek', 'qwen', 'qwen-embed']);

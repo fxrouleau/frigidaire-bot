@@ -1,33 +1,53 @@
-// Typed factories for context-menu command interactions (and the guild/message pieces they touch), for
-// tests of src/commands/. The response methods follow discord.js's state machine — deferReply/reply only
-// on a fresh interaction, editReply/followUp/deleteReply only after one — and throw like discord.js does
-// on a misuse, so a handler that would crash in production crashes in its test too. Every response is
-// recorded in call order with its visibility.
+// Typed factories for context-menu command interactions, the button / select-menu / modal-submit
+// interactions that follow them (the notes viewer), and the guild/message pieces they touch, for tests of
+// src/commands/. The response methods follow discord.js's state machine — deferReply/reply/update/
+// deferUpdate/showModal only on a fresh interaction, editReply/followUp/deleteReply only after one — and
+// throw like discord.js does on a misuse, so a handler that would crash in production crashes in its test
+// too. Where discord.js lets a call through that Discord itself refuses, the fake refuses too: nothing
+// after a modal (a modal response has no message to edit or follow up), update/deferUpdate only on a
+// component or on a modal submitted from a message component, and showModal never on a modal submit.
+// Every response is recorded in call order with its visibility.
 import {
   ApplicationCommandType,
+  type ButtonInteraction,
   type Client,
   Collection,
+  ComponentType,
   type Guild,
   type Message,
   type MessageContextMenuCommandInteraction,
   MessageFlags,
   MessageFlagsBitField,
+  type ModalSubmitInteraction,
+  type StringSelectMenuInteraction,
   type UserContextMenuCommandInteraction,
 } from 'discord.js';
 import type { AudioInput, VideoInput, VideoOutcome } from '../ai/media';
 import type { MemoryStore } from '../ai/memory/memoryStore';
+import type { EditProposal, EditRequest } from '../ai/memory/notes/dreamer';
+import { NotesStore } from '../ai/memory/notes/notesStore';
 import type { ChannelSummary, CommandDeps, CompletionRequest, SummarizeRequest } from '../commands/types';
+import { canonicalUserId } from '../linkedAccounts';
 import { createFakeMessage, type FakeMessageOptions } from './fakeDiscord';
 import { createRecorder, type Recorder } from './recorder';
 
-export type InteractionResponseMethod = 'deferReply' | 'reply' | 'editReply' | 'followUp' | 'deleteReply';
+export type InteractionResponseMethod =
+  | 'deferReply'
+  | 'reply'
+  | 'editReply'
+  | 'followUp'
+  | 'deleteReply'
+  | 'update'
+  | 'deferUpdate'
+  | 'showModal';
 
 export type RecordedResponse = {
   method: InteractionResponseMethod;
-  /** The text sent (undefined for deferReply/deleteReply). */
+  /** The text sent (undefined for deferReply/deferUpdate/deleteReply/showModal). */
   content?: string;
   /** Whether this response is only visible to the invoker. */
   ephemeral: boolean;
+  /** What was passed (the modal for showModal). */
   options: unknown;
 };
 
@@ -177,9 +197,20 @@ function isEphemeralFlag(options: unknown): boolean {
   return typeof flags === 'number' && (flags & MessageFlags.Ephemeral) !== 0;
 }
 
+/** Which response methods a fake has: a command's, a message component's, or a modal submit's. */
+type FakeInteractionKind = 'command' | 'component' | 'modal';
+
+type BuildOptions = FakeInteractionOptions & {
+  kind: FakeInteractionKind;
+  /** Whether the message a component (or a modal opened from one) is on is ephemeral. Default true. */
+  messageEphemeral?: boolean;
+  /** A modal submit that came from a message component (it can update that message). */
+  fromMessage?: boolean;
+};
+
 function buildInteraction(
-  opts: FakeInteractionOptions,
-  commandType: ApplicationCommandType,
+  opts: BuildOptions,
+  commandType: ApplicationCommandType | undefined,
   extra: Record<string, unknown>,
 ): { interaction: Record<string, unknown>; responses: RecordedResponse[] } {
   const responses: RecordedResponse[] = [];
@@ -188,8 +219,10 @@ function buildInteraction(
   const invokerUsername = opts.invokerUsername ?? 'invoker';
   const invokerDisplayName = opts.invokerDisplayName === undefined ? 'Invoker' : opts.invokerDisplayName;
   const inGuild = opts.inGuild ?? true;
+  const kind = opts.kind;
+  const canUpdate = kind === 'component' || (kind === 'modal' && opts.fromMessage === true);
 
-  const state = { deferred: false, replied: false, ephemeral: null as boolean | null };
+  const state = { deferred: false, replied: false, ephemeral: null as boolean | null, modalShown: false };
   const failIfConfigured = (method: InteractionResponseMethod) => {
     if (opts.failOn && method in opts.failOn) throw opts.failOn[method];
   };
@@ -201,17 +234,32 @@ function buildInteraction(
     Object.assign(new Error('The reply to this interaction has already been sent or deferred.'), {
       code: 'InteractionAlreadyReplied',
     });
+  // What Discord answers when a modal response is edited or followed up: there is no message behind it.
+  const noMessage = () => Object.assign(new Error('Unknown Message'), { code: 10008 });
+  const mustBeFresh = () => {
+    if (state.deferred || state.replied) throw alreadyReplied();
+  };
+  const mustHaveResponded = () => {
+    if (!state.deferred && !state.replied) throw notReplied();
+    if (state.modalShown) throw noMessage();
+  };
+  const missing = (method: string) => () => {
+    throw new TypeError(`interaction.${method} is not a function`);
+  };
 
   const interaction: Record<string, unknown> = {
     id: 'interaction-1',
-    commandName: opts.commandName,
-    commandType,
+    ...(commandType !== undefined ? { commandName: opts.commandName, commandType } : {}),
     channelId: opts.channelId ?? 'channel-1',
     guildId: inGuild ? 'guild-1' : null,
     guild: opts.guild ?? null,
     user: { id: invokerId, username: invokerUsername, displayName: invokerDisplayName ?? invokerUsername },
     member: inGuild && invokerDisplayName !== null ? { id: invokerId, displayName: invokerDisplayName } : null,
-    client: { user: { id: botUserId, displayName: 'Frigidaire' }, application: { id: botUserId } },
+    client: {
+      user: { id: botUserId, displayName: 'Frigidaire' },
+      application: { id: botUserId },
+      users: { cache: new Collection<string, unknown>() },
+    },
     get deferred() {
       return state.deferred;
     },
@@ -223,27 +271,31 @@ function buildInteraction(
     },
     inGuild: () => inGuild,
     inCachedGuild: () => inGuild,
-    isContextMenuCommand: () => true,
-    isMessageContextMenuCommand: () => commandType === ApplicationCommandType.Message,
-    isUserContextMenuCommand: () => commandType === ApplicationCommandType.User,
+    isContextMenuCommand: () => kind === 'command',
+    isMessageContextMenuCommand: () => kind === 'command' && commandType === ApplicationCommandType.Message,
+    isUserContextMenuCommand: () => kind === 'command' && commandType === ApplicationCommandType.User,
     isChatInputCommand: () => false,
+    isMessageComponent: () => kind === 'component',
+    isButton: () => false,
+    isStringSelectMenu: () => false,
+    isModalSubmit: () => kind === 'modal',
     async deferReply(options?: unknown) {
       failIfConfigured('deferReply');
-      if (state.deferred || state.replied) throw alreadyReplied();
+      mustBeFresh();
       state.deferred = true;
       state.ephemeral = isEphemeralFlag(options);
       responses.push({ method: 'deferReply', ephemeral: state.ephemeral, options });
     },
     async reply(options: unknown) {
       failIfConfigured('reply');
-      if (state.deferred || state.replied) throw alreadyReplied();
+      mustBeFresh();
       state.replied = true;
       state.ephemeral = isEphemeralFlag(options);
       responses.push({ method: 'reply', content: contentOf(options), ephemeral: state.ephemeral, options });
     },
     async editReply(options: unknown) {
       failIfConfigured('editReply');
-      if (!state.deferred && !state.replied) throw notReplied();
+      mustHaveResponded();
       state.replied = true;
       responses.push({
         method: 'editReply',
@@ -255,16 +307,44 @@ function buildInteraction(
     },
     async followUp(options: unknown) {
       failIfConfigured('followUp');
-      if (!state.deferred && !state.replied) throw notReplied();
+      mustHaveResponded();
       state.replied = true;
       responses.push({ method: 'followUp', content: contentOf(options), ephemeral: isEphemeralFlag(options), options });
       return { id: `followup-${responses.length}` };
     },
     async deleteReply() {
       failIfConfigured('deleteReply');
-      if (!state.deferred && !state.replied) throw notReplied();
+      mustHaveResponded();
       responses.push({ method: 'deleteReply', ephemeral: state.ephemeral ?? false, options: undefined });
     },
+    update: canUpdate
+      ? async (options: unknown) => {
+          failIfConfigured('update');
+          mustBeFresh();
+          state.replied = true;
+          state.ephemeral = opts.messageEphemeral ?? true;
+          responses.push({ method: 'update', content: contentOf(options), ephemeral: state.ephemeral, options });
+        }
+      : missing('update'),
+    deferUpdate: canUpdate
+      ? async () => {
+          failIfConfigured('deferUpdate');
+          mustBeFresh();
+          state.deferred = true;
+          state.ephemeral = opts.messageEphemeral ?? true;
+          responses.push({ method: 'deferUpdate', ephemeral: state.ephemeral, options: undefined });
+        }
+      : missing('deferUpdate'),
+    showModal:
+      kind === 'modal'
+        ? missing('showModal')
+        : async (modal: unknown) => {
+            failIfConfigured('showModal');
+            mustBeFresh();
+            state.replied = true;
+            state.modalShown = true;
+            responses.push({ method: 'showModal', ephemeral: true, options: modal });
+          },
     ...extra,
   };
   return { interaction, responses };
@@ -286,7 +366,12 @@ export function createFakeMessageCommandInteraction(
   target: Message,
   opts: FakeInteractionOptions,
 ): FakeInteractionHandle<MessageContextMenuCommandInteraction> {
-  return handle(buildInteraction(opts, ApplicationCommandType.Message, { targetId: target.id, targetMessage: target }));
+  return handle(
+    buildInteraction({ ...opts, kind: 'command' }, ApplicationCommandType.Message, {
+      targetId: target.id,
+      targetMessage: target,
+    }),
+  );
 }
 
 export type FakeTargetUser = {
@@ -295,6 +380,7 @@ export type FakeTargetUser = {
   displayName?: string;
   /** Server display name; null ⇒ not a member (left the server). */
   memberDisplayName?: string | null;
+  bot?: boolean;
 };
 
 /** A user context-menu interaction ("Apps" on a member) targeting `target`. */
@@ -303,12 +389,87 @@ export function createFakeUserCommandInteraction(
   opts: FakeInteractionOptions,
 ): FakeInteractionHandle<UserContextMenuCommandInteraction> {
   const username = target.username ?? 'targetuser';
-  const targetUser = { id: target.id, username, displayName: target.displayName ?? username, bot: false };
+  const targetUser = { id: target.id, username, displayName: target.displayName ?? username, bot: target.bot ?? false };
   const targetMember =
     target.memberDisplayName === null || target.memberDisplayName === undefined
       ? null
       : { id: target.id, displayName: target.memberDisplayName };
-  return handle(buildInteraction(opts, ApplicationCommandType.User, { targetId: target.id, targetUser, targetMember }));
+  return handle(
+    buildInteraction({ ...opts, kind: 'command' }, ApplicationCommandType.User, {
+      targetId: target.id,
+      targetUser,
+      targetMember,
+    }),
+  );
+}
+
+export type FakeComponentOptions = Omit<FakeInteractionOptions, 'commandName'> & {
+  customId: string;
+  /** Whether the message the component is on is ephemeral (the notes viewer's is). Default true. */
+  messageEphemeral?: boolean;
+};
+
+function componentMessage(opts: FakeComponentOptions): Record<string, unknown> {
+  return {
+    id: 'component-message-1',
+    flags: new MessageFlagsBitField(opts.messageEphemeral === false ? 0 : MessageFlags.Ephemeral),
+  };
+}
+
+/** A button click on a message (a message component interaction). */
+export function createFakeButtonInteraction(opts: FakeComponentOptions): FakeInteractionHandle<ButtonInteraction> {
+  return handle(
+    buildInteraction({ ...opts, commandName: '', kind: 'component' }, undefined, {
+      customId: opts.customId,
+      componentType: ComponentType.Button,
+      message: componentMessage(opts),
+      isButton: () => true,
+    }),
+  );
+}
+
+/** A choice in a string select menu on a message (a message component interaction). */
+export function createFakeSelectInteraction(
+  opts: FakeComponentOptions & { values: string[] },
+): FakeInteractionHandle<StringSelectMenuInteraction> {
+  return handle(
+    buildInteraction({ ...opts, commandName: '', kind: 'component' }, undefined, {
+      customId: opts.customId,
+      componentType: ComponentType.StringSelect,
+      values: opts.values,
+      message: componentMessage(opts),
+      isStringSelectMenu: () => true,
+    }),
+  );
+}
+
+/**
+ * A submitted modal: `fields` by text input custom id (what fields.getTextInputValue() reads; an unknown
+ * id throws like discord.js). `fromMessage` (default true): the modal was opened from a message
+ * component, so the submit can update that message.
+ */
+export function createFakeModalSubmitInteraction(
+  opts: FakeComponentOptions & { fields: Record<string, string>; fromMessage?: boolean },
+): FakeInteractionHandle<ModalSubmitInteraction> {
+  const fromMessage = opts.fromMessage ?? true;
+  return handle(
+    buildInteraction({ ...opts, commandName: '', kind: 'modal', fromMessage }, undefined, {
+      customId: opts.customId,
+      message: fromMessage ? componentMessage(opts) : null,
+      isFromMessage: () => fromMessage,
+      fields: {
+        getTextInputValue: (customId: string) => {
+          const value = opts.fields[customId];
+          if (value === undefined) {
+            throw Object.assign(new TypeError(`Required field with custom id "${customId}" not found.`), {
+              code: 'ModalSubmitInteractionFieldNotFound',
+            });
+          }
+          return value;
+        },
+      },
+    }),
+  );
 }
 
 /** A ready client whose guild cache holds the given guilds (for command registration). */
@@ -332,6 +493,9 @@ export type FakeCommandDeps = {
     getCachedTranscript: Recorder<[string], string | undefined>;
     watchVideo: Recorder<[VideoInput], Promise<VideoOutcome>>;
     complete: Recorder<[CompletionRequest], Promise<string | undefined>>;
+    isOwner: Recorder<[Client, string], Promise<boolean>>;
+    proposeEdit: Recorder<[EditRequest], Promise<EditProposal>>;
+    report: Recorder<[Client, string], Promise<boolean>>;
   };
 };
 
@@ -339,19 +503,26 @@ export const FAKE_NOW = new Date('2026-09-25T16:00:00Z');
 
 /**
  * CommandDeps where every collaborator is recorded: the agent and media do nothing, the summary is a
- * canned text, the model answers nothing, the clock is FAKE_NOW, and the memory store is `store` (pass
- * an in-memory MemoryStore). Override any collaborator's implementation; calls are still recorded.
+ * canned text, the model answers nothing, the clock is FAKE_NOW (or `now`: a date, or a function for a
+ * clock that moves), the memory store is `store` (pass an in-memory MemoryStore) and the notes store
+ * `notes` (default: one over `store`), nobody is the bot's owner but the `owners` (a linked side account
+ * of one counts), and an owner edit draft fails unless `proposeEdit` is scripted. Override any
+ * collaborator's implementation; calls are still recorded.
  */
 export function createFakeCommandDeps(
   opts: {
     store?: MemoryStore;
+    notes?: NotesStore;
+    owners?: string[];
     askAgent?: CommandDeps['askAgent'];
     summarize?: CommandDeps['summarize'];
     transcribeAudio?: CommandDeps['transcribeAudio'];
     getCachedTranscript?: CommandDeps['getCachedTranscript'];
     watchVideo?: CommandDeps['watchVideo'];
     complete?: CommandDeps['complete'];
-    now?: Date;
+    proposeEdit?: CommandDeps['proposeEdit'];
+    report?: CommandDeps['report'];
+    now?: Date | (() => Date);
   } = {},
 ): FakeCommandDeps {
   const recorders = {
@@ -369,15 +540,28 @@ export function createFakeCommandDeps(
     complete: createRecorder<[CompletionRequest], Promise<string | undefined>>(
       opts.complete ?? (async () => undefined),
     ),
+    isOwner: createRecorder<[Client, string], Promise<boolean>>(async (_client, userId) =>
+      (opts.owners ?? []).some((owner) => canonicalUserId(owner) === canonicalUserId(userId)),
+    ),
+    proposeEdit: createRecorder<[EditRequest], Promise<EditProposal>>(
+      opts.proposeEdit ?? (async () => ({ ok: false, error: 'this test scripted no edit' })),
+    ),
+    report: createRecorder<[Client, string], Promise<boolean>>(opts.report ?? (async () => true)),
   };
+  const memoryStore = () => {
+    if (!opts.store) throw new Error('This test did not provide a memory store');
+    return opts.store;
+  };
+  let notes = opts.notes;
   const now = opts.now ?? FAKE_NOW;
   const deps: CommandDeps = {
     ...recorders,
-    memoryStore: () => {
-      if (!opts.store) throw new Error('This test did not provide a memory store');
-      return opts.store;
+    memoryStore,
+    notesStore: () => {
+      notes ??= new NotesStore(memoryStore());
+      return notes;
     },
-    now: () => now,
+    now: typeof now === 'function' ? now : () => now,
   };
   return { deps, recorders };
 }

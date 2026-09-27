@@ -3,9 +3,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '../../logger';
 import { FakeEmbeddingProvider } from '../../test-support/fakeEmbeddings';
 import type { EmbeddingKind } from './embeddingProvider';
-import { buildEmbeddingInput, MemoryStore } from './memoryStore';
+import { buildEmbeddingInput, type Memory, MemoryStore, relatedUserIdsOf } from './memoryStore';
+import { parseEvidence } from './evidence';
 import { blobToVector, cosineSimilarity, vectorToBlob } from './vectorMath';
 import { wordOverlap } from './wordOverlap';
 
@@ -2088,5 +2090,234 @@ describe('compact() dedup groups by person (subject_user_id, else subject)', () 
 
     expect(store.compact().removed).toBe(1);
     expect(store.getAllActive().map((m) => m.id)).toEqual([a]);
+  });
+});
+
+describe('journal clock (memory v2)', () => {
+  it('adds journal_seq and said_by to an existing database, starting existing rows at their id', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'journal-'));
+    const file = path.join(dir, 'memory.db');
+    try {
+      const old = new Database(file);
+      old.exec(`CREATE TABLE memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL, subject TEXT, content TEXT NOT NULL,
+        source TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+        active INTEGER DEFAULT 1)`);
+      old.exec("INSERT INTO memories (category, subject, content) VALUES ('fact', 'Remi', 'a'), ('fact', 'Dale', 'b')");
+      old.exec("DELETE FROM memories WHERE content = 'a'");
+      old.exec("INSERT INTO memories (category, subject, content) VALUES ('fact', 'Remi', 'c')");
+      old.close();
+
+      const migrated = new MemoryStore(file);
+      // @ts-expect-error accessing private db
+      const rows = migrated.db.prepare('SELECT id, journal_seq, said_by FROM memories ORDER BY id').all();
+      expect(rows).toEqual([
+        { id: 2, journal_seq: 2, said_by: null },
+        { id: 3, journal_seq: 3, said_by: null },
+      ]);
+      // New rows continue the clock, also from a raw INSERT that never names the column.
+      // @ts-expect-error accessing private db
+      migrated.db.exec("INSERT INTO memories (category, subject, content) VALUES ('fact', 'Remi', 'd')");
+      // @ts-expect-error accessing private db
+      expect(migrated.db.prepare("SELECT journal_seq FROM memories WHERE content = 'd'").get()).toEqual({
+        journal_seq: 4,
+      });
+      migrated.close();
+      // Reopening changes nothing.
+      const reopened = new MemoryStore(file);
+      // @ts-expect-error accessing private db
+      expect(reopened.db.prepare('SELECT MAX(journal_seq) AS m FROM memories').get()).toEqual({ m: 4 });
+      reopened.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('moves a row forward when its subject id is stamped, not when it is deactivated', async () => {
+    const id = await store.save({ category: 'fact', subject: 'Remi', content: 'likes cats' });
+    const seq = () =>
+      // @ts-expect-error accessing private db
+      (store.db.prepare('SELECT journal_seq FROM memories WHERE id = ?').get(id) as { journal_seq: number }).journal_seq;
+    const before = seq();
+    await store.save({ category: 'fact', subject: 'Dale', content: 'plays bass' });
+    store.upsertIdentity('100000000000000001', 'Remi');
+    store.stampSubjectUserIds();
+    const stamped = seq();
+    expect(stamped).toBeGreaterThan(before);
+    store.deactivate(id);
+    expect(seq()).toBe(stamped);
+  });
+});
+
+describe('journal evidence, recurrence and related members (memory v2)', () => {
+  const REMI = '100000000000000001';
+  const DALE = '100000000000000002';
+  const MSG1 = '1200000000000000001';
+  const MSG2 = '1200000000000000002';
+  const row = (id: number) =>
+    // @ts-expect-error accessing private db
+    store.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Memory;
+
+  it('stores evidence, a first sighting and related members on insert', async () => {
+    const id = await store.save({
+      category: 'fact',
+      subject: 'Remi',
+      content: 'plays bass in a garage band',
+      subject_user_id: REMI,
+      evidence: { messageIds: [MSG1], quote: '  i finally  joined a band lol ' },
+      related_user_ids: [DALE],
+      observed_at: new Date('2019-05-04T20:00:00Z'),
+    });
+    const stored = row(id);
+    expect(parseEvidence(stored.evidence)).toEqual({ messageIds: [MSG1], quote: 'i finally joined a band lol' });
+    expect([stored.seen_count, stored.first_seen_at, stored.last_seen_at]).toEqual([
+      1,
+      '2019-05-04 20:00:00',
+      '2019-05-04 20:00:00',
+    ]);
+    expect(relatedUserIdsOf(stored)).toEqual([DALE]);
+  });
+
+  it('counts a merged re-observation, widens the span and keeps both passages', async () => {
+    const id = await store.save({
+      category: 'fact',
+      subject: 'Remi',
+      content: 'plays bass in a garage band',
+      subject_user_id: REMI,
+      evidence: { messageIds: [MSG1], quote: 'joined a band' },
+      observed_at: new Date('2019-05-04T20:00:00Z'),
+    });
+    const merged = await store.save({
+      category: 'fact',
+      subject: 'Remi',
+      content: 'plays bass in a garage band still',
+      subject_user_id: REMI,
+      evidence: { messageIds: [MSG2], quote: 'band practice tonight' },
+      related_user_ids: [DALE],
+      observed_at: new Date('2026-09-01T20:00:00Z'),
+    });
+    expect(merged).toBe(id);
+    const stored = row(id);
+    expect([stored.seen_count, stored.first_seen_at, stored.last_seen_at]).toEqual([
+      2,
+      '2019-05-04 20:00:00',
+      '2026-09-01 20:00:00',
+    ]);
+    expect(parseEvidence(stored.evidence)).toEqual({ messageIds: [MSG1, MSG2], quote: 'band practice tonight' });
+    expect(relatedUserIdsOf(stored)).toEqual([DALE]);
+  });
+
+  it('folds a compacted duplicate into the row it keeps', async () => {
+    // @ts-expect-error accessing private db
+    const db = store.db as Database.Database;
+    db.prepare(
+      `INSERT INTO memories (category, subject, content, subject_user_id, seen_count, first_seen_at, last_seen_at, evidence, created_at, updated_at)
+       VALUES ('fact', 'Remi', 'works nights at the bakery', ?, 3, '2020-01-01 00:00:00', '2021-01-01 00:00:00', ?, '2020-01-01 00:00:00', '2021-01-01 00:00:00')`,
+    ).run(REMI, JSON.stringify({ messageIds: [MSG1] }));
+    db.prepare(
+      `INSERT INTO memories (category, subject, content, subject_user_id, created_at, updated_at)
+       VALUES ('fact', 'Remi', 'works nights at the bakery downtown', ?, '2026-09-01 00:00:00', '2026-09-01 00:00:00')`,
+    ).run(REMI);
+    expect(store.compact().removed).toBe(1);
+    const [kept] = store.getAllActive();
+    expect(kept.content).toBe('works nights at the bakery downtown');
+    expect([kept.seen_count, kept.first_seen_at, kept.last_seen_at]).toEqual([
+      4,
+      '2020-01-01 00:00:00',
+      '2026-09-01 00:00:00',
+    ]);
+    expect(parseEvidence(kept.evidence)?.messageIds).toEqual([MSG1]);
+  });
+
+  it('starts existing rows at one sighting over their created/updated span', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'journal-cols-'));
+    const file = path.join(dir, 'memory.db');
+    try {
+      const old = new Database(file);
+      old.exec(`CREATE TABLE memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL, subject TEXT, content TEXT NOT NULL,
+        source TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+        active INTEGER DEFAULT 1)`);
+      old.exec(
+        "INSERT INTO memories (category, subject, content, created_at, updated_at) VALUES ('fact', 'Remi', 'a', '2024-01-01 00:00:00', '2025-01-01 00:00:00')",
+      );
+      old.close();
+      const migrated = new MemoryStore(file);
+      // @ts-expect-error accessing private db
+      expect(migrated.db.prepare('SELECT seen_count, first_seen_at, last_seen_at, evidence FROM memories').get()).toEqual({
+        seen_count: 1,
+        first_seen_at: '2024-01-01 00:00:00',
+        last_seen_at: '2025-01-01 00:00:00',
+        evidence: null,
+      });
+      migrated.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('two processes on one memory.db (the bootstrap CLI next to the running bot)', () => {
+  let dir: string;
+  const opened: MemoryStore[] = [];
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-2proc-'));
+  });
+
+  afterEach(() => {
+    for (const s of opened.splice(0)) s.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function open(): MemoryStore {
+    const s = new MemoryStore(path.join(dir, 'memory.db'), {
+      embeddings: new FakeEmbeddingProvider(),
+      dedupThreshold: 0.65,
+    });
+    opened.push(s);
+    return s;
+  }
+
+  const original = { category: 'fact', subject: 'Remi', content: 'Remi loves eating pizza with extra cheese on top' };
+  const paraphrase = { category: 'fact', subject: 'Remi', content: 'Remi loves eating pizza with mushrooms' };
+
+  it('never merges into a row the other process retired after this one cached its vector', async () => {
+    const cli = open();
+    const bot = open();
+    const warn = vi.spyOn(logger, 'warn');
+    const id = await cli.save(original);
+    // The bot forgets it (forget_memory, compact) while the CLI still holds its vector.
+    expect(bot.deactivate(id)).toBe(true);
+
+    const again = await cli.save(paraphrase);
+
+    // Merging into it would 'delete' a row the FTS index no longer has ("database disk image is malformed").
+    expect(warn).not.toHaveBeenCalled();
+    expect(again).not.toBe(id);
+    expect(getVectorInputText(cli, again)).toBe(buildEmbeddingInput(paraphrase));
+    expect(cli.getAllActive().map((m) => [m.id, m.content])).toEqual([[again, paraphrase.content]]);
+    expect(cli.sharedDatabase().prepare('SELECT content, active FROM memories WHERE id = ?').get(id)).toEqual({
+      content: original.content,
+      active: 0,
+    });
+    // The retired row was never 'delete'd from the FTS index a second time.
+    cli.sharedDatabase().exec("INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')");
+  });
+
+  it('never merges into a row the other process removed', async () => {
+    const cli = open();
+    const bot = open();
+    const warn = vi.spyOn(logger, 'warn');
+    const id = await cli.save(original);
+    bot.remove(id);
+
+    const again = await cli.save(paraphrase);
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(again).not.toBe(id);
+    expect(getVectorInputText(cli, again)).toBe(buildEmbeddingInput(paraphrase));
+    expect(cli.getAllActive().map((m) => m.content)).toEqual([paraphrase.content]);
   });
 });

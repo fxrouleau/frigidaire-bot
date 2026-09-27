@@ -8,6 +8,9 @@ export type ConversationState = {
   // so a memory rendered once isn't repeated on later turns. Plain number[] — kept JSON-serializable
   // on purpose (conversation state is persisted across restarts).
   injectedMemoryIds?: number[];
+  // Keys of the notes (`note:<id>@<version>`) already injected into this window, same purpose: a note
+  // version is shown once per window, a newer version again.
+  injectedNoteKeys?: string[];
   // Discord id of the newest message this window has accounted for (the last triggering message). The
   // next turn fetches what was said after it, so the bot isn't blind to the chat between two pings.
   lastSeenMessageId?: string;

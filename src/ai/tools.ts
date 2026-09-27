@@ -1,6 +1,7 @@
 import type { Message } from 'discord.js';
 import { logger } from '../logger';
 import { getMemoryStore } from './memory';
+import { evidenceFromMessage } from './memory/evidence';
 import {
   type Memory,
   type MemoryStore,
@@ -8,9 +9,11 @@ import {
   nameKey,
   SELF_DIAGNOSIS_CATEGORIES,
 } from './memory/memoryStore';
+import { categoryLabel } from './memory/notes/context';
 import {
   checkNickname,
   cleanSubject,
+  currentName,
   MAX_MEMBER_NAME_LENGTH,
   parseMemberName,
   type ResolvedPerson,
@@ -22,6 +25,7 @@ import { costTools } from './tools/costs';
 import { featureRequestTools } from './tools/featureRequest';
 import { linkReaderTools } from './tools/linkReader';
 import { messageSearchTools } from './tools/messageSearch';
+import { notesTools } from './tools/notes';
 import { reactTools } from './tools/react';
 import { reminderTools } from './tools/reminders';
 import { sandboxTools } from './tools/sandbox';
@@ -62,8 +66,10 @@ function optionalString(raw: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function formatMemoryLine(m: Memory): string {
-  return `[id:${m.id}] [${m.category}] ${m.subject}: ${m.content} (saved: ${m.created_at}, updated: ${m.updated_at})`;
+/** One recall_memories line; a correction says who made it, so a claim about someone never reads as their fact. */
+function formatMemoryLine(m: Memory, store: MemoryStore): string {
+  const nameOf = (id: string) => currentName(id, '', store) || undefined;
+  return `[id:${m.id}] ${categoryLabel(m, nameOf)} ${m.subject}: ${m.content} (saved: ${m.created_at}, updated: ${m.updated_at})`;
 }
 
 /**
@@ -266,6 +272,8 @@ const rememberFactTool: ToolDefinition = {
       content,
       source: 'conversation',
       subject_user_id: person?.userId,
+      // The message that prompted it: the dream can read the passage back from the archive.
+      evidence: evidenceFromMessage(ctx.message?.id, ctx.message?.content),
     });
     return person ? `Saved to memory (id: ${id}) about ${person.displayName}.` : `Saved to memory (id: ${id}).`;
   },
@@ -331,7 +339,10 @@ const recallMemoriesTool: ToolDefinition = {
       return 'No memories found matching that query.';
     }
 
-    return `Found ${results.length} memories:\n${results.slice(0, 25).map(formatMemoryLine).join('\n')}`;
+    return `Found ${results.length} memories:\n${results
+      .slice(0, 25)
+      .map((m) => formatMemoryLine(m, store))
+      .join('\n')}`;
   },
 };
 
@@ -446,6 +457,7 @@ export const toolDefinitions: ToolDefinition[] = [
   rememberFactTool,
   recallMemoriesTool,
   forgetMemoryTool,
+  ...notesTools,
   setMemberInfoTool,
   querySelfDiagnosisTool,
   getEmojiTool,

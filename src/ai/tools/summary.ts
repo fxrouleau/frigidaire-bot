@@ -17,8 +17,9 @@ import { logger } from '../../logger';
 import { attributeMessage } from '../../relay';
 import { getCachedTranscript } from '../media';
 import { isTranscriptReply } from '../media/autoTranscribe';
-import { getMemoryStore } from '../memory';
+import { getMemoryStore, getNotesStore } from '../memory';
 import type { Identity, MemoryStore } from '../memory/memoryStore';
+import { profileSummary } from '../memory/notes/context';
 import { requireOpenRouterClient } from '../openRouterClient';
 import { createPeopleMatcher, foldMembers, memoryKeyFor } from '../people';
 import { featureRequestOptions } from '../usage';
@@ -47,6 +48,8 @@ const MAX_WHOS_WHO_ENTRIES = 25;
 const MAX_BACKGROUND_PEOPLE = 8;
 const MAX_BACKGROUND_MEMORIES = 4;
 const MAX_BACKGROUND_MEMORY_CHARS = 200;
+// With notes (memory v2): the first lines of their profile instead, about as long as the memories were.
+const MAX_BACKGROUND_PROFILE_CHARS = 400;
 const BACKGROUND_CATEGORIES: ReadonlySet<string> = new Set(['fact', 'preference', 'personality']);
 // The prompt asks for ~1,500 characters (~400 tokens); the headroom is for a reasoning model in
 // CHAT_MODEL, whose thinking tokens count against this limit too.
@@ -379,11 +382,17 @@ function peopleInStretch(transcript: Transcript, identities: Identity[], store: 
   return ranked;
 }
 
-/** A person's most recently updated durable memories, by id and every name they go by. */
+/**
+ * Who a person is at a glance: the first lines of their profile (memory v2 notes, without the dated
+ * "Earlier" footnotes) once the nightly dream has written one, else their most recently updated durable
+ * memories, by id and every name they go by.
+ */
 function backgroundFor(store: MemoryStore, person: StretchPerson): string[] {
   // Without an id there is only a display name that matched no member: too weak to pull memories by.
   if (!person.userId) return [];
   try {
+    const profile = getNotesStore(store).getProfile(person.userId);
+    if (profile) return [profileSummary(profile.content, MAX_BACKGROUND_PROFILE_CHARS)];
     return store
       .getForPerson(memoryKeyFor(store, person.userId, [person.name]), 50)
       .filter((m) => BACKGROUND_CATEGORIES.has(m.category))

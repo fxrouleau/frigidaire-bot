@@ -21,7 +21,7 @@ export type UsageFeature =
   | 'chat'
   | 'summary'
   | 'image'
-  | 'learner'
+  | 'memory_capture'
   | 'self_improvement'
   | 'emoji_caption'
   | 'embedding'
@@ -34,6 +34,9 @@ export type UsageFeature =
   | 'birthday'
   | 'ramble'
   | 'auto_react'
+  | 'memory_dream'
+  | 'memory_edit'
+  | 'memory_bootstrap'
   | 'eval'
   | 'other';
 

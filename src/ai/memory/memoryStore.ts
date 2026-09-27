@@ -4,7 +4,9 @@ import Database from 'better-sqlite3';
 import { config } from '../../config';
 import { accountIdsFor, canonicalUserId } from '../../linkedAccounts';
 import { logger } from '../../logger';
+import { parseSqliteUtc, toSqliteUtc } from '../utils';
 import type { EmbeddingProvider } from './embeddingProvider';
+import { type JournalEvidence, mergeEvidence, normalizeEvidence, parseEvidence, serializeEvidence } from './evidence';
 import { blobToVector, dot, vectorToBlob } from './vectorMath';
 import { STOP_WORDS, wordOverlap } from './wordOverlap';
 
@@ -21,14 +23,51 @@ export type Memory = {
   updated_at: string;
   active: number;
   subject_user_id: string | null;
+  /**
+   * The journal clock (memory v2): a number that grows every time a row is written or its content or
+   * subject_user_id changes, so "what is new since the last dream" also catches a re-observation merged
+   * into an old row. Set by triggers; optional in the type only so hand-built rows (tests) need not name it.
+   */
+  journal_seq?: number | null;
+  /** Who said it, for rows that record a claim: a correction's speaker (main account id). */
+  said_by?: string | null;
+  /**
+   * Memory v2 evidence: JSON of a JournalEvidence (./evidence.ts), the key passage the row was learned
+   * from, or null. Read it with parseEvidence().
+   */
+  evidence?: string | null;
+  /** How many times this was observed: 1, plus one per re-observation merged into the row. */
+  seen_count?: number;
+  /**
+   * When it was first / last observed in chat (SQLite UTC). Usually created_at / updated_at; a backdated
+   * write (the bootstrap reading old history) carries the history's time. Recency × recurrence decide how
+   * the dream weighs a fact (docs/memory.md).
+   */
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  /**
+   * JSON array of the OTHER members (main ids) the row is also about: a relationship or a shared event is
+   * filed under one subject but belongs in every involved member's journal (journalSince()). Read it with
+   * relatedUserIdsOf().
+   */
+  related_user_ids?: string | null;
 };
 
-type MemoryInput = {
+/** What a writer hands save(). */
+export type MemoryInput = {
   category: string;
   subject: string;
   content: string;
   source?: string;
   subject_user_id?: string;
+  /** Who said it (main account id): set on correction rows. Rows with different speakers never merge. */
+  said_by?: string;
+  /** The key passage it was learned from (message ids + a short quote). Merges keep both sides'. */
+  evidence?: JournalEvidence;
+  /** When it was said, for a backdated write (the bootstrap); default now. Moves first/last seen on a merge. */
+  observed_at?: Date;
+  /** Other members (any account id; stored as main ids) the row is also about. Merges keep both sides'. */
+  related_user_ids?: string[];
 };
 
 export type Identity = {
@@ -131,6 +170,14 @@ export const SELF_DIAGNOSIS_CATEGORIES = [
 
 const SELF_DIAGNOSIS_SET: ReadonlySet<string> = new Set(SELF_DIAGNOSIS_CATEGORIES);
 
+/**
+ * The journal category of a correction (memory v2, record_correction): what is wrong and what is right
+ * about someone, with who said it in `said_by`. A correction about yourself is authoritative; one about
+ * someone else is a claim the nightly dream weighs. Shown next to the person's notes until a dream has
+ * folded it in (see docs/memory.md). Never expires.
+ */
+export const CORRECTION_CATEGORY = 'correction';
+
 // Inline literal list for SQL. Safe: values are compile-time constants (no injection surface), and
 // EXPLAIN QUERY PLAN on the prod DB confirms literal vs bound params produce identical plans
 // (the exclusion is a post-join filter on PK-fetched rows; no index is involved either way).
@@ -206,7 +253,7 @@ export const IDENTITY_NAME_TIERS: readonly ((identity: Identity) => (string | nu
  * startup stamp's strict rule). A side account (LINKED_ACCOUNTS) counts as its main account, so a name
  * the main and the side account share is still one person.
  */
-function everyoneGoingBy(identities: Identity[], name: string): string[] {
+export function everyoneGoingBy(identities: Identity[], name: string): string[] {
   const needle = nameKey(name);
   if (!needle) return [];
   const owners = identities.filter((i) =>
@@ -223,10 +270,47 @@ function samePerson(a: string | null | undefined, b: string | null | undefined):
   return !a || !b || a === b;
 }
 
+/** Whether two rows record the same speaker's claim: two people's corrections never merge into one. */
+function sameSpeaker(a: string | null | undefined, b: string | null | undefined): boolean {
+  return (a ?? null) === (b ?? null);
+}
+
+const SNOWFLAKE_ID = /^\d{15,21}$/;
+
+/**
+ * The other members a row is also about (main ids), from its related_user_ids column; [] when none or
+ * unreadable.
+ */
+export function relatedUserIdsOf(row: Pick<Memory, 'related_user_ids'>): string[] {
+  if (!row.related_user_ids) return [];
+  try {
+    const parsed: unknown = JSON.parse(row.related_user_ids);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The stored form of a row's related members: snowflake-shaped ids as main ids, the subject's own id left
+ * out, deduped and sorted; null when nothing is left.
+ */
+function serializeRelated(ids: Iterable<string>, subjectUserId: string | null | undefined): string | null {
+  const own = subjectUserId ? canonicalUserId(subjectUserId) : undefined;
+  const main = [...ids]
+    .map((id) => (typeof id === 'string' ? id.trim() : ''))
+    .filter((id) => SNOWFLAKE_ID.test(id))
+    .map((id) => canonicalUserId(id))
+    .filter((id) => id !== own);
+  const unique = [...new Set(main)].sort();
+  return unique.length > 0 ? JSON.stringify(unique) : null;
+}
+
 /** The compact() dedup group of a memory: one person's rows group together whatever name they were filed under. */
-function dedupGroupKey(memory: Pick<Memory, 'subject' | 'subject_user_id' | 'category'>): string {
+function dedupGroupKey(memory: Pick<Memory, 'subject' | 'subject_user_id' | 'category' | 'said_by'>): string {
   const who = memory.subject_user_id ? `id:${memory.subject_user_id}` : `name:${memory.subject}`;
-  return `${who}::${memory.category}`;
+  const speaker = memory.said_by ? `::said:${memory.said_by}` : '';
+  return `${who}::${memory.category}${speaker}`;
 }
 
 export class MemoryStore {
@@ -332,6 +416,8 @@ export class MemoryStore {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject_user_id ON memories(subject_user_id);');
     this.addColumnIfMissing('emojis', 'use_count', 'INTEGER NOT NULL DEFAULT 0');
     this.addColumnIfMissing('emojis', 'last_used_at', 'TEXT');
+    this.addColumnIfMissing('memories', 'said_by', 'TEXT');
+    this.initJournal();
 
     // FTS5 virtual table — created separately to handle already-exists gracefully
     try {
@@ -369,6 +455,68 @@ export class MemoryStore {
   }
 
   /**
+   * Memory v2 journal columns on `memories` (docs/memory.md), added idempotently to an existing database:
+   *
+   * - `journal_seq`, the journal clock: it grows on every insert and on every change of a row's content,
+   *   subject_user_id, related members or recurrence count, so the nightly dream's watermark ("everything
+   *   up to seq N is in the notes") also catches a re-observation merged into an old row, or an old row
+   *   newly linked to a member. Kept by triggers, so every write path (and a raw INSERT in a test) gets it
+   *   without remembering to. Existing rows start at their id. Deactivation doesn't move it: forgetting
+   *   isn't news.
+   * - `seen_count`, `first_seen_at`, `last_seen_at`: how often and over what span a thing was observed
+   *   (recency × recurrence weigh it in the dream). Existing rows start at 1 and created_at/updated_at.
+   * - `evidence` (the key passage, ./evidence.ts) and `related_user_ids` (other members it is about).
+   */
+  private initJournal(): void {
+    this.addColumnIfMissing('memories', 'journal_seq', 'INTEGER');
+    this.addColumnIfMissing('memories', 'evidence', 'TEXT');
+    this.addColumnIfMissing('memories', 'seen_count', 'INTEGER NOT NULL DEFAULT 1');
+    this.addColumnIfMissing('memories', 'first_seen_at', 'TEXT');
+    this.addColumnIfMissing('memories', 'last_seen_at', 'TEXT');
+    this.addColumnIfMissing('memories', 'related_user_ids', 'TEXT');
+    this.db.exec(`
+      UPDATE memories SET journal_seq = id WHERE journal_seq IS NULL;
+      UPDATE memories SET first_seen_at = COALESCE(created_at, datetime('now')) WHERE first_seen_at IS NULL;
+      UPDATE memories SET last_seen_at = COALESCE(updated_at, first_seen_at) WHERE last_seen_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_memories_journal_seq ON memories(journal_seq);
+
+      CREATE TRIGGER IF NOT EXISTS memories_journal_seq_insert AFTER INSERT ON memories
+      WHEN new.journal_seq IS NULL
+      BEGIN
+        UPDATE memories SET journal_seq = (SELECT COALESCE(MAX(journal_seq), 0) + 1 FROM memories)
+        WHERE id = new.id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS memories_seen_insert AFTER INSERT ON memories
+      WHEN new.first_seen_at IS NULL OR new.last_seen_at IS NULL
+      BEGIN
+        UPDATE memories SET
+          first_seen_at = COALESCE(new.first_seen_at, new.created_at, datetime('now')),
+          last_seen_at = COALESCE(new.last_seen_at, new.updated_at, new.created_at, datetime('now'))
+        WHERE id = new.id;
+      END;
+
+      DROP TRIGGER IF EXISTS memories_journal_seq_update;
+      CREATE TRIGGER IF NOT EXISTS memories_journal_seq_touch
+      AFTER UPDATE OF content, subject_user_id, seen_count, related_user_ids ON memories
+      WHEN new.content IS NOT old.content OR new.subject_user_id IS NOT old.subject_user_id
+        OR new.seen_count IS NOT old.seen_count OR new.related_user_ids IS NOT old.related_user_ids
+      BEGIN
+        UPDATE memories SET journal_seq = (SELECT COALESCE(MAX(journal_seq), 0) + 1 FROM memories)
+        WHERE id = new.id;
+      END;
+    `);
+  }
+
+  /**
+   * The memory.db handle, for the stores that keep their tables in the same file (the notes store,
+   * src/ai/memory/notes/notesStore.ts). Nothing else reaches into it.
+   */
+  sharedDatabase(): Database.Database {
+    return this.db;
+  }
+
+  /**
    * Saves a memory.
    *
    * PHASE 1 — synchronous, before any await: lexical (word-overlap) dedup + INSERT/UPDATE + FTS sync,
@@ -398,28 +546,39 @@ export class MemoryStore {
   private lexicalSave(memory: MemoryInput): LexicalSaveResult {
     return this.runInTransaction(() => {
       const existing = this.stmt(
-        'SELECT id, content, subject_user_id FROM memories WHERE category = ? AND subject = ? AND active = 1',
-      ).all(memory.category, memory.subject) as Pick<Memory, 'id' | 'content' | 'subject_user_id'>[];
+        'SELECT id, content, subject_user_id, said_by FROM memories WHERE category = ? AND subject = ? AND active = 1',
+      ).all(memory.category, memory.subject) as Pick<Memory, 'id' | 'content' | 'subject_user_id' | 'said_by'>[];
 
       for (const row of existing) {
         if (!samePerson(row.subject_user_id, memory.subject_user_id)) continue;
+        if (!sameSpeaker(row.said_by, memory.said_by)) continue;
         if (wordOverlap(row.content, memory.content) > 0.6) {
           // Update existing record instead of creating a duplicate
           this.updateMemoryContent(row.id, row.content, memory);
           this.adoptSubjectUserId(row.id, row.subject_user_id, memory.subject_user_id);
+          this.recordRecurrence(row.id, memory);
           logger.info(`Updated existing memory #${row.id} (dedup match)`);
           return { id: row.id, merged: true };
         }
       }
 
+      const observed = memory.observed_at ? toSqliteUtc(memory.observed_at) : null;
       const result = this.stmt(
-        'INSERT INTO memories (category, subject, content, source, subject_user_id) VALUES (?, ?, ?, ?, ?)',
+        `INSERT INTO memories
+           (category, subject, content, source, subject_user_id, said_by, evidence, related_user_ids,
+            first_seen_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))`,
       ).run(
         memory.category,
         memory.subject,
         memory.content,
         memory.source ?? 'conversation',
         memory.subject_user_id ?? null,
+        memory.said_by ?? null,
+        serializeEvidence(memory.evidence),
+        serializeRelated(memory.related_user_ids ?? [], memory.subject_user_id),
+        observed,
+        observed,
       );
 
       const newId = Number(result.lastInsertRowid);
@@ -488,14 +647,22 @@ export class MemoryStore {
       candidates.sort((a, b) => b.score - a.score);
 
       for (const { id: bestId, score: bestScore } of candidates) {
-        const existing = this.stmt('SELECT content, subject_user_id FROM memories WHERE id = ?').get(bestId) as Pick<
-          Memory,
-          'content' | 'subject_user_id'
-        >;
+        const existing = this.stmt('SELECT content, subject_user_id, said_by, active FROM memories WHERE id = ?').get(
+          bestId,
+        ) as Pick<Memory, 'content' | 'subject_user_id' | 'said_by' | 'active'> | undefined;
+        // Another process on this file (the bootstrap CLI next to the running bot) may have retired or
+        // removed the row since this one cached its vector: never merge into it (its FTS entry is gone, and
+        // a second 'delete' corrupts the index), and drop the stale vector.
+        if (existing?.active !== 1) {
+          cache.delete(bestId);
+          continue;
+        }
         // subject_user_id is not in the cache (the startup stamp can change it): checked per candidate.
         if (!samePerson(existing.subject_user_id, memory.subject_user_id)) continue;
+        if (!sameSpeaker(existing.said_by, memory.said_by)) continue;
         this.updateMemoryContent(bestId, existing.content, memory);
         this.adoptSubjectUserId(bestId, existing.subject_user_id, memory.subject_user_id);
+        this.recordRecurrence(bestId, memory);
         this.removeInCurrentTransaction(phase1.id);
         this.upsertVector(bestId, embeddings.model, inputText, vector, meta);
         logger.info(`Memory #${phase1.id} merged into #${bestId} (semantic dedup, cosine ${bestScore.toFixed(3)})`);
@@ -511,6 +678,73 @@ export class MemoryStore {
   private adoptSubjectUserId(id: number, existingUserId: string | null, incomingUserId: string | undefined): void {
     if (existingUserId || !incomingUserId) return;
     this.stmt('UPDATE memories SET subject_user_id = ? WHERE id = ?').run(incomingUserId, id);
+  }
+
+  /**
+   * A re-observation merged into row `id`: one more sighting, the seen span widened to the observation's
+   * time (now unless backdated), and its evidence and related members folded in. In the caller's
+   * transaction.
+   */
+  private recordRecurrence(id: number, memory: MemoryInput): void {
+    const row = this.stmt('SELECT evidence, related_user_ids, subject_user_id FROM memories WHERE id = ?').get(id) as
+      | Pick<Memory, 'evidence' | 'related_user_ids' | 'subject_user_id'>
+      | undefined;
+    if (!row) return;
+    const evidence = mergeEvidence(parseEvidence(row.evidence), normalizeEvidence(memory.evidence));
+    const related = serializeRelated(
+      [...relatedUserIdsOf(row), ...(memory.related_user_ids ?? [])],
+      row.subject_user_id ?? memory.subject_user_id,
+    );
+    this.stmt(
+      `UPDATE memories SET
+         seen_count = COALESCE(seen_count, 1) + 1,
+         first_seen_at = min(COALESCE(first_seen_at, created_at, @at), @at),
+         last_seen_at = max(COALESCE(last_seen_at, updated_at, @at), @at),
+         evidence = @evidence,
+         related_user_ids = @related
+       WHERE id = @id`,
+    ).run({
+      id,
+      at: toSqliteUtc(memory.observed_at ?? new Date()),
+      evidence: evidence ? JSON.stringify(evidence) : null,
+      related,
+    });
+  }
+
+  /**
+   * compact() found `drop` to be a duplicate of `keepId`: the kept row takes over its sightings (count,
+   * span), evidence and related members before `drop` is deactivated, so recurrence survives the merge.
+   */
+  private foldDuplicate(keepId: number, drop: Memory): void {
+    const keep = this.stmt(
+      'SELECT evidence, related_user_ids, subject_user_id, seen_count, first_seen_at, last_seen_at, created_at, updated_at FROM memories WHERE id = ?',
+    ).get(keepId) as Memory | undefined;
+    if (!keep) return;
+    const evidence = mergeEvidence(parseEvidence(drop.evidence), parseEvidence(keep.evidence));
+    const related = serializeRelated([...relatedUserIdsOf(keep), ...relatedUserIdsOf(drop)], keep.subject_user_id);
+    const earliest = [keep.first_seen_at ?? keep.created_at, drop.first_seen_at ?? drop.created_at]
+      .filter((t): t is string => parseSqliteUtc(t) !== undefined)
+      .sort()[0];
+    const latest = [keep.last_seen_at ?? keep.updated_at, drop.last_seen_at ?? drop.updated_at]
+      .filter((t): t is string => parseSqliteUtc(t) !== undefined)
+      .sort()
+      .at(-1);
+    this.stmt(
+      `UPDATE memories SET
+         seen_count = COALESCE(seen_count, 1) + ?,
+         first_seen_at = COALESCE(?, first_seen_at),
+         last_seen_at = COALESCE(?, last_seen_at),
+         evidence = ?,
+         related_user_ids = ?
+       WHERE id = ?`,
+    ).run(
+      drop.seen_count ?? 1,
+      earliest ?? null,
+      latest ?? null,
+      evidence ? JSON.stringify(evidence) : null,
+      related,
+      keepId,
+    );
   }
 
   /** Updates a memory's content + updated_at and keeps the FTS index in sync. Caller provides the OLD content. */
@@ -1020,8 +1254,16 @@ export class MemoryStore {
               ? dot(vecI, vecJ) >= this.dedupThreshold
               : wordOverlap(group[i].content, group[j].content) > 0.6;
 
-          if (isDuplicate && this.deactivate(group[j].id)) {
-            // Keep newer (i), deactivate older (j)
+          // Keep newer (i); the older (j) is deactivated and folded into it (its sightings, span and
+          // evidence carry over), both or neither.
+          const folded =
+            isDuplicate &&
+            this.runInTransaction(() => {
+              if (!this.deactivate(group[j].id)) return false;
+              this.foldDuplicate(group[i].id, group[j]);
+              return true;
+            });
+          if (folded) {
             deactivated.add(group[j].id);
             removed++;
             logger.info(`Compacted: deactivated memory #${group[j].id} (duplicate of #${group[i].id})`);
@@ -1221,6 +1463,14 @@ export class MemoryStore {
        VALUES (?, ?, datetime('now'))
        ON CONFLICT(channel_id) DO UPDATE SET last_message_id = ?, last_observed_at = datetime('now')`,
     ).run(channelId, messageId, messageId);
+  }
+
+  /** Channels the learner captured at or after `since`, most recent first (its startup resume). */
+  observedChannelsSince(since: Date): string[] {
+    const rows = this.stmt(
+      'SELECT channel_id FROM learner_state WHERE last_observed_at >= ? ORDER BY last_observed_at DESC, channel_id',
+    ).all(toSqliteUtc(since)) as { channel_id: string }[];
+    return rows.map((row) => row.channel_id);
   }
 
   // ---- Generic key/value state (digest watermark, last-announced deploy sha, etc.) ----

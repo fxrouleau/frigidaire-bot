@@ -11,6 +11,7 @@ import {
   type ScriptedReply,
 } from '../test-support/capturingClient';
 import { createFakeBotMessage, createFakeClient, createFakeMessage, type FakeMessageOptions } from '../test-support/fakeDiscord';
+import type { CaptureActivity, CaptureTrigger } from './captureTrigger';
 import { setMemoryStoreForTesting } from './memory';
 import { MemoryStore } from './memory/memoryStore';
 import { capImageParts, MAX_LEARNER_IMAGES, PersonalityLearner } from './personalityLearner';
@@ -160,7 +161,7 @@ describe('PersonalityLearner observation cycle', () => {
     await learner.observeOnce(client);
 
     const texts = partsOf(requests[0]).map((p) => p.text);
-    const at = texts.findIndex((t) => t?.startsWith('[') && t.includes('[Wheelie (id:100000000000000002)]'));
+    const at = texts.findIndex((t) => t?.startsWith('#') && t.includes('[Wheelie (id:100000000000000002)]'));
     expect(texts[at + 1]).toBe('[voice message transcript: I got the job]');
   });
 
@@ -208,8 +209,8 @@ describe('PersonalityLearner observation cycle', () => {
     expect(requests.map((r) => r.body.provider)).toEqual([{ zdr: true }, { zdr: true }]);
     // The default learner model reasons at 'max' unless told otherwise, which could spend the whole cap.
     expect(requests.map((r) => r.body.reasoning)).toEqual([{ effort: 'low' }, { effort: 'low' }]);
-    expect(requests.map((r) => r.body.max_tokens)).toEqual([4096, 4096]);
-    expect(requests.map((r) => r.headers.get(FEATURE_HEADER))).toEqual(['learner', 'self_improvement']);
+    expect(requests.map((r) => r.body.max_tokens)).toEqual([16_384, 16_384]);
+    expect(requests.map((r) => r.headers.get(FEATURE_HEADER))).toEqual(['memory_capture', 'self_improvement']);
   });
 
   it("gives the self-improvement pass the bot's mention id and the asked rule", async () => {
@@ -261,7 +262,8 @@ describe('PersonalityLearner observation cycle', () => {
       webhookId: 'wh-1',
       authorUsername: 'Wheelie',
       channelId: CHANNEL_ID,
-      createdAt: new Date(BASE),
+      // In the same conversation as the messages below (a first capture reads only the last one).
+      createdAt: new Date(BASE + ++seq * 60_000),
       content: 'https://fixvx.com/x/status/1',
     }).message;
     const { client } = channelServing([
@@ -378,6 +380,38 @@ describe('PersonalityLearner observation cycle', () => {
     // The channel queued during the skipped tick is processed on the next one.
     await learner.observeOnce(client);
     expect(fetchCalls).toHaveLength(2);
+  });
+
+  it('reads the channels its capture trigger says are due, and reports activity to it', async () => {
+    const noted: CaptureActivity[] = [];
+    const asked: number[] = [];
+    let due: string[] = [];
+    const trigger: CaptureTrigger = {
+      tickMs: 60_000,
+      describe: () => 'test',
+      noteActivity: (activity) => noted.push(activity),
+      noteBacklog: () => {},
+      takeDue: (now) => {
+        asked.push(now);
+        const taken = due;
+        due = [];
+        return taken;
+      },
+    };
+    vi.stubEnv('LEARNER_IGNORE_CHANNELS', 'chan-ignored');
+    const { client: openai, requests } = createCapturingClient([noObservations()]);
+    const learner = new PersonalityLearner(store, { client: openai, minMessages: 3, trigger });
+    learner.trackActivity(CHANNEL_ID, { at: 42, messageId: 'm1', authorId: '100000000000000001' });
+    learner.trackActivity('chan-ignored');
+    expect(noted).toEqual([{ channelId: CHANNEL_ID, at: 42, messageId: 'm1', authorId: '100000000000000001' }]);
+
+    const { client, fetchCalls } = channelServing([jasper('a'), wheelie('b'), jasper('c')]);
+    await learner.observeOnce(client, 1_000);
+    expect([asked, fetchCalls.length, requests.length]).toEqual([[1_000], 0, 0]);
+
+    due = [CHANNEL_ID];
+    await learner.observeOnce(client, 2_000);
+    expect([asked, fetchCalls.length, requests.length]).toEqual([[1_000, 2_000], 1, 1]);
   });
 
   it('survives a channel fetch failure and a model failure without throwing', async () => {

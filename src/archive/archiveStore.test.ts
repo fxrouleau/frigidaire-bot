@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { archiveInput, snowflake } from '../test-support/fakeArchive';
 import { ArchiveStore, compareSnowflakes, ftsTerms, normalizeReactions } from './archiveStore';
 
@@ -312,6 +312,53 @@ describe('ArchiveStore — reads', () => {
     store.upsertMessages([voice, relay, oldVoice]);
     expect(store.pendingTranscriptIds(T0 - DAY, 10)).toEqual([voice.id]);
     expect(store.unresolvedRelayIds(T0 - DAY, 10)).toEqual([relay.id]);
+  });
+});
+
+describe('ArchiveStore — whole-archive reads (memory bootstrap export)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('streams every live message in time order across batches, ignored channels and deleted ones left out', () => {
+    vi.stubEnv('ARCHIVE_IGNORE_CHANNELS', OTHER_CHANNEL);
+    const rows = Array.from({ length: 7 }, (_, i) =>
+      archiveInput({ id: snowflake(T0 + (7 - i) * 1000, i), content: `m${7 - i}`, createdAt: T0 + (7 - i) * 1000 }),
+    );
+    // Two messages in the same millisecond: snowflake order.
+    rows.push(archiveInput({ id: snowflake(T0 + 3000, 50), content: 'm3b', createdAt: T0 + 3000 }));
+    rows.push(archiveInput({ id: snowflake(T0 + 500), content: 'hidden', channelId: OTHER_CHANNEL, createdAt: T0 + 500 }));
+    rows.push(
+      archiveInput({
+        id: snowflake(T0 + 600),
+        content: 'in a hidden thread',
+        channelId: THREAD,
+        parentChannelId: OTHER_CHANNEL,
+        createdAt: T0 + 600,
+      }),
+    );
+    store.upsertMessages(rows);
+    store.markDeleted([rows[0].id], T0 + 10_000);
+
+    const streamed = [...store.iterateMessages({ batchSize: 2 })].map((m) => m.content);
+    expect(streamed).toEqual(['m1', 'm2', 'm3', 'm3b', 'm4', 'm5', 'm6']);
+  });
+
+  it("summarizes who wrote what under which name, the bot's rows marked", () => {
+    store.upsertMessages([
+      archiveInput({ id: snowflake(T0, 1), authorId: REMI, authorName: 'Remi', createdAt: T0 }),
+      archiveInput({ id: snowflake(T0 + DAY, 2), authorId: REMI, authorName: 'Remi', createdAt: T0 + DAY }),
+      archiveInput({ id: snowflake(T0 + 2 * DAY, 3), authorId: REMI, authorName: 'Remington', createdAt: T0 + 2 * DAY }),
+      archiveInput({ id: snowflake(T0, 4), authorId: null, authorName: 'Old relay', source: 'relay', createdAt: T0 }),
+      archiveInput({ id: snowflake(T0, 5), authorId: '900000000000000099', authorName: 'Bot', source: 'bot', createdAt: T0 }),
+    ]);
+    // Most messages first, then the most recent.
+    expect(store.authorSummary()).toEqual([
+      { authorId: REMI, authorName: 'Remi', bot: false, count: 2, firstAt: T0, lastAt: T0 + DAY },
+      expect.objectContaining({ authorId: REMI, authorName: 'Remington', count: 1 }),
+      expect.objectContaining({ authorId: '900000000000000099', authorName: 'Bot', bot: true }),
+      expect.objectContaining({ authorId: null, authorName: 'Old relay', bot: false }),
+    ]);
   });
 });
 
