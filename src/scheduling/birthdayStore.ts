@@ -13,6 +13,8 @@ export type Birthday = {
   setBy: string;
   updatedAt: number;
   lastAnnouncedYear: number | null;
+  /** The last year a shadow announcement (BIRTHDAY_ANNOUNCE_MODE=shadow) went to the report channel. */
+  lastShadowYear: number | null;
 };
 
 type BirthdayRow = {
@@ -23,6 +25,7 @@ type BirthdayRow = {
   set_by: string;
   updated_at: number;
   last_announced_year: number | null;
+  last_shadow_year?: number | null;
 };
 
 export type CalendarDate = { year: number; month: number; day: number };
@@ -52,6 +55,8 @@ const MIN_BIRTH_YEAR = 1900;
 function db() {
   const botDb = getBotDb();
   botDb.ensureSchema('birthdays', SCHEMA);
+  // Shadow announcements keep their own watermark, so switching to `on` the same day still posts for real.
+  botDb.ensureColumn('birthdays', 'last_shadow_year', 'INTEGER');
   return botDb;
 }
 
@@ -64,6 +69,7 @@ function toBirthday(row: BirthdayRow): Birthday {
     setBy: row.set_by,
     updatedAt: row.updated_at,
     lastAnnouncedYear: row.last_announced_year,
+    lastShadowYear: row.last_shadow_year ?? null,
   };
 }
 
@@ -205,6 +211,25 @@ export function claimAnnouncement(userId: string, year: number): boolean {
 export function releaseAnnouncement(userId: string, year: number, previous: number | null): void {
   db()
     .stmt('UPDATE birthdays SET last_announced_year = ? WHERE user_id = ? AND last_announced_year = ?')
+    .run(previous, userId, year);
+}
+
+/** claimAnnouncement() for a shadow announcement: its own watermark, never the real one. */
+export function claimShadowAnnouncement(userId: string, year: number): boolean {
+  return (
+    db()
+      .stmt(
+        `UPDATE birthdays SET last_shadow_year = ?
+         WHERE user_id = ? AND (last_shadow_year IS NULL OR last_shadow_year < ?)`,
+      )
+      .run(year, userId, year).changes === 1
+  );
+}
+
+/** Undoes a shadow claim whose report post failed. */
+export function releaseShadowAnnouncement(userId: string, year: number, previous: number | null): void {
+  db()
+    .stmt('UPDATE birthdays SET last_shadow_year = ? WHERE user_id = ? AND last_shadow_year = ?')
     .run(previous, userId, year);
 }
 

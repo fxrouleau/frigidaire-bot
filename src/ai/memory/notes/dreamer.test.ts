@@ -232,8 +232,12 @@ describe('dreamPerson', () => {
     const [request] = requests;
     expect(request.url).toMatch(/\/chat\/completions$/);
     expect(request.headers.get('X-Frigidaire-Feature')).toBe('memory_dream');
-    expect(request.body).toMatchObject({ model: config.dream.model, max_tokens: 16_000, provider: { zdr: true } });
-    expect(request.body.reasoning).toBeUndefined();
+    expect(request.body).toMatchObject({
+      model: config.dream.model,
+      max_tokens: 32_000,
+      provider: { zdr: true },
+      reasoning: { effort: 'medium' },
+    });
     const [system, user] = messagesOf(request);
     expect(system.role).toBe('system');
     expect(system.content).toContain('A correction a person made about themself beats everything else');
@@ -976,7 +980,7 @@ describe('proposeEdit', () => {
 
     const [request] = requests;
     expect(request.headers.get('X-Frigidaire-Feature')).toBe('memory_edit');
-    expect(request.body).toMatchObject({ model: 'anthropic/claude-sonnet-5', max_tokens: 16_000, provider: { zdr: true } });
+    expect(request.body).toMatchObject({ model: 'anthropic/claude-sonnet-5', max_tokens: 32_000, provider: { zdr: true } });
     const [system, user] = messagesOf(request);
     expect(system.content).toContain("The owner's instruction is authoritative");
     expect(user.content).toContain('EDITING: your notes on Remi');

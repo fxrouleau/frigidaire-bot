@@ -100,6 +100,7 @@ describe('storage', () => {
       setBy: 'y',
       updatedAt: 2,
       lastAnnouncedYear: 2025,
+      lastShadowYear: null,
     });
     expect(listBirthdays().map((b) => b.userId)).toEqual(['u2', USER]);
     expect(deleteBirthday(USER)).toBe(true);

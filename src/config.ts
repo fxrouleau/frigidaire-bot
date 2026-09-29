@@ -2,7 +2,8 @@
 //
 // Values are read lazily (getters) rather than once at import: tests set process.env per case, and
 // prod never mutates it, so the cost is a few string reads per access and the behavior is identical
-// either way. Parsing rules:
+// either way. Live settings (src/runtimeSettings.ts: the owner asks the bot to change one) sit on top of
+// the environment as overrides, never written into process.env. Parsing rules:
 //   - booleans accept 1/0, true/false, yes/no, on/off (case-insensitive; surrounding whitespace and
 //     quotes are ignored) — an unrecognized or blank value falls back to the default
 //   - numbers must be finite (and within the stated bounds) or the default applies; "0" is a real value
@@ -10,8 +11,30 @@
 //   - csv lists are trimmed and empty entries dropped
 import process from 'node:process';
 
+// Live overrides (src/runtimeSettings.ts): consulted before process.env, so a changed setting applies on
+// the next read everywhere that reads config per use.
+const overrides = new Map<string, string>();
+
+/** Sets (or, with undefined, removes) the live override of one variable. */
+export function setConfigOverride(name: string, value: string | undefined): void {
+  if (value === undefined) overrides.delete(name);
+  else overrides.set(name, value);
+}
+
+/** Drops every live override (tests). */
+export function clearConfigOverrides(): void {
+  overrides.clear();
+}
+
+/** Where a variable's value comes from right now: its live override and its environment value. */
+export function configSource(name: string): { override?: string; env?: string } {
+  const override = overrides.get(name);
+  const env = process.env[name];
+  return { ...(override !== undefined ? { override } : {}), ...(env !== undefined ? { env } : {}) };
+}
+
 function raw(name: string): string | undefined {
-  const value = process.env[name];
+  const value = overrides.get(name) ?? process.env[name];
   if (value === undefined) return undefined;
   const trimmed = value.trim().replace(/^["']|["']$/g, '');
   return trimmed.length > 0 ? trimmed : undefined;
@@ -77,11 +100,14 @@ export const DEFAULT_LEARNER_MODEL = 'z-ai/glm-5.3-flash';
 export const DEFAULT_EMOJI_CAPTION_MODEL = 'anthropic/claude-opus-4.7';
 export const DEFAULT_EMBEDDING_MODEL = 'qwen/qwen3-embedding-8b';
 /**
- * Memory v2's nightly dream (and, by default, owner edits and the built-in bootstrap): the strong model that
- * turns the journal into per-person notes. On OpenRouter's zero-data-retention list; $4/M in, $20/M out, and
- * it only runs nightly for people with new journal rows (docs/memory.md).
+ * Memory v2's nightly dream (and, by default, owner edits and the built-in bootstrap): the model that turns
+ * the journal into per-person notes. The chat model: cheap, zero-data-retention hosts, and it only runs
+ * nightly for people with new journal rows (docs/memory.md). It reasons, so the dream asks for
+ * MEMORY_DREAM_REASONING's effort (a model that only reasons when asked, like Claude, wants `off`).
  */
-export const DEFAULT_DREAM_MODEL = 'anthropic/claude-opus-5.5';
+export const DEFAULT_DREAM_MODEL = 'z-ai/glm-5.3-flash';
+export const DREAM_REASONING_EFFORTS = ['off', 'low', 'medium', 'high'] as const;
+export type DreamReasoningEffort = (typeof DREAM_REASONING_EFFORTS)[number];
 /**
  * The TypeSafe decision model (src/ai/decisions.ts) for the deleted-message judge and the gate. Pinned
  * rather than `~typesafe/jev-latest`: thresholds are tuned against one model version.
@@ -380,6 +406,14 @@ export const config = {
     get model(): string {
       return envString('MEMORY_DREAM_MODEL') ?? DEFAULT_DREAM_MODEL;
     },
+    /**
+     * The reasoning effort the dream, owner edits and the bootstrap ask for. `off` sends no reasoning field
+     * (Claude only thinks when asked; an effort would switch paid thinking on). GLM reasons at `max` unless
+     * told otherwise, and reasoning counts toward max_tokens, hence a bounded default.
+     */
+    get reasoning(): DreamReasoningEffort {
+      return envEnum('MEMORY_DREAM_REASONING', DREAM_REASONING_EFFORTS, 'medium');
+    },
     /** Eastern hour (0–23) from which the day's dream runs: the first scheduler tick at/after it, once a day. */
     get hour(): number {
       return envInt('MEMORY_DREAM_HOUR', 4, { min: 0, max: 23 });
@@ -601,6 +635,15 @@ export const config = {
     /** Kill switch for the announcements alone; the birthday tools keep working either way. */
     get announceEnabled(): boolean {
       return envBool('BIRTHDAY_ANNOUNCE_ENABLED', true);
+    },
+    /**
+     * off: no announcements. shadow (default): the message is written exactly as it would be but posted
+     * only to the report channel, so the owner can check it first. on: posted in the birthday channel.
+     * BIRTHDAY_ANNOUNCE_ENABLED=false still means off.
+     */
+    get announceMode(): 'off' | 'shadow' | 'on' {
+      if (!this.announceEnabled) return 'off';
+      return envEnum('BIRTHDAY_ANNOUNCE_MODE', ['off', 'shadow', 'on'] as const, 'shadow');
     },
     /** Eastern hour (0–23) from which the day's birthdays are announced: afternoon, not midnight. */
     get announceHour(): number {
@@ -1023,8 +1066,11 @@ export function describeEffectiveConfig(): string {
   const deployAnnounce = !report.deployAnnounceEnabled ? 'off' : report.gitSha ? 'on' : 'no-sha';
   // Birthdays post to BIRTHDAY_CHANNEL_ID, else the main channel: say which, without the id.
   let birthdayAnnounce = `${birthdays.announceHour}h,channel:${birthdays.channelId === server.mainChannelId ? 'main' : 'own'}`;
+  // Shadow posts go to the report channel only: say when there is none.
+  if (birthdays.announceMode === 'shadow')
+    birthdayAnnounce += report.channelId ? ',mode:shadow' : ',mode:shadow-no-report';
   if (!birthdays.channelId) birthdayAnnounce = 'no-channel';
-  if (!birthdays.announceEnabled) birthdayAnnounce = 'off';
+  if (birthdays.announceMode === 'off') birthdayAnnounce = 'off';
   // Half-configured feature requests are the likely mistake: name the missing half.
   let featureRequestsOff: string | undefined;
   if (featureRequests.githubToken && !featureRequests.githubRepo) featureRequestsOff = 'no-repo';
@@ -1073,6 +1119,7 @@ export function describeEffectiveConfig(): string {
     `learning=idle:${formatDuration(learner.captureIdleMinutes * MINUTE_MS)},span:${formatDuration(learner.captureMaxSpanMinutes * MINUTE_MS)},min:${learner.minMessages},ignore:${learner.ignoredChannels.length},selfImprovement:${onOff(learner.selfImprovementEnabled)}`,
     feature('dream', dream.enabled, [
       `model:${dream.model}`,
+      `reasoning:${dream.reasoning}`,
       `hour:${dream.hour}`,
       `max:${dream.maxPeoplePerNight}`,
       `report:${dreamReport}`,

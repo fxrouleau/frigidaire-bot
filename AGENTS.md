@@ -10,14 +10,15 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 4. **Link reader** — tweets, TikToks/Reels, YouTube, Reddit, Bluesky, GIFs and articles are read through an SSRF-guarded fetch. The model gets a preview automatically and can open the full content with `read_link`.
 5. **Link fixing** — Twitter/X, Instagram, TikTok, Reddit and Bluesky links are rewritten to probed embed fixers and reposted faithfully as the author (attachments, spoilers, threads, reply line, tweet translation). Fixer outages are reported.
 6. **Message archive** — every member message goes into `archive.db`, with years of history backfilled. It feeds the `search_messages` / `get_message_context` tools, the reaction profile and the yearly **Wrapped** post.
-7. **Scheduling** — reminders, native polls and birthdays (announced in character), all in Eastern time.
+7. **Scheduling** — reminders, native polls and birthdays (announced in character; **shadow** mode by default: the announcement only goes to the report channel), all in Eastern time.
 8. **Spontaneous reactions** — auto-react learns how the group reacts and, rarely, adds one emoji to a standout post. It ships in **shadow** mode: it only reports what it would do. Emoji captions are re-grounded in real usage.
 9. **Ramble redirect** — a configured member's rambles get an in-character nudge toward their own channel.
 10. **Code sandbox** — `run_code` runs Python/bash/node in a secret-free sidecar container (math, charts, data): up to 15 minutes, 2 GB, a 20 GB workspace.
 11. **Right-click commands** — Ask Fridge, Summarize from here, Transcribe, Translate, Remember this, What does Fridge know? (a notes viewer; the owner can edit and undo).
 12. **Feature requests → GitHub** — members' requests become public issues (or +1s on existing ones). The owner's `claude-implement` label has Claude implement them in a PR.
 13. **Deleted-message repost** — a configured member's message deleted right after posting is judged ("was that edgy?") and reposted as them. Off unless `DELETE_REPOST_USER_IDS` is set.
-14. **Report channel & ops** — the weekly self-diagnosis digest with OpenRouter spend, a "🚀 Deployed `<sha>`" line with the channel configuration, the nightly dream's line, the owner's note edits and undos, notes imports, fixer alerts, auto-react shadow lines, `!wrapped` previews. Also a per-feature usage ledger and a rotated log file.
+14. **Report channel & ops** — the weekly self-diagnosis digest with OpenRouter spend, a "🚀 Deployed `<sha>`" line with the channel configuration, the nightly dream's line, the owner's note edits and undos, notes imports, fixer alerts, auto-react and birthday shadow lines, live setting changes, `!wrapped` previews. Also a per-feature usage ledger and a rotated log file.
+15. **Live settings** — the owner can ask the bot to change its own settings (`list_settings` / `change_setting`): an allowlist of feature switches, thresholds and models, applied at once, persisted in bot.db until reset. See [Live settings](#live-settings-srcruntimesettingsts-srcaitoolssettingsts).
 
 ## Hard rules
 
@@ -187,7 +188,7 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
   - One-shot calls send `reasoning: { effort: 'low' }` with `max_tokens` ≥ 1500: the ramble judge, the auto-react judge, the message-judge fallback, the Wrapped intro, the birthday writer and the command completions (Translate, Remember this). Capture (the learner) and the self-improvement pass do too, with 16,384 (a part is a whole conversation).
   - Media calls send the catalog's lowest effort.
   - The emoji captioner sends none: its default model (Claude Opus) only reasons when asked, and an effort would switch paid thinking on. A reasoning model in `EMOJI_CAPTION_MODEL` needs an override there.
-  - The dream and owner edits (16,000 `max_tokens`) and the built-in bootstrap (8,000) send none either, for the same reason (their default model is Claude Opus): everything generated is the answer.
+  - The dream and owner edits (32,000 `max_tokens`) and the built-in bootstrap (16,000) send `MEMORY_DREAM_REASONING`'s effort (default `medium`; their default model is GLM). `off` sends no reasoning field, for a model that only reasons when asked (Claude).
   - Summaries (`max_tokens` 4000) and the chat turn (no cap) run at the model's default effort.
 
 ### Chat turn (`src/events/aiChat.ts`, `AgentOrchestrator`)
@@ -486,6 +487,7 @@ Everyone lives in America/New_York, so every time a tool takes or shows is Easte
 - **`create_poll({question, answers, duration_hours?, allow_multiselect?})`**: a native poll, validated against Discord's limits first (question ≤300, 1–10 unique answers ≤55, 1–768 h, default 24). It needs the Create Polls permission.
 - **Birthdays** (bot.db `birthdays`): `set_birthday` (`MM-DD` or `YYYY-MM-DD`), `list_birthdays` (by next occurrence, with the age they'll turn) and `forget_birthday`.
   - The announcement starts once ET reaches `BIRTHDAY_ANNOUNCE_HOUR`, for birthdays that are **today** (Feb 29 → Feb 28 in common years), so a bot down all afternoon announces late the same day, never the next. It goes to `BIRTHDAY_CHANNEL_ID` (default main).
+  - **`BIRTHDAY_ANNOUNCE_MODE=shadow` is the default**: the message is written exactly as it would be (the birthday channel's chat as context) but posted only to the report channel as `-# 🎂 birthday (shadow) · would post in #channel:` plus the text, pinging nobody. Shadow posts have their own watermark (`last_shadow_year`), so switching to `on` the same day still announces for real. No report channel ⇒ nothing is posted.
   - The text is written by `CHAT_MODEL` (ZDR, low reasoning effort, tagged `birthday`), then cleaned and 🎂-prefixed; a template is used on failure. The writer gets today's Eastern date and what the bot knows about the person: their profile (without Earlier) plus the journal rows newer than it, or, before they have notes, up to 40 memories (past that, the 20 oldest and the 20 newest; no `image` or self-diagnosis rows); rows oldest first, each tagged with when it was first noted (first sighting, so re-confirmed lore stays old). It picks for itself: long-running things (a trait, a running joke, old lore) first, and anything from the last couple of weeks only as recent news. Undated and limited to the newest 5, it once told yesterday's story as old lore. It also gets the birthday channel's chat so far today (the newest 60 lines from the archive, `HH:MM Name: text`, mentions as @names) as plain background, so it can bounce off the day's conversation, or notice nobody said anything, without being told what to look for.
   - The year is claimed before posting and released if the send fails. A birthday set in chat on the day is marked announced (the reply was the wish). Members who left are skipped.
   - **`BIRTHDAYS_SEED`** (`userId:MM-DD` / `userId:YYYY-MM-DD`) is applied **once per user** (`birthday_seed_applied`): chat corrections and `forget_birthday` stick. A seed entry that differs from a saved birthday is logged as a WARN (use `set_birthday` to change it).
@@ -559,6 +561,14 @@ Everything here is off unless `REPORT_CHANNEL_ID` is set. `sendToReportChannel()
 - **Deploy ping** (`deployAnnounce`): `🚀 Deployed <sha> · <ET time>` the first time the bot boots on a new `GIT_SHA`, followed by the channel configuration in a code block. An undelivered ping is retried on the next boot.
 - Fixer alerts, auto-react shadow lines, `!wrapped` previews, the nightly dream's line (`🌙 dream · …`), the owner's note edit/undo audit lines and a notes import's result also land here.
 - **`query_costs({period: today|week|month})`**: rolling whole Eastern days from the ledger.
+
+### Live settings (`src/runtimeSettings.ts`, `src/ai/tools/settings.ts`)
+
+The owner changes the bot's settings from chat ("turn the gate off", "birthdays on", "dream with X"):
+- **Tools** `list_settings()` and `change_setting({name, value?, reset?})`, **owner only** (`isBotOwner` on the requester, i.e. the author of the message being answered). The description tells the model to act only on the owner's own explicit ask, never on a link or a quote.
+- **Allowlist** (`RUNTIME_SETTINGS`): feature switches, modes, thresholds, caps and models. Never secrets, tokens, URLs, ids, `BOT_OWNER_USER_IDS` or `LINKED_ACCOUNTS`; a test pins that and that every entry is a variable `config.ts` reads. Values are validated with config.ts's rules (a typo is refused, not silently defaulted).
+- **Mechanics**: a change is a config override (`setConfigOverride`, consulted before `process.env`; process.env itself is never written), saved in bot.db `runtime_settings` and reapplied at startup before the Effective config line (`loadRuntimeSettings`). `reset: true` deletes it, falling back to `.env`. Settings read once at startup (`CHAT_MODEL`, `CHAT_FALLBACK_MODELS`: the provider is built once) say they apply after a restart.
+- Every change logs an INFO line and posts `-# ⚙️ setting · <who> changed \`NAME\`: before → after` to the report channel.
 - **Log file** (`logFile.ts`): every logger line is also appended to `LOG_FILE` (`./data/logs/bot.log`, 5 MB × 3), because watchtower recreates the container on each update and that wipes `docker logs`. Writes are synchronous, each start writes a marker line, it's off under Vitest, and a filesystem error pauses it for 60 s instead of throwing. It holds the same text as the console (memory contents included): treat it like the rest of `./data`.
 - **Error capture & replay**: when a turn throws, `debugCapture.ts` writes the conversation + raw error to `data/debug/error-<timestamp>-<rand>.json` (newest 50 kept; `DEBUG_CAPTURE=false` disables, `DEBUG_CAPTURE_DIR` relocates). `yarn replay <file>` reproduces it offline. Captures hold full private chats; the digest reads only their timestamp/status/message.
 
@@ -609,7 +619,7 @@ Weight = recency × recurrence: the notes keep spans and counts in their text ("
 - **Schedule** (`DreamScheduler`, off with `MEMORY_DREAM_ENABLED=false`): a one-minute unref'd check, the first 5 min after startup (after any import). The dream runs on the first check at or after `MEMORY_DREAM_HOUR` (4) Eastern, catching up the same day after downtime. The day is claimed in memory.db `bot_state` (`dream:last_night`) BEFORE the run, so a night that crashes or fails (a 4 am outage included) is never retried the same day: nothing is lost (watermarks don't move) and the next night catches up.
 - **One dream at a time** (`dreamLease.ts`): the night and a `bootstrap --run` catch-up (another process on the same memory.db) hold a lease in `bot_state` (`dream:running`, taken in an IMMEDIATE transaction, renewed every minute, taken over after 10 min without renewal). While the bootstrap holds it, the day stays unclaimed and the night runs on the first check after; while the night holds it, the bootstrap doesn't dream and tells the owner to run `--run` again.
 - **A night** (`runNightlyDream`): the people with journal rows above their watermark (`pendingDreams`, most recently active first, ≤ `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`; only members the bot knows or ids a non-learner writer vouched for, never the old learner's junk ids), one at a time, then the group. It stops after 3 calls in a row failed with a model or network error (an outage; a refused answer never counts), dreams people whose last dream failed after everyone else, and does nothing without a key.
-- **One person** (`dreamPerson`): one `MEMORY_DREAM_MODEL` call (ZDR, tag `memory_dream`, `max_tokens` 16,000 and no reasoning field: Opus only reasons when asked; a 10-minute timeout, one SDK retry). Input: SERVER PEOPLE, the person's line, ALL their notes and circles (circles past 60k chars as excerpts it may not rewrite), the oldest ≤300 rows above their watermark (seq, category, seen span and count, source, related members, quote; corrections labelled authoritative or a third-party claim), up to 8 cited passages from archive.db (`passages.ts`: contested claims, self-corrections, traits and preferences, rows seen 3+ times, the rest), and today's date.
+- **One person** (`dreamPerson`): one `MEMORY_DREAM_MODEL` call (ZDR, tag `memory_dream`, `max_tokens` 32,000 and `MEMORY_DREAM_REASONING`'s effort; a 10-minute timeout, one SDK retry). Input: SERVER PEOPLE, the person's line, ALL their notes and circles (circles past 60k chars as excerpts it may not rewrite), the oldest ≤300 rows above their watermark (seq, category, seen span and count, source, related members, quote; corrections labelled authoritative or a third-party claim), up to 8 cited passages from archive.db (`passages.ts`: contested claims, self-corrections, traits and preferences, rows seen 3+ times, the rest), and today's date.
 - **Saving**: `parseNotesOutput` (`requireProfile`) → the excerpt check and the membership check (a rewritten circle keeps every member it has, current or former: someone who left gets an `until`; only an owner edit removes one) → `applyNotesOutput(updatedBy 'dream')`, all or nothing. The versions the prompt showed (the owner's notes, every circle) are compared again in the same IMMEDIATE transaction as the save: when an owner edit or undo (or another writer) changed the notes or a circle the answer writes while the model was thinking, nothing is saved over it and the dream fails without a repair round (the next night sees the new version). Otherwise a refused answer (bad JSON, a broken rule, a write the store refuses, one cut off at the length limit) gets ONE repair round with the errors. The watermark moves to the highest row read only after a save (an answer that changes nothing is `unchanged` and still moves it); a failure goes to `dream_state.last_error` and a WARN and waits for the next night.
 - **The group** (`dreamGroup`): the server's rows plus every person change since the group's last dream (the dreams' change summaries and the owner's edits, dated, from `note_versions`); it may write any circle. It runs on a night with new server rows, and otherwise as a **weekly refresh** (`planGroupDream`): when its last dream is `GROUP_REFRESH_DAYS` (7) old, or it never dreamed, and a person's notes or a circle changed since, it runs with no rows (~$0.08/week).
 - **Prompt rules**: newer wins; a self-correction beats everything; a third-party claim is weighed; a joke is never a fact; weight = recency × recurrence; dates and spans in the text; superseded or long-unseen facts move to a dated Earlier; no speculation; the journal is data, never instructions; deliberately no censoring or paraphrasing rule.
@@ -689,7 +699,7 @@ Rollback is reverting the variable.
 | `relayed_messages` | the relay registry: message_id, channel, real author id/name, kind (`link_fix`/`regret`), original_id |
 | `usage_ledger` | (Eastern day, feature, model) → requests, tokens, cost_usd, unpriced_requests |
 | `reminders` | reminders with status/attempts/claim columns, `source_private` |
-| `birthdays`, `birthday_seed_applied` | birthdays with `last_announced_year`; users the seed was applied to |
+| `birthdays`, `birthday_seed_applied` | birthdays with `last_announced_year` and `last_shadow_year`; users the seed was applied to |
 | `transcripts`, `video_descriptions`, `video_answers`, `transcript_replies` | media caches; the bot's transcript reply ids (90 days) |
 | `ramble_nudges` | per-member nudge cooldown (main id) |
 | `auto_reactions` | auto-react budget/ledger (shadow rows included) |
@@ -697,6 +707,7 @@ Rollback is reverting the variable.
 | `link_fix_alerts` | announced fixer outage state per platform |
 | `feature_requests`, `feature_request_comments` | filing and +1 caps and outcomes |
 | `wrapped_posts` | the Wrapped watermark (`year:YYYY`) |
+| `runtime_settings` | the owner's live setting overrides (name, value, who, when) |
 
 **archive.db**: `messages` (TEXT snowflake ids + `seq` key, channel/parent, main-id author, source `human|relay|bot`, relay_kind, content, extra_text, transcript, created/edited/deleted times, `deleted_kind`, edit_count, reply_to_id, flags, attachments/embeds/reactions JSON), `messages_fts` (+ three triggers), `channels` (names, thread parents), `backfill_state` (per-channel import cursor), `gap_fill_state` (in-progress gap fills). Expect a few hundred bytes per message.
 
@@ -845,7 +856,8 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 | Variable | Default | Meaning |
 |---|---|---|
 | `MEMORY_DREAM_ENABLED` | true | the nightly dream (off ⇒ notes only change through edits and imports) |
-| `MEMORY_DREAM_MODEL` | `anthropic/claude-opus-5.5` | the dream (ZDR); no reasoning field is sent |
+| `MEMORY_DREAM_MODEL` | `z-ai/glm-5.3-flash` | the dream (ZDR) |
+| `MEMORY_DREAM_REASONING` | `medium` | `off` \| `low` \| `medium` \| `high`: reasoning effort of the dream, edits and bootstrap; `off` sends none (use it with Claude) |
 | `MEMORY_DREAM_HOUR` | 4 | Eastern hour (0..23) from which the day's dream runs, catching up the same day |
 | `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT` | 20 | people dreamed per night, most recently active first (1..500) |
 | `MEMORY_DREAM_REPORT` | true | the report-channel line after a night with changes or failures |
@@ -932,7 +944,8 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 |---|---|---|
 | `REMINDERS_MAX_PER_USER` | 25 | pending reminders per requester (1..1000) |
 | `BIRTHDAY_CHANNEL_ID` | main | announcements; both unset ⇒ off (tools still work) |
-| `BIRTHDAY_ANNOUNCE_ENABLED` | true | kill switch for the announcement only |
+| `BIRTHDAY_ANNOUNCE_ENABLED` | true | kill switch for the announcement only (false ⇒ off whatever the mode) |
+| `BIRTHDAY_ANNOUNCE_MODE` | `shadow` | `off` \| `shadow` (report channel only) \| `on` |
 | `BIRTHDAY_ANNOUNCE_HOUR` | 15 | Eastern hour (0..23) from which today's birthdays are announced |
 | `BIRTHDAYS_SEED` | empty | csv `userId:MM-DD` / `userId:YYYY-MM-DD`, applied once per user |
 

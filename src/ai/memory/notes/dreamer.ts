@@ -19,8 +19,9 @@
 //   previewChanges() and saves with applyEdit() on Confirm. A draft whose notes changed while the model was
 //   thinking (the dream saved meanwhile) is refused, so Confirm can't put back what the dream replaced.
 //
-// The dream model (Claude Opus by default) only reasons when asked, so the calls send no reasoning field
-// and leave generous output room (NOTES_MAX_TOKENS): everything generated is the answer.
+// The dream model (GLM by default) reasons, and reasoning counts toward max_tokens: the calls ask for
+// MEMORY_DREAM_REASONING's effort and leave generous output room (NOTES_MAX_TOKENS; only what is generated
+// is billed). `off` sends no reasoning field, for a model that only reasons when asked (Claude).
 import type OpenAI from 'openai';
 import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 import { config } from '../../../config';
@@ -71,10 +72,9 @@ const EDIT_FEATURE: UsageFeature = 'memory_edit';
 /**
  * Output room per call. A dream rewrites the profile in full plus the topic notes and circles it changes
  * (a few thousand tokens on a normal night; far more when a first dream builds everything at once). Only
- * the tokens actually generated are billed, and the dream model doesn't reason unless asked, so this is all
- * answer.
+ * the tokens actually generated are billed; the room also covers the reasoning MEMORY_DREAM_REASONING asks for.
  */
-const NOTES_MAX_TOKENS = 16_000;
+const NOTES_MAX_TOKENS = 32_000;
 /** A long rewrite takes minutes: well past the shared client's per-attempt default. */
 const MODEL_TIMEOUT_MS = 10 * 60_000;
 /** Repair rounds after a refused answer (each resends the whole conversation). */
@@ -208,7 +208,14 @@ type NotesRequestBody = {
   max_tokens: number;
   messages: ChatMessage[];
   provider: { zdr: true };
+  reasoning?: { effort: 'low' | 'medium' | 'high' };
 };
+
+/** The reasoning field MEMORY_DREAM_REASONING asks for (none for `off`). Shared with the bootstrap. */
+export function dreamReasoning(): { reasoning?: { effort: 'low' | 'medium' | 'high' } } {
+  const effort = config.dream.reasoning;
+  return effort === 'off' ? {} : { reasoning: { effort } };
+}
 
 type ModelAnswer = { text: string; truncated: boolean; costUsd?: number };
 
@@ -225,6 +232,7 @@ async function askModel(
     max_tokens: NOTES_MAX_TOKENS,
     messages: [...messages],
     provider: { zdr: true },
+    ...dreamReasoning(),
   };
   // The SDK's types don't know OpenRouter's `provider` object: bridged here, once.
   const response = await client.chat.completions.create(body as unknown as ChatCompletionCreateParamsNonStreaming, {
