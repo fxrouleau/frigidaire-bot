@@ -128,6 +128,7 @@ describe('config', () => {
       'MEMORY_DREAM_REPORT',
       'MEMORY_EDIT_MODEL',
       'MEMORY_BOOTSTRAP_MODEL',
+      'MEMORY_DREAM_REASONING',
       'CAPTURE_IDLE_MINUTES',
       'CAPTURE_MAX_SPAN_MINUTES',
       'BOT_OWNER_USER_IDS',
@@ -136,12 +137,13 @@ describe('config', () => {
     }
     expect(config.dream).toMatchObject({
       enabled: true,
-      model: 'anthropic/claude-opus-5.5',
+      model: 'z-ai/glm-5.3-flash',
+      reasoning: 'medium',
       hour: 4,
       maxPeoplePerNight: 20,
       reportEnabled: true,
-      editModel: 'anthropic/claude-opus-5.5',
-      bootstrapModel: 'anthropic/claude-opus-5.5',
+      editModel: 'z-ai/glm-5.3-flash',
+      bootstrapModel: 'z-ai/glm-5.3-flash',
     });
     expect(config.learner.captureIdleMinutes).toBe(20);
     expect(config.learner.captureMaxSpanMinutes).toBe(120);
@@ -365,11 +367,11 @@ describe('describeEffectiveConfig', () => {
         'linkedAccounts=1',
         'reportChannel=set(digest:on@7d,deploy:on)',
         'learning=idle:20m,span:2h,min:5,ignore:2,selfImprovement:on',
-        'dream=on(model:anthropic/claude-opus-5.5,hour:4,max:20,report:on)',
+        'dream=on(model:z-ai/glm-5.3-flash,reasoning:medium,hour:4,max:20,report:on)',
         'owners=app',
         'links=verify:on,fixers:x3/ig3/tt3/rd2/bsky3,translate:en,alerts:on',
         'deleteRepost=off',
-        'birthdays=announce:15h,channel:main,seed:2',
+        'birthdays=announce:15h,channel:main,mode:shadow,seed:2',
         'archive=on(backfill:1,ignore:0,wrapped:on)',
         'media=transcribe:openai/whisper-large-v3,video:google/gemini-3.5-flash-lite,videoBudget:$0.50/day,voiceAuto:all',
         'gate=on(channels:1,max:30/10m,cold:3/10m)',
@@ -407,10 +409,12 @@ describe('describeEffectiveConfig', () => {
 
   it('shows the dream, its models when they differ, and where its report goes', () => {
     stubAll({ MEMORY_EDIT_MODEL: 'edit/model', MEMORY_DREAM_HOUR: '5', BOT_OWNER_USER_IDS: '242424242424242424' });
-    for (const name of ['REPORT_CHANNEL_ID', 'MEMORY_DREAM_MODEL', 'MEMORY_BOOTSTRAP_MODEL']) vi.stubEnv(name, undefined);
+    for (const name of ['REPORT_CHANNEL_ID', 'MEMORY_DREAM_MODEL', 'MEMORY_BOOTSTRAP_MODEL', 'MEMORY_DREAM_REASONING']) {
+      vi.stubEnv(name, undefined);
+    }
     const tokens = describeEffectiveConfig().split(' ');
     expect(tokens).toContain(
-      'dream=on(model:anthropic/claude-opus-5.5,hour:5,max:20,report:no-channel,edit:edit/model)',
+      'dream=on(model:z-ai/glm-5.3-flash,reasoning:medium,hour:5,max:20,report:no-channel,edit:edit/model)',
     );
     expect(tokens).toContain('owners=1');
     vi.stubEnv('MEMORY_DREAM_ENABLED', 'off');

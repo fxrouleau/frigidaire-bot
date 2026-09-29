@@ -14,8 +14,12 @@ import { config, configWarnings, describeEffectiveConfig } from './config';
 import { createDiscordClient } from './discordClient';
 import { registerEventModules, resolveEventModule } from './eventModule';
 import { logger } from './logger';
+import { loadRuntimeSettings } from './runtimeSettings';
 import { getBotDb } from './storage/botDb';
 
+// The owner's live setting changes (change_setting), saved in bot.db, go on top of .env before anything logs
+// or starts from config.
+loadRuntimeSettings();
 logger.info(`Effective config: ${describeEffectiveConfig()}`);
 for (const warning of configWarnings()) logger.warn(warning);
 

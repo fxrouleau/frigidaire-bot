@@ -28,8 +28,8 @@ The owner's guiding call: good architecture for the foundation matters more than
 - **The journal is the source of truth.** The `memories` table stays the raw journal; the dream never
   deletes from it. Notes are derived and can always be regenerated from it.
 - **Capture at conversation end**, not every 30 minutes: a cheap model reads each whole conversation.
-- **Dream nightly** with a strong model (`MEMORY_DREAM_MODEL`, default `anthropic/claude-opus-5.5`, on
-  OpenRouter's zero-data-retention list), only for people (and the group) with new journal rows.
+- **Dream nightly** (`MEMORY_DREAM_MODEL`, default `z-ai/glm-5.3-flash` at `MEMORY_DREAM_REASONING=medium`, on
+  OpenRouter's zero-data-retention hosts), only for people (and the group) with new journal rows.
 - **Freshness**: a chat turn sees a person's notes plus their journal rows newer than the notes, so nothing
   waits a day to be known.
 - **Corrections** are recorded instantly and shown next to the notes until the dream folds them in. A
@@ -541,7 +541,8 @@ rows (and fall back to keyword search while they are over a fifth of the journal
 | Variable | Default | Meaning |
 |---|---|---|
 | `MEMORY_DREAM_ENABLED` | true | the nightly dream |
-| `MEMORY_DREAM_MODEL` | `anthropic/claude-opus-5.5` | the dream (ZDR) |
+| `MEMORY_DREAM_MODEL` | `z-ai/glm-5.3-flash` | the dream (ZDR) |
+| `MEMORY_DREAM_REASONING` | `medium` | `off` \| `low` \| `medium` \| `high`: the dream/edit/bootstrap reasoning effort (`off` for Claude) |
 | `MEMORY_DREAM_HOUR` | 4 | Eastern hour from which the day's dream runs |
 | `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT` | 20 | people dreamed per night, most recently active first |
 | `MEMORY_DREAM_REPORT` | true | the report-channel line after a night with changes |

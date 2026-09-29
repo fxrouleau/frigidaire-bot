@@ -74,12 +74,58 @@ beforeEach(() => {
   vi.stubEnv('MAIN_CHANNEL_ID', '');
   vi.stubEnv('BIRTHDAY_ANNOUNCE_HOUR', '');
   vi.stubEnv('BIRTHDAY_ANNOUNCE_ENABLED', '');
+  vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'on');
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
   setBotDbForTesting(undefined);
   setMemoryStoreForTesting(undefined);
+});
+
+describe('BirthdayAnnouncer shadow mode', () => {
+  const REPORT = 'report-channel';
+
+  function shadowSetup() {
+    const target = createPostableChannel({ id: CHANNEL });
+    const report = createPostableChannel({ id: REPORT });
+    const { client } = createSchedulingClient({ [CHANNEL]: target.channel, [REPORT]: report.channel });
+    const announcer = new BirthdayAnnouncer({ client, writer: writerSaying(`🎂 <@${ALICE}> old now`).writer });
+    return { target, report, announcer };
+  }
+
+  it('is the default: posts the message to the report channel only, once, without touching the real watermark', async () => {
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', '');
+    vi.stubEnv('REPORT_CHANNEL_ID', REPORT);
+    birthday(ALICE, 9, 25);
+    const { target, report, announcer } = shadowSetup();
+
+    expect(await announcer.run(SEPT25_1500)).toBe(1);
+    expect(target.sent).toHaveLength(0);
+    expect(report.sent).toHaveLength(1);
+    expect(report.sent[0]).toMatchObject({ allowedMentions: { parse: [] } });
+    expect(String(report.sent[0].content)).toContain(`birthday (shadow) · would post in <#${CHANNEL}>`);
+    expect(String(report.sent[0].content)).toContain(`🎂 <@${ALICE}> old now`);
+    expect(getBirthday(ALICE)).toMatchObject({ lastAnnouncedYear: null, lastShadowYear: 2026 });
+
+    expect(await announcer.run(SEPT25_1500 + 30_000)).toBe(0);
+    expect(report.sent).toHaveLength(1);
+
+    // Switched to on the same day: the real announcement still goes out.
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'on');
+    expect(await announcer.run(SEPT25_1500 + 60_000)).toBe(1);
+    expect(target.sent).toHaveLength(1);
+  });
+
+  it('does nothing without a report channel', async () => {
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'shadow');
+    vi.stubEnv('REPORT_CHANNEL_ID', '');
+    birthday(ALICE, 9, 25);
+    const { target, announcer } = shadowSetup();
+    expect(await announcer.run(SEPT25_1500)).toBe(0);
+    expect(target.sent).toHaveLength(0);
+    expect(getBirthday(ALICE)?.lastShadowYear).toBeNull();
+  });
 });
 
 describe('BirthdayAnnouncer.run', () => {

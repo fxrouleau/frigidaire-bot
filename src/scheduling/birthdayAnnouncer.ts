@@ -3,6 +3,8 @@
 // birthday channel, written by the chat model with what it knows about the person as light context
 // (a fixed template when the model call fails). Only today's birthdays are ever considered, so a bot
 // that was offline all afternoon announces late the same evening and never the day after.
+// BIRTHDAY_ANNOUNCE_MODE=shadow (the default) writes the message exactly the same way but posts it only to
+// the report channel, under its own watermark, so the owner can read it before turning announcements on.
 import { createHash } from 'node:crypto';
 import { type Client, RESTJSONErrorCodes } from 'discord.js';
 import type OpenAI from 'openai';
@@ -12,12 +14,21 @@ import { CORRECTION_CATEGORY, type Memory, SELF_DIAGNOSIS_CATEGORIES } from '../
 import { chatExcerpt, correctionSource } from '../ai/memory/notes/context';
 import { getOpenRouterClient } from '../ai/openRouterClient';
 import { currentName, memoryKeyFor } from '../ai/people';
+import { sendToReportChannel } from '../ai/reportChannel';
 import { featureRequestOptions } from '../ai/usage';
 import { easternParts, easternWallClockToDate, formatRelativeAge, parseSqliteUtc } from '../ai/utils';
 import { type ArchivedMessage, getArchivedMessages } from '../archive';
 import { config } from '../config';
 import { logger } from '../logger';
-import { type Birthday, claimAnnouncement, isBirthdayOn, listBirthdays, releaseAnnouncement } from './birthdayStore';
+import {
+  type Birthday,
+  claimAnnouncement,
+  claimShadowAnnouncement,
+  isBirthdayOn,
+  listBirthdays,
+  releaseAnnouncement,
+  releaseShadowAnnouncement,
+} from './birthdayStore';
 import { describeError, discordErrorCode, fetchPostableChannel, type PostableChannel } from './discord';
 
 const MINUTE_MS = 60_000;
@@ -239,16 +250,24 @@ export class BirthdayAnnouncer {
   /** Posts every due announcement; returns how many went out. Never throws. */
   async run(nowMs: number): Promise<number> {
     const channelId = config.birthdays.channelId;
-    if (!channelId || !config.birthdays.announceEnabled) return 0;
+    const mode = config.birthdays.announceMode;
+    if (!channelId || mode === 'off') return 0;
+    const shadow = mode === 'shadow';
+    // Shadow posts go to the report channel: without one there is nowhere to put them.
+    if (shadow && !config.report.channelId) return 0;
 
     const now = easternParts(new Date(nowMs));
     if (now.hour < config.birthdays.announceHour) return 0;
 
     let due: Birthday[];
     try {
-      due = listBirthdays().filter(
-        (b) => isBirthdayOn(b, now) && (b.lastAnnouncedYear === null || b.lastAnnouncedYear < now.year),
-      );
+      due = listBirthdays().filter((b) => {
+        if (!isBirthdayOn(b, now)) return false;
+        const last = shadow ? b.lastShadowYear : b.lastAnnouncedYear;
+        // A real announcement this year makes a shadow one pointless.
+        if (shadow && b.lastAnnouncedYear !== null && b.lastAnnouncedYear >= now.year) return false;
+        return last === null || last < now.year;
+      });
     } catch (error) {
       logger.warn('birthdays: failed to read birthdays:', error);
       return 0;
@@ -267,7 +286,7 @@ export class BirthdayAnnouncer {
 
     let announced = 0;
     for (const birthday of ready) {
-      if (await this.announce(birthday, channel, now.year, nowMs)) announced++;
+      if (await this.announce(birthday, channel, now.year, nowMs, shadow)) announced++;
     }
     return announced;
   }
@@ -283,13 +302,20 @@ export class BirthdayAnnouncer {
     this.attempts.set(key, { failures, nextAt: nowMs + delay });
   }
 
-  private async announce(birthday: Birthday, channel: PostableChannel, year: number, nowMs: number): Promise<boolean> {
+  private async announce(
+    birthday: Birthday,
+    channel: PostableChannel,
+    year: number,
+    nowMs: number,
+    shadow: boolean,
+  ): Promise<boolean> {
     const { userId } = birthday;
     try {
       const member = await this.lookupMember(channel, userId);
       if (member === 'gone') {
         // They left the server: pinging them would be noise. Claim the year so this isn't re-checked.
-        claimAnnouncement(userId, year);
+        if (shadow) claimShadowAnnouncement(userId, year);
+        else claimAnnouncement(userId, year);
         logger.info(`birthdays: ${userId} is no longer in the server; skipping their announcement.`);
         return false;
       }
@@ -317,6 +343,8 @@ export class BirthdayAnnouncer {
       }
       const text = written ?? fallbackBirthdayMessage(userId, age);
 
+      if (shadow) return await this.postShadow(birthday, channel, year, text);
+
       // Claim right before posting: whoever moves the watermark is the only one that posts this year.
       if (!claimAnnouncement(userId, year)) return false;
       try {
@@ -339,6 +367,23 @@ export class BirthdayAnnouncer {
       logger.warn(`birthdays: announcing ${userId}'s birthday failed: ${describeError(error)}`);
       return false;
     }
+  }
+
+  /** Posts the would-be announcement to the report channel (which pings nobody) under the shadow watermark. */
+  private async postShadow(birthday: Birthday, channel: PostableChannel, year: number, text: string): Promise<boolean> {
+    const { userId } = birthday;
+    if (!claimShadowAnnouncement(userId, year)) return false;
+    const posted = await sendToReportChannel(
+      this.client,
+      `-# 🎂 birthday (shadow) · would post in <#${channel.id}>:\n${text}`,
+    );
+    if (!posted) {
+      releaseShadowAnnouncement(userId, year, birthday.lastShadowYear);
+      throw new Error('the report channel post failed');
+    }
+    this.attempts.delete(this.attemptKey(userId, year));
+    logger.info(`birthdays: shadow-announced ${userId}'s birthday in the report channel.`);
+    return true;
   }
 
   /**

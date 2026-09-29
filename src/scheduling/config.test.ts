@@ -44,4 +44,17 @@ describe('config.birthdays', () => {
     vi.stubEnv('BIRTHDAY_ANNOUNCE_ENABLED', 'off');
     expect(config.birthdays.announceEnabled).toBe(false);
   });
+
+  it('announces in shadow mode by default; BIRTHDAY_ANNOUNCE_ENABLED=false still means off', () => {
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_ENABLED', '');
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', '');
+    expect(config.birthdays.announceMode).toBe('shadow');
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'ON');
+    expect(config.birthdays.announceMode).toBe('on');
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'bogus');
+    expect(config.birthdays.announceMode).toBe('shadow');
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'on');
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_ENABLED', 'false');
+    expect(config.birthdays.announceMode).toBe('off');
+  });
 });

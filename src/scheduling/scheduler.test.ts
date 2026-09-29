@@ -33,6 +33,7 @@ beforeEach(() => {
   vi.stubEnv('BIRTHDAYS_SEED', '');
   vi.stubEnv('BIRTHDAY_ANNOUNCE_HOUR', '');
   vi.stubEnv('BIRTHDAY_ANNOUNCE_ENABLED', '');
+  vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'on');
 });
 
 afterEach(() => {

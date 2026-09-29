@@ -31,7 +31,7 @@ import { foldMembers, type Member } from '../../people';
 import { featureRequestOptions } from '../../usage';
 import type { JournalEvidence } from '../evidence';
 import { type Identity, type Memory, type MemoryStore, nameKey } from '../memoryStore';
-import type { NightlyDreamResult } from '../notes/dreamer';
+import { dreamReasoning, type NightlyDreamResult } from '../notes/dreamer';
 import type { NotesStore } from '../notes/notesStore';
 import { noteTextProblems } from '../notes/schema';
 import { leadInStart, lineCosts, planChunks } from './chunks';
@@ -45,9 +45,9 @@ export const BOOTSTRAP_PROGRESS_KEY = 'memory_bootstrap:progress';
 /** The `source` of the journal rows a run writes. */
 export const BOOTSTRAP_SOURCE = 'bootstrap';
 
-// The output room per call. The default model (Opus) only reasons when asked, so this is all JSON; a
-// reasoning model in MEMORY_BOOTSTRAP_MODEL still has room for a pass at its default effort.
-const MAX_OUTPUT_TOKENS = 8_000;
+// The output room per call: the JSON plus the reasoning MEMORY_DREAM_REASONING asks for (the default
+// model, GLM, reasons, and reasoning counts toward max_tokens; only what is generated is billed).
+const MAX_OUTPUT_TOKENS = 16_000;
 // A segment's call reads tens of thousands of tokens and writes up to 8,000: minutes, well past the shared
 // client's per-attempt default (OPENROUTER_TIMEOUT_MS, 2 minutes), which would abort a long answer and pay
 // for it again on each retry. The dream's allowance, and like the dream one retry.
@@ -560,6 +560,7 @@ type ChatBody = {
   temperature: number;
   messages: Array<{ role: 'user'; content: string }>;
   provider: { zdr: true };
+  reasoning?: { effort: 'low' | 'medium' | 'high' };
 };
 
 /** A segment that could not be read; `costUsd` is what its calls cost anyway. */
@@ -621,6 +622,7 @@ async function askAboutSegment(
     temperature: 0.2,
     messages: [{ role: 'user', content: prompt }],
     provider: { zdr: true },
+    ...dreamReasoning(),
   };
   // The SDK's types don't know OpenRouter's `provider` routing: bridged here, once.
   const response = await deps.client.chat.completions.create(
