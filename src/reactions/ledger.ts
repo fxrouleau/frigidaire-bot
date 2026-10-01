@@ -116,6 +116,11 @@ export class AutoReactLedger {
     this.db().stmt('DELETE FROM auto_reactions WHERE message_id = ?').run(messageId);
   }
 
+  /** A shadow reaction the owner confirmed: it was added after all. */
+  markReacted(messageId: string): void {
+    this.db().stmt("UPDATE auto_reactions SET mode = 'on' WHERE message_id = ?").run(messageId);
+  }
+
   /** Reactions since `sinceMs`, newest first. */
   since(sinceMs: number): AutoReactRecord[] {
     const rows = this.db()

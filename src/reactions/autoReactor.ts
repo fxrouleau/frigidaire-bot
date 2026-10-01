@@ -13,9 +13,11 @@
 //   3. the judge (judge.ts) sees the post, its images and preview text, a few messages of context and the
 //      reaction guide (guide.ts), and answers react / emoji / why.
 //   4. the emoji must exist (server emoji or unicode); the budget slot is claimed synchronously, then
-//      'on' reacts and 'shadow' only posts what it would have done to the report channel.
+//      'on' reacts and 'shadow' only posts what it would have done to the report channel, with a React
+//      button the owner can click to add it after all (approval.ts).
 import type { EmojiRow } from '../ai/memory/memoryStore';
 import { resolveReactionEmoji } from '../ai/tools/react';
+import type { ReactionApproval } from '../approvals/approvalStore';
 import { logger } from '../logger';
 import type { ReactionGuide } from './guide';
 import type { AutoReactJudge, ContextLine } from './judge';
@@ -81,8 +83,11 @@ export type AutoReactorDeps = {
   emojis: () => EmojiRow[];
   /** Downloads and downscales up to `max` images; failures are left out. */
   loadImages: (urls: string[], max: number) => Promise<string[]>;
-  /** Posts a line to the report channel (a no-op when none is configured). */
-  report: (text: string) => Promise<void>;
+  /**
+   * Posts a line to the report channel (a no-op when none is configured). A shadow line passes the
+   * reaction it stands for, which the owner can confirm from there.
+   */
+  report: (text: string, approval?: ReactionApproval) => Promise<void>;
   /**
    * Whether the post was handed to the agent for an answer (the gate's wasRouted). Covers a turn whose
    * reply hasn't been posted yet, and a gate-routed follow-up from a partner answered earlier on.
@@ -320,6 +325,13 @@ export class AutoReactor {
     );
     await this.deps.report(
       `-# auto-react (shadow) · would react ${resolved.label} to ${noPings(snapshot.authorName)}'s post ${candidate.url}\n-# why: ${noPings(verdict.why) || '(no reason given)'}`,
+      {
+        kind: 'auto_react',
+        channelId: candidate.channelId,
+        messageId: candidate.id,
+        emoji: resolved.emoji,
+        label: resolved.label,
+      },
     );
     return { status: 'shadow', emoji: resolved.label, why: verdict.why };
   }

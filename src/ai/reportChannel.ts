@@ -3,7 +3,7 @@
 // and logged at WARN — posting to the report channel must never throw into a caller. Callers that
 // record "this was posted" (the digest watermark, the announced deploy sha, fixer alert state) check
 // the returned flag, so a failed post is retried instead of silently marked done.
-import type { Client } from 'discord.js';
+import type { Client, MessageCreateOptions } from 'discord.js';
 import { config } from '../config';
 import { logger } from '../logger';
 import { splitMessage } from '../utils';
@@ -17,9 +17,14 @@ export function getReportChannelId(): string | undefined {
  * Posts `text` (split into Discord-sized chunks) to the report channel. Resolves true only when the
  * channel resolved and every chunk went out; false when the channel is unset, missing or not
  * text-based, or a send failed. Never throws. Nothing in a report post pings anyone: the digest and
- * shadow reports carry member- and model-written text.
+ * shadow reports carry member- and model-written text. `components` (a shadow line's Confirm button) ride
+ * on the last chunk.
  */
-export async function sendToReportChannel(client: Client, text: string): Promise<boolean> {
+export async function sendToReportChannel(
+  client: Client,
+  text: string,
+  extra: { components?: MessageCreateOptions['components'] } = {},
+): Promise<boolean> {
   const id = getReportChannelId();
   if (!id) return false;
 
@@ -29,8 +34,14 @@ export async function sendToReportChannel(client: Client, text: string): Promise
       logger.warn(`Report channel ${id} is missing or not text-based; skipping send.`);
       return false;
     }
-    for (const chunk of splitMessage(text)) {
-      await channel.send({ content: chunk, allowedMentions: { parse: [] } });
+    const chunks = splitMessage(text);
+    for (const [index, chunk] of chunks.entries()) {
+      const last = index === chunks.length - 1;
+      await channel.send({
+        content: chunk,
+        allowedMentions: { parse: [] },
+        ...(last && extra.components ? { components: extra.components } : {}),
+      });
     }
     return true;
   } catch (error) {
