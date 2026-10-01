@@ -5,6 +5,7 @@ import type { Client } from 'discord.js';
 import { getMemoryStore } from '../ai/memory';
 import type { EmojiRow } from '../ai/memory/memoryStore';
 import { sendToReportChannel } from '../ai/reportChannel';
+import { offerApproval } from '../approvals/offer';
 import { config } from '../config';
 import { addressedGate } from '../gate';
 import { logger } from '../logger';
@@ -52,8 +53,10 @@ export function getAutoReactor(client: Client): AutoReactor {
       emojis: usableEmojis,
       loadImages: (urls, max) => loadImages(urls, max),
       // Shadow-mode lines are best-effort: nothing is recorded as "reported", so there is nothing to retry.
-      report: async (text) => {
-        await sendToReportChannel(client, text);
+      // A shadow line carries a React button (src/approvals/) the owner can click to add the reaction after all.
+      report: async (text, approval) => {
+        if (approval) await offerApproval(client, text, approval);
+        else await sendToReportChannel(client, text);
       },
       // A post the agent is answering (a gate-routed follow-up included) never also gets a reaction.
       wasRouted: (messageId) => addressedGate.wasRouted(messageId),

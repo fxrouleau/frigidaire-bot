@@ -5,6 +5,8 @@
 // that was offline all afternoon announces late the same evening and never the day after.
 // BIRTHDAY_ANNOUNCE_MODE=shadow (the default) writes the message exactly the same way but posts it only to
 // the report channel, under its own watermark, so the owner can read it before turning announcements on.
+// The shadow post carries a "Post it" button (src/approvals/): the owner can still let a good one through,
+// that same day, and postApprovedBirthday() then announces it for real.
 import { createHash } from 'node:crypto';
 import { type Client, RESTJSONErrorCodes } from 'discord.js';
 import type OpenAI from 'openai';
@@ -14,9 +16,11 @@ import { CORRECTION_CATEGORY, type Memory, SELF_DIAGNOSIS_CATEGORIES } from '../
 import { chatExcerpt, correctionSource } from '../ai/memory/notes/context';
 import { getOpenRouterClient } from '../ai/openRouterClient';
 import { currentName, memoryKeyFor } from '../ai/people';
-import { sendToReportChannel } from '../ai/reportChannel';
 import { featureRequestOptions } from '../ai/usage';
 import { easternParts, easternWallClockToDate, formatRelativeAge, parseSqliteUtc } from '../ai/utils';
+import type { BirthdayApproval } from '../approvals/approvalStore';
+import type { ApprovalResult } from '../approvals/handler';
+import { offerApproval } from '../approvals/offer';
 import { type ArchivedMessage, getArchivedMessages } from '../archive';
 import { config } from '../config';
 import { logger } from '../logger';
@@ -24,12 +28,19 @@ import {
   type Birthday,
   claimAnnouncement,
   claimShadowAnnouncement,
+  getBirthday,
   isBirthdayOn,
   listBirthdays,
   releaseAnnouncement,
   releaseShadowAnnouncement,
 } from './birthdayStore';
-import { describeError, discordErrorCode, fetchPostableChannel, type PostableChannel } from './discord';
+import {
+  describeError,
+  discordErrorCode,
+  fetchPostableChannel,
+  isPermanentChannelError,
+  type PostableChannel,
+} from './discord';
 
 const MINUTE_MS = 60_000;
 // The writer sees what the bot knows about the person nearly whole (a few dozen memories each), dated, and
@@ -226,6 +237,49 @@ export function createBirthdayWriter(opts: BirthdayWriterOptions = {}): Birthday
   };
 }
 
+/** Posts an announcement: a ping for the birthday person only, deduped by Discord on a retry. */
+async function sendAnnouncement(channel: PostableChannel, userId: string, year: number, text: string): Promise<void> {
+  await channel.send({
+    content: text,
+    allowedMentions: { parse: [], users: [userId] },
+    // Discord dedupes a retried post with the same nonce for a few minutes (≤25 chars).
+    nonce: `bd-${createHash('sha1').update(`${userId}:${year}`).digest('hex').slice(0, 20)}`,
+    enforceNonce: true,
+  });
+}
+
+/**
+ * The owner confirmed a shadow announcement: posts its text in the birthday channel it was written for,
+ * under the real watermark, exactly as live mode would have (so the day never gets a second one, and
+ * switching to `on` later the same day doesn't announce again).
+ */
+export async function postApprovedBirthday(client: Client, approval: BirthdayApproval): Promise<ApprovalResult> {
+  const { userId, year } = approval;
+  const birthday = getBirthday(userId);
+  if (!birthday) return { status: 'closed', note: 'their birthday is no longer saved' };
+  if (birthday.lastAnnouncedYear !== null && birthday.lastAnnouncedYear >= year) {
+    return { status: 'closed', note: 'already announced this year' };
+  }
+  let channel: PostableChannel;
+  try {
+    channel = await fetchPostableChannel(client, approval.channelId);
+  } catch (error) {
+    if (isPermanentChannelError(error)) return { status: 'closed', note: `can't post in <#${approval.channelId}>` };
+    return { status: 'retry', note: `couldn't reach <#${approval.channelId}>, click again in a bit` };
+  }
+  if (!claimAnnouncement(userId, year)) return { status: 'closed', note: 'already announced this year' };
+  try {
+    await sendAnnouncement(channel, userId, year, approval.text);
+  } catch (error) {
+    releaseAnnouncement(userId, year, birthday.lastAnnouncedYear);
+    logger.warn(`birthdays: posting ${userId}'s approved announcement failed: ${describeError(error)}`);
+    if (isPermanentChannelError(error)) return { status: 'closed', note: `can't post in <#${approval.channelId}>` };
+    return { status: 'retry', note: "the post didn't go through, click again in a bit" };
+  }
+  logger.info(`birthdays: announced ${userId}'s birthday (approved from the shadow post).`);
+  return { status: 'done', note: `posted in <#${approval.channelId}>` };
+}
+
 export type BirthdayAnnouncerOptions = {
   client: Client;
   writer?: BirthdayWriter;
@@ -348,13 +402,7 @@ export class BirthdayAnnouncer {
       // Claim right before posting: whoever moves the watermark is the only one that posts this year.
       if (!claimAnnouncement(userId, year)) return false;
       try {
-        await channel.send({
-          content: text,
-          allowedMentions: { parse: [], users: [userId] },
-          // Discord dedupes a retried post with the same nonce for a few minutes (≤25 chars).
-          nonce: `bd-${createHash('sha1').update(`${userId}:${year}`).digest('hex').slice(0, 20)}`,
-          enforceNonce: true,
-        });
+        await sendAnnouncement(channel, userId, year, text);
       } catch (error) {
         releaseAnnouncement(userId, year, birthday.lastAnnouncedYear);
         throw error;
@@ -369,13 +417,17 @@ export class BirthdayAnnouncer {
     }
   }
 
-  /** Posts the would-be announcement to the report channel (which pings nobody) under the shadow watermark. */
+  /**
+   * Posts the would-be announcement to the report channel (which pings nobody) under the shadow watermark,
+   * with a button that posts it for real (postApprovedBirthday).
+   */
   private async postShadow(birthday: Birthday, channel: PostableChannel, year: number, text: string): Promise<boolean> {
     const { userId } = birthday;
     if (!claimShadowAnnouncement(userId, year)) return false;
-    const posted = await sendToReportChannel(
+    const posted = await offerApproval(
       this.client,
       `-# 🎂 birthday (shadow) · would post in <#${channel.id}>:\n${text}`,
+      { kind: 'birthday', userId, year, channelId: channel.id, text },
     );
     if (!posted) {
       releaseShadowAnnouncement(userId, year, birthday.lastShadowYear);

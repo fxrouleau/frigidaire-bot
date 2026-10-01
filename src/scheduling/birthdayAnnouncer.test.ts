@@ -4,9 +4,11 @@ import { getNotesStore, setMemoryStoreForTesting } from '../ai/memory';
 import { MemoryStore } from '../ai/memory/memoryStore';
 import { FEATURE_HEADER } from '../ai/usage';
 import { ArchiveStore, setArchiveStoreForTesting } from '../archive/archiveStore';
+import { type BirthdayApproval, claimApproval } from '../approvals/approvalStore';
+import { parseApprovalCustomId } from '../approvals/offer';
 import { BotDb, setBotDbForTesting } from '../storage/botDb';
 import { archiveInput } from '../test-support/fakeArchive';
-import { createPostableChannel, createSchedulingClient } from '../test-support/fakeScheduling';
+import { createPostableChannel, createSchedulingClient, discordError } from '../test-support/fakeScheduling';
 import {
   BirthdayAnnouncer,
   type BirthdayMessageInput,
@@ -14,6 +16,7 @@ import {
   createBirthdayWriter,
   fallbackBirthdayMessage,
   finalizeBirthdayMessage,
+  postApprovedBirthday,
 } from './birthdayAnnouncer';
 import { getBirthday, saveBirthday } from './birthdayStore';
 
@@ -115,6 +118,70 @@ describe('BirthdayAnnouncer shadow mode', () => {
     vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'on');
     expect(await announcer.run(SEPT25_1500 + 60_000)).toBe(1);
     expect(target.sent).toHaveLength(1);
+  });
+
+  /** The approval behind the shadow post's button. */
+  function offered(sent: { components?: unknown }): BirthdayApproval {
+    const row = (sent.components as Array<{ components: Array<{ custom_id: string; label: string }> }>)[0];
+    expect(row.components[0].label).toBe('Post it');
+    const claim = claimApproval(parseApprovalCustomId(row.components[0].custom_id) as number, SEPT25_1500);
+    if (claim.status !== 'claimed' || claim.approval.payload.kind !== 'birthday') throw new Error('no offer');
+    return claim.approval.payload;
+  }
+
+  it('offers a "Post it" button that announces the exact text for real, once', async () => {
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'shadow');
+    vi.stubEnv('REPORT_CHANNEL_ID', REPORT);
+    birthday(ALICE, 9, 25);
+    const { target, report, announcer } = shadowSetup();
+    const { client } = createSchedulingClient({ [CHANNEL]: target.channel, [REPORT]: report.channel });
+    expect(await announcer.run(SEPT25_1500)).toBe(1);
+
+    const approval = offered(report.sent[0]);
+    expect(approval).toEqual({ kind: 'birthday', userId: ALICE, year: 2026, channelId: CHANNEL, text: `🎂 <@${ALICE}> old now` });
+
+    expect(await postApprovedBirthday(client, approval)).toEqual({ status: 'done', note: `posted in <#${CHANNEL}>` });
+    expect(target.sent).toEqual([
+      expect.objectContaining({
+        content: `🎂 <@${ALICE}> old now`,
+        allowedMentions: { parse: [], users: [ALICE] },
+        enforceNonce: true,
+      }),
+    ]);
+    expect(getBirthday(ALICE)).toMatchObject({ lastAnnouncedYear: 2026 });
+
+    expect(await postApprovedBirthday(client, approval)).toEqual({ status: 'closed', note: 'already announced this year' });
+    // Switching to on the same day doesn't announce a second time either.
+    vi.stubEnv('BIRTHDAY_ANNOUNCE_MODE', 'on');
+    expect(await announcer.run(SEPT25_1500 + 60_000)).toBe(0);
+    expect(target.sent).toHaveLength(1);
+  });
+
+  it('keeps an approval retryable when the post fails, and closes it when it never can work', async () => {
+    birthday(ALICE, 9, 25);
+    const approval: BirthdayApproval = { kind: 'birthday', userId: ALICE, year: 2026, channelId: CHANNEL, text: 'hb' };
+    let fail: Error | undefined = new Error('socket hang up');
+    const target = createPostableChannel({
+      id: CHANNEL,
+      sendImpl: async () => {
+        if (fail) throw fail;
+        return { id: 'posted' };
+      },
+    });
+    const { client } = createSchedulingClient({ [CHANNEL]: target.channel });
+
+    expect((await postApprovedBirthday(client, approval)).status).toBe('retry');
+    expect(getBirthday(ALICE)?.lastAnnouncedYear).toBeNull();
+    fail = discordError(50013, 'Missing Permissions');
+    expect((await postApprovedBirthday(client, approval)).status).toBe('closed');
+    expect(getBirthday(ALICE)?.lastAnnouncedYear).toBeNull();
+
+    const { client: noChannel } = createSchedulingClient({});
+    expect((await postApprovedBirthday(noChannel, approval)).status).toBe('closed');
+    expect(await postApprovedBirthday(client, { ...approval, userId: BOB })).toEqual({
+      status: 'closed',
+      note: 'their birthday is no longer saved',
+    });
   });
 
   it('does nothing without a report channel', async () => {

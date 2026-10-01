@@ -407,11 +407,14 @@ export type FakeComponentOptions = Omit<FakeInteractionOptions, 'commandName'> &
   customId: string;
   /** Whether the message the component is on is ephemeral (the notes viewer's is). Default true. */
   messageEphemeral?: boolean;
+  /** The text of the message the component is on. Default ''. */
+  messageContent?: string;
 };
 
 function componentMessage(opts: FakeComponentOptions): Record<string, unknown> {
   return {
     id: 'component-message-1',
+    content: opts.messageContent ?? '',
     flags: new MessageFlagsBitField(opts.messageEphemeral === false ? 0 : MessageFlags.Ephemeral),
   };
 }

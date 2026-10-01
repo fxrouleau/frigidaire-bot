@@ -10,14 +10,14 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 4. **Link reader** — tweets, TikToks/Reels, YouTube, Reddit, Bluesky, GIFs and articles are read through an SSRF-guarded fetch. The model gets a preview automatically and can open the full content with `read_link`.
 5. **Link fixing** — Twitter/X, Instagram, TikTok, Reddit and Bluesky links are rewritten to probed embed fixers and reposted faithfully as the author (attachments, spoilers, threads, reply line, tweet translation). Fixer outages are reported.
 6. **Message archive** — every member message goes into `archive.db`, with years of history backfilled. It feeds the `search_messages` / `get_message_context` tools, the reaction profile and the yearly **Wrapped** post.
-7. **Scheduling** — reminders, native polls and birthdays (announced in character; **shadow** mode by default: the announcement only goes to the report channel), all in Eastern time.
-8. **Spontaneous reactions** — auto-react learns how the group reacts and, rarely, adds one emoji to a standout post. It ships in **shadow** mode: it only reports what it would do. Emoji captions are re-grounded in real usage.
+7. **Scheduling** — reminders, native polls and birthdays (announced in character; **shadow** mode by default: the announcement only goes to the report channel, with a **Post it** button the owner can click to post it for real), all in Eastern time.
+8. **Spontaneous reactions** — auto-react learns how the group reacts and, rarely, adds one emoji to a standout post. It ships in **shadow** mode: it only reports what it would do, with a **React** button the owner can click to add it after all. Emoji captions are re-grounded in real usage.
 9. **Ramble redirect** — a configured member's rambles get an in-character nudge toward their own channel.
 10. **Code sandbox** — `run_code` runs Python/bash/node in a secret-free sidecar container (math, charts, data): up to 15 minutes, 2 GB, a 20 GB workspace.
 11. **Right-click commands** — Ask Fridge, Summarize from here, Transcribe, Translate, Remember this, What does Fridge know? (a notes viewer; the owner can edit and undo).
 12. **Feature requests → GitHub** — members' requests become public issues (or +1s on existing ones). The owner's `claude-implement` label has Claude implement them in a PR.
 13. **Deleted-message repost** — a configured member's message deleted right after posting is judged ("was that edgy?") and reposted as them. Off unless `DELETE_REPOST_USER_IDS` is set.
-14. **Report channel & ops** — the weekly self-diagnosis digest with OpenRouter spend, a "🚀 Deployed `<sha>`" line with the channel configuration, the nightly dream's line, the owner's note edits and undos, notes imports, fixer alerts, auto-react and birthday shadow lines, live setting changes, `!wrapped` previews. Also a per-feature usage ledger and a rotated log file.
+14. **Report channel & ops** — the weekly self-diagnosis digest with OpenRouter spend, a "🚀 Deployed `<sha>`" line with the channel configuration, the nightly dream's line, the owner's note edits and undos, notes imports, fixer alerts, auto-react and birthday shadow lines (with their Confirm buttons, see [Shadow approvals](#shadow-approvals-srcapprovals-event-shadowapproval)), live setting changes, `!wrapped` previews. Also a per-feature usage ledger and a rotated log file.
 15. **Live settings** — the owner can ask the bot to change its own settings (`list_settings` / `change_setting`): an allowlist of feature switches, thresholds and models, applied at once, persisted in bot.db until reset. See [Live settings](#live-settings-srcruntimesettingsts-srcaitoolssettingsts).
 
 ## Hard rules
@@ -109,6 +109,8 @@ src/
 │                              #   wrapped.ts, index.ts (the public surface other features use)
 ├── scheduling/                # scheduler.ts (one 30 s tick), reminderStore.ts + reminderDelivery.ts, birthdayStore.ts +
 │                              #   birthdayAnnouncer.ts, polls.ts, time.ts (Eastern rendering), discord.ts
+├── approvals/                 # Shadow lines' Confirm buttons: approvalStore.ts (bot.db offers), offer.ts (post with a button,
+│                              #   expiry), handler.ts (the owner's click)
 ├── commands/                  # Context menus: index.ts (registry, dispatch, repeat guard), one file per command, respond.ts,
 │                              #   targets.ts, completion.ts (one-shot ZDR call), summary.ts, types.ts; the notes viewer:
 │                              #   notesViewer.ts (state, custom ids, rendering), notesViewerActions.ts (clicks, edit, undo), noteDiff.ts
@@ -151,7 +153,7 @@ Every env var the bot reads is parsed here, in its feature's section. Values are
 | Reactions | `reactionTracker` (emoji use counts), `archiveReactionAdd` / `Remove` / `RemoveAll` / `RemoveEmoji` |
 | ChannelDelete, ThreadDelete | `archiveChannelDelete`, `archiveThreadDelete` |
 | Guild emoji create/update/delete | `emojiCreate`, `emojiUpdate`, `emojiDelete` |
-| InteractionCreate | `interactionCreate` (context-menu commands), `notesViewerInteraction` (the notes viewer's buttons, menu and Edit modal) |
+| InteractionCreate | `interactionCreate` (context-menu commands), `notesViewerInteraction` (the notes viewer's buttons, menu and Edit modal), `shadowApproval` (Confirm buttons on shadow lines) |
 | ClientReady (once) | `ready`, `emojiReady` (reconcile + caption; schedules usage captions), `archiveBackfill`, `archiveWrapped`, `channelEnvLog`, `commandsRegister`, `deployAnnounce`, `linkFixAlerts`, `memoryDream` (the nightly dream's schedule), `memoryImportReport` (the notes import's report line), `reportDigest`, `schedulerStart`, `transcriptionRouteCheck`; app.ts also starts capture (the learner) |
 
 ### Storage
@@ -321,7 +323,7 @@ It fires on **content** (monologue-ish, stream-of-consciousness rambling, the th
 
 ### Spontaneous reactions (`src/reactions/`, events `autoReact`, `autoReactDelete`, `autoReactBulkDelete`)
 
-Owner's brief: now and then add ONE emoji to a post that genuinely stands out, the way the group reacts, "only when it's a real good one", and learn how the group reacts first. **`AUTO_REACT_MODE=shadow` is the default**: it decides exactly as live mode would but only posts `-# auto-react (shadow) · would react <emoji> to <author>'s post <link>` plus the reason to the report channel. Shadow rows count against the budget, so the report mirrors live behavior. The owner reviews it, then sets `on`.
+Owner's brief: now and then add ONE emoji to a post that genuinely stands out, the way the group reacts, "only when it's a real good one", and learn how the group reacts first. **`AUTO_REACT_MODE=shadow` is the default**: it decides exactly as live mode would but only posts `-# auto-react (shadow) · would react <emoji> to <author>'s post <link>` plus the reason to the report channel. Shadow rows count against the budget, so the report mirrors live behavior. The line carries a **React** button: the owner's click adds that reaction after all (within 24 h; see [Shadow approvals](#shadow-approvals-srcapprovals-event-shadowapproval)). The owner reviews the lines, then sets `on`.
 - **Intake** (free): member posts in `AUTO_REACT_CHANNELS` (threads through their parent). The bot's own relays count as the member's post; other bots and integrations don't. Skipped:
   - posts that mention or reply to the bot, or contain a `GATE_NAMES` word (those get answers instead);
   - text-only posts under 4 characters.
@@ -487,7 +489,7 @@ Everyone lives in America/New_York, so every time a tool takes or shows is Easte
 - **`create_poll({question, answers, duration_hours?, allow_multiselect?})`**: a native poll, validated against Discord's limits first (question ≤300, 1–10 unique answers ≤55, 1–768 h, default 24). It needs the Create Polls permission.
 - **Birthdays** (bot.db `birthdays`): `set_birthday` (`MM-DD` or `YYYY-MM-DD`), `list_birthdays` (by next occurrence, with the age they'll turn) and `forget_birthday`.
   - The announcement starts once ET reaches `BIRTHDAY_ANNOUNCE_HOUR`, for birthdays that are **today** (Feb 29 → Feb 28 in common years), so a bot down all afternoon announces late the same day, never the next. It goes to `BIRTHDAY_CHANNEL_ID` (default main).
-  - **`BIRTHDAY_ANNOUNCE_MODE=shadow` is the default**: the message is written exactly as it would be (the birthday channel's chat as context) but posted only to the report channel as `-# 🎂 birthday (shadow) · would post in #channel:` plus the text, pinging nobody. Shadow posts have their own watermark (`last_shadow_year`), so switching to `on` the same day still announces for real. No report channel ⇒ nothing is posted.
+  - **`BIRTHDAY_ANNOUNCE_MODE=shadow` is the default**: the message is written exactly as it would be (the birthday channel's chat as context) but posted only to the report channel as `-# 🎂 birthday (shadow) · would post in #channel:` plus the text, pinging nobody. Shadow posts have their own watermark (`last_shadow_year`), so switching to `on` the same day still announces for real. The shadow post carries a **Post it** button: the owner's click posts that exact text in the birthday channel (`postApprovedBirthday`: the real watermark, the same ping and nonce as live mode), until the end of that Eastern day. After that, switching to `on` the same day doesn't announce again. No report channel ⇒ nothing is posted.
   - The text is written by `CHAT_MODEL` (ZDR, low reasoning effort, tagged `birthday`), then cleaned and 🎂-prefixed; a template is used on failure. The writer gets today's Eastern date and what the bot knows about the person: their profile (without Earlier) plus the journal rows newer than it, or, before they have notes, up to 40 memories (past that, the 20 oldest and the 20 newest; no `image` or self-diagnosis rows); rows oldest first, each tagged with when it was first noted (first sighting, so re-confirmed lore stays old). It picks for itself: long-running things (a trait, a running joke, old lore) first, and anything from the last couple of weeks only as recent news. Undated and limited to the newest 5, it once told yesterday's story as old lore. It also gets the birthday channel's chat so far today (the newest 60 lines from the archive, `HH:MM Name: text`, mentions as @names) as plain background, so it can bounce off the day's conversation, or notice nobody said anything, without being told what to look for.
   - The year is claimed before posting and released if the send fails. A birthday set in chat on the day is marked announced (the reply was the wish). Members who left are skipped.
   - **`BIRTHDAYS_SEED`** (`userId:MM-DD` / `userId:YYYY-MM-DD`) is applied **once per user** (`birthday_seed_applied`): chat corrections and `forget_birthday` stick. A seed entry that differs from a saved birthday is logged as a WARN (use `set_birthday` to change it).
@@ -559,8 +561,16 @@ Flow: a member asks → `request_feature` files an issue, or backs or links an e
 Everything here is off unless `REPORT_CHANNEL_ID` is set. `sendToReportChannel()` posts with `parse: []` and returns whether it posted, and callers only record success when it did.
 - **Digest** (`reportDigest`, `digest.ts`): self-diagnosis signals and failures plus a **Spend** section (total, by feature, top models; complete Eastern days since the last digest, so no day counts twice). It is "weekly … this week" only for a 6–8 day period; otherwise "since the last digest" with the real span. The watermark only advances when the post landed.
 - **Deploy ping** (`deployAnnounce`): `🚀 Deployed <sha> · <ET time>` the first time the bot boots on a new `GIT_SHA`, followed by the channel configuration in a code block. An undelivered ping is retried on the next boot.
-- Fixer alerts, auto-react shadow lines, `!wrapped` previews, the nightly dream's line (`🌙 dream · …`), the owner's note edit/undo audit lines and a notes import's result also land here.
+- Fixer alerts, auto-react and birthday shadow lines (with their Confirm buttons), `!wrapped` previews, the nightly dream's line (`🌙 dream · …`), the owner's note edit/undo audit lines and a notes import's result also land here.
 - **`query_costs({period: today|week|month})`**: rolling whole Eastern days from the ledger.
+
+### Shadow approvals (`src/approvals/`, event `shadowApproval`)
+
+Shadow modes report what live mode would do; some of those are good enough to let through by hand before the feature is switched to `on`. So a shadow line carries one Confirm button: **Post it** on a birthday announcement, **React** on an auto-react line.
+- **Offer** (`offer.ts`): `offerApproval()` stores what Confirm does in bot.db `shadow_approvals` (kind, payload JSON, expiry, status), then posts the line through `sendToReportChannel` with a button whose custom_id is `sa:<row id>` (on the last chunk). A failed post deletes the row; a failed store still posts the line, without a button. A birthday offer expires at the end of its Eastern day (the announcer never wishes anyone happy birthday the day after either), a reaction after 24 h.
+- **Click** (`handler.ts`): owner only (`isBotOwner`, re-checked on every click, 1.5 s limit, fails closed; anyone else is told privately). The row is claimed (pending → working, a conditional UPDATE; a claim stale for 5 min is taken over) so a double click acts once, the click is acknowledged with `deferUpdate`, then the action runs. Its result: `done` (the line gets `-# ✅ <what happened> · approved by <owner>` and loses its button), `closed` (it never can: already announced, the post is gone, Discord refused the emoji; `-# ✖ <why>`, no button), `retry` (a hiccup: the row is released, the button stays, the owner is told privately). An expired offer says it's too late.
+- **Actions**: `postApprovedBirthday()` (`birthdayAnnouncer.ts`) and `addApprovedReaction()` (`src/reactions/approval.ts`: reacts, and turns the ledger's shadow row into a real one; the budget was already spent by the shadow row).
+- Rows older than 30 days are deleted when a new offer is stored.
 
 ### Live settings (`src/runtimeSettings.ts`, `src/ai/tools/settings.ts`)
 
@@ -702,7 +712,8 @@ Rollback is reverting the variable.
 | `birthdays`, `birthday_seed_applied` | birthdays with `last_announced_year` and `last_shadow_year`; users the seed was applied to |
 | `transcripts`, `video_descriptions`, `video_answers`, `transcript_replies` | media caches; the bot's transcript reply ids (90 days) |
 | `ramble_nudges` | per-member nudge cooldown (main id) |
-| `auto_reactions` | auto-react budget/ledger (shadow rows included) |
+| `auto_reactions` | auto-react budget/ledger (shadow rows included; a confirmed one becomes `on`) |
+| `shadow_approvals` | shadow lines' Confirm offers: kind, payload, expiry, status, who confirmed (30 days) |
 | `emoji_usage_captions`, `reaction_jobs` | usage-grounded caption state; job watermarks |
 | `link_fix_alerts` | announced fixer outage state per platform |
 | `feature_requests`, `feature_request_comments` | filing and +1 caps and outcomes |
@@ -830,7 +841,7 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AUTO_REACT_MODE` | `shadow` | `off` \| `shadow` (report-channel lines only) \| `on` |
+| `AUTO_REACT_MODE` | `shadow` | `off` \| `shadow` (report-channel lines, each with a React button) \| `on` |
 | `AUTO_REACT_CHANNELS` | main | csv; threads match through their parent |
 | `AUTO_REACT_MAX_PER_DAY` | 3 | rolling 24 h, shadow ones included (0..100) |
 | `AUTO_REACT_MIN_GAP_MINUTES` | 45 | minimum time between two reactions |
@@ -945,7 +956,7 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 | `REMINDERS_MAX_PER_USER` | 25 | pending reminders per requester (1..1000) |
 | `BIRTHDAY_CHANNEL_ID` | main | announcements; both unset ⇒ off (tools still work) |
 | `BIRTHDAY_ANNOUNCE_ENABLED` | true | kill switch for the announcement only (false ⇒ off whatever the mode) |
-| `BIRTHDAY_ANNOUNCE_MODE` | `shadow` | `off` \| `shadow` (report channel only) \| `on` |
+| `BIRTHDAY_ANNOUNCE_MODE` | `shadow` | `off` \| `shadow` (report channel only, with a Post it button) \| `on` |
 | `BIRTHDAY_ANNOUNCE_HOUR` | 15 | Eastern hour (0..23) from which today's birthdays are announced |
 | `BIRTHDAYS_SEED` | empty | csv `userId:MM-DD` / `userId:YYYY-MM-DD`, applied once per user |
 
@@ -1076,6 +1087,6 @@ Both image workflows build the `ci` Docker stage (GHA layer cache), which runs `
   - Thread history backfill in the archive.
   - An offline eval set for the ramble judge (hold out real rambles as positives).
   - Unifying the helpers that remain duplicated per module (small truncate/one-line helpers; a few test files still build a local capturing client instead of using `capturingClient.ts`).
-- **Tuning is owner-driven from the logs**: `GATE_THRESHOLD` (`gate: REPLY|skip` lines + `yarn eval:gate`), `RAMBLE_THRESHOLD` (`ramble:` lines), auto-react (shadow lines, then `AUTO_REACT_MODE=on`), fixer order (`*_FIXERS`, alerts), memory (the `🌙 dream` report lines and `dream:`/`capture:` log lines; `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`, `CAPTURE_IDLE_MINUTES`).
+- **Tuning is owner-driven from the logs**: `GATE_THRESHOLD` (`gate: REPLY|skip` lines + `yarn eval:gate`), `RAMBLE_THRESHOLD` (`ramble:` lines), auto-react (shadow lines and which ones get confirmed, then `AUTO_REACT_MODE=on`), fixer order (`*_FIXERS`, alerts), memory (the `🌙 dream` report lines and `dream:`/`capture:` log lines; `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT`, `CAPTURE_IDLE_MINUTES`).
 - **Grandfathered public-repo exception**: the learner prompt's GOOD/BAD examples in `personalityLearner.ts` still use a few real first names; the owner kept them as-is for now. Don't copy them anywhere (the dream, edit and bootstrap prompts use the fictional cast), and don't add more.
 - Cloud / no-Docker fallback: `npm install && npx vitest run && npx tsc -p tsconfig.test.json && npx biome check --fix src/`; set `LEFTHOOK=0` when committing; never commit `package-lock.json`; regenerate `yarn.lock` with a Yarn 4 binary from npm (`npm pack @yarnpkg/cli-dist@4.18.1`) when dependencies change. The sandbox server tests need `python3` and `bash`.

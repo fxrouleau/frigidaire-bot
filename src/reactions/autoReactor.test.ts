@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ReactionApproval } from '../approvals/approvalStore';
 import type { EmojiRow } from '../ai/memory/memoryStore';
 import { AddressedGate } from '../gate/addressedGate';
 import { BotDb } from '../storage/botDb';
@@ -37,7 +38,7 @@ type Harness = {
   reactor: AutoReactor;
   ledger: AutoReactLedger;
   judge: ReturnType<typeof vi.fn<(input: JudgeInput) => Promise<Verdict | undefined>>>;
-  report: ReturnType<typeof vi.fn<(text: string) => Promise<void>>>;
+  report: ReturnType<typeof vi.fn<(text: string, approval?: ReactionApproval) => Promise<void>>>;
   loadImages: ReturnType<typeof vi.fn<(urls: string[], max: number) => Promise<string[]>>>;
   timers: Array<{ fn: () => void; ms: number; cleared: boolean }>;
   settings: AutoReactSettings;
@@ -65,7 +66,7 @@ function harness(overrides: Partial<AutoReactSettings> = {}, verdict: Verdict | 
   const db = new BotDb(':memory:');
   const ledger = new AutoReactLedger(() => db);
   const judge = vi.fn(async (_input: JudgeInput) => verdict ?? { react: true, emoji: 'KEKW', why: 'legendary fail' });
-  const report = vi.fn(async (_text: string) => {});
+  const report = vi.fn(async (_text: string, _approval?: ReactionApproval) => {});
   const loadImages = vi.fn(async (urls: string[], max: number) => urls.slice(0, max).map((u) => `data:${u}`));
   const routed = new Set<string>();
   const partners = new Set<string>();
@@ -228,6 +229,14 @@ describe('AutoReactor: shadow mode', () => {
     const line = h.report.mock.calls[0][0];
     expect(line).toContain(`would react <:KEKW:${KEKW}> to Remi's post https://discord.com/channels/g/main/m1`);
     expect(line).toContain('why: legendary fail');
+    // The line offers the reaction for the owner to confirm (a React button).
+    expect(h.report.mock.calls[0][1]).toEqual({
+      kind: 'auto_react',
+      channelId: 'main',
+      messageId: 'm1',
+      emoji: `KEKW:${KEKW}`,
+      label: `<:KEKW:${KEKW}>`,
+    });
     expect(h.ledger.since(0)).toMatchObject([{ messageId: 'm1', mode: 'shadow' }]);
 
     // The budget applies in shadow mode too: the next post within the gap isn't even judged.
