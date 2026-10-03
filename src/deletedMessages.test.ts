@@ -2,6 +2,7 @@ import { ChannelType } from 'discord.js';
 import sharp from 'sharp';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { JudgeInput } from './ai/messageJudge';
+import { describeForJudge, type JudgeMediaDeps } from './deletedMessageMedia';
 import { DeletedMessageReposter } from './deletedMessages';
 import { getRelay } from './relay';
 import { BotDb, setBotDbForTesting } from './storage/botDb';
@@ -13,10 +14,21 @@ const T0 = 1_000_000;
 
 type SendCall = Parameters<typeof sendViaWebhook>;
 
+/** The judge's view of a message's media, offline: no link reads, downloads, ffmpeg or transcription by default. */
+const OFFLINE_MEDIA: JudgeMediaDeps = {
+  readLink: async (url) => ({ ok: false, url, error: 'offline' }),
+  downloadImage: async () => undefined,
+  sampleVideo: async () => {
+    throw new Error('no ffmpeg in this test');
+  },
+  transcribe: async () => undefined,
+};
+
 function makeReposter(opts: {
   verdict?: boolean | undefined;
   mode?: 'edgy' | 'always';
   attachmentBytes?: Buffer | undefined;
+  media?: Partial<JudgeMediaDeps>;
   now?: () => number;
 } = {}) {
   const judgeCalls: JudgeInput[] = [];
@@ -29,6 +41,7 @@ function makeReposter(opts: {
       judgeCalls.push(input);
       return 'verdict' in opts ? opts.verdict : true;
     },
+    judgeMedia: (content, attachments) => describeForJudge(content, attachments, { ...OFFLINE_MEDIA, ...opts.media }),
     fetchAttachment: async () => opts.attachmentBytes,
     send: (async (...args: SendCall) => {
       sendCalls.push(args);
@@ -64,7 +77,9 @@ describe('DeletedMessageReposter', () => {
     const outcome = await reposter.handleDelete(fake.message);
 
     expect(outcome).toBe('reposted');
-    expect(judgeCalls).toEqual([{ author: 'Jasper', text: 'something edgy', imageUrls: [], attachmentNames: [] }]);
+    expect(judgeCalls).toEqual([
+      { author: 'Jasper', text: 'something edgy', imageUrls: [], attachmentNames: [], mediaNotes: [] },
+    ]);
     expect(sendCalls).toHaveLength(1);
     const [channel, identity, payload] = sendCalls[0];
     expect(channel.id).toBe('channel-1');
@@ -201,6 +216,88 @@ describe('DeletedMessageReposter', () => {
     expect(payload).toEqual([{ files: [{ attachment: bytes, name: 'spicy.png' }], allowedMentions: { parse: [] } }]);
   });
 
+  it("judges a GIF from Discord's picker by what it shows, and reposts the link (Discord embeds it again)", async () => {
+    const still = await sharp({ create: { width: 498, height: 280, channels: 3, background: '#336699' } })
+      .png()
+      .toBuffer();
+    const gifUrl = 'https://klipy.com/gifs/some-reaction';
+    const { reposter, judgeCalls, sendCalls } = makeReposter({
+      media: {
+        readLink: async (url) => ({
+          ok: true,
+          content: {
+            url,
+            source: 'klipy',
+            kind: 'gif',
+            title: 'Some Reaction',
+            site: 'Klipy',
+            text: 'tags: reaction',
+            textTruncated: false,
+            media: [{ type: 'image', url: 'https://static.klipy.com/still.webp' }],
+          },
+        }),
+        downloadImage: async () => still,
+      },
+    });
+    const fake = jasperMessage({ content: gifUrl });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+
+    expect(judgeCalls[0]).toMatchObject({ text: gifUrl, mediaNotes: ['gif on Klipy "Some Reaction": tags: reaction'] });
+    expect(judgeCalls[0].imageUrls).toHaveLength(1);
+    expect(sendCalls[0][2]).toEqual([{ content: gifUrl, allowedMentions: { parse: [] } }]);
+  });
+
+  it("judges a saved video by its keyframes and soundtrack, and re-uploads it", async () => {
+    const bytes = Buffer.from('mp4-bytes');
+    const { reposter, judgeCalls, sendCalls } = makeReposter({
+      attachmentBytes: bytes,
+      media: {
+        sampleVideo: async (input) => {
+          expect(input).toBe(bytes);
+          return { durationSecs: 9, frames: [Buffer.from('frame')], audio: Buffer.from('mp3') };
+        },
+        transcribe: async () => 'something unrepeatable',
+      },
+    });
+    const fake = jasperMessage({
+      content: '',
+      attachments: [{ url: 'https://cdn.discordapp.com/attachments/1/2/clip.mp4', contentType: 'video/mp4', name: 'clip.mp4' }],
+    });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+
+    expect(judgeCalls[0]).toEqual({
+      author: 'Jasper',
+      text: '',
+      imageUrls: [`data:image/jpeg;base64,${Buffer.from('frame').toString('base64')}`],
+      attachmentNames: ['clip.mp4'],
+      mediaNotes: ['video clip.mp4 (0:09), said: "something unrepeatable"'],
+    });
+    expect(sendCalls[0][2]).toEqual([{ files: [{ attachment: bytes, name: 'clip.mp4' }], allowedMentions: { parse: [] } }]);
+  });
+
+  it('looks at nothing in "always" mode: every qualifying deletion is reposted as is', async () => {
+    let looked = false;
+    const { reposter, sendCalls } = makeReposter({
+      mode: 'always',
+      media: {
+        readLink: async (url) => {
+          looked = true;
+          return { ok: false, url, error: 'offline' };
+        },
+      },
+    });
+    const fake = jasperMessage({ content: 'https://klipy.com/gifs/some-reaction' });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+    expect(looked).toBe(false);
+    expect(sendCalls).toHaveLength(1);
+  });
+
   it('still reposts the text when an attachment could not be downloaded', async () => {
     const { reposter, sendCalls } = makeReposter({ attachmentBytes: undefined });
     const fake = jasperMessage({
@@ -252,7 +349,13 @@ describe('DeletedMessageReposter', () => {
 
     reposter.observe(fake.message);
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
-    expect(judgeCalls[0]).toEqual({ author: 'Jasper', text: 'something edgy', imageUrls: [], attachmentNames: ['odd.png'] });
+    expect(judgeCalls[0]).toEqual({
+      author: 'Jasper',
+      text: 'something edgy',
+      imageUrls: [],
+      attachmentNames: ['odd.png'],
+      mediaNotes: [],
+    });
   });
 
   it('does not pay the judge when nothing could be reposted anyway', async () => {

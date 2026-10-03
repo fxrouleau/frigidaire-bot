@@ -158,6 +158,15 @@ describe('findLinks', () => {
     expect(isDiscordUrl(new URL('https://media.discordapp.net/x.png'))).toBe(true);
   });
 
+  it("keeps files on Discord's attachment CDN when asked (a favorited GIF), never the app's own links", () => {
+    const text =
+      'https://discord.com/channels/1/2/3 https://cdn.discordapp.com/attachments/1/2/a.gif?ex=1 https://media.discordapp.net/attachments/1/2/b.png https://discord.gg/abc';
+    expect(findLinks(text, { discordMedia: true })).toEqual([
+      'https://cdn.discordapp.com/attachments/1/2/a.gif?ex=1',
+      'https://media.discordapp.net/attachments/1/2/b.png',
+    ]);
+  });
+
   it('ignores markdown emphasis around a link', () => {
     expect(findLinks('**https://a.example/x**')).toEqual(['https://a.example/x']);
   });
