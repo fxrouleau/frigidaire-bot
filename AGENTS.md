@@ -59,7 +59,7 @@ src/
 ├── botOwner.ts                # Who the owner is: BOT_OWNER_USER_IDS, else the Discord application's owner/team (fails closed)
 ├── relay.ts                   # Registry of the bot's webhook relays + attributeMessage(): who really wrote a message
 ├── utils.ts                   # splitMessage(), sendViaWebhook(), repostMessage()/repostBlocker(), mentionsInText()
-├── deletedMessages.ts         # DeletedMessageReposter — snapshot cache + judge + webhook repost for watched users
+├── deletedMessages.ts         # DeletedMessageReposter — snapshot cache + judge + webhook repost (big videos shrunk) for watched users
 ├── deletedMessageMedia.ts     # What a deleted message showed, for the judge: picture/GIF/video frames, GIF pages, soundtrack
 ├── storage/botDb.ts           # ./data/bot.db: the shared handle for small feature tables (ensureSchema/ensureColumn)
 ├── ai/
@@ -383,7 +383,7 @@ The chat model never receives audio or video. It reads the text this layer produ
   - `isTranscriptReply()` (header or stored id) and `repliesToTranscript()` keep transcripts out of history, the gate, auto-react, the archive and summaries. A reply to one is not a reply to the bot.
   - Deleting (or purging) the voice message deletes the transcript and forgets the cached text.
 - **Downloads** (`download.ts`): only Discord's media hosts are fetched directly. Everything else, including a Discord URL that redirects elsewhere, goes through the link reader's `createSafeFetch()` with a content-type allowlist; a declared oversized body is refused before download. `generate_image` downloads a URL-only result the same way (image types, 20 MB, 30 s).
-- **Transcoder** (`transcoder.ts`): the only place the bot shells out. Arguments only (no shell), extension-less temp input, 90 s SIGKILL, 2 concurrent jobs across one shared instance (`getMediaTranscoder()`, also the deleted-message judge's video frames). Without ffmpeg the features degrade instead of failing.
+- **Transcoder** (`transcoder.ts`): the only place the bot shells out. Arguments only (no shell), extension-less temp input, 90 s SIGKILL (240 s for `shrinkVideo`), 2 concurrent jobs across one shared instance (`getMediaTranscoder()`, also the deleted-message judge's video frames and the shrinking of a reposted video). Without ffmpeg the features degrade instead of failing.
 
 ### Link reader (`src/ai/linkReader/`, `src/ai/tools/linkReader.ts`)
 
@@ -432,7 +432,7 @@ Embed fixers are hobby scrapers that die regularly (zzinstagram.com was dead for
 
 ### Deleted-message repost (`src/deletedMessages.ts`, `src/deletedMessageMedia.ts`, `src/ai/messageJudge.ts`)
 
-For users in `DELETE_REPOST_USER_IDS` (either account of a linked pair watches both), every new message in a text or announcement channel is snapshotted: content, identity, and attachment bytes ≤10 MB downloaded immediately, because Discord drops attachments on delete. When such a message is deleted within `DELETE_REPOST_WINDOW_MS`:
+For users in `DELETE_REPOST_USER_IDS` (either account of a linked pair watches both), every new message in a text or announcement channel is snapshotted: content, identity, and attachment bytes downloaded immediately, because Discord drops attachments on delete. Files up to 10 MB are saved (what a webhook can upload; a level-1 boost doesn't raise it), and videos up to 100 MB, within 300 MB of big videos held across all snapshots (by declared size; released when the snapshot is handled, forgotten or expires). Anything else is never downloaded. When such a message is deleted within `DELETE_REPOST_WINDOW_MS`:
 - Nothing is judged when there is nothing left to repost.
 - `DELETE_REPOST_MODE=edgy` (default): the judge decides, on what the message **showed** as well as its text (`deletedMessageMedia.ts`, free but the transcription; nothing in `always` mode):
   - saved pictures, downscaled; an animated GIF/WebP gives 3 frames from across it;
@@ -442,7 +442,7 @@ For users in `DELETE_REPOST_USER_IDS` (either account of a linked pair watches b
 
   At most 6 images; whatever can't be read is left out. The images and the same in words (`mediaNotes`, fenced as data) go to the judge.
 - Routing: `DELETE_REPOST_MODEL` defaults to `typesafe/jev-1.13` (the decisions endpoint, ~$0.00001 per call), which is text-only: it judges messages with no images (a GIF whose still failed still brings its words). A message with images goes to the chat model (`CHAT_MODEL`: a JSON yes/no, low effort, 1500 tokens, judged from the **saved** bytes, since the CDN URLs die with the message). Each falls back to the other (the decision model only when there are words). Any chat model id in `DELETE_REPOST_MODEL` skips the decision model. No verdict ⇒ no repost.
-- Attachments are saved up to 10 MB each, so a bigger video can't be reposted (and leaves nothing to repost when it was the whole message).
+- A saved video over 10 MB is shrunk for the repost, and only then (after the verdict): `shrinkVideo` (ffmpeg) re-encodes it to H.264/AAC MP4 under 9.5 MB, its bitrate from its length and its size from the bitrate (720p down to 360p, ≤30 fps, metadata stripped), one lower retry if the encoder overshoots, and renames it `.mp4`. Past 5 minutes, or when it fails, the video is left out (and nothing is posted if it was the whole message). A 20 s 1080p clip takes ~6 s on 4 cores.
 - `DELETE_REPOST_MODE=always`: every qualifying deletion is reposted.
 - The repost goes through `sendViaWebhook` as the author with `parse: []`, chunked when the text exceeds 2000 characters (Nitro), and is recorded as a `regret` relay. Deletions the bot performs itself (link fixing) are excluded via `forget()`.
 

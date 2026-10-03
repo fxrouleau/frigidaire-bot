@@ -176,7 +176,10 @@ function visualLinks(content: string): VisualLink[] {
   return links;
 }
 
-function attachmentKind(attachment: SnapshotAttachment): 'picture' | 'video' | undefined {
+/** A picture or a video, by declared type (or the extension when Discord left the type off). */
+export function attachmentKind(
+  attachment: Pick<SnapshotAttachment, 'name' | 'contentType'>,
+): 'picture' | 'video' | undefined {
   const type = attachment.contentType?.split(';')[0].trim().toLowerCase();
   if (type === 'image/svg+xml') return undefined;
   if (type?.startsWith('image/')) return 'picture';

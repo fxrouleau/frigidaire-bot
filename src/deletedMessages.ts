@@ -9,10 +9,17 @@
 // author's name and avatar. A watched member's side account (LINKED_ACCOUNTS) is watched too, and its
 // messages are reposted as that account. The judge sees what the message showed, not just its text: its
 // pictures, frames and the soundtrack of its videos, and the GIFs it linked (deletedMessageMedia.ts).
+//
+// A webhook can upload 10 MB per file (level-1 boosts don't raise it). Videos up to 100 MB are saved
+// anyway, within a cap on what all snapshots hold at once, and one that gets reposted is first shrunk
+// to fit (ffmpeg, getMediaTranscoder().shrinkVideo): a lower resolution and bitrate, for up to 5 minutes
+// of footage. Shrinking only happens for a repost that is going out, never for a message nobody deleted.
 import type { Message, PartialMessage, WebhookMessageCreateOptions } from 'discord.js';
+import { getMediaTranscoder } from './ai/media';
+import { downloadMedia } from './ai/media/download';
 import { createEdgyJudge, type MessageJudge } from './ai/messageJudge';
 import { config, type DeleteRepostMode } from './config';
-import { describeForJudge, type JudgeMedia, type SnapshotAttachment } from './deletedMessageMedia';
+import { attachmentKind, describeForJudge, type JudgeMedia, type SnapshotAttachment } from './deletedMessageMedia';
 import { isSamePerson } from './linkedAccounts';
 import { logger } from './logger';
 import { recordRelay } from './relay';
@@ -25,7 +32,17 @@ import {
 } from './utils';
 
 const MAX_SNAPSHOTS = 100;
+// What a webhook can upload per file in a server without a level-2 boost.
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+// A bigger video is saved too, to be shrunk under the upload limit if it gets reposted.
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+// What all snapshots' big videos may hold at once (each lives for the repost window).
+const MAX_HELD_VIDEO_BYTES = 300 * 1024 * 1024;
+// The shrunk file's limit leaves room under the upload limit; past 5 minutes it would be mush.
+const SHRINK_TARGET_BYTES = Math.floor(9.5 * 1024 * 1024);
+const MAX_SHRINK_SECONDS = 300;
+const DOWNLOAD_TIMEOUT_MS = 15_000;
+const VIDEO_DOWNLOAD_TIMEOUT_MS = 60_000;
 // Snapshots outlive the repost window by this much so a delete racing the window edge still resolves.
 const SNAPSHOT_GRACE_MS = 5000;
 
@@ -40,6 +57,8 @@ export type MessageSnapshot = {
   createdAt: number;
   attachmentNames: string[];
   attachments: Promise<SnapshotAttachment[]>;
+  /** Bytes of big videos this snapshot holds against MAX_HELD_VIDEO_BYTES (0 once released). */
+  heldBytes: number;
 };
 
 export type DeleteOutcome = 'ignored' | 'expired' | 'not-edgy' | 'undecided' | 'empty' | 'reposted';
@@ -51,23 +70,35 @@ export type DeletedMessageReposterOptions = {
   judge?: MessageJudge;
   /** What the saved attachments and the text's GIF links show, for the judge. Default: describeForJudge. */
   judgeMedia?: (content: string, attachments: SnapshotAttachment[]) => Promise<JudgeMedia>;
-  fetchAttachment?: (url: string) => Promise<Buffer | undefined>;
+  /** An attachment's bytes, refused past `maxBytes`. Default: downloadMedia (Discord's CDN, streamed and capped). */
+  fetchAttachment?: (url: string, maxBytes: number) => Promise<Buffer | undefined>;
+  /** A video re-encoded under the upload limit, or undefined when it can't be. Default: ffmpeg. */
+  shrinkVideo?: (data: Buffer) => Promise<Buffer | undefined>;
   send?: typeof sendViaWebhook;
   now?: () => number;
 };
 
-async function downloadAttachment(url: string): Promise<Buffer | undefined> {
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) return undefined;
-    const length = Number(response.headers.get('content-length') ?? 0);
-    if (length > MAX_ATTACHMENT_BYTES) return undefined;
-    const data = Buffer.from(await response.arrayBuffer());
-    return data.byteLength <= MAX_ATTACHMENT_BYTES ? data : undefined;
-  } catch (error) {
-    logger.warn(`deletedMessages: attachment download failed for ${url}:`, error);
-    return undefined;
-  }
+async function downloadAttachment(url: string, maxBytes: number): Promise<Buffer | undefined> {
+  const timeoutMs = maxBytes > MAX_ATTACHMENT_BYTES ? VIDEO_DOWNLOAD_TIMEOUT_MS : DOWNLOAD_TIMEOUT_MS;
+  const result = await downloadMedia(url, { maxBytes, timeoutMs });
+  return result.ok ? result.data : undefined;
+}
+
+async function shrinkWithFfmpeg(data: Buffer): Promise<Buffer | undefined> {
+  const shrunk = await getMediaTranscoder().shrinkVideo(data, {
+    maxBytes: SHRINK_TARGET_BYTES,
+    maxSeconds: MAX_SHRINK_SECONDS,
+  });
+  return shrunk?.data;
+}
+
+function megabytes(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** IMG_0042.MOV → IMG_0042.mp4 (a SPOILER_ prefix stays). */
+function asMp4(name: string): string {
+  return `${name.replace(/\.[^./\\]*$/, '')}.mp4`;
 }
 
 /**
@@ -97,9 +128,11 @@ export class DeletedMessageReposter {
   private readonly mode: () => DeleteRepostMode;
   private readonly judge: MessageJudge;
   private readonly judgeMedia: (content: string, attachments: SnapshotAttachment[]) => Promise<JudgeMedia>;
-  private readonly fetchAttachment: (url: string) => Promise<Buffer | undefined>;
+  private readonly fetchAttachment: (url: string, maxBytes: number) => Promise<Buffer | undefined>;
+  private readonly shrinkVideo: (data: Buffer) => Promise<Buffer | undefined>;
   private readonly send: typeof sendViaWebhook;
   private readonly now: () => number;
+  private heldVideoBytes = 0;
 
   constructor(opts: DeletedMessageReposterOptions = {}) {
     this.userIds = opts.userIds ?? (() => config.deleteRepost.userIds);
@@ -108,6 +141,7 @@ export class DeletedMessageReposter {
     this.judge = opts.judge ?? createEdgyJudge();
     this.judgeMedia = opts.judgeMedia ?? ((content, attachments) => describeForJudge(content, attachments));
     this.fetchAttachment = opts.fetchAttachment ?? downloadAttachment;
+    this.shrinkVideo = opts.shrinkVideo ?? shrinkWithFfmpeg;
     this.send = opts.send ?? sendViaWebhook;
     this.now = opts.now ?? (() => Date.now());
   }
@@ -127,9 +161,25 @@ export class DeletedMessageReposter {
     this.prune(now);
 
     const attachments = [...message.attachments.values()];
+    let heldBytes = 0;
+    const limits = attachments.map((a) => {
+      if (a.size <= MAX_ATTACHMENT_BYTES) return MAX_ATTACHMENT_BYTES;
+      // Too big to repost: only a video can be brought under the upload limit.
+      if (attachmentKind(a) !== 'video' || a.size > MAX_VIDEO_BYTES) return 0;
+      if (this.heldVideoBytes + a.size > MAX_HELD_VIDEO_BYTES) {
+        logger.info(
+          `deletedMessages: not saving ${a.name} (${megabytes(a.size)}): ${megabytes(this.heldVideoBytes)} of videos already held`,
+        );
+        return 0;
+      }
+      this.heldVideoBytes += a.size;
+      heldBytes += a.size;
+      return MAX_VIDEO_BYTES;
+    });
     const downloads = Promise.all(
-      attachments.map(async (a) => {
-        const data = await this.fetchAttachment(a.url);
+      attachments.map(async (a, index) => {
+        if (limits[index] === 0) return undefined;
+        const data = await this.fetchAttachment(a.url, limits[index]);
         return data ? { name: a.name, contentType: a.contentType, data } : undefined;
       }),
     ).then((results) => results.filter((r): r is SnapshotAttachment => r !== undefined));
@@ -146,12 +196,14 @@ export class DeletedMessageReposter {
       createdAt: message.createdTimestamp ?? now,
       attachmentNames: attachments.map((a) => a.name),
       attachments: downloads,
+      heldBytes,
     });
   }
 
   /** Tells the reposter the bot itself is about to delete this message (link fix), so it is not "a regret". */
   forget(messageId: string): void {
-    this.snapshots.delete(messageId);
+    const snapshot = this.snapshots.get(messageId);
+    if (snapshot) this.drop(snapshot);
     this.botDeleted.add(messageId);
   }
 
@@ -160,7 +212,14 @@ export class DeletedMessageReposter {
     const snapshot = this.snapshots.get(message.id);
     if (!snapshot) return 'ignored';
     this.snapshots.delete(message.id);
+    try {
+      return await this.resolve(snapshot, message);
+    } finally {
+      this.release(snapshot);
+    }
+  }
 
+  private async resolve(snapshot: MessageSnapshot, message: Message | PartialMessage): Promise<DeleteOutcome> {
     const age = this.now() - snapshot.createdAt;
     if (age > this.windowMs()) return 'expired';
 
@@ -193,8 +252,11 @@ export class DeletedMessageReposter {
       if (!verdict) return 'not-edgy';
     }
 
+    const files = await this.fitForUpload(attachments);
+    if (snapshot.content.length === 0 && files.length === 0) return 'empty';
+
     logger.info(`deletedMessages: reposting ${snapshot.id} by ${snapshot.identity.name} (deleted after ${age}ms)`);
-    const reposts = await this.send(channel, snapshot.identity, regretPayloads(snapshot.content, attachments));
+    const reposts = await this.send(channel, snapshot.identity, regretPayloads(snapshot.content, files));
     for (const repost of reposts) {
       if (!repost?.id) continue;
       recordRelay({
@@ -214,15 +276,53 @@ export class DeletedMessageReposter {
     return this.snapshots.size;
   }
 
+  /** Test-only: bytes of big videos the live snapshots hold. */
+  get heldBytes(): number {
+    return this.heldVideoBytes;
+  }
+
+  /** The attachments as a webhook can upload them: big videos shrunk, what can't be shrunk left out. */
+  private async fitForUpload(attachments: SnapshotAttachment[]): Promise<SnapshotAttachment[]> {
+    const fitted = await Promise.all(
+      attachments.map(async (attachment): Promise<SnapshotAttachment | undefined> => {
+        if (attachment.data.byteLength <= MAX_ATTACHMENT_BYTES) return attachment;
+        const size = megabytes(attachment.data.byteLength);
+        try {
+          const data = await this.shrinkVideo(attachment.data);
+          if (!data) {
+            logger.info(`deletedMessages: ${attachment.name} (${size}) can't be shrunk to fit; left out of the repost`);
+            return undefined;
+          }
+          logger.info(`deletedMessages: shrank ${attachment.name} from ${size} to ${megabytes(data.byteLength)}`);
+          return { name: asMp4(attachment.name), contentType: 'video/mp4', data };
+        } catch (error) {
+          logger.warn(`deletedMessages: shrinking ${attachment.name} (${size}) failed; left out of the repost:`, error);
+          return undefined;
+        }
+      }),
+    );
+    return fitted.filter((a): a is SnapshotAttachment => a !== undefined);
+  }
+
+  private drop(snapshot: MessageSnapshot): void {
+    this.snapshots.delete(snapshot.id);
+    this.release(snapshot);
+  }
+
+  private release(snapshot: MessageSnapshot): void {
+    this.heldVideoBytes -= snapshot.heldBytes;
+    snapshot.heldBytes = 0;
+  }
+
   private prune(now: number): void {
     const maxAge = this.windowMs() + SNAPSHOT_GRACE_MS;
-    for (const [id, snapshot] of this.snapshots) {
-      if (now - snapshot.createdAt > maxAge) this.snapshots.delete(id);
+    for (const snapshot of [...this.snapshots.values()]) {
+      if (now - snapshot.createdAt > maxAge) this.drop(snapshot);
     }
     while (this.snapshots.size >= MAX_SNAPSHOTS) {
-      const oldest = this.snapshots.keys().next().value;
+      const oldest = this.snapshots.values().next().value;
       if (oldest === undefined) break;
-      this.snapshots.delete(oldest);
+      this.drop(oldest);
     }
   }
 }

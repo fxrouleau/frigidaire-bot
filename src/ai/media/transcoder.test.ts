@@ -68,6 +68,80 @@ describe('FfmpegTranscoder (stand-in executables)', () => {
     await expect(transcoder.probe(Buffer.from('x'))).rejects.toThrow(/timed out after 150ms/);
   });
 
+  it("won't shrink a video it can't make fit well: no picture, too long, or too long for the bytes", async () => {
+    const unreachable = script('ffmpeg-never', 'exit 1');
+    const shrink = async (probeJson: string, opts: { maxBytes: number; maxSeconds: number }) => {
+      const ffprobe = script(`probe-${Math.random().toString(36).slice(2)}`, `echo '${probeJson}'`);
+      return new FfmpegTranscoder({ ffprobePath: ffprobe, ffmpegPath: unreachable }).shrinkVideo(Buffer.from('x'), opts);
+    };
+    const audioOnly = '{"format":{"duration":"30"},"streams":[{"codec_type":"audio"}]}';
+    const tenMinutes = '{"format":{"duration":"600"},"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}';
+    const oneMinute = '{"format":{"duration":"60"},"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}';
+    const unknownLength = '{"format":{"duration":"N/A"},"streams":[{"codec_type":"video"}]}';
+
+    expect(await shrink(audioOnly, { maxBytes: 10_000_000, maxSeconds: 300 })).toBeUndefined();
+    expect(await shrink(tenMinutes, { maxBytes: 10_000_000, maxSeconds: 300 })).toBeUndefined();
+    expect(await shrink(unknownLength, { maxBytes: 10_000_000, maxSeconds: 300 })).toBeUndefined();
+    // 1 MB for a minute leaves ~120 kbps: mush, not a video.
+    expect(await shrink(oneMinute, { maxBytes: 1_000_000, maxSeconds: 300 })).toBeUndefined();
+  });
+
+  /** A stand-in ffmpeg that logs its arguments and writes outputs of the given sizes, one per run. */
+  function shrinkingFfmpeg(name: string, sizes: number[]): { ffmpeg: string; runs: () => string[][] } {
+    const log = path.join(scratch, `${name}.log`);
+    const cases = sizes.map((size, i) => `${i + 1}) head -c ${size} /dev/zero > "$last" ;;`).join(' ');
+    const ffmpeg = script(
+      name,
+      `for last; do :; done\nprintf '%s\\n' "$*" >> "${log}"\nn=$(($(wc -l < "${log}")))\ncase $n in ${cases} esac`,
+    );
+    return {
+      ffmpeg,
+      runs: () =>
+        fs.existsSync(log)
+          ? fs.readFileSync(log, 'utf8').trim().split('\n').map((line) => line.split(' '))
+          : [],
+    };
+  }
+
+  const TWO_MINUTES = '{"format":{"duration":"120"},"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}';
+
+  it('shrinks to a bitrate the length allows, picks the size from it, and strips metadata', async () => {
+    const ffprobe = script('probe-two-minutes', `echo '${TWO_MINUTES}'`);
+    const { ffmpeg, runs } = shrinkingFfmpeg('ffmpeg-fits', [900_000]);
+    const transcoder = new FfmpegTranscoder({ ffprobePath: ffprobe, ffmpegPath: ffmpeg });
+
+    const shrunk = await transcoder.shrinkVideo(Buffer.from('x'), { maxBytes: 10_000_000, maxSeconds: 300 });
+
+    expect(shrunk?.data.byteLength).toBe(900_000);
+    expect(shrunk?.durationSecs).toBe(120);
+    const [args] = runs();
+    const arg = (flag: string) => args[args.indexOf(flag) + 1];
+    // 10 MB × 8 × 0.92 over 120 s ≈ 613 kbps: 64k of sound, the rest picture, at 480p.
+    expect(arg('-b:a')).toBe('64k');
+    expect(arg('-b:v')).toBe('549k');
+    expect(arg('-vf')).toContain('min(854,iw)');
+    expect(arg('-map_metadata')).toBe('-1');
+    expect(arg('-c:v')).toBe('libx264');
+    expect(args.at(-1)?.endsWith('.mp4')).toBe(true);
+  });
+
+  it('aims lower once when the encoder overshoots, and gives up after a second miss', async () => {
+    const ffprobe = script('probe-two-minutes-2', `echo '${TWO_MINUTES}'`);
+    const retried = shrinkingFfmpeg('ffmpeg-overshoots-once', [12_000_000, 9_000_000]);
+    const once = new FfmpegTranscoder({ ffprobePath: ffprobe, ffmpegPath: retried.ffmpeg });
+    expect((await once.shrinkVideo(Buffer.from('x'), { maxBytes: 10_000_000, maxSeconds: 300 }))?.data.byteLength).toBe(
+      9_000_000,
+    );
+    const [first, second] = retried.runs();
+    const rate = (args: string[]) => Number.parseInt(args[args.indexOf('-b:v') + 1], 10);
+    expect(rate(second)).toBeLessThan(rate(first) * 0.8);
+
+    const missed = shrinkingFfmpeg('ffmpeg-overshoots-twice', [12_000_000, 11_000_000]);
+    const twice = new FfmpegTranscoder({ ffprobePath: ffprobe, ffmpegPath: missed.ffmpeg });
+    expect(await twice.shrinkVideo(Buffer.from('x'), { maxBytes: 10_000_000, maxSeconds: 300 })).toBeUndefined();
+    expect(missed.runs()).toHaveLength(2);
+  });
+
   it('cleans up its temp directory', async () => {
     const ffprobe = script('probe-cleanup', `echo '{"format":{},"streams":[]}'`);
     const before = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('frigidaire-media-')).length;
@@ -138,5 +212,31 @@ describe.skipIf(!HAS_FFMPEG)('FfmpegTranscoder (real ffmpeg)', () => {
 
   it('rejects files that are not media', async () => {
     await expect(transcoder.probe(Buffer.from('definitely not a video'))).rejects.toThrow();
+  });
+
+  it('shrinks a busy portrait clip under the byte limit, long side bounded, metadata gone', async () => {
+    const mp4 = generate('busy.mp4', [
+      ...['-f', 'lavfi', '-i', 'testsrc2=duration=6:size=720x1280:rate=24,noise=alls=40:allf=t'],
+      ...['-f', 'lavfi', '-i', 'sine=frequency=500:duration=6'],
+      ...['-c:v', 'libx264', '-preset', 'ultrafast', '-b:v', '6M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest'],
+      ...['-metadata', 'title=somewhere private'],
+    ]);
+    const maxBytes = 400_000;
+    expect(mp4.byteLength).toBeGreaterThan(maxBytes * 5);
+
+    const shrunk = await transcoder.shrinkVideo(mp4, { maxBytes, maxSeconds: 300 });
+
+    expect(shrunk).toBeDefined();
+    expect(shrunk?.data.byteLength).toBeLessThanOrEqual(maxBytes);
+    expect(shrunk?.durationSecs).toBeCloseTo(6, 0);
+    const out = path.join(scratch, 'shrunk.mp4');
+    fs.writeFileSync(out, shrunk?.data ?? Buffer.alloc(0));
+    const info = JSON.parse(
+      spawnSync('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', out]).stdout.toString(),
+    ) as { streams: Array<{ codec_type: string; width?: number; height?: number }>; format: { tags?: Record<string, string> } };
+    const video = info.streams.find((stream) => stream.codec_type === 'video');
+    expect([video?.width, video?.height]).toEqual([360, 640]);
+    expect(info.streams.some((stream) => stream.codec_type === 'audio')).toBe(true);
+    expect(info.format.tags?.title).toBeUndefined();
   });
 });

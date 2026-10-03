@@ -3,7 +3,7 @@
 // capturing OpenRouter client is capturingClient.ts's (fixtures go in through fixtureReply()).
 import type { Resolver } from '../ai/linkReader/netGuard';
 import { createSafeFetch, type HttpTransport, type SafeFetch } from '../ai/linkReader/safeFetch';
-import type { MediaTranscoder, ProbeResult, VideoSample } from '../ai/media/transcoder';
+import type { MediaTranscoder, ProbeResult, ShrunkVideo, VideoSample } from '../ai/media/transcoder';
 import type { EndpointCoverage, ModelCatalog, ModelInfo } from '../ai/modelCatalog';
 import type { CapturedRequest } from './capturingClient';
 
@@ -30,14 +30,20 @@ export type FakeTranscoderOptions = {
   probe?: Scripted<ProbeResult>;
   toMp3?: Scripted<{ data: Buffer; durationSecs?: number } | undefined>;
   sampleVideo?: Scripted<VideoSample>;
+  shrinkVideo?: Scripted<ShrunkVideo | undefined>;
 };
 
 export type FakeTranscoder = MediaTranscoder & {
-  calls: { probe: Buffer[]; toMp3: Array<{ input: Buffer; maxSeconds: number }>; sampleVideo: Buffer[] };
+  calls: {
+    probe: Buffer[];
+    toMp3: Array<{ input: Buffer; maxSeconds: number }>;
+    sampleVideo: Buffer[];
+    shrinkVideo: Array<{ input: Buffer; maxBytes: number; maxSeconds: number }>;
+  };
 };
 
 export function createFakeTranscoder(opts: FakeTranscoderOptions = {}): FakeTranscoder {
-  const calls: FakeTranscoder['calls'] = { probe: [], toMp3: [], sampleVideo: [] };
+  const calls: FakeTranscoder['calls'] = { probe: [], toMp3: [], sampleVideo: [], shrinkVideo: [] };
   return {
     calls,
     async probe(input) {
@@ -53,13 +59,18 @@ export function createFakeTranscoder(opts: FakeTranscoderOptions = {}): FakeTran
       calls.sampleVideo.push(input);
       return resolveScripted(opts.sampleVideo ?? { frames: [], audio: undefined });
     },
+    async shrinkVideo(input, { maxBytes, maxSeconds }) {
+      calls.shrinkVideo.push({ input, maxBytes, maxSeconds });
+      // An explicit `shrinkVideo: undefined` scripts "can't be shrunk".
+      return resolveScripted('shrinkVideo' in opts ? opts.shrinkVideo : { data: MP4_BYTES, durationSecs: 10 });
+    },
   };
 }
 
 /** A transcoder standing in for "ffmpeg is not installed". */
 export function createMissingTranscoder(): FakeTranscoder {
   const missing = () => new Error('ffmpeg is not installed (spawn ENOENT)');
-  return createFakeTranscoder({ probe: missing, toMp3: missing, sampleVideo: missing });
+  return createFakeTranscoder({ probe: missing, toMp3: missing, sampleVideo: missing, shrinkVideo: missing });
 }
 
 export type FakeFile = { body: Buffer; contentType?: string; status?: number; headers?: Record<string, string> };
