@@ -245,11 +245,15 @@ function stripCode(text: string): string {
   return text.replace(/```[\s\S]*?```/g, ' ').replace(/(`{1,2})[^`\n]+?\1/g, ' ');
 }
 
+// Discord's attachment CDN: a link there is a file (a favorited GIF, a re-shared picture), not the app.
+const DISCORD_MEDIA_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
+
 /**
  * The http(s) links a message shares, in order and deduplicated. Links in code and links wrapped in
- * <…> (the author suppressed the embed on purpose) are skipped, as are Discord's own links.
+ * <…> (the author suppressed the embed on purpose) are skipped, as are Discord's own links (with
+ * `discordMedia`, links to files on Discord's attachment CDN are kept).
  */
-export function findLinks(text: string): string[] {
+export function findLinks(text: string, options: { discordMedia?: boolean } = {}): string[] {
   const source = stripCode(text);
   const found: string[] = [];
   for (const match of source.matchAll(/https?:\/\/[^\s<>]+/gi)) {
@@ -263,7 +267,7 @@ export function findLinks(text: string): string[] {
     } catch {
       continue;
     }
-    if (isDiscordUrl(url)) continue;
+    if (isDiscordUrl(url) && !(options.discordMedia && DISCORD_MEDIA_HOSTS.has(normalizedHost(url)))) continue;
     if (!found.includes(candidate)) found.push(candidate);
   }
   return found;

@@ -7,11 +7,12 @@
 // judge decides whether it was one of their "edgy bouts" (DELETE_REPOST_MODE=edgy, the default) or
 // every deletion qualifies (always), and the message is reposted through a webhook wearing the
 // author's name and avatar. A watched member's side account (LINKED_ACCOUNTS) is watched too, and its
-// messages are reposted as that account.
+// messages are reposted as that account. The judge sees what the message showed, not just its text: its
+// pictures, frames and the soundtrack of its videos, and the GIFs it linked (deletedMessageMedia.ts).
 import type { Message, PartialMessage, WebhookMessageCreateOptions } from 'discord.js';
-import sharp from 'sharp';
 import { createEdgyJudge, type MessageJudge } from './ai/messageJudge';
 import { config, type DeleteRepostMode } from './config';
+import { describeForJudge, type JudgeMedia, type SnapshotAttachment } from './deletedMessageMedia';
 import { isSamePerson } from './linkedAccounts';
 import { logger } from './logger';
 import { recordRelay } from './relay';
@@ -27,11 +28,8 @@ const MAX_SNAPSHOTS = 100;
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 // Snapshots outlive the repost window by this much so a delete racing the window edge still resolves.
 const SNAPSHOT_GRACE_MS = 5000;
-// What the judge sees of a regret's images: the first few, downscaled (it only needs to get the gist).
-const MAX_JUDGE_IMAGES = 4;
-const JUDGE_IMAGE_DIMENSION = 768;
 
-export type SnapshotAttachment = { name: string; contentType: string | null; data: Buffer };
+export type { SnapshotAttachment };
 
 export type MessageSnapshot = {
   id: string;
@@ -51,6 +49,8 @@ export type DeletedMessageReposterOptions = {
   windowMs?: () => number;
   mode?: () => DeleteRepostMode;
   judge?: MessageJudge;
+  /** What the saved attachments and the text's GIF links show, for the judge. Default: describeForJudge. */
+  judgeMedia?: (content: string, attachments: SnapshotAttachment[]) => Promise<JudgeMedia>;
   fetchAttachment?: (url: string) => Promise<Buffer | undefined>;
   send?: typeof sendViaWebhook;
   now?: () => number;
@@ -68,33 +68,6 @@ async function downloadAttachment(url: string): Promise<Buffer | undefined> {
     logger.warn(`deletedMessages: attachment download failed for ${url}:`, error);
     return undefined;
   }
-}
-
-/** The saved image attachments as downscaled JPEG data URIs for the judge; undecodable ones are left out. */
-async function judgeImages(attachments: SnapshotAttachment[]): Promise<string[]> {
-  const images = attachments.filter((a) => a.contentType?.startsWith('image/')).slice(0, MAX_JUDGE_IMAGES);
-  const uris = await Promise.all(
-    images.map(async (image) => {
-      try {
-        // First frame of an animation; flattened so transparency doesn't turn black.
-        const jpeg = await sharp(image.data)
-          .resize({
-            width: JUDGE_IMAGE_DIMENSION,
-            height: JUDGE_IMAGE_DIMENSION,
-            fit: 'inside',
-            withoutEnlargement: true,
-          })
-          .flatten({ background: '#ffffff' })
-          .jpeg({ quality: 80 })
-          .toBuffer();
-        return `data:image/jpeg;base64,${jpeg.toString('base64')}`;
-      } catch (error) {
-        logger.debug(`deletedMessages: could not decode ${image.name} for the judge:`, error);
-        return undefined;
-      }
-    }),
-  );
-  return uris.filter((uri): uri is string => uri !== undefined);
 }
 
 /**
@@ -123,6 +96,7 @@ export class DeletedMessageReposter {
   private readonly windowMs: () => number;
   private readonly mode: () => DeleteRepostMode;
   private readonly judge: MessageJudge;
+  private readonly judgeMedia: (content: string, attachments: SnapshotAttachment[]) => Promise<JudgeMedia>;
   private readonly fetchAttachment: (url: string) => Promise<Buffer | undefined>;
   private readonly send: typeof sendViaWebhook;
   private readonly now: () => number;
@@ -132,6 +106,7 @@ export class DeletedMessageReposter {
     this.windowMs = opts.windowMs ?? (() => config.deleteRepost.windowMs);
     this.mode = opts.mode ?? (() => config.deleteRepost.mode);
     this.judge = opts.judge ?? createEdgyJudge();
+    this.judgeMedia = opts.judgeMedia ?? ((content, attachments) => describeForJudge(content, attachments));
     this.fetchAttachment = opts.fetchAttachment ?? downloadAttachment;
     this.send = opts.send ?? sendViaWebhook;
     this.now = opts.now ?? (() => Date.now());
@@ -198,11 +173,18 @@ export class DeletedMessageReposter {
     if (snapshot.content.length === 0 && attachments.length === 0) return 'empty';
 
     if (this.mode() === 'edgy') {
+      const media = await this.judgeMedia(snapshot.content, attachments);
+      if (media.imageUrls.length > 0 || media.notes.length > 0) {
+        logger.info(
+          `deletedMessages: judging ${snapshot.id} with ${media.imageUrls.length} image(s) and ${media.notes.length} media note(s)`,
+        );
+      }
       const verdict = await this.judge({
         author: snapshot.identity.name,
         text: snapshot.content,
-        imageUrls: await judgeImages(attachments),
+        imageUrls: media.imageUrls,
         attachmentNames: snapshot.attachmentNames,
+        mediaNotes: media.notes,
       });
       if (verdict === undefined) {
         logger.warn(`deletedMessages: no verdict for ${snapshot.id}; leaving it deleted`);

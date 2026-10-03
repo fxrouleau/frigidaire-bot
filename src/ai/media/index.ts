@@ -35,14 +35,15 @@ function defaultClient(): OpenAI | undefined {
   return config.isTest ? undefined : getOpenRouterClient();
 }
 
-function sharedTranscoder(): MediaTranscoder {
+/** The process-wide ffmpeg wrapper (its concurrency cap is per instance, so every feature shares one). */
+export function getMediaTranscoder(): MediaTranscoder {
   if (!transcoder) transcoder = new FfmpegTranscoder();
   return transcoder;
 }
 
 /** The process-wide transcriber (in-flight dedup and failure cooldowns are per instance). */
 export function getAudioTranscriber(): AudioTranscriber {
-  if (!transcriber) transcriber = new AudioTranscriber({ client: defaultClient, transcoder: sharedTranscoder() });
+  if (!transcriber) transcriber = new AudioTranscriber({ client: defaultClient, transcoder: getMediaTranscoder() });
   return transcriber;
 }
 
@@ -50,7 +51,7 @@ export function getVideoDescriber(): VideoDescriber {
   if (!describer) {
     describer = new VideoDescriber({
       client: defaultClient,
-      transcoder: sharedTranscoder(),
+      transcoder: getMediaTranscoder(),
       transcriber: getAudioTranscriber(),
     });
   }
