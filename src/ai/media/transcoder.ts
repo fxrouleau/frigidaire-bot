@@ -1,5 +1,5 @@
-// The only place the bot shells out: ffmpeg/ffprobe for audio transcoding, duration probes and video
-// keyframe sampling. Everything above this module talks to the MediaTranscoder interface, so tests
+// The only place the bot shells out: ffmpeg/ffprobe for audio transcoding, duration probes, video
+// keyframe sampling and shrinking a video under an upload limit. Everything above this module talks to the MediaTranscoder interface, so tests
 // inject a fake and never need ffmpeg installed.
 //
 // Inputs are written to a private temp directory rather than piped: MP4s with the index (moov atom)
@@ -20,6 +20,8 @@ export type VideoSample = {
   audio?: Buffer;
 };
 
+export type ShrunkVideo = { data: Buffer; durationSecs: number };
+
 export interface MediaTranscoder {
   /** Stream layout and duration of a media file. Throws when the probe itself fails. */
   probe(input: Buffer): Promise<ProbeResult>;
@@ -33,11 +35,23 @@ export interface MediaTranscoder {
     input: Buffer,
     opts: { frames: number; maxDimension: number; maxAudioSeconds: number },
   ): Promise<VideoSample>;
+  /**
+   * The video re-encoded (H.264/AAC MP4, metadata stripped) to fit in `maxBytes`: the bitrate follows from
+   * the length, the size from the bitrate. Undefined when it can't be done well: no picture, a length
+   * over `maxSeconds` or unknown, or still too big after one lower-quality retry. Throws when ffmpeg fails.
+   */
+  shrinkVideo(input: Buffer, opts: { maxBytes: number; maxSeconds: number }): Promise<ShrunkVideo | undefined>;
 }
 
 type RunResult = { stdout: Buffer; stderr: string };
 
 const DEFAULT_TIMEOUT_MS = 90_000;
+// Re-encoding a few minutes of phone video takes longer than any probe or sample.
+const DEFAULT_SHRINK_TIMEOUT_MS = 240_000;
+// What the bitrate leaves for picture and sound once the container and the encoder's overshoot are paid for.
+const SHRINK_HEADROOM = 0.92;
+// Below this the picture is mush: better not to post it at all.
+const MIN_SHRINK_VIDEO_KBPS = 150;
 // ffmpeg is CPU-heavy; two at a time keeps a burst of voice messages from starving the event loop's host.
 const MAX_CONCURRENT = 2;
 const STDERR_LIMIT = 4000;
@@ -66,18 +80,28 @@ export type FfmpegTranscoderOptions = {
   ffmpegPath?: string;
   ffprobePath?: string;
   timeoutMs?: number;
+  shrinkTimeoutMs?: number;
 };
+
+/** The long side for a video bitrate: 720p when there are bits for it, down to 360p. */
+function shrinkDimension(videoKbps: number): number {
+  if (videoKbps >= 1000) return 1280;
+  if (videoKbps >= 500) return 854;
+  return 640;
+}
 
 export class FfmpegTranscoder implements MediaTranscoder {
   private readonly ffmpeg: string;
   private readonly ffprobe: string;
   private readonly timeoutMs: number;
+  private readonly shrinkTimeoutMs: number;
   private readonly slots = new Semaphore(MAX_CONCURRENT);
 
   constructor(opts: FfmpegTranscoderOptions = {}) {
     this.ffmpeg = opts.ffmpegPath ?? 'ffmpeg';
     this.ffprobe = opts.ffprobePath ?? 'ffprobe';
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.shrinkTimeoutMs = opts.shrinkTimeoutMs ?? DEFAULT_SHRINK_TIMEOUT_MS;
   }
 
   probe(input: Buffer): Promise<ProbeResult> {
@@ -110,6 +134,48 @@ export class FfmpegTranscoder implements MediaTranscoder {
         }
       }
       return { durationSecs: probe.durationSecs, frames, audio };
+    });
+  }
+
+  shrinkVideo(input: Buffer, opts: { maxBytes: number; maxSeconds: number }): Promise<ShrunkVideo | undefined> {
+    return this.withInput(input, async (file, dir) => {
+      const probe = await this.probeFile(file);
+      const durationSecs = probe.durationSecs;
+      if (!probe.hasVideo || !durationSecs || durationSecs > opts.maxSeconds) return undefined;
+      let totalKbps = (opts.maxBytes * 8 * SHRINK_HEADROOM) / durationSecs / 1000;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const audioKbps = probe.hasAudio ? (totalKbps >= 800 ? 96 : 64) : 0;
+        const videoKbps = Math.floor(totalKbps - audioKbps);
+        if (videoKbps < MIN_SHRINK_VIDEO_KBPS) return undefined;
+        const max = shrinkDimension(videoKbps);
+        const out = path.join(dir, `shrunk-${attempt}.mp4`);
+        await this.run(
+          this.ffmpeg,
+          [
+            ...['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', file],
+            ...['-map', '0:v:0', ...(probe.hasAudio ? ['-map', '0:a:0'] : []), '-sn', '-dn', '-map_metadata', '-1'],
+            '-vf',
+            `scale=w='min(${max},iw)':h='min(${max},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2`,
+            ...['-fpsmax', '30', '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'],
+            ...[
+              '-b:v',
+              `${videoKbps}k`,
+              '-maxrate',
+              `${Math.floor(videoKbps * 1.5)}k`,
+              '-bufsize',
+              `${videoKbps * 2}k`,
+            ],
+            ...(probe.hasAudio ? ['-c:a', 'aac', '-b:a', `${audioKbps}k`, '-ac', '2'] : ['-an']),
+            ...['-movflags', '+faststart', '-f', 'mp4', out],
+          ],
+          this.shrinkTimeoutMs,
+        );
+        const data = await fs.readFile(out);
+        if (data.byteLength <= opts.maxBytes) return { data, durationSecs };
+        // The encoder overshot (busy footage): aim lower by what it missed, plus a margin.
+        totalKbps *= (opts.maxBytes / data.byteLength) * 0.9;
+      }
+      return undefined;
     });
   }
 
@@ -215,15 +281,15 @@ export class FfmpegTranscoder implements MediaTranscoder {
     return frames;
   }
 
-  private run(command: string, args: string[]): Promise<RunResult> {
+  private run(command: string, args: string[], timeoutMs = this.timeoutMs): Promise<RunResult> {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
       const stdout: Buffer[] = [];
       let stderr = '';
       const timer = setTimeout(() => {
         child.kill('SIGKILL');
-        reject(new Error(`${command} timed out after ${this.timeoutMs}ms`));
-      }, this.timeoutMs);
+        reject(new Error(`${command} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
 
       child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
       child.stderr.on('data', (chunk: Buffer) => {

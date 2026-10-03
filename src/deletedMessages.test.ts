@@ -29,10 +29,13 @@ function makeReposter(opts: {
   mode?: 'edgy' | 'always';
   attachmentBytes?: Buffer | undefined;
   media?: Partial<JudgeMediaDeps>;
+  shrink?: (data: Buffer) => Promise<Buffer | undefined>;
   now?: () => number;
 } = {}) {
   const judgeCalls: JudgeInput[] = [];
   const sendCalls: SendCall[] = [];
+  const fetchCalls: Array<{ url: string; maxBytes: number }> = [];
+  const shrinkCalls: Buffer[] = [];
   const reposter = new DeletedMessageReposter({
     userIds: () => [JASPER],
     windowMs: () => 60_000,
@@ -42,15 +45,24 @@ function makeReposter(opts: {
       return 'verdict' in opts ? opts.verdict : true;
     },
     judgeMedia: (content, attachments) => describeForJudge(content, attachments, { ...OFFLINE_MEDIA, ...opts.media }),
-    fetchAttachment: async () => opts.attachmentBytes,
+    fetchAttachment: async (url, maxBytes) => {
+      fetchCalls.push({ url, maxBytes });
+      return opts.attachmentBytes;
+    },
+    shrinkVideo: async (data) => {
+      shrinkCalls.push(data);
+      return opts.shrink ? opts.shrink(data) : undefined;
+    },
     send: (async (...args: SendCall) => {
       sendCalls.push(args);
       return args[2].map((_, index) => ({ id: `repost-${sendCalls.length}-${index}` }));
     }) as unknown as typeof sendViaWebhook,
     now: opts.now ?? (() => T0),
   });
-  return { reposter, judgeCalls, sendCalls };
+  return { reposter, judgeCalls, sendCalls, fetchCalls, shrinkCalls };
 }
+
+const MB = 1024 * 1024;
 
 function jasperMessage(overrides: Parameters<typeof createFakeMessage>[0] = {}) {
   return createFakeMessage({
@@ -296,6 +308,113 @@ describe('DeletedMessageReposter', () => {
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
     expect(looked).toBe(false);
     expect(sendCalls).toHaveLength(1);
+  });
+
+  it('saves a video too big to upload, and reposts it shrunk under the limit as an .mp4', async () => {
+    const original = Buffer.alloc(11 * MB, 1);
+    const shrunk = Buffer.from('shrunk-mp4');
+    const sampled: Buffer[] = [];
+    const { reposter, sendCalls, fetchCalls, shrinkCalls } = makeReposter({
+      attachmentBytes: original,
+      shrink: async () => shrunk,
+      media: {
+        sampleVideo: async (input) => {
+          sampled.push(input);
+          return { durationSecs: 40, frames: [Buffer.from('frame')] };
+        },
+      },
+    });
+    const fake = jasperMessage({
+      content: 'oops',
+      attachments: [
+        { url: 'https://cdn.discordapp.com/attachments/1/2/IMG_0042.MOV', contentType: 'video/quicktime', name: 'IMG_0042.MOV', size: 40 * MB },
+      ],
+    });
+
+    reposter.observe(fake.message);
+    expect(fetchCalls).toEqual([{ url: 'https://cdn.discordapp.com/attachments/1/2/IMG_0042.MOV', maxBytes: 100 * MB }]);
+    expect(reposter.heldBytes).toBe(40 * MB);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+
+    // The judge watched the original; only the repost is shrunk. (Identity checks: deep-comparing 11 MB is slow.)
+    expect(sampled).toHaveLength(1);
+    expect(sampled[0]).toBe(original);
+    expect(shrinkCalls).toHaveLength(1);
+    expect(shrinkCalls[0]).toBe(original);
+    expect(sendCalls[0][2]).toEqual([
+      { content: 'oops', allowedMentions: { parse: [] }, files: [{ attachment: shrunk, name: 'IMG_0042.mp4' }] },
+    ]);
+    expect(reposter.heldBytes).toBe(0);
+  });
+
+  it("leaves out a video it can't shrink, and posts nothing when the video was the whole message", async () => {
+    const big = Buffer.alloc(11 * MB, 1);
+    const video = { url: 'https://cdn.discordapp.com/attachments/1/2/long.mp4', contentType: 'video/mp4', name: 'long.mp4', size: 60 * MB };
+    const failing = makeReposter({ attachmentBytes: big, shrink: async () => undefined });
+    const alone = jasperMessage({ content: '', attachments: [video] });
+    failing.reposter.observe(alone.message);
+    expect(await failing.reposter.handleDelete(alone.message)).toBe('empty');
+    expect(failing.sendCalls).toHaveLength(0);
+
+    const crashing = makeReposter({
+      attachmentBytes: big,
+      shrink: async () => {
+        throw new Error('ffmpeg timed out');
+      },
+    });
+    const captioned = jasperMessage({ content: 'caption', attachments: [video] });
+    crashing.reposter.observe(captioned.message);
+    expect(await crashing.reposter.handleDelete(captioned.message)).toBe('reposted');
+    expect(crashing.sendCalls[0][2]).toEqual([{ content: 'caption', allowedMentions: { parse: [] } }]);
+  });
+
+  it('never downloads what could not be reposted: a picture over the limit, a video over 100 MB', async () => {
+    const { reposter, sendCalls, fetchCalls } = makeReposter({ mode: 'always', attachmentBytes: Buffer.from('x') });
+    const fake = jasperMessage({
+      attachments: [
+        { url: 'https://cdn.discordapp.com/attachments/1/2/huge.png', contentType: 'image/png', name: 'huge.png', size: 12 * MB },
+        { url: 'https://cdn.discordapp.com/attachments/1/2/movie.mp4', contentType: 'video/mp4', name: 'movie.mp4', size: 150 * MB },
+      ],
+    });
+
+    reposter.observe(fake.message);
+    expect(fetchCalls).toEqual([]);
+    expect(reposter.heldBytes).toBe(0);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+    expect(sendCalls[0][2]).toEqual([{ content: 'something edgy', allowedMentions: { parse: [] } }]);
+  });
+
+  it('holds at most 300 MB of big videos at once, and frees them as snapshots go', async () => {
+    let now = T0;
+    const { reposter, fetchCalls } = makeReposter({ now: () => now, attachmentBytes: Buffer.from('x') });
+    const post = (id: string) => {
+      const fake = jasperMessage({
+        messageId: id,
+        createdAt: new Date(now),
+        attachments: [{ url: `https://cdn.discordapp.com/attachments/1/2/${id}.mp4`, contentType: 'video/mp4', name: `${id}.mp4`, size: 90 * MB }],
+      });
+      reposter.observe(fake.message);
+      return fake.message;
+    };
+
+    const first = post('v1');
+    post('v2');
+    const third = post('v3');
+    post('v4');
+    expect(fetchCalls.map((c) => c.url.split('/').pop())).toEqual(['v1.mp4', 'v2.mp4', 'v3.mp4']);
+    expect(reposter.heldBytes).toBe(270 * MB);
+
+    // A deletion handled frees its video; so does the bot's own deletion.
+    await reposter.handleDelete(first);
+    reposter.forget(third.id);
+    expect(reposter.heldBytes).toBe(90 * MB);
+    post('v5');
+    expect(fetchCalls).toHaveLength(4);
+
+    // Snapshots past the window let theirs go too.
+    now = T0 + 120_000;
+    reposter.observe(jasperMessage({ messageId: 'later', createdAt: new Date(now) }).message);
+    expect(reposter.heldBytes).toBe(0);
   });
 
   it('still reposts the text when an attachment could not be downloaded', async () => {
