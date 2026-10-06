@@ -7,6 +7,7 @@ import { logger } from '../../../logger';
 import { archiveInput, snowflake } from '../../../test-support/fakeArchive';
 import { MemoryStore } from '../memoryStore';
 import { NotesStore } from '../notes/notesStore';
+import { NOTE_LIMITS } from '../notes/schema';
 import {
   checkNotesTree,
   importNotesAtStartup,
@@ -311,14 +312,16 @@ describe('importNotesAtStartup', () => {
   });
 
   it('rolls everything back when the store refuses one write (all or nothing)', () => {
-    // 13 circles for Remi: over the per-member limit, found only by the store.
+    // One circle more than the per-member limit for Remi, found only by the store.
     const circles: Record<string, string> = {};
-    for (let i = 0; i < 13; i++) {
+    for (let i = 0; i <= NOTE_LIMITS.maxCirclesPerMember; i++) {
       circles[`circles/c${i}.md`] = `---\ntitle: C${i}\nmembers: [{"id": "${REMI}"}, {"id": "${DALE}"}]\n---\nx`;
     }
     writeTree(dir, { ...goodTree(), ...circles });
     const outcome = importNotesAtStartup({ dir, memory, notes, archive });
-    expect(outcome?.status === 'refused' && outcome.errors.join('\n')).toContain('over the limit of 12');
+    expect(outcome?.status === 'refused' && outcome.errors.join('\n')).toContain(
+      `over the limit of ${NOTE_LIMITS.maxCirclesPerMember}`,
+    );
     expect(notes.listAllNotes()).toEqual([]);
     expect(notes.getDreamState({ scope: 'person', ownerId: REMI }).journalWatermark).toBe(0);
     expect(memory.getIdentityById(REMI)).toBeDefined();
