@@ -466,7 +466,7 @@ The answer is JSON:
 circle written in `circles` without being listed there is live again. An occasion without a `status` keeps its
 stored one (a new one is planned, or past when its dates are behind); its `circle` must be an existing circle.
 
-It is validated (profile present, sizes, slugs, markdown only, no Discord markup, no ids of other people unless
+It is validated (a profile for someone who has none yet; someone with one may leave it out, unchanged; sizes, slugs, markdown only, no Discord markup, no ids of other people unless
 they were in the input, circle membership and occasion participants' shape and dates, an occasion's dates (it
 can't end before it starts); a rewritten circle keeps every member it has, current or former, since someone who
 left gets an `until` and only the owner's edit removes a member, and a rewritten occasion every participant; an

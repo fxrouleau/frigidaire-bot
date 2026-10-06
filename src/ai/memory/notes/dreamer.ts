@@ -1202,8 +1202,10 @@ function passagesFor(deps: DreamDeps, rows: Memory[], ctx: JournalRenderContext)
  * source/speaker, recurrence and seen span, related members, quote) and the cited passages of the entries
  * that matter most (corrections, traits, recurring facts); today's date. One MEMORY_DREAM_MODEL call (plus
  * one repair round when the answer is refused); the answer is parsed with parseNotesOutput({ scope:
- * 'person', requireProfile: true, allowedIds }) and saved with applyNotesOutput(..., { updatedBy: 'dream'
- * }); the watermark moves to the highest journal_seq it read. Never throws: failures come back as 'failed'.
+ * 'person', requireProfile, allowedIds }) and saved with applyNotesOutput(..., { updatedBy: 'dream' }); the
+ * watermark moves to the highest journal_seq it read. Never throws: failures come back as 'failed'. The
+ * profile is required only from someone who has none yet: otherwise an answer that leaves it out leaves it
+ * unchanged (GLM 5.3 left an unchanged profile out of most topic-only answers, and each was refused).
  */
 export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<DreamOutcome> {
   const ownerId = canonicalUserId(rawOwnerId);
@@ -1241,6 +1243,8 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
     });
     const allowedIds = allowedIdsFrom(identities, [...accounts, ...circleMemberIds(shared.notes)]);
     const watermark = highestSeq(rows);
+    // Someone with a profile may leave it out of an answer (unchanged); someone without one must get one.
+    const requireProfile = deps.notes.getNote(owner, PROFILE_TOPIC) === undefined;
     const basis = notesBasis(deps.notes, owner);
 
     const model = deps.model ?? config.dream.model;
@@ -1263,7 +1267,7 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
         }),
       check: (text) =>
         checkAndSaveDream(deps, owner, text, {
-          parse: { scope: 'person', requireProfile: true, allowedIds },
+          parse: { scope: 'person', requireProfile, allowedIds },
           basis,
           excerptOnly: shared.circles.excerptOnly,
           occasionsExcerptOnly: shared.occasions.excerptOnly,
