@@ -1,7 +1,8 @@
-// Images for the auto-react judge: a post's picture is often the whole joke. Only Discord-hosted URLs are
-// fetched (attachments on the CDN, embed images through Discord's media proxy), so nothing here reaches
-// an arbitrary host. Each image is downscaled before it is inlined: the judge only needs to get the joke,
-// and image tokens are most of the cost of a call that runs on nearly every post.
+// Images for the auto-react judge (a post's picture is often the whole joke) and for memory capture. Only
+// Discord-hosted URLs are fetched (attachments on the CDN, embed images through Discord's media proxy), so
+// nothing here reaches an arbitrary host. Each image is downscaled and inlined as a data URI: the model only
+// needs the gist, image tokens are most of the cost of a call, and a raw URL would make OpenRouter fetch it
+// itself, which Discord's proxy refuses now and then (the whole request then fails with a 400).
 import sharp from 'sharp';
 import { logger } from '../logger';
 
@@ -13,7 +14,7 @@ const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_DIMENSION = 768;
 const TIMEOUT_MS = 8000;
 
-type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+type FetchLike = (url: string, init?: { signal?: AbortSignal; redirect?: RequestRedirect }) => Promise<Response>;
 
 export function isDiscordMediaUrl(url: string): boolean {
   try {
@@ -34,9 +35,10 @@ export async function loadImageDataUri(
 ): Promise<string | undefined> {
   if (!isDiscordMediaUrl(url)) return undefined;
   try {
-    const response = await fetchImpl(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    // A redirect could lead off Discord's hosts (anything else goes through the guarded fetch): refused.
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(TIMEOUT_MS), redirect: 'error' });
     if (!response.ok) {
-      logger.debug(`autoReact: image fetch failed (HTTP ${response.status})`);
+      logger.debug(`images: fetch failed (HTTP ${response.status})`);
       return undefined;
     }
     const declared = Number(response.headers.get('content-length') ?? 0);
@@ -51,7 +53,7 @@ export async function loadImageDataUri(
       .toBuffer();
     return `data:image/jpeg;base64,${jpeg.toString('base64')}`;
   } catch (error) {
-    logger.debug('autoReact: could not load an image:', error);
+    logger.debug('images: could not load an image:', error);
     return undefined;
   }
 }

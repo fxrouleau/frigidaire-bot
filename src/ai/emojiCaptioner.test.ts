@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { chatCompletionBody, createCapturingClient } from '../test-support/capturingClient';
 import { composeCaption, describeEmojiUsage, normalizeUsagePhrase, splitCaption } from './emojiCaptioner';
 import { FEATURE_HEADER } from './usage';
@@ -59,24 +59,33 @@ describe('describeEmojiUsage', () => {
     uses: ['- reacted to: "the printer is on fire again"', '- replying to "flight cancelled": ":SAJ:"'],
   };
 
-  it('asks the caption model with the uses and the image: ZDR-routed, tagged emoji_caption', async () => {
+  it('asks the usage model (GLM 5.3 by default) with the uses, text only: ZDR-routed, low effort, tagged emoji_caption', async () => {
     const { client, requests } = createCapturingClient([
       { body: chatCompletionBody('for resigned "bruh" at absurd moments') },
     ]);
-    expect(await describeEmojiUsage({ ...input, client, model: 'anthropic/claude-opus-4.7' })).toBe(
-      'for resigned "bruh" at absurd moments',
-    );
+    expect(await describeEmojiUsage({ ...input, client })).toBe('for resigned "bruh" at absurd moments');
     const [request] = requests;
     expect(request.headers.get(FEATURE_HEADER)).toBe('emoji_caption');
-    expect(request.body).toMatchObject({ model: 'anthropic/claude-opus-4.7', provider: { zdr: true } });
-    const content = (request.body.messages as Array<{ content: Array<Record<string, unknown>> }>)[0].content;
-    expect(content[0].text).toContain('The emoji is "SAJ"');
-    expect(content[0].text).toContain('Its current caption is "crying cat; for sadness, pleading"');
-    expect(content[0].text).toContain(input.uses.join('\n'));
-    expect(content[1]).toEqual({
-      type: 'image_url',
-      image_url: { url: 'https://cdn.discordapp.com/emojis/300000000000000001.png?size=96&quality=lossless' },
+    expect(request.body).toMatchObject({
+      model: 'z-ai/glm-5.3',
+      provider: { zdr: true },
+      reasoning: { effort: 'low' },
+      max_tokens: 2000,
     });
+    // GLM 5.3 reads no images: the current caption's visual half says what the emoji shows.
+    const content = (request.body.messages as Array<{ content: unknown }>)[0].content as string;
+    expect(typeof content).toBe('string');
+    expect(content).toContain('The emoji is "SAJ"');
+    expect(content).toContain('Its current caption is "crying cat; for sadness, pleading"');
+    expect(content).toContain(input.uses.join('\n'));
+  });
+
+  it('takes another model from EMOJI_USAGE_CAPTION_MODEL', async () => {
+    vi.stubEnv('EMOJI_USAGE_CAPTION_MODEL', 'some/other-model');
+    const { client, requests } = createCapturingClient([{ body: chatCompletionBody('for hype') }]);
+    await describeEmojiUsage({ ...input, client });
+    expect(requests[0].body.model).toBe('some/other-model');
+    vi.unstubAllEnvs();
   });
 
   it('returns undefined on an API error or an empty answer', async () => {

@@ -122,7 +122,7 @@ describe('usage tracking through the real SDK', () => {
     vi.stubGlobal('fetch', async (input: string | URL | Request) => {
       requests.push(String(input));
       return jsonResponse({
-        ...chatCompletion('anthropic/claude-opus-4.7', 0.004),
+        ...chatCompletion('z-ai/glm-5.3-flash', 0.004),
         choices: [
           {
             index: 0,

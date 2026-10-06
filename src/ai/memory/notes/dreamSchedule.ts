@@ -5,9 +5,14 @@
 // still above their watermarks and wait for the next night. While another process dreams over the same
 // memory.db (a `memory bootstrap --run` catching up: dreamLease.ts), the day stays unclaimed and the night
 // runs on the first check after it is done. After a night that changed notes (or failed
-// for someone), one line goes to the report channel (MEMORY_DREAM_REPORT), never pinging anyone:
+// for someone), a report goes to the report channel (MEMORY_DREAM_REPORT), never pinging anyone: a header,
+// then one line per owner, the change summaries in full (they are capped at 300 characters already; GLM
+// writes whole sentences, and an 80-character clip cut nearly every one mid-word):
 //
-//   🌙 dream · updated 2 profiles (Remi: new job at the bakery; Dale: quit Valorant) · group: new lore · $0.18
+//   🌙 dream · Sep 26 · 2 updated · 1 failed, retried tomorrow · $0.18
+//   • Remi [profile, work]: new job at the bakery
+//   • the group [lore]: new lore: the 2026 LAN
+//   ✖ Dale: "profile" too long (4,105 of 4,000) · last good dream Sep 20
 //
 // After each night the notes' version history is trimmed to the newest 50 versions per note (bootstrap and
 // owner-edit versions are always kept). The check is one bot_state read, so it simply runs every minute
@@ -21,7 +26,7 @@ import { easternParts } from '../../utils';
 import { getMemoryStore, getNotesStore } from '../index';
 import { type DreamOutcome, type NightlyDreamResult, runNightlyDream } from './dreamer';
 import { type DreamLeaseHolder, type DreamLeaseResult, takeDreamLease } from './dreamLease';
-import { easternDay } from './dreamPrompts';
+import { easternDay, easternDayOf } from './dreamPrompts';
 import { NOTE_VERSIONS_KEPT } from './notesStore';
 
 /** bot_state key: the Eastern day (YYYY-MM-DD) whose dream last ran (or started). */
@@ -33,10 +38,10 @@ export const DREAM_TICK_MS = 60_000;
  * watermarks) come first.
  */
 export const DREAM_FIRST_CHECK_DELAY_MS = 5 * 60_000;
-/** People named in the report line; the rest are counted. */
-const REPORT_MAX_NAMED = 8;
-/** Each person's change summary in the report line. */
-const REPORT_SUMMARY_CHARS = 80;
+/** Owners given a line of their own in the report (more than a night dreams); the rest are counted. */
+const REPORT_MAX_LINES = 25;
+/** A failure's reason, when it is none of the known ones. */
+const REPORT_REASON_CHARS = 120;
 
 /** Where the once-a-day watermark lives (memory.db's bot_state by default). */
 export type DreamStateStore = { get(key: string): string | undefined; set(key: string, value: string): void };
@@ -56,6 +61,49 @@ function clip(text: string, max: number): string {
   return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line;
 }
 
+const SHORT_DATE = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+/** "Sep 26" for an Eastern day (YYYY-MM-DD). */
+function shortDay(day: string): string {
+  const date = new Date(`${day}T12:00:00Z`);
+  return Number.isNaN(date.getTime()) ? day : SHORT_DATE.format(date);
+}
+
+const count = (n: string) => Number(n).toLocaleString('en-US');
+
+/** Why a dream failed, in a few words: the size refusal with its numbers, a bad answer, an API error. */
+export function failureReason(error: string): string {
+  const size = /(note|circle) "([^"]+)": the content is (\d+) characters, over the (\d+) limit/.exec(error);
+  if (size)
+    return `${size[1] === 'circle' ? 'circle ' : ''}"${size[2]}" too long (${count(size[3])} of ${count(size[4])})`;
+  if (error.includes('not a JSON object')) return 'the answer was not JSON';
+  if (error.includes('cut off at the length limit')) return 'the answer was cut off';
+  if (error.includes('the answer was empty')) return 'the answer was empty';
+  if (error.includes('the notes changed while dreaming'))
+    return 'the notes changed while it dreamed (an edit came first)';
+  if (error.includes('the profile lost its')) return 'the rewrite dropped profile sections';
+  if (error.includes('the profile shrank from')) return 'the rewrite lost half the profile';
+  return clip(error.split('; ')[0], REPORT_REASON_CHARS);
+}
+
+/** "last good dream Sep 20"; without a dream yet, "notes from Sep 27" (an import) or "no notes yet"; '' when unknown. */
+function lastGood(outcome: Extract<DreamOutcome, { status: 'failed' }>): string {
+  const day = (at: string | undefined) => (at ? easternDayOf(at) : undefined);
+  const dreamed = day(outcome.lastDreamAt ?? undefined);
+  if (dreamed) return ` · last good dream ${shortDay(dreamed)}`;
+  if (outcome.lastDreamAt !== null) return '';
+  const written = day(outcome.notesUpdatedAt);
+  return written ? ` · notes from ${shortDay(written)}, no good dream since` : ' · no notes yet';
+}
+
+/** What a dream wrote, like the log line: `profile, food, circle:chez-dv, -games`. */
+function touched(outcome: Extract<DreamOutcome, { status: 'updated' }>): string {
+  return [
+    ...outcome.written.map((n) => (n.scope === 'circle' ? `circle:${n.topic}` : n.topic)),
+    ...outcome.removed.map((n) => `-${n.scope === 'circle' ? `circle:${n.topic}` : n.topic}`),
+  ].join(', ');
+}
+
 /** `$0.18`; `<$0.01` for a few tenths of a cent. */
 export function formatUsd(cost: number): string {
   return cost > 0 && cost < 0.005 ? '<$0.01' : `$${cost.toFixed(2)}`;
@@ -66,36 +114,37 @@ function ownerName(outcome: DreamOutcome, nameOf: (userId: string) => string | u
 }
 
 /**
- * The report-channel line for a night: who was updated and what changed, the group, how many were
- * unchanged or failed, and the night's cost. Undefined when nothing changed and nothing failed (no post).
+ * The report for a night: a header (the day, how many owners were updated, unchanged or failed, the cost),
+ * then a line per updated owner (what it wrote, the change summary) and per failure (why, and since when
+ * they have had no good dream). Undefined when nothing changed and nothing failed (no post). Long reports
+ * are split on lines by the report channel.
  */
 export function formatDreamReport(
   result: NightlyDreamResult,
   nameOf: (userId: string) => string | undefined,
 ): string | undefined {
-  const updated = result.people.filter(
-    (o): o is Extract<DreamOutcome, { status: 'updated' }> => o.status === 'updated',
-  );
-  const unchanged = result.people.filter((o) => o.status === 'unchanged').length;
-  const failed = [...result.people, ...(result.group ? [result.group] : [])].filter((o) => o.status === 'failed');
-  const group = result.group?.status === 'updated' ? result.group : undefined;
-  if (updated.length === 0 && !group && failed.length === 0) return undefined;
+  const owners = [...result.people, ...(result.group ? [result.group] : [])];
+  const updated = owners.filter((o): o is Extract<DreamOutcome, { status: 'updated' }> => o.status === 'updated');
+  const failed = owners.filter((o): o is Extract<DreamOutcome, { status: 'failed' }> => o.status === 'failed');
+  const unchanged = owners.filter((o) => o.status === 'unchanged').length;
+  if (updated.length === 0 && failed.length === 0) return undefined;
 
-  const parts = ['🌙 dream'];
-  if (updated.length > 0) {
-    const named = updated
-      .slice(0, REPORT_MAX_NAMED)
-      .map((o) => `${ownerName(o, nameOf)}: ${clip(o.changeSummary || 'updated', REPORT_SUMMARY_CHARS)}`);
-    const more = updated.length > REPORT_MAX_NAMED ? `; +${updated.length - REPORT_MAX_NAMED} more` : '';
-    parts.push(`updated ${updated.length} profile${updated.length === 1 ? '' : 's'} (${named.join('; ')}${more})`);
-  }
-  if (group) parts.push(`group: ${clip(group.changeSummary || 'updated', REPORT_SUMMARY_CHARS)}`);
-  if (unchanged > 0) parts.push(`${unchanged} unchanged`);
-  if (failed.length > 0) {
-    parts.push(`${failed.length} failed (${failed.map((o) => ownerName(o, nameOf)).join(', ')}; retried tomorrow)`);
-  }
-  if (result.costUsd !== undefined) parts.push(formatUsd(result.costUsd));
-  return parts.join(' · ');
+  const header = [`🌙 dream · ${shortDay(result.day)}`];
+  if (updated.length > 0) header.push(`${updated.length} updated`);
+  if (unchanged > 0) header.push(`${unchanged} unchanged`);
+  if (failed.length > 0) header.push(`${failed.length} failed, retried tomorrow`);
+  if (result.costUsd !== undefined) header.push(formatUsd(result.costUsd));
+
+  const lines = [
+    ...updated.map((o) => {
+      const what = touched(o);
+      return `• ${ownerName(o, nameOf)}${what ? ` [${what}]` : ''}: ${o.changeSummary.trim() || '(no summary)'}`;
+    }),
+    ...failed.map((o) => `✖ ${ownerName(o, nameOf)}: ${failureReason(o.error)}${lastGood(o)}`),
+  ];
+  const shown = lines.slice(0, REPORT_MAX_LINES);
+  const more = lines.length > shown.length ? [`… and ${lines.length - shown.length} more`] : [];
+  return [header.join(' · '), ...shown, ...more].join('\n');
 }
 
 /** The night's one log line. */

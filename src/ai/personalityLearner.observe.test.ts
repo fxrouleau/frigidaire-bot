@@ -79,9 +79,16 @@ function channelServing(messages: Message[] | (() => Promise<Message[]>)): FakeC
   return { client, fetchCalls };
 }
 
-function learnerWith(replies: ScriptedReply[], minMessages = 3) {
+/** A stand-in for the image download: every URL "loads" as a recognizable data URI, never over the network. */
+const inline = (url: string) => `data:image/jpeg;base64,${url}`;
+
+function learnerWith(
+  replies: ScriptedReply[],
+  minMessages = 3,
+  loadImage: (url: string) => Promise<string | undefined> = async (url) => inline(url),
+) {
   const { client, requests } = createCapturingClient(replies);
-  const learner = new PersonalityLearner(store, { client, minMessages, intervalMs: 60_000 });
+  const learner = new PersonalityLearner(store, { client, minMessages, intervalMs: 60_000, loadImage });
   learner.trackActivity(CHANNEL_ID);
   return { learner, requests };
 }
@@ -180,7 +187,32 @@ describe('PersonalityLearner observation cycle', () => {
     const images = partsOf(requests[0])
       .filter((p) => p.type === 'image_url')
       .map((p) => p.image_url?.url);
-    expect(images).toEqual(['https://media.discordapp.net/external/a.jpg', 'https://origin.example/thumb.jpg']);
+    expect(images).toEqual([inline('https://media.discordapp.net/external/a.jpg'), inline('https://origin.example/thumb.jpg')]);
+  });
+
+  it('sends images inline, never as URLs for OpenRouter to fetch, and a placeholder for one that fails to load', async () => {
+    const history = [
+      jasper('pic', { attachments: [{ url: 'https://cdn.discordapp.com/a/1.png', contentType: 'image/png' }] }),
+      wheelie('broken', { embeds: [{ imageUrl: 'https://origin.example/x.jpg', imageProxyUrl: 'https://images-ext-1.discordapp.net/external/x.jpg' }] }),
+      jasper('c'),
+    ];
+    const { client } = channelServing(history);
+    const loaded: string[] = [];
+    const { learner, requests } = learnerWith([noObservations()], 3, async (url) => {
+      loaded.push(url);
+      return url.includes('images-ext') ? undefined : inline(url);
+    });
+
+    await learner.observeOnce(client);
+
+    expect(loaded).toEqual(['https://cdn.discordapp.com/a/1.png', 'https://images-ext-1.discordapp.net/external/x.jpg']);
+    const parts = partsOf(requests[0]);
+    expect(parts.filter((p) => p.type === 'image_url').map((p) => p.image_url?.url)).toEqual([
+      inline('https://cdn.discordapp.com/a/1.png'),
+    ]);
+    const texts = parts.map((p) => p.text);
+    const broken = texts.findIndex((t) => t?.includes('] broken'));
+    expect(texts[broken + 1]).toBe('[image not shown]');
   });
 
   it(`keeps only the ${MAX_LEARNER_IMAGES} most recent images per request`, async () => {
@@ -194,7 +226,7 @@ describe('PersonalityLearner observation cycle', () => {
 
     const parts = partsOf(requests[0]);
     const images = parts.filter((p) => p.type === 'image_url').map((p) => p.image_url?.url);
-    expect(images).toEqual(Array.from({ length: 8 }, (_, i) => `https://cdn.example/${i + 3}.png`));
+    expect(images).toEqual(Array.from({ length: 8 }, (_, i) => inline(`https://cdn.example/${i + 3}.png`)));
     expect(parts.filter((p) => p.text === '[image not shown]')).toHaveLength(3);
   });
 

@@ -36,6 +36,7 @@ export const RUNTIME_SETTINGS: Record<string, SettingSpec> = {
   LEARNER_MODEL: { kind: 'model', description: 'memory capture model' },
   IMAGE_MODEL: { kind: 'model', description: 'generate_image model' },
   VIDEO_MODEL: { kind: 'model', description: 'the model that watches videos' },
+  EMOJI_USAGE_CAPTION_MODEL: { kind: 'model', description: 'the model that re-grounds emoji meanings from usage' },
   MEMORY_DREAM_MODEL: { kind: 'model', description: 'the nightly dream model (edits and bootstrap default to it)' },
   MEMORY_DREAM_REASONING: {
     kind: 'enum',
@@ -68,6 +69,10 @@ export const RUNTIME_SETTINGS: Record<string, SettingSpec> = {
   },
   BIRTHDAY_ANNOUNCE_HOUR: { kind: 'int', min: 0, max: 23, description: 'Eastern hour birthdays are announced from' },
   DELETE_REPOST_MODE: { kind: 'enum', values: ['edgy', 'always'], description: 'deleted-message reposts' },
+  DELETE_REPOST_VISION_MODEL: {
+    kind: 'model',
+    description: 'the model that judges what a deleted message showed (must read images)',
+  },
   // Media and links
   VOICE_AUTO_TRANSCRIBE: { kind: 'bool', description: 'transcript replies to voice messages' },
   VIDEO_DAILY_BUDGET_USD: { kind: 'number', min: 0, max: 100, description: 'daily video spend cap (0 = none)' },

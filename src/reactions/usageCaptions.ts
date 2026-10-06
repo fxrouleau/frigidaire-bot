@@ -4,12 +4,12 @@
 // captioned "sadness/pleading" is used as a resigned "bruh" at absurd moments; one captioned "deep
 // thought" is used for meh/underwhelmed/annoyed. This job keeps each caption's visual half and rewrites
 // the meaning half from real uses in the archive (reactions + typed uses, emojiUsage.ts), using the
-// caption model.
+// usage-caption model (EMOJI_USAGE_CAPTION_MODEL, GLM 5.3; text only: the visual half goes in as words).
 //
 // When: weekly (and EMOJI_RECAPTION_FROM_USAGE=1 forces a full pass at startup). Most weeks rewrite
 // nothing: an emoji is only re-grounded when it has never been, when its caption was replaced since (a
 // rename re-captions it from the image, EMOJI_FORCE_RECAPTION clears everything), or when its uses grew
-// by half since. That keeps the Opus-priced caption model to a handful of calls a week.
+// by half since. That keeps the job to a handful of calls a week.
 //
 // Not while the archive is still importing history (a fresh archive's backfill runs for hours or days):
 // the uses would be counted from the first few pages and the week-long watermark would then hold most

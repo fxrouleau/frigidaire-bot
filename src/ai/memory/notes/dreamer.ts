@@ -5,11 +5,14 @@
 //   names, ALL their current notes and circles, the journal rows above their watermark and the cited
 //   passages of the entries that matter most (dreamPrompts.ts). The answer goes through parseNotesOutput()
 //   (schema.ts, shared by every writer) and is saved with NotesStore.applyNotesOutput(), all or nothing. A
-//   refused answer (invalid JSON, a rule broken, a write the store refuses) gets ONE repair round with the
-//   errors; then the watermark moves (recordDreamSuccess) only after a successful save. A failure is
-//   recorded (recordDreamFailure) and retried the next night. They never throw. An answer drafted from
-//   notes that changed while the model was thinking (an owner edit or undo, another writer) is never saved
-//   over them: that dream fails without a repair round and the next night dreams from the new version.
+//   note that comes back over its size limit is first shrunk on its own (shrinkOversized: one small call
+//   per note, far cheaper and surer than resending the whole prompt). A refused answer (invalid JSON, a
+//   rule broken, a write the store refuses, a profile that lost its sections or half its text) gets ONE
+//   repair round with the errors (and, for a note still too long, how much to cut); then the watermark
+//   moves (recordDreamSuccess) only after a successful save. A failure is recorded (recordDreamFailure) and
+//   retried the next night. They never throw. An answer drafted from notes that changed while the model was
+//   thinking (an owner edit or undo, another writer) is never saved over them: that dream fails without a
+//   repair round and the next night dreams from the new version.
 // - runNightlyDream(): the people with new rows (most recently active first, capped), then the group when
 //   it has new rows, or at least weekly while members' notes keep changing (planGroupDream). The scheduler
 //   that calls it once per Eastern day, and the report line, live in dreamSchedule.ts.
@@ -38,11 +41,13 @@ import {
   buildEditPrompt,
   buildGroupDreamPrompt,
   buildPersonDreamPrompt,
+  CIRCLES_FULL_BUDGET_CHARS,
   easternDay,
   easternDayOf,
   excerptOnlyProblems,
   type JournalRenderContext,
   MAX_JOURNAL_ROWS_PER_DREAM,
+  type Oversize,
   pickEvidence,
   renderCircles,
   renderJournal,
@@ -55,14 +60,25 @@ import { type EvidencePassage, type EvidencePassageOptions, loadEvidencePassages
 import {
   type CircleMember,
   clampSummary,
+  extractJson,
+  maxCharsFor,
+  NOTE_LIMITS,
   type NoteOwner,
   type NoteScope,
   type NotesOutput,
   normalizeTopic,
   PROFILE_TOPIC,
   parseNotesOutput,
+  targetCharsFor,
 } from './schema';
-import { noteShapeWarnings } from './sections';
+import {
+  headingKeys,
+  noteShapeWarnings,
+  PROFILE_DAMAGE_FLOOR,
+  PROFILE_MIN_KEPT_SHARE,
+  profileDamage,
+  withoutEarlier,
+} from './sections';
 
 export type { NotesOutput } from './schema';
 export { parseNotesOutput, validateNotesOutput } from './schema';
@@ -79,6 +95,10 @@ const NOTES_MAX_TOKENS = 32_000;
 const MODEL_TIMEOUT_MS = 10 * 60_000;
 /** Repair rounds after a refused answer (each resends the whole conversation). */
 const MAX_REPAIRS = 1;
+/** Calls per oversized note: the second aims lower when the first still came back over the limit. */
+const SHRINK_ATTEMPTS = 2;
+/** A shrunk profile keeps this much more than the profile guard's minimum, so the guard never refuses it. */
+const SHRINK_GUARD_MARGIN = 100;
 /**
  * A night stops after this many dreams in a row failed with a model or network error (the API is down; the
  * rest wait for tomorrow). A refused answer (invalid, cut off, refused by the store) is that person's
@@ -145,8 +165,18 @@ export type DreamOutcome =
    * No usable answer (model error, invalid JSON, a refused write): the watermark stays; retried next night.
    * `cause`: 'error' when the call itself failed (network, API error, no key, a store error), 'answer' when
    * answers came back but none was usable. `costUsd`: what the refused answers cost, when any came back.
+   * `lastDreamAt`: the owner's last successful dream (SQLite UTC), null when they never had one; absent
+   * when unknown. `notesUpdatedAt`: without a dream, when their notes were last written (an import).
    */
-  | { status: 'failed'; owner: NoteOwner; error: string; cause: 'error' | 'answer'; costUsd?: number };
+  | {
+      status: 'failed';
+      owner: NoteOwner;
+      error: string;
+      cause: 'error' | 'answer';
+      costUsd?: number;
+      lastDreamAt?: string | null;
+      notesUpdatedAt?: string;
+    };
 
 /** Context the group pass gets: what changed in the members' notes since its last dream. */
 export type GroupDreamContext = {
@@ -255,9 +285,10 @@ type Checked<T> =
   | { ok: false; errors: string[]; final?: boolean };
 
 /**
- * Asks, checks the answer with `check` (parse, validate, and for the dream the save itself), and on a
- * refusal asks once more with the errors (unless the refusal is final). Model and network errors throw (the
- * callers turn them into failures).
+ * Asks, runs `prepare` on the answer (the dream's shrink step), checks it with `check` (parse, validate, and
+ * for the dream the save itself), and on a refusal asks once more with the errors and how much to cut from
+ * whatever is still over its size limit (unless the refusal is final). Each refusal is logged. Model and
+ * network errors throw (the callers turn them into failures).
  */
 async function draftWithRepair<T>(args: {
   client: OpenAI;
@@ -266,6 +297,14 @@ async function draftWithRepair<T>(args: {
   system: string;
   user: string;
   check: (text: string) => Checked<T>;
+  /** Whose draft, for the log ("dream: Remi (123)", "edit: the group"). */
+  label: string;
+  /** How the repair prompt sizes an oversized note: a dream aims at the target, an owner edit just under the limit. */
+  mode: 'dream' | 'edit';
+  /** The scope whose size limits apply to the answer's notes. */
+  scope: NoteScope;
+  /** Runs on each complete answer before it is checked; never throws. */
+  prepare?: (text: string) => Promise<{ text: string; costUsd?: number }>;
   /** Aborts the calls (the SDK then throws, like any model error). */
   signal?: AbortSignal;
 }): Promise<{ result: Checked<T>; costUsd?: number }> {
@@ -277,20 +316,182 @@ async function draftWithRepair<T>(args: {
   for (let attempt = 0; ; attempt++) {
     const answer = await askModel(args.client, args.model, args.feature, messages, args.signal);
     if (answer.costUsd !== undefined) costUsd = (costUsd ?? 0) + answer.costUsd;
+    let text = answer.text;
+    if (!answer.truncated && text.trim() && args.prepare) {
+      const prepared = await args.prepare(text);
+      text = prepared.text;
+      if (prepared.costUsd !== undefined) costUsd = (costUsd ?? 0) + prepared.costUsd;
+    }
     const result: Checked<T> = answer.truncated
       ? { ok: false, errors: ['the answer was cut off at the length limit'] }
-      : answer.text.trim()
-        ? args.check(answer.text)
+      : text.trim()
+        ? args.check(text)
         : { ok: false, errors: ['the answer was empty'] };
-    if (result.ok || result.final || attempt >= MAX_REPAIRS) return { result, costUsd };
+    if (result.ok || result.final) return { result, costUsd };
+    const last = attempt >= MAX_REPAIRS;
+    logger.info(
+      `${args.label}: answer ${attempt + 1} refused${last ? '' : ', asking once more'}: ${errorText(result.errors)}`,
+    );
+    if (last) return { result, costUsd };
     messages.push(
+      { role: 'assistant', content: answer.truncated ? '(an answer cut off at the length limit)' : text || '(empty)' },
       {
-        role: 'assistant',
-        content: answer.truncated ? '(an answer cut off at the length limit)' : answer.text || '(empty)',
+        role: 'user',
+        content: repairPrompt(
+          result.errors,
+          answer.truncated,
+          answer.truncated ? [] : oversizedIn(text, args.scope),
+          args.mode,
+        ),
       },
-      { role: 'user', content: repairPrompt(result.errors, answer.truncated) },
     );
   }
+}
+
+// ---- Notes that come back too long ----
+
+/** A note or circle of a raw answer over its size limit, and the JSON object it sits in (to rewrite it). */
+type OversizedEntry = Oversize & { entry: Record<string, unknown> };
+
+function contentLength(entry: Record<string, unknown>): number | undefined {
+  return typeof entry.content === 'string' ? entry.content.replace(/\r\n?/g, '\n').trim().length : undefined;
+}
+
+/** The notes and circles of a parsed answer over their size limits (by the validator's own measure). */
+function oversizedEntries(answer: unknown, scope: NoteScope): OversizedEntry[] {
+  if (!answer || typeof answer !== 'object' || Array.isArray(answer)) return [];
+  const fields = answer as Record<string, unknown>;
+  const found: OversizedEntry[] = [];
+  const objects = (raw: unknown) =>
+    (Array.isArray(raw) ? raw : []).filter(
+      (e): e is Record<string, unknown> => !!e && typeof e === 'object' && !Array.isArray(e),
+    );
+  if (scope !== 'circle') {
+    for (const entry of objects(fields.notes)) {
+      const topic = normalizeTopic(entry.topic);
+      const length = contentLength(entry);
+      if (!topic || length === undefined) continue;
+      const max = maxCharsFor(scope, topic);
+      if (length > max)
+        found.push({ kind: 'note', key: topic, length, max, target: targetCharsFor(scope, topic), entry });
+    }
+  }
+  for (const entry of objects(fields.circles)) {
+    const slug = normalizeTopic(entry.slug);
+    const length = contentLength(entry);
+    if (!slug || length === undefined || length <= NOTE_LIMITS.circleMaxChars) continue;
+    found.push({
+      kind: 'circle',
+      key: slug,
+      length,
+      max: NOTE_LIMITS.circleMaxChars,
+      target: NOTE_LIMITS.circleTargetChars,
+      entry,
+    });
+  }
+  return found;
+}
+
+/** What in an answer is over its size limit (for the repair prompt). */
+function oversizedIn(text: string, scope: NoteScope): Oversize[] {
+  const json = extractJson(text);
+  return json ? oversizedEntries(json.value, scope).map(({ entry: _entry, ...o }) => o) : [];
+}
+
+const SHRINK_SYSTEM = `You shorten one note of a Discord bot's long-term memory about the members of a private server of close friends. Rewrite the note you are given to the size asked for. Keep its markdown shape (the same headings, in the same order), every date and span, and what matters most and what is most recent; cut wording first, then minor details, then the least important footnotes of Earlier. Add nothing, and don't soften how it describes anyone. Answer with the note's markdown only.`;
+
+/** A markdown answer without the code fence a model sometimes wraps it in (and whatever it said around it). */
+function unfenced(text: string): string {
+  const trimmed = text.trim();
+  const fenced = /```[a-z]*\n([\s\S]*?)\n```/i.exec(trimmed);
+  return (fenced ? fenced[1] : trimmed).trim();
+}
+
+/**
+ * One note rewritten under its limit: up to SHRINK_ATTEMPTS calls, aiming at its target, then lower. A
+ * rewrite is used only when it keeps every section the answer's version had (Earlier may shrink away), is
+ * at least half the target, and, for a profile, keeps enough of the current one that the profile guard
+ * (profileRewriteProblems) won't refuse it. Undefined content when none fit.
+ */
+async function shrinkNote(
+  client: OpenAI,
+  model: string,
+  item: OversizedEntry,
+  current: string | undefined,
+): Promise<{ content?: string; costUsd?: number }> {
+  const original = String(item.entry.content).trim();
+  const sections = [...headingKeys(original)].filter((key) => key !== 'earlier');
+  const usable = (text: string): boolean => {
+    if (text.length < item.target * 0.5 || text.length > item.max) return false;
+    const keys = headingKeys(text);
+    if (!sections.every((key) => keys.has(key))) return false;
+    if (item.kind !== 'note' || item.key !== PROFILE_TOPIC || current === undefined) return true;
+    if (profileDamage(current, text).damaged) return false;
+    const kept = withoutEarlier(current).length;
+    return (
+      kept < PROFILE_DAMAGE_FLOOR || withoutEarlier(text).length >= kept * PROFILE_MIN_KEPT_SHARE + SHRINK_GUARD_MARGIN
+    );
+  };
+  let aim = item.target;
+  let costUsd: number | undefined;
+  for (let attempt = 0; attempt < SHRINK_ATTEMPTS; attempt++) {
+    const answer = await askModel(client, model, DREAM_FEATURE, [
+      { role: 'system', content: SHRINK_SYSTEM },
+      {
+        role: 'user',
+        content: `Rewrite this note to at most ${aim.toLocaleString('en-US')} characters (it is ${original.length.toLocaleString('en-US')} now):\n\n${original}`,
+      },
+    ]);
+    if (answer.costUsd !== undefined) costUsd = (costUsd ?? 0) + answer.costUsd;
+    const text = answer.truncated ? '' : unfenced(answer.text);
+    if (usable(text)) return { content: text, costUsd };
+    if (text.length > item.max) aim = Math.round(aim * 0.8);
+  }
+  return { costUsd };
+}
+
+/**
+ * The dream's shrink step: every note and circle of the answer over its size limit is rewritten on its own
+ * under it (shrinkNote), and the answer goes on with the shorter content. Whatever can't be shrunk is left
+ * as it was (the check refuses it, and the repair round says how much to cut). Never throws.
+ */
+async function shrinkOversized(
+  text: string,
+  scope: NoteScope,
+  ctx: {
+    client: OpenAI;
+    model: string;
+    label: string;
+    /** The stored content of a note or circle the answer rewrites (the profile guard compares with it). */
+    currentOf?: (kind: Oversize['kind'], key: string) => string | undefined;
+  },
+): Promise<{ text: string; costUsd?: number }> {
+  const json = extractJson(text);
+  const items = json ? oversizedEntries(json.value, scope) : [];
+  if (!json || items.length === 0) return { text };
+  let costUsd: number | undefined;
+  let changed = false;
+  for (const item of items) {
+    const what = item.kind === 'circle' ? `circle "${item.key}"` : `"${item.key}"`;
+    try {
+      const shrunk = await shrinkNote(ctx.client, ctx.model, item, ctx.currentOf?.(item.kind, item.key));
+      if (shrunk.costUsd !== undefined) costUsd = (costUsd ?? 0) + shrunk.costUsd;
+      if (shrunk.content === undefined) {
+        logger.info(
+          `${ctx.label}: ${what} came back at ${item.length} characters (limit ${item.max}) and could not be shrunk`,
+        );
+        continue;
+      }
+      item.entry.content = shrunk.content;
+      changed = true;
+      logger.info(
+        `${ctx.label}: ${what} came back at ${item.length} characters (limit ${item.max}): shrunk to ${shrunk.content.length}`,
+      );
+    } catch (error) {
+      logger.warn(`${ctx.label}: shrinking ${what} failed:`, error);
+    }
+  }
+  return { text: changed ? JSON.stringify(json.value) : text, ...(costUsd !== undefined ? { costUsd } : {}) };
 }
 
 // ---- What a writer was shown ----
@@ -410,7 +611,7 @@ function finishDream(
     const error = errorText(outcome.result.errors);
     deps.notes.recordDreamFailure(owner, error);
     logger.warn(`dream: ${label} failed${formatCost(outcome.costUsd)}: ${error}`);
-    return { status: 'failed', owner, error, cause: 'answer', ...cost };
+    return { status: 'failed', owner, error, cause: 'answer', ...cost, ...lastDream(deps, owner) };
   }
   const { output, saved } = outcome.result.value;
   deps.notes.recordDreamSuccess(owner, watermark);
@@ -467,6 +668,38 @@ function droppedMemberProblems(
   return problems;
 }
 
+const SECTION_NAMES: Record<string, string> = { now: 'Now', traits: 'Traits', circles: 'Circles & people' };
+
+/**
+ * Problems with a dream's rewrite of a person's profile that destroys it (sections.ts profileDamage: Now or
+ * two core sections lost, or less than half its text outside Earlier left). The store never refuses a note
+ * for its shape (owner edits and imports stay free-form): this is the dream's own check, so the repair
+ * round can put it right.
+ */
+function profileRewriteProblems(notes: NotesStore, owner: NoteOwner, output: NotesOutput): string[] {
+  if (owner.scope !== 'person') return [];
+  const draft = output.notes.find((n) => n.topic === PROFILE_TOPIC);
+  const current = notes.getNote(owner, PROFILE_TOPIC);
+  if (!draft || !current) return [];
+  const damage = profileDamage(current.content, draft.content);
+  if (!damage.damaged) return [];
+  const problems: string[] = [];
+  if (damage.lost.length > 0) {
+    const names = damage.lost.map((key) => `"## ${SECTION_NAMES[key] ?? key}"`);
+    problems.push(
+      `the profile lost its ${names.join(' and ')} section${names.length === 1 ? '' : 's'}: write the whole profile, every section it had`,
+    );
+  }
+  if (damage.shrunk) {
+    const before = withoutEarlier(current.content).length;
+    const after = withoutEarlier(draft.content).length;
+    problems.push(
+      `the profile shrank from ${before} to ${after} characters outside Earlier, losing more than half of it: write it in full, keeping everything that still holds`,
+    );
+  }
+  return problems;
+}
+
 /**
  * A dream's answer, checked and saved: parsed (parseNotesOutput with `parse`), refused for good when the
  * notes it was drafted from changed while the model was thinking (see changedSince: saving it would
@@ -503,6 +736,7 @@ function checkAndSaveDream(
     const problems = [
       ...excerptOnlyProblems(parsed.value, check.excerptOnly),
       ...droppedMemberProblems(deps.notes, parsed.value, check.nameOf),
+      ...profileRewriteProblems(deps.notes, owner, parsed.value),
     ];
     if (problems.length > 0) return { ok: false, errors: problems };
     const saved = deps.notes.applyNotesOutput(owner, parsed.value, {
@@ -514,6 +748,25 @@ function checkAndSaveDream(
   return deps.memory.sharedDatabase().transaction(save).immediate();
 }
 
+/**
+ * When the owner last dreamed successfully, for the report; without a dream yet, when their notes were last
+ * written (an import never stamps a dream). {} when it can't be read.
+ */
+function lastDream(deps: DreamDeps, owner: NoteOwner): { lastDreamAt?: string | null; notesUpdatedAt?: string } {
+  try {
+    const lastDreamAt = deps.notes.getDreamState(owner).lastDreamAt;
+    if (lastDreamAt) return { lastDreamAt };
+    const newest = deps.notes
+      .listNotes(owner)
+      .map((n) => n.updatedAt)
+      .sort()
+      .at(-1);
+    return newest ? { lastDreamAt: null, notesUpdatedAt: newest } : { lastDreamAt: null };
+  } catch {
+    return {};
+  }
+}
+
 /** A dream that threw (a model or network error, a store error): recorded, never rethrown. */
 function failDream(deps: DreamDeps, owner: NoteOwner, label: string, error: unknown): DreamOutcome {
   const message = describeError(error);
@@ -523,7 +776,7 @@ function failDream(deps: DreamDeps, owner: NoteOwner, label: string, error: unkn
     logger.warn(`dream: recording ${label}'s failure failed:`, recordError);
   }
   logger.warn(`dream: ${label} failed: ${message}`);
-  return { status: 'failed', owner, error: message, cause: 'error' };
+  return { status: 'failed', owner, error: message, cause: 'error', ...lastDream(deps, owner) };
 }
 
 /** The cited passages worth rereading for these rows, as a prompt section ('' when none). */
@@ -559,7 +812,7 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
   const owner: NoteOwner = { scope: 'person', ownerId };
   let label = ownerLabel(owner);
   try {
-    const rows = rowsToDream(deps.notes.newJournal(owner));
+    const rows = rowsToDream(deps.notes.newJournal(owner, { dream: true }));
     if (rows.length === 0) return { status: 'skipped', owner, reason: 'nothing-new' };
 
     const memory = deps.memory;
@@ -592,12 +845,24 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
     const watermark = highestSeq(rows);
     const basis = notesBasis(deps.notes, owner);
 
+    const model = deps.model ?? config.dream.model;
     const outcome = await draftWithRepair<Saved>({
       client,
-      model: deps.model ?? config.dream.model,
+      model,
       feature: DREAM_FEATURE,
       system: prompt.system,
       user: prompt.user,
+      label: `dream: ${label}`,
+      scope: 'person',
+      mode: 'dream',
+      prepare: (text) =>
+        shrinkOversized(text, 'person', {
+          client,
+          model,
+          label: `dream: ${label}`,
+          currentOf: (kind, key) =>
+            kind === 'note' && key === PROFILE_TOPIC ? deps.notes.getNote(owner, PROFILE_TOPIC)?.content : undefined,
+        }),
       check: (text) =>
         checkAndSaveDream(deps, owner, text, {
           parse: { scope: 'person', requireProfile: true, allowedIds },
@@ -629,7 +894,7 @@ export async function dreamGroup(
   const owner: NoteOwner = { scope: 'group' };
   const label = ownerLabel(owner);
   try {
-    const rows = rowsToDream(deps.notes.newJournal(owner));
+    const rows = rowsToDream(deps.notes.newJournal(owner, { dream: true }));
     if (rows.length === 0 && !opts.refresh) return { status: 'skipped', owner, reason: 'nothing-new' };
     const client = deps.client ?? getOpenRouterClient();
     if (!client) return failDream(deps, owner, label, new Error('OPENROUTER_API_KEY is not set'));
@@ -655,12 +920,17 @@ export async function dreamGroup(
     const watermark = Math.max(highestSeq(rows), deps.notes.getDreamState(owner).journalWatermark);
     const basis = notesBasis(deps.notes, owner);
 
+    const model = deps.model ?? config.dream.model;
     const outcome = await draftWithRepair<Saved>({
       client,
-      model: deps.model ?? config.dream.model,
+      model,
       feature: DREAM_FEATURE,
       system: prompt.system,
       user: prompt.user,
+      label: `dream: ${label}`,
+      scope: 'group',
+      mode: 'dream',
+      prepare: (text) => shrinkOversized(text, 'group', { client, model, label: `dream: ${label}` }),
       check: (text) =>
         checkAndSaveDream(deps, owner, text, {
           parse: { scope: 'group', allowedIds },
@@ -738,7 +1008,7 @@ export function planGroupDream(deps: Pick<DreamDeps, 'notes' | 'memory'>, now: D
   const state = deps.notes.getDreamState(owner);
   const changes = deps.notes.changesSince(state.lastDreamAt, { limit: GROUP_CHANGES.maxVersions });
   const context: GroupDreamContext = { personChanges: summarizePersonChanges(changes, nameResolver(deps.memory)) };
-  if (deps.notes.newJournal(owner, { limit: 1 }).length > 0) {
+  if (deps.notes.newJournal(owner, { limit: 1, dream: true }).length > 0) {
     return { run: true, why: 'new-rows', context, changedNotes: changes.length };
   }
   const last = parseSqliteUtc(state.lastDreamAt);
@@ -1038,7 +1308,13 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
 
     const nameOf = nameResolver(deps.memory);
     const identities = deps.memory.getAllIdentities();
-    const circleView = renderCircles(view.scope === 'circle' ? 'THE CIRCLE' : 'CIRCLES', view.circles, nameOf);
+    const circleView = renderCircles(
+      view.scope === 'circle' ? 'THE CIRCLE' : 'CIRCLES',
+      view.circles,
+      nameOf,
+      CIRCLES_FULL_BUDGET_CHARS,
+      { targets: false },
+    );
     const prompt = buildEditPrompt({
       now: (deps.now ?? (() => new Date()))(),
       roster: renderRoster(identities),
@@ -1057,6 +1333,9 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
       feature: EDIT_FEATURE,
       system: prompt.system,
       user: prompt.user,
+      label: `edit: ${view.what}`,
+      scope: view.scope,
+      mode: 'edit',
       signal: request.signal,
       check: (text) => {
         const parsed = parseNotesOutput(text, { scope: view.scope, allowedIds });

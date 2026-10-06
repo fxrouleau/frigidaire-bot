@@ -7,6 +7,7 @@ import type {
 import { config } from '../config';
 import { canonicalUserId } from '../linkedAccounts';
 import { logger } from '../logger';
+import { loadImageDataUri } from '../reactions/images';
 import { attributeMessage } from '../relay';
 import { citedEvidence, relatedMembers, type TranscriptLine } from './capture/citations';
 import {
@@ -43,9 +44,11 @@ const OBSERVATION_CATEGORIES = [
   'fact',
   'preference',
   'personality',
-  'event', // time-bound: expired by the TTL sweep (~14 days)
+  'event', // a dated milestone; expired by the TTL sweep (~14 days), once its owner's dream has read it
   'vibe',
-  'image', // image/GIF share observations: ephemeral by definition, expired by the TTL sweep (~24h)
+  // Image/GIF share observations (expired by the TTL sweep, ~24 h): no longer asked for, still accepted from
+  // the model and old rows. The dream never reads them (notesStore DREAM_EXCLUDED_CATEGORIES).
+  'image',
   'capability_gap',
   'pain_point',
   'feature_request',
@@ -205,6 +208,9 @@ Save only knowledge that will still be true and useful in 30 days — jobs, pref
 habits, skills, goals, server culture. NEVER record the conversation itself: that someone asked, confirmed,
 declined, arrived, responded, reacted, or shared something is transcription, not a memory. Record what a message
 REVEALS about the person, never what the message DID.
+Every row you save is folded into the bot's permanent notes about that person (nothing you save just expires):
+a row that won't matter next month sits in their notes as noise. Many conversations have nothing worth saving:
+{"observations": []} is then the right answer.
 
 OUTPUT RULES (the most important part):
 1. Each "content" field MUST be ≤80 characters. One atomic fact per row. If you notice two things, emit two observations.
@@ -226,20 +232,29 @@ OUTPUT RULES (the most important part):
    stable identity anchor even when display names change. For server-wide observations use subject "server" with
    no subject_user_id.
 
-CATEGORIES (pick the right one — some expire automatically):
-- "fact": durable facts — jobs, locations, hobbies, relationships, possessions, skills, goals
-- "preference": stated likes/dislikes and strong opinions (not casual one-off reactions)
+CATEGORIES (pick the right one):
+- "fact": durable facts — jobs, school, where they live, relationships, possessions, skills, goals, the games and
+  hobbies they keep coming back to
+- "preference": lasting likes/dislikes and strong opinions they hold (not a one-off reaction, not a rating of one
+  meal, product or show)
 - "personality": communication style and traits (NEW traits or clear changes only — see rule 4)
-- "event": plans, outings, milestones, things that happened. Anything time-bound MUST be "event" (never "fact") —
-  events expire automatically after ~2 weeks, so stale plans never pollute the bot's memory.
-- "vibe": server-wide culture — in-jokes, running bits, group dynamics (subject "server")
-- "image": a shared image/GIF/meme worth noting. Any observation describing an image share MUST be "image" — these
-  expire automatically after ~a day. If an image reveals a DURABLE fact (bought a car, got injured, moved house),
-  save that fact as "fact" instead of describing the share.
+- "event": something out of the ordinary, with its date (and place, when said) — a milestone that happened (a move,
+  a new job, an injury, a breakup, a tournament result, a big purchase) or a plan for one (a trip, an outing somewhere,
+  a concert, a tournament): "Ski trip to Tremblant with Dale planned for Feb 2027". When a known plan changes or is
+  called off, save that ("Tremblant trip called off"). NEVER the logistics (who drives, who picks up whom, who is
+  late, who brings what, what time), routine plans (gaming tonight, dinner later), or what someone ate or watched.
+- "vibe": server-wide culture — in-jokes, running bits, group dynamics (subject "server"). Not news from outside the
+  server (a streamer's win, game drama, what a card sells for) unless it became a running thing in the group.
+A shared image, GIF or meme is never an observation in itself. If an image reveals a DURABLE fact (bought a car,
+got injured, moved house), save that fact as "fact" instead of describing the share.
 
 WHAT NOT TO EXTRACT:
 - Small talk, greetings, reactions to the current moment
 - Conversation logistics — who asked, confirmed, declined, arrived, responded (fails the 30-day test)
+- The logistics of a plan (who is driving or bringing what, who is running late) and routine plans (gaming tonight)
+- Image, GIF and meme shares, and one-off ratings or reactions (a meal, a product, a video)
+- News and trivia from outside the server, unless it reveals something lasting about a member (a pro they follow)
+- Feedback about the bot itself (bugs, things it can't do): never an observation about a person
 - Single emoji usages or reactions (a person's habitual emoji style belongs in ONE personality memory described in words — never paste emoji syntax into a memory)
 - Personality restatements of a known pattern
 - Things only inferred from what others say about them — only first-hand evidence
@@ -252,11 +267,13 @@ GOOD vs BAD examples:
   GOOD: {"category":"fact","subject":"Simon","subject_user_id":"789","content":"Goal: lose 40 kg."}
   BAD:  {"category":"fact","subject":"Simon","content":"Asked what the group is getting from Costco, indicating active participation in planning."}
 
-  GOOD: {"category":"event","subject":"server","content":"Costco run + BBQ planned for Sunday June 7."}
-  BAD:  {"category":"fact","subject":"server","content":"Group plans Costco run at 11am Sunday before 2pm BBQ."}
+  GOOD: {"category":"event","subject":"Remi","subject_user_id":"321","content":"Moved to Ottawa for a new job (Sept 2026)."}
+  GOOD: {"category":"event","subject":"Remi","subject_user_id":"321","content":"Ski trip to Tremblant with Dale planned for Feb 2027."}
+  BAD:  {"category":"event","subject":"Remi","content":"Driving Saturday, has 3 seats, picking up Dale."}
+  BAD:  {"category":"event","subject":"server","content":"Gaming session planned for tonight."}
 
-  GOOD: {"category":"image","subject":"Jason","subject_user_id":"456","content":"Shared a meme about League ranked anxiety."}
-  BAD:  {"category":"personality","subject":"Jason","content":"Shared a Tenor GIF of a dancing man, reinforcing his pattern of absurdist humor."}
+  GOOD: (nothing: an image share on its own is not a memory)
+  BAD:  {"category":"fact","subject":"Dale","content":"Shared a meme about League ranked anxiety."}
 
   GOOD: {"category":"personality","subject":"Jason","subject_user_id":"456","content":"Edgy humor, loves winding people up."}
   BAD:  {"category":"personality","subject":"Jason","content":"Uses absurdist, boundary-pushing humor by sharing a joke ... reinforcing his pattern of edgy commentary."}
@@ -276,7 +293,7 @@ ${args.existingMemoriesSummary}
 Respond ONLY with a JSON object. If nothing worth saving, respond with {"observations": []}.
 {
   "observations": [
-    {"category": "fact|preference|personality|event|vibe|image", "subject": "CurrentDisplayName|server", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char statement", "evidence": {"lines": [12], "quote": "exact words from line 12"}, "related_user_ids": ["other-member-discord-id-if-shared"]}
+    {"category": "fact|preference|personality|event|vibe", "subject": "CurrentDisplayName|server", "subject_user_id": "discord-id-if-person", "content": "atomic ≤80-char statement", "evidence": {"lines": [12], "quote": "exact words from line 12"}, "related_user_ids": ["other-member-discord-id-if-shared"]}
   ],
   "identity_updates": [
     {"discord_user_id": "123", "irl_name": "Derrick", "aliases_add": ["Derek", "D"]}
@@ -351,7 +368,10 @@ Respond ONLY with a JSON object. If nothing actionable, respond with {"observati
 }
 
 // Image parts per learner request: every image is paid vision input, and a busy meme channel can post
-// dozens between cycles. The newest ones are kept; older ones become a text placeholder.
+// dozens between cycles. The newest ones are kept; older ones become a text placeholder. The kept ones are
+// downloaded and inlined (downscaled JPEG data URIs, src/reactions/images.ts): sent as raw Discord URLs,
+// OpenRouter fetched them itself, Discord's media proxy refused it now and then, and the whole capture
+// failed with a 400 ("Received 403 status code when fetching image from URL"), retry after retry.
 export const MAX_LEARNER_IMAGES = 8;
 const IMAGE_PLACEHOLDER = '[image not shown]';
 const MAX_VOICE_TRANSCRIPT_CHARS = 2_000;
@@ -397,6 +417,17 @@ function imageUrls(msg: Message): string[] {
     if (url) urls.push(url);
   }
   return urls;
+}
+
+/**
+ * An API error (it carries an HTTP status) as one line: the SDK's error objects log as ~40 lines of headers
+ * and stack. Anything else is passed through for the logger to print whole.
+ */
+function briefError(error: unknown): unknown {
+  const status = error instanceof Error ? (error as { status?: unknown }).status : undefined;
+  if (typeof status !== 'number') return error;
+  const message = (error as Error).message;
+  return message.startsWith(String(status)) ? message : `${status} ${message}`;
 }
 
 /** A transcript the media feature already produced for this message. Cache only: the learner never pays to transcribe. */
@@ -455,6 +486,11 @@ export type PersonalityLearnerOptions = {
   /** The quiet time that separates two conversations (CAPTURE_IDLE_MINUTES): where a first capture starts. */
   idleMs?: number;
   sizes?: CaptureSizes;
+  /**
+   * An image as an inline data URI, or undefined when it can't be loaded (it becomes a placeholder).
+   * Default: loadImageDataUri (Discord-hosted URLs only, downscaled).
+   */
+  loadImage?: (url: string) => Promise<string | undefined>;
 };
 
 export class PersonalityLearner {
@@ -463,6 +499,7 @@ export class PersonalityLearner {
   private readonly minMessages: number;
   private readonly idleMs: number;
   private readonly sizes: Required<CaptureSizes>;
+  private readonly loadImage: (url: string) => Promise<string | undefined>;
   private timer: NodeJS.Timeout | undefined;
   private readonly ignoredChannels: Set<string>;
   private client: OpenAI | undefined;
@@ -484,6 +521,7 @@ export class PersonalityLearner {
     };
     this.ignoredChannels = new Set(config.learner.ignoredChannels);
     this.client = opts.client;
+    this.loadImage = opts.loadImage ?? ((url) => loadImageDataUri(url));
   }
 
   start(discordClient: Client, now: number = Date.now()): void {
@@ -642,13 +680,14 @@ export class PersonalityLearner {
   /**
    * One extractor request's messages: the lead-in (text only, under its "ALREADY COVERED" header) then the
    * segment, one numbered text line per message (plus a cached voice transcript when there is one)
-   * followed by its images, capped at MAX_LEARNER_IMAGES image parts. `lines` maps each #N to its message,
-   * for the evidence the model cites.
+   * followed by its images, capped at MAX_LEARNER_IMAGES image parts, each inlined as a data URI (one that
+   * can't be loaded becomes a placeholder). `lines` maps each #N to its message, for the evidence the model
+   * cites.
    */
-  private renderSegment(
+  private async renderSegment(
     segment: Segment<CaptureItem>,
     channelId: string,
-  ): { parts: ChatCompletionContentPart[]; lines: Map<number, TranscriptLine> } {
+  ): Promise<{ parts: ChatCompletionContentPart[]; lines: Map<number, TranscriptLine> }> {
     const parts: ChatCompletionContentPart[] = [];
     const lines = new Map<number, TranscriptLine>();
     const add = (item: CaptureItem, leadIn: boolean) => {
@@ -676,14 +715,21 @@ export class PersonalityLearner {
     for (const item of segment.items) add(item, false);
 
     const capped = capImageParts(parts, MAX_LEARNER_IMAGES);
-    if (capped.dropped > 0) {
+    const inlined = await Promise.all(
+      capped.parts.map(async (part): Promise<ChatCompletionContentPart> => {
+        if (part.type !== 'image_url') return part;
+        const uri = await this.loadImage(part.image_url.url).catch(() => undefined);
+        return uri ? { type: 'image_url', image_url: { url: uri } } : { type: 'text', text: IMAGE_PLACEHOLDER };
+      }),
+    );
+    const shown = inlined.filter((part) => part.type === 'image_url').length;
+    if (capped.kept > 0 || capped.dropped > 0) {
+      const unloaded = capped.kept - shown;
       logger.info(
-        `PersonalityLearner: Including ${capped.kept} images from channel ${channelId}, dropped ${capped.dropped} older ones (cap ${MAX_LEARNER_IMAGES} per request)`,
+        `PersonalityLearner: Including ${shown} images from channel ${channelId}${capped.dropped > 0 ? `, dropped ${capped.dropped} older ones (cap ${MAX_LEARNER_IMAGES} per request)` : ''}${unloaded > 0 ? `, ${unloaded} could not be loaded` : ''}`,
       );
-    } else if (capped.kept > 0) {
-      logger.info(`PersonalityLearner: Including ${capped.kept} images from channel ${channelId}`);
     }
-    return { parts: capped.parts, lines };
+    return { parts: inlined, lines };
   }
 
   /**
@@ -941,7 +987,7 @@ export class PersonalityLearner {
         await this.observeChannel(discordClient, openai, channelId, botName, selfImprovementEnabled, now);
         this.captureFailures.delete(channelId);
       } catch (error) {
-        logger.error(`PersonalityLearner: Error processing channel ${channelId}:`, error);
+        logger.error(`PersonalityLearner: Error processing channel ${channelId}:`, briefError(error));
         this.retryLater(channelId, now + (Date.now() - started));
       }
     }
@@ -1097,7 +1143,7 @@ export class PersonalityLearner {
     },
   ): Promise<{ observations: number; identityUpdates: number }> {
     const { openai, channelId } = ctx;
-    const { parts, lines } = this.renderSegment(segment, channelId);
+    const { parts, lines } = await this.renderSegment(segment, channelId);
 
     // --- Pass 1: Personality analysis ---
     const knowledge = buildCaptureKnowledge({
@@ -1165,7 +1211,7 @@ export class PersonalityLearner {
           logger.info(`SelfImprovementLearner: No new observations from channel ${channelId}`);
         }
       } catch (error) {
-        logger.warn('SelfImprovementLearner: Self-improvement pass failed, continuing:', error);
+        logger.warn('SelfImprovementLearner: Self-improvement pass failed, continuing:', briefError(error));
       }
     }
 

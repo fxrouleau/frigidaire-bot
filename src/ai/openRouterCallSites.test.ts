@@ -36,11 +36,9 @@ const USAGE_EXEMPT: Record<string, string> = {
 const CLIENT_FACTORY = 'ai/openRouterClient.ts';
 // A content call whose body caps max_tokens below this must send `reasoning` (e.g. { effort: 'low' }).
 const UNREASONED_MIN_MAX_TOKENS = 4000;
-// Files whose capped calls send no reasoning override, and why that is fine.
-const REASONING_EXEMPT: Record<string, string> = {
-  'ai/emojiCaptioner.ts':
-    "EMOJI_CAPTION_MODEL defaults to Claude Opus, which doesn't reason unless asked: an effort would switch paid thinking on",
-};
+// Files whose capped calls send no reasoning override, and why that is fine (none today: the emoji captioner,
+// the last one, moved from Claude Opus to GLM, which reasons unless told otherwise).
+const REASONING_EXEMPT: Record<string, string> = {};
 
 type CallSite = { file: string; line: number; callee: string; kind: 'content' | 'sdk' | 'raw' };
 type Audit = { calls: CallSite[]; problems: string[]; referencesOpenRouter: boolean; recordsUsage: boolean };
@@ -362,7 +360,7 @@ describe('the call-site scanner', () => {
       `,
     );
     expect(audit.problems).toEqual([]);
-    expect(auditSource('ai/emojiCaptioner.ts', "await o.chat.completions.create({ max_tokens: 1, provider: { zdr: true } }, featureRequestOptions('x'));").problems).toEqual([]);
+    expect(auditSource('ai/emojiCaptioner.ts', "await o.chat.completions.create({ max_tokens: 1, provider: { zdr: true } }, featureRequestOptions('x'));").problems).toHaveLength(1);
   });
 
   it('accepts the shapes the code base uses', () => {

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 const ENTRY_POINTS: Array<[file: string, specifier: string]> = [
   ['app.ts', './loadEnv'],
   ['ai/memory/bootstrap/cli.ts', '../../../loadEnv'],
+  ['evals/deletedRepost/runEval.ts', '../../loadEnv'],
   ['evals/persona/cli.ts', '../../loadEnv'],
   ['gate/eval/runEval.ts', '../../loadEnv'],
 ];

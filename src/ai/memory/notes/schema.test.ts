@@ -102,6 +102,15 @@ describe('validateNotesOutput', () => {
       { scope: 'person', requireProfile: true },
     );
     expect(noProfile).toEqual({ ok: false, errors: ['a person\'s notes must include the "profile" topic'] });
+    // A profile refused for its size is still there: only the size is wrong.
+    const tooLong = validateNotesOutput(
+      { notes: [{ ...profile, content: 'x'.repeat(NOTE_LIMITS.profileMaxChars + 1) }], change_summary: '' },
+      { scope: 'person', requireProfile: true },
+    );
+    expect(tooLong).toEqual({
+      ok: false,
+      errors: [`note "profile": the content is ${NOTE_LIMITS.profileMaxChars + 1} characters, over the 4000 limit`],
+    });
     const removal = validateNotesOutput(
       { notes: [], removed_topics: ['profile'], change_summary: '' },
       { scope: 'person' },

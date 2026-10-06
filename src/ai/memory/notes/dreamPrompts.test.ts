@@ -15,10 +15,12 @@ import {
   pickEvidence,
   renderCircles,
   renderJournal,
+  renderNotes,
   renderPassages,
   renderRoster,
   repairPrompt,
   seenSpan,
+  sizeLine,
   sourceLabel,
   todayLine,
 } from './dreamPrompts';
@@ -185,7 +187,9 @@ describe('renderCircles', () => {
     const recent = circle();
     const old = circle({ id: 2, topic: 'old-crew', title: 'The old crew', content: 'x'.repeat(900), updatedAt: '2025-01-01 00:00:00' });
     const { text, excerptOnly } = renderCircles('CIRCLES', [old, recent], (id) => NAMES[id], 500);
-    expect(text).toContain('<circle slug="mtg" title="The MTG crew" version="3" updated="2026-09-20">');
+    expect(text).toContain(
+      `<circle slug="mtg" title="The MTG crew" version="3" updated="2026-09-20" size="${recent.content.length} of 6,000 characters; aim for 5,000 at most">`,
+    );
     expect(text).toContain('Also called: the drafters');
     expect(text).toContain(`  - Remi (id:${REMI}; since 2021, organizer)`);
     expect(text).toContain(`  - Dale (id:${DALE}; 2021–2023-02, former)`);
@@ -273,5 +277,51 @@ describe('prompts', () => {
     expect(text).toContain('- … and 3 more');
     expect(text).toContain('Answer again with the whole corrected JSON object only.');
     expect(repairPrompt(['the answer was cut off at the length limit'], true)).toMatch(/^Your answer was cut off/);
+  });
+
+  it('say in numbers how much an oversized note has to lose', () => {
+    const text = repairPrompt(['note "profile": the content is 4103 characters, over the 4000 limit'], false, [
+      { kind: 'note', key: 'profile', length: 4103, max: 4000, target: 3200 },
+      { kind: 'circle', key: 'mtg', length: 6400, max: 6000, target: 5000 },
+    ]);
+    expect(text).toContain(
+      '- Rewrite "profile" to about 3,200 characters: it is 4,103, so cut about 950 (some 150 words).',
+    );
+    expect(text).toContain('- Rewrite the circle "mtg" to about 5,000 characters: it is 6,400, so cut about 1,400');
+  });
+
+  it("show each note's size against its target and limit, and how many topics there are", () => {
+    const profile = { ...circle(), scope: 'person' as const, topic: 'profile', title: 'Remi', content: 'x'.repeat(3961) };
+    const games = { ...profile, topic: 'games', title: 'Games', content: 'y'.repeat(120) };
+    expect(sizeLine(profile)).toBe('3,961 of 4,000 characters, over the 3,200 target: shrink it');
+    expect(sizeLine(games)).toBe('120 of 8,000 characters; aim for 6,500 at most');
+    const text = renderNotes('CURRENT NOTES on Remi', [profile, games]);
+    expect(text).toMatch(/^CURRENT NOTES on Remi \(2 of 10 topics\):/);
+    expect(text).toContain('size="3,961 of 4,000 characters, over the 3,200 target: shrink it">');
+    expect(renderNotes('NOTES', [profile], { targets: false })).toContain('size="3,961 of 4,000 characters">');
+  });
+
+  it('ask an owner edit to get just under the limit, not down to the target', () => {
+    const text = repairPrompt(['too long'], false, [{ kind: 'note', key: 'profile', length: 4050, max: 4000, target: 3200 }], 'edit');
+    expect(text).toContain('- Shorten "profile" to under 3,900 characters: it is 4,050, so cut about 150, changing as little else as you can.');
+    expect(text).not.toContain('3,200');
+  });
+
+  it('tell the dreams the targets and every writer the hard limits, and which events are worth keeping', () => {
+    for (const system of [PERSON_DREAM_SYSTEM, GROUP_DREAM_SYSTEM, EDIT_SYSTEM]) {
+      expect(system).toContain('Size limits: a profile 4,000 characters, any other topic note 8,000, a circle 6,000');
+    }
+    for (const system of [PERSON_DREAM_SYSTEM, GROUP_DREAM_SYSTEM]) {
+      expect(system).toContain('Aim for about 3,200 characters for a profile');
+    }
+    // An owner edit changes nothing else: it is never told to shrink toward a target.
+    expect(EDIT_SYSTEM).not.toContain('Aim for about');
+    for (const system of [PERSON_DREAM_SYSTEM, GROUP_DREAM_SYSTEM]) {
+      expect(system).toContain('An upcoming plan goes in Now as upcoming, with its date and who is in it');
+      expect(system).toContain('once TODAY is past its date, write it as what happened');
+      expect(system).toContain('at most about 100 characters');
+    }
+    expect(PERSON_DREAM_SYSTEM).toContain('about 3,200 characters (some 500 words) in all');
+    expect(PERSON_DREAM_SYSTEM).not.toContain('200–400 words');
   });
 });

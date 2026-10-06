@@ -404,7 +404,9 @@ describe('describeEffectiveConfig', () => {
     const tokens = describeEffectiveConfig().split(' ');
     expect(tokens).toContain('ramble=on(users:1,channels:1,run:3,long:900)');
     expect(tokens).toContain('linkReader=on(previews:on,videos:off)');
-    expect(tokens).toContain('deleteRepost=on(users:1,mode:edgy,judge:typesafe/jev-1.13)');
+    expect(tokens).toContain(
+      'deleteRepost=on(users:1,mode:edgy,judge:typesafe/jev-1.13,vision:z-ai/glm-5.3-flash)',
+    );
   });
 
   it('shows the dream, its models when they differ, and where its report goes', () => {

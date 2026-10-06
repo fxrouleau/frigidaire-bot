@@ -268,21 +268,92 @@ describe('dreamPerson', () => {
     expect(await dreamPerson(REMI_ALT, deps(client))).toMatchObject({ status: 'updated', owner: remi });
   });
 
-  it('asks once more with the errors when the answer is refused, and saves the fixed one', async () => {
+  it('shrinks a note that comes back over its limit on its own (one small call), then saves the answer', async () => {
     await saveFact('Works day shifts at the bakery now.');
+    const long = `## Now\n${'Day shifts at the bakery since August. '.repeat(110)}`.trim();
+    const short = `## Now\n${'Day shifts at the bakery. '.repeat(80)}`.trim();
+    expect(long.length).toBeGreaterThan(NOTE_LIMITS.profileMaxChars);
     const { client, requests } = createCapturingClient([
-      reply({ notes: [newProfile('x'.repeat(NOTE_LIMITS.profileMaxChars + 1))], change_summary: 'too long' }, { cost: 0.02 }),
+      reply({ notes: [newProfile(long)], change_summary: 'day shifts' }, { cost: 0.02 }),
+      reply(`\`\`\`markdown\n${short}\n\`\`\``, { cost: 0.01 }),
+    ]);
+
+    const outcome = await dreamPerson(REMI, deps(client));
+
+    expect(outcome).toMatchObject({ status: 'updated', changeSummary: 'day shifts' });
+    expect(outcome.status === 'updated' ? outcome.costUsd : undefined).toBeCloseTo(0.03);
+    expect(requests).toHaveLength(2);
+    const shrink = messagesOf(requests[1]);
+    expect(shrink[0].content).toContain('You shorten one note');
+    expect(shrink[1].content).toContain(`Rewrite this note to at most 3,200 characters (it is ${long.length.toLocaleString('en-US')} now)`);
+    expect(requests[1].body.provider).toEqual({ zdr: true });
+    expect(requests[1].headers.get('X-Frigidaire-Feature')).toBe('memory_dream');
+    // The code fence is dropped; the shrunk text is what gets saved.
+    expect(notes.getNote(remi, 'profile')?.content).toBe(short);
+  });
+
+  it("never uses a shrink that drops a section the answer's note had", async () => {
+    await saveFact('Works day shifts at the bakery now.');
+    const long = `## Now\n${'Day shifts at the bakery since August. '.repeat(60)}\n\n## Traits\n${'Dry humor. '.repeat(160)}`;
+    const noTraits = `## Now\n${'Day shifts at the bakery. '.repeat(80)}`;
+    const { client, requests } = createCapturingClient([
+      reply({ notes: [newProfile(long)], change_summary: 'day shifts' }),
+      reply(noTraits),
+      reply(noTraits),
+      reply({ notes: [newProfile()], change_summary: 'day shifts' }),
+    ]);
+
+    expect(await dreamPerson(REMI, deps(client))).toMatchObject({ status: 'updated' });
+    expect(requests).toHaveLength(4);
+    expect(messagesOf(requests[3])[3].content).toContain('Rewrite "profile" to about 3,200 characters');
+    expect(notes.getNote(remi, 'profile')?.content).not.toBe(noTraits);
+  });
+
+  it('asks once more with the errors and how much to cut when a note cannot be shrunk', async () => {
+    await saveFact('Works day shifts at the bakery now.');
+    const long = 'x'.repeat(NOTE_LIMITS.profileMaxChars + 1);
+    const { client, requests } = createCapturingClient([
+      reply({ notes: [newProfile(long)], change_summary: 'too long' }, { cost: 0.02 }),
+      reply('y'.repeat(4_500), { cost: 0.001 }),
+      reply('y'.repeat(4_500), { cost: 0.001 }),
       reply({ notes: [newProfile()], change_summary: 'day shifts' }, { cost: 0.03 }),
     ]);
     const outcome = await dreamPerson(REMI, deps(client));
     expect(outcome).toMatchObject({ status: 'updated', changeSummary: 'day shifts' });
-    expect(outcome.status === 'updated' ? outcome.costUsd : undefined).toBeCloseTo(0.05);
+    expect(outcome.status === 'updated' ? outcome.costUsd : undefined).toBeCloseTo(0.052);
 
-    expect(requests).toHaveLength(2);
-    const repair = messagesOf(requests[1]);
+    expect(requests).toHaveLength(4);
+    // The second shrink aims lower than the first.
+    expect(messagesOf(requests[2])[1].content).toContain('at most 2,560 characters');
+    const repair = messagesOf(requests[3]);
     expect(repair.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'user']);
     expect(repair[3].content).toContain('Your answer could not be saved');
     expect(repair[3].content).toContain(`over the ${NOTE_LIMITS.profileMaxChars} limit`);
+    expect(repair[3].content).toContain('Rewrite "profile" to about 3,200 characters: it is 4,001, so cut about 850');
+    // A size refusal never claims the profile is missing.
+    expect(repair[3].content).not.toContain('must include the "profile" topic');
+  });
+
+  it('refuses a rewrite that destroys the profile (sections or half of it gone), and saves the repaired one', async () => {
+    const full = [
+      'Remi bakes.',
+      `## Now\n${'Works at the bakery, plays Valorant with Dale. '.repeat(20)}`,
+      `## Traits\n${'Dry humor. '.repeat(20)}`,
+      '## Circles & people\n- The MTG crew: organizer.',
+    ].join('\n\n');
+    notes.writeNotes(remi, [{ topic: 'profile', title: 'Remi', content: full }], { updatedBy: 'edit' });
+    await saveFact('Works day shifts at the bakery now.');
+    const { client, requests } = createCapturingClient([
+      reply({ notes: [newProfile('## Now\nDay shifts.')], change_summary: 'day shifts' }),
+      reply({ notes: [newProfile(full.replace('Works at the bakery', 'Works day shifts at the bakery'))], change_summary: 'day shifts' }),
+    ]);
+
+    expect(await dreamPerson(REMI, deps(client))).toMatchObject({ status: 'updated' });
+
+    const repair = messagesOf(requests[1])[3].content;
+    expect(repair).toContain('the profile lost its "## Traits" and "## Circles & people" sections');
+    expect(repair).toContain(`the profile shrank from ${full.length} to 18 characters`);
+    expect(notes.getNote(remi, 'profile')?.content).toContain('Works day shifts at the bakery');
   });
 
   it('feeds a write the store refuses back as errors (a circle the person is not in)', async () => {

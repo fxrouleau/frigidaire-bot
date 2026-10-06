@@ -82,8 +82,9 @@ speaker in `said_by`. It never expires.
 | `notes_fts` | FTS5 over active notes (title, content, aliases). A plain FTS table kept by triggers on `notes` alone: correct by construction (a delete of a missing row is harmless, unlike the external-content 'delete' command). |
 | `dream_state` | Per person and for the group: `journal_watermark` (the highest `journal_seq` folded into the notes), `last_dream_at`, `last_error`. Circles have none: the person and group dreams maintain them. |
 
-Limits, validated on every write: profile ≤ 4,000 chars, other topics ≤ 8,000, circles ≤ 6,000; ≤ 10 topics
-per person, ≤ 8 for the group; ≤ 60 active circles, nobody currently in more than 12; 2–30 members per circle;
+Limits, validated on every write: profile ≤ 4,000 chars, other topics ≤ 8,000, circles ≤ 6,000 (the writers
+aim at targets well under them, 3,200 / 6,500 / 5,000: a model can't count, and a note written up to its limit
+fails the next time anything is added); ≤ 10 topics per person, ≤ 8 for the group; ≤ 60 active circles, nobody currently in more than 12; 2–30 members per circle;
 ≤ 8 aliases. Titles are one line ≤ 80 chars. Markdown only: no Discord mention, emoji, timestamp or channel
 syntax, no `@everyone`, no HTML, and no Discord id that wasn't in the writer's input. Every write is all or
 nothing; a note breaking a rule is refused, never clamped into a different meaning.
@@ -169,9 +170,17 @@ it, dated by first sighting; summaries' WHO'S WHO uses the first lines of each p
 
 ## Capture
 
-The learner's extraction stays (the 30-day test, event/image categories, no re-saves, subject normalization,
-identity updates, attribution through `attributeMessage`, cached voice transcripts, the image cap, the
-self-improvement pass). What changes is when it reads a channel, how much it reads, and what it keeps.
+The learner's extraction stays (the 30-day test, no re-saves, subject normalization, identity updates,
+attribution through `attributeMessage`, cached voice transcripts, the image cap, the self-improvement pass).
+What changes is when it reads a channel, how much it reads, and what it keeps. Since every row now ends up in
+the permanent notes (the TTL no longer protects anything: the dream reads a row long before it expires), the
+prompt keeps `event` to dated milestones and notable plans (a trip, an outing somewhere), never logistics,
+routine plans or meals; asks
+for no image shares (a durable fact an image reveals is a `fact`; `image` rows are still accepted, and the dream
+never reads them); and leaves out outside news and feedback about the bot. In October 2026, before this, half
+of what capture saved was logistics, memes and outside news, which the dream folded into profiles for good.
+Images go to the extractor inlined (downscaled JPEG data URIs), never as raw Discord URLs: OpenRouter fetching
+an embed-proxy URL itself got a 403 now and then, and the whole capture failed with a 400.
 
 **When** (`ConversationEndTrigger`): per channel, once at least `MIN_MESSAGES_FOR_OBSERVATION` new member
 messages exist and the channel has been quiet for `CAPTURE_IDLE_MINUTES` (20), or its oldest uncaptured
@@ -282,8 +291,13 @@ The answer is JSON:
 It is validated (profile present, sizes, slugs, markdown only, no Discord markup, no ids of other people unless
 they were in the input, circle membership shape and dates; a rewritten circle keeps every member it has, current
 or former, since someone who left gets an `until` and only the owner's edit removes a member) and saved all or
-nothing as new versions (`updated_by = 'dream'`). A refused answer (invalid JSON, a broken rule, a write the store refuses, an answer
-cut off at the length limit) gets one repair round with the errors. The watermark advances only on success
+nothing as new versions (`updated_by = 'dream'`). A note that comes back over its size limit is first
+rewritten on its own (one small call per note, aiming at its target, then 20% lower), far cheaper and surer
+than resending the whole prompt. A profile rewrite that drops a section the profile had (Earlier aside) or
+keeps less than half of it is refused (GLM once saved a 3,900-character profile as 900 characters of Now). A
+refused answer (invalid JSON, a broken rule, a write the store refuses, a note still too long, an answer cut off
+at the length limit) gets one repair round with the errors, and for a note too long, how much to cut, in
+characters and words. Every refused attempt is logged. The watermark advances only on success
 (an answer that changes nothing still advances it); a failure is logged, kept in `dream_state` and retried the
 next night. A night stops early after three calls in a row failed with a model or network error (an outage);
 a refused answer is that person's problem and never stops the night, and people whose last dream failed are
@@ -296,8 +310,12 @@ fails without a repair round, so the next night dreams from the new version.
 Dream rules (the prompt): merge new facts; resolve contradictions (newer wins; a self-correction beats
 anything; a third-party claim is weighed, never blindly applied); weigh by recency × recurrence; keep dates
 and spans in the text ("since 2024", "as of Sept 2026", "2019–2026, constant") and move superseded or
-long-unseen facts to a short Earlier section written as history instead of deleting them; profile = Now
-(who they are these days, ~200–400 words) · Traits · Circles & people · Earlier; details go to topic notes;
+long-unseen facts to a short Earlier section written as history instead of deleting them; an upcoming notable
+plan goes in Now with its date and people and, once its date is past, becomes a dated line of what happened
+(or is dropped); never logistics or routine plans; profile = about 3,200 chars: Now (who they are these days
+and their notable upcoming plans, ~150–250 words) · Traits (~50–100 words) · Circles & people (a dozen words
+per current circle) · a few dated Earlier footnotes; every note and circle shown carries its size against its
+target and limit; details go to topic notes; `image` rows are never read;
 create, update and merge circles for recurring shared things; no censoring or paraphrasing away of what people
 are like; no speculation beyond the journal and its passages; English.
 
@@ -308,12 +326,19 @@ otherwise at least weekly: when its last dream is 7 days old (or it never dreame
 circle changed since, it runs that night with no journal rows (a refresh, about $0.08 a week), so the vibe
 and lore keep up with how the members changed.
 
-Report: one report-channel line after a night with changes or failures, e.g.
-`🌙 dream · updated 2 profiles (Remi: new job; Dale: quit Valorant) · group: new lore · 1 unchanged · $0.18`
-(`MEMORY_DREAM_REPORT`, default on; nothing without a report channel). Tags `memory_dream` (and
-`memory_edit` for owner edits, with `MEMORY_EDIT_MODEL`, default the dream model). The dream model only
-reasons when asked, so calls send no reasoning field and a `max_tokens` of 16,000 (all answer), with a
-10-minute timeout per attempt.
+Report: after a night with changes or failures, a header and a line per owner, the change summaries in full
+(`MEMORY_DREAM_REPORT`, default on; nothing without a report channel; split on lines past 2,000 chars):
+
+```
+🌙 dream · Oct 6 · 2 updated · 1 failed, retried tomorrow · $0.06
+• Remi [profile, work]: new job at the bakery
+• the group [lore]: new lore: the 2026 LAN
+✖ Dale: "profile" too long (4,105 of 4,000) · last good dream Sep 29
+```
+
+Tags `memory_dream` (the shrink calls too) and `memory_edit` for owner edits (`MEMORY_EDIT_MODEL`, default the
+dream model). Calls send `MEMORY_DREAM_REASONING`'s effort (`off` sends none, for a model that only reasons
+when asked) and a `max_tokens` of 32,000, with a 10-minute timeout per attempt.
 
 Owner edits (`proposeEdit`) show the model the target's notes (a person's with their circles, the group's with
 every circle, or one circle) and the instruction; the draft is checked against the store in a rolled-back
@@ -562,7 +587,7 @@ interval trigger). Startup summary tokens:
 ## Cost visibility
 
 Usage tags `memory_capture`, `memory_dream`, `memory_edit`, `memory_bootstrap` land in the weekly digest's
-Spend section and `query_costs` automatically; the dream's report line carries the night's cost.
+Spend section and `query_costs` automatically; the dream's report carries the night's cost.
 
 ## Not yet
 
@@ -594,7 +619,7 @@ Deliberately left out of memory v2, for a later change:
 | `src/ai/memory/notes/passages.ts` | cited passages from archive.db for the dream |
 | `src/ai/memory/notes/dreamer.ts` | the writers: `dreamPerson()`, `dreamGroup()` and `planGroupDream()` (new rows or the weekly refresh), `runNightlyDream()`, `runDreamsUntilCaughtUp()` (the bootstrap), `proposeEdit()`, `previewChanges()`, `applyEdit()` |
 | `src/ai/memory/notes/dreamPrompts.ts` | the dream, group and edit prompts and how their input is rendered |
-| `src/ai/memory/notes/dreamSchedule.ts`, `src/events/memoryDream.ts` | once per Eastern day from `MEMORY_DREAM_HOUR`, the report line, the version trim |
+| `src/ai/memory/notes/dreamSchedule.ts`, `src/events/memoryDream.ts` | once per Eastern day from `MEMORY_DREAM_HOUR`, the report, the version trim |
 | `src/ai/memory/notes/dreamLease.ts` | one dream at a time across processes (the night, a bootstrap's catch-up) |
 | `src/ai/captureTrigger.ts` | when the learner reads a channel (`CaptureTrigger`, `ConversationEndTrigger`) |
 | `src/ai/capture/conversation.ts` | reading a whole conversation (paging, the cap) and splitting it into parts with lead-ins |

@@ -29,6 +29,8 @@ function makeReposter(opts: {
   mode?: 'edgy' | 'always';
   attachmentBytes?: Buffer | undefined;
   media?: Partial<JudgeMediaDeps>;
+  /** Signs Discord attachment links (the bot's REST client in prod); signs nothing by default. */
+  sign?: (urls: string[]) => Promise<Map<string, string>>;
   shrink?: (data: Buffer) => Promise<Buffer | undefined>;
   now?: () => number;
 } = {}) {
@@ -44,7 +46,9 @@ function makeReposter(opts: {
       judgeCalls.push(input);
       return 'verdict' in opts ? opts.verdict : true;
     },
-    judgeMedia: (content, attachments) => describeForJudge(content, attachments, { ...OFFLINE_MEDIA, ...opts.media }),
+    judgeMedia: (content, attachments, signUrls) =>
+      describeForJudge(content, attachments, { ...OFFLINE_MEDIA, signUrls, ...opts.media }),
+    signer: () => opts.sign ?? (async () => new Map()),
     fetchAttachment: async (url, maxBytes) => {
       fetchCalls.push({ url, maxBytes });
       return opts.attachmentBytes;
@@ -90,7 +94,7 @@ describe('DeletedMessageReposter', () => {
 
     expect(outcome).toBe('reposted');
     expect(judgeCalls).toEqual([
-      { author: 'Jasper', text: 'something edgy', imageUrls: [], attachmentNames: [], mediaNotes: [] },
+      { author: 'Jasper', text: 'something edgy', visuals: [], attachmentNames: [], mediaNotes: [] },
     ]);
     expect(sendCalls).toHaveLength(1);
     const [channel, identity, payload] = sendCalls[0];
@@ -218,8 +222,9 @@ describe('DeletedMessageReposter', () => {
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
 
     expect(judgeCalls[0]).toMatchObject({ author: 'Jasper', text: '', attachmentNames: ['spicy.png'] });
-    const [image] = judgeCalls[0].imageUrls;
-    expect(judgeCalls[0].imageUrls).toHaveLength(1);
+    expect(judgeCalls[0].visuals.map((v) => v.label)).toEqual(['picture spicy.png']);
+    const [image] = judgeCalls[0].visuals[0].frames;
+    expect(judgeCalls[0].visuals[0].frames).toHaveLength(1);
     expect(image.startsWith('data:image/jpeg;base64,')).toBe(true);
     // Downscaled for the judge.
     const shown = await sharp(Buffer.from(image.slice('data:image/jpeg;base64,'.length), 'base64')).metadata();
@@ -257,8 +262,61 @@ describe('DeletedMessageReposter', () => {
     expect(await reposter.handleDelete(fake.message)).toBe('reposted');
 
     expect(judgeCalls[0]).toMatchObject({ text: gifUrl, mediaNotes: ['gif on Klipy "Some Reaction": tags: reaction'] });
-    expect(judgeCalls[0].imageUrls).toHaveLength(1);
+    expect(judgeCalls[0].visuals).toHaveLength(1);
     expect(sendCalls[0][2]).toEqual([{ content: gifUrl, allowedMentions: { parse: [] } }]);
+  });
+
+  it("signs a favorited GIF's unsigned CDN link, judges it by its frames, and reposts the link", async () => {
+    const frames = await Promise.all(
+      ['#ff0000', '#00ff00', '#0000ff'].map((color) =>
+        sharp({ create: { width: 40, height: 20, channels: 3, background: color } })
+          .png()
+          .toBuffer(),
+      ),
+    );
+    const gif = await sharp(frames, { join: { animated: true } })
+      .gif()
+      .toBuffer();
+    const favorite = 'https://cdn.discordapp.com/attachments/1/2/twitter-gif-1.gif?backend=b2';
+    const signed = `${favorite}&ex=ffffffff&is=1&hm=abc`;
+    const asked: string[][] = [];
+    const { reposter, judgeCalls, sendCalls } = makeReposter({
+      sign: async (urls) => {
+        asked.push(urls);
+        return new Map([[favorite, signed]]);
+      },
+      media: { downloadImage: async (url) => (url === signed ? gif : undefined) },
+    });
+    const fake = jasperMessage({ content: favorite });
+
+    reposter.observe(fake.message);
+    expect(await reposter.handleDelete(fake.message)).toBe('reposted');
+
+    expect(asked).toEqual([[favorite]]);
+    expect(judgeCalls[0].visuals).toHaveLength(1);
+    expect(judgeCalls[0].visuals[0].label).toMatch(/^linked GIF twitter-gif-1\.gif \(animated, 3 frames/);
+    expect(judgeCalls[0].visuals[0].frames).toHaveLength(3);
+    expect(sendCalls[0][2]).toEqual([{ content: favorite, allowedMentions: { parse: [] } }]);
+  });
+
+  it('never judges a message that was only a link it could not open: left deleted as undecided', async () => {
+    const favorite = 'https://cdn.discordapp.com/attachments/1/2/gone.gif';
+    const { reposter, judgeCalls, sendCalls } = makeReposter();
+    const blind = jasperMessage({ content: ` ${favorite} ` });
+    const withWords = jasperMessage({ messageId: 'm2', content: `look at this ${favorite}` });
+
+    const spoiled = jasperMessage({ messageId: 'm3', content: `||${favorite}||.` });
+    reposter.observe(blind.message);
+    reposter.observe(withWords.message);
+    reposter.observe(spoiled.message);
+    expect(await reposter.handleDelete(blind.message)).toBe('undecided');
+    // A spoiler or a period around the link says nothing either.
+    expect(await reposter.handleDelete(spoiled.message)).toBe('undecided');
+    expect(judgeCalls).toHaveLength(0);
+    // With words of its own, the message is still judged (on them, and the note that the GIF couldn't be opened).
+    expect(await reposter.handleDelete(withWords.message)).toBe('reposted');
+    expect(judgeCalls[0]).toMatchObject({ visuals: [], mediaNotes: ['linked GIF gone.gif (could not be opened)'] });
+    expect(sendCalls).toHaveLength(1);
   });
 
   it("judges a saved video by its keyframes and soundtrack, and re-uploads it", async () => {
@@ -284,7 +342,12 @@ describe('DeletedMessageReposter', () => {
     expect(judgeCalls[0]).toEqual({
       author: 'Jasper',
       text: '',
-      imageUrls: [`data:image/jpeg;base64,${Buffer.from('frame').toString('base64')}`],
+      visuals: [
+        {
+          label: 'video clip.mp4 (0:09): one frame',
+          frames: [`data:image/jpeg;base64,${Buffer.from('frame').toString('base64')}`],
+        },
+      ],
       attachmentNames: ['clip.mp4'],
       mediaNotes: ['video clip.mp4 (0:09), said: "something unrepeatable"'],
     });
@@ -471,7 +534,7 @@ describe('DeletedMessageReposter', () => {
     expect(judgeCalls[0]).toEqual({
       author: 'Jasper',
       text: 'something edgy',
-      imageUrls: [],
+      visuals: [],
       attachmentNames: ['odd.png'],
       mediaNotes: [],
     });

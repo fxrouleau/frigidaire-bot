@@ -6,7 +6,6 @@
 //
 // The judge's bar is a judgement call, so these only pin what must hold for any sane model: a parseable
 // verdict, "no" for plain logistics, and a usable "for …" phrase. Grep LIVE-AUTOREACT for what it said.
-import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import { describeEmojiUsage } from '../ai/emojiCaptioner';
 import type { ReactionGuide } from './guide';
@@ -71,13 +70,9 @@ describe.skipIf(!RUN_LIVE)('auto-react and usage captions (live, paid, opt-in)',
   it(
     'writes a "for …" usage phrase from real-looking uses',
     async () => {
-      // A drawn stand-in for the emoji image: no real server emoji in a public repo.
-      const face = await sharp({ create: { width: 96, height: 96, channels: 3, background: '#f5c542' } })
-        .png()
-        .toBuffer();
+      // Text only (EMOJI_USAGE_CAPTION_MODEL, GLM 5.3 by default): the caption's visual half stands in for the image.
       const phrase = await describeEmojiUsage({
         id: '1000000000000000000',
-        imageUrl: `data:image/png;base64,${face.toString('base64')}`,
         name: 'sadcat',
         animated: false,
         caption: 'crying cat with big eyes; for sadness, pleading',

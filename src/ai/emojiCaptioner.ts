@@ -1,19 +1,29 @@
 import type OpenAI from 'openai';
+import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 import { config } from '../config';
 import { logger } from '../logger';
 import { getOpenRouterClient } from './openRouterClient';
 import { emojiCdnUrl } from './promptSections';
 import { featureRequestOptions } from './usage';
 
+type CaptionRequestBody = {
+  model: string;
+  max_tokens: number;
+  temperature: number;
+  messages: OpenAI.ChatCompletionMessageParam[];
+  reasoning: { effort: 'low' };
+  provider: { zdr: true };
+};
+
+/** Room for the low-effort reasoning before the one-line caption (only generated tokens are billed). */
+const CAPTION_MAX_TOKENS = 1_500;
+
 /**
  * Captions a single Discord custom emoji via a vision model over OpenRouter (EMOJI_CAPTION_MODEL,
- * Claude Opus by default — see config.ts for why). Returns the caption string, or undefined if the
- * captioning failed or OPENROUTER_API_KEY is unset. The caption is intentionally terse so it fits in
- * prompt preambles without blowing up token budgets.
- *
- * Neither call here sends a reasoning effort: Claude only reasons when asked, and an effort would switch
- * paid thinking on. A model that reasons by default (z-ai/glm-5.3-flash reasons at 'max') would spend
- * these small max_tokens caps before answering, so pointing EMOJI_CAPTION_MODEL at one needs an override.
+ * GLM-5.3-Flash by default — see config.ts). Returns the caption string, or undefined if the captioning
+ * failed or OPENROUTER_API_KEY is unset. The caption is intentionally terse so it fits in prompt preambles
+ * without blowing up token budgets. Low reasoning effort with room to answer: GLM reasons at 'max' unless
+ * told otherwise (a model that only reasons when asked, like Claude, gets low thinking switched on).
  */
 export async function captionEmoji(params: {
   id: string;
@@ -32,21 +42,19 @@ export async function captionEmoji(params: {
 
   logger.info(`emojiCaptioner: requesting caption for ${params.name} (${params.id}) via ${model}`);
 
-  try {
-    const response = await openai.chat.completions.create(
+  const body: CaptionRequestBody = {
+    model,
+    max_tokens: CAPTION_MAX_TOKENS,
+    temperature: 0.2,
+    reasoning: { effort: 'low' },
+    provider: { zdr: true },
+    messages: [
       {
-        model,
-        max_tokens: 160,
-        temperature: 0.2,
-        // @ts-expect-error OpenRouter-specific provider-routing hint — matches learner config
-        provider: { zdr: true },
-        messages: [
+        role: 'user',
+        content: [
           {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: `You are captioning a Discord custom emoji for a chat bot's system prompt. The emoji's name is "${params.name}".
+            type: 'text',
+            text: `You are captioning a Discord custom emoji for a chat bot's system prompt. The emoji's name is "${params.name}".
 
 IMPORTANT: Most custom Discord emojis come from Twitch/streaming culture, anime fandoms, League of Legends, game-specific memes. The NAME usually carries more meaning than the image alone, because the cultural usage defines what the emote signals. Common families you should recognize by name:
 - monkaS / monkaW / monkaX / monkaGIGA: panic, fear, nervousness, sweating through something
@@ -75,12 +83,16 @@ OUTPUT: one line, ≤80 characters, format "<brief visual>; for <emotion or situ
 - "hype wide-eyed face; for excitement, pog moments"
 
 Now caption "${params.name}":`,
-              },
-              { type: 'image_url', image_url: { url: imageUrl } },
-            ],
           },
+          { type: 'image_url', image_url: { url: imageUrl } },
         ],
       },
+    ],
+  };
+  try {
+    // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
+    const response = await openai.chat.completions.create(
+      body as unknown as ChatCompletionCreateParamsNonStreaming,
       featureRequestOptions('emoji_caption'),
     );
 
@@ -107,6 +119,8 @@ Now caption "${params.name}":`,
 
 /** Longest meaning half kept; the whole caption goes into every chat prompt's emoji glossary. */
 const MAX_USAGE_CHARS = 80;
+/** Room for the low-effort reasoning before the one-line answer (only generated tokens are billed). */
+const USAGE_MAX_TOKENS = 2_000;
 
 /** Splits "<visual>; for <meaning>" into its halves (a caption without a "for …" half is all visual). */
 export function splitCaption(caption: string): { visual: string; meaning: string } {
@@ -154,39 +168,42 @@ export type UsagePhraseInput = {
   caption: string | null;
   /** Real uses, one prompt line each (see formatUsageSample in src/reactions/emojiUsage.ts). */
   uses: string[];
-  /** The emoji's image; defaults to its Discord CDN URL. */
-  imageUrl?: string;
+  /** EMOJI_USAGE_CAPTION_MODEL by default. */
   model?: string;
   /** Injected in tests; defaults to the shared OpenRouter client. */
   client?: OpenAI;
 };
 
+type UsageRequestBody = {
+  model: string;
+  max_tokens: number;
+  messages: Array<{ role: 'user'; content: string }>;
+  reasoning: { effort: 'low' };
+  provider: { zdr: true };
+};
+
 /**
- * Asks the caption model how THIS group uses an emoji, from real uses (and its image, so the answer stays
- * consistent with what it shows). Returns the new meaning half ("for …"), or undefined when the call
- * failed or produced nothing usable.
+ * Asks the usage-caption model (EMOJI_USAGE_CAPTION_MODEL, GLM 5.3 by default) how THIS group uses an
+ * emoji, from real uses and its current caption (whose visual half says what it shows): text only, so any
+ * text model works. Low reasoning effort with room to answer (GLM reasons whether asked or not). Returns
+ * the new meaning half ("for …"), or undefined when the call failed or produced nothing usable.
  */
 export async function describeEmojiUsage(params: UsagePhraseInput): Promise<string | undefined> {
   const openai = params.client ?? getOpenRouterClient();
   if (!openai) return undefined;
-  const model = params.model ?? config.models.emojiCaption;
-  const current = params.caption ? `Its current caption is "${params.caption}".` : 'It has no caption yet.';
-  try {
-    const response = await openai.chat.completions.create(
+  const model = params.model ?? config.models.emojiUsageCaption;
+  const current = params.caption
+    ? `Its current caption is "${params.caption}" (the part before ";" describes what it shows).`
+    : 'It has no caption yet.';
+  const body: UsageRequestBody = {
+    model,
+    max_tokens: USAGE_MAX_TOKENS,
+    messages: [
       {
-        model,
-        max_tokens: 100,
-        // @ts-expect-error OpenRouter-specific provider-routing hint (the uses are members' messages)
-        provider: { zdr: true },
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: `You are grounding the caption of a Discord custom emoji in how one private friend group actually uses it. The emoji is "${params.name}" (image attached). ${current} Captions read "<visual>; for <meaning>": the visual half stays, you write the meaning half.
+        role: 'user',
+        content: `You are grounding the caption of a Discord custom emoji in how one private friend group actually uses it. The emoji is "${params.name}". ${current} Captions read "<visual>; for <meaning>": the visual half stays, you write the meaning half.
 
-Below are real uses from this server: posts people reacted to with it, and messages it was typed in (with the message it was replying to when the emoji is most of the message). Work out what THIS group means by it. Groups often use an emoji differently from its generic internet meaning, e.g. a crying emoji used as a resigned "bruh" at absurd moments, or a thinking emoji used for meh, underwhelmed or mildly annoyed. Go by the uses rather than the name or the image; if the uses show no clear pattern, keep the current meaning.
+Below are real uses from this server: posts people reacted to with it, and messages it was typed in (with the message it was replying to when the emoji is most of the message). Work out what THIS group means by it. Groups often use an emoji differently from its generic internet meaning, e.g. a crying emoji used as a resigned "bruh" at absurd moments, or a thinking emoji used for meh, underwhelmed or mildly annoyed. Go by the uses rather than the name or the current caption; if the uses show no clear pattern, keep the current meaning.
 
 Uses:
 ${params.uses.join('\n')}
@@ -195,12 +212,15 @@ OUTPUT: only the meaning half, one line starting with "for ", at most 70 charact
 - for resigned "bruh" at absurd moments
 - for meh, underwhelmed or mildly annoyed
 - for big laughs at someone's expense`,
-              },
-              { type: 'image_url', image_url: { url: params.imageUrl ?? emojiCdnUrl(params.id, params.animated) } },
-            ],
-          },
-        ],
       },
+    ],
+    reasoning: { effort: 'low' },
+    provider: { zdr: true },
+  };
+  try {
+    // The SDK's types know neither `provider` nor OpenRouter's `reasoning` object: bridged here, once.
+    const response = await openai.chat.completions.create(
+      body as unknown as ChatCompletionCreateParamsNonStreaming,
       featureRequestOptions('emoji_caption'),
     );
     const phrase = normalizeUsagePhrase(response.choices?.[0]?.message?.content);

@@ -184,7 +184,17 @@ export type JournalOptions = {
   limit?: number;
   /** 'observations' leaves corrections out, 'corrections' keeps only them. Default 'all'. */
   kinds?: 'all' | 'observations' | 'corrections';
+  /** What a dream reads: leaves out DREAM_EXCLUDED_CATEGORIES. */
+  dream?: boolean;
 };
+
+/**
+ * Journal categories the dream never reads (and that never make someone's dream pending): image rows say
+ * someone shared a picture or a meme. They expire within a day, and the notes are permanent: folded in,
+ * they turned a day's memes into lasting "facts" and filled full profiles past their limit.
+ */
+export const DREAM_EXCLUDED_CATEGORIES = ['image'] as const;
+const DREAM_EXCLUDED_NOT_IN = DREAM_EXCLUDED_CATEGORIES.map((c) => `'${c}'`).join(', ');
 
 /** An owner with journal rows above their watermark (see pendingDreams()). */
 export type PendingDream = { owner: NoteOwner; newRows: number; latestSeq: number };
@@ -1215,12 +1225,13 @@ export class NotesStore {
    */
   journalSince(owner: JournalOwner, afterSeq: number, opts: JournalOptions = {}): Memory[] {
     const kinds = opts.kinds ?? 'all';
-    const kindFilter =
+    const kindFilter = `${
       kinds === 'corrections'
         ? `AND category = '${CORRECTION_CATEGORY}'`
         : kinds === 'observations'
           ? `AND category != '${CORRECTION_CATEGORY}'`
-          : '';
+          : ''
+    } ${opts.dream ? `AND category NOT IN (${DREAM_EXCLUDED_NOT_IN})` : ''}`;
     const limit = opts.limit !== undefined ? Math.max(0, Math.floor(opts.limit)) : -1;
 
     if (owner.scope === 'group') {
@@ -1269,7 +1280,8 @@ export class NotesStore {
   }
 
   /**
-   * Owners with journal rows above their watermark, most recently active first: people (by the id their
+   * Owners with journal rows a dream reads (DREAM_EXCLUDED_CATEGORIES aside) above their watermark, most
+   * recently active first: people (by the id their
    * rows are stamped with, a linked side account's counting for its main, and by the related members of
    * relationship rows; name-only rows get an id from the startup stamp) and the group. `limit` caps the
    * people.
@@ -1288,7 +1300,7 @@ export class NotesStore {
     const rows = this.stmt(
       `SELECT subject_user_id AS uid, related_user_ids AS related, journal_seq AS seq, source FROM memories
        WHERE active = 1 AND (subject_user_id IS NOT NULL OR related_user_ids IS NOT NULL)
-         AND category NOT IN (${SELF_DIAGNOSIS_NOT_IN})`,
+         AND category NOT IN (${SELF_DIAGNOSIS_NOT_IN}) AND category NOT IN (${DREAM_EXCLUDED_NOT_IN})`,
     ).all() as { uid: string | null; related: string | null; seq: number; source: string | null }[];
 
     const states = new Map<string, DreamState>();
@@ -1328,7 +1340,7 @@ export class NotesStore {
       })
       .slice(0, opts.limit ?? Number.POSITIVE_INFINITY);
 
-    const groupRows = this.newJournal({ scope: 'group' });
+    const groupRows = this.newJournal({ scope: 'group' }, { dream: true });
     const group =
       groupRows.length > 0
         ? {
