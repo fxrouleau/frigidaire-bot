@@ -95,6 +95,45 @@ export function earlierPart(markdown: string): string {
   return kept.join('\n').trim();
 }
 
+/** A level-2 heading's key: its first word, lowercased ("Circles and people" and "Circles & people" → "circles"). */
+function headingKey(heading: string): string {
+  return (
+    heading
+      .trim()
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)[0] ?? ''
+  );
+}
+
+/** The keys of a note's level-2 headings (see headingKey). */
+export function headingKeys(content: string): Set<string> {
+  return new Set(
+    splitSections(content)
+      .filter((s) => s.level === 2)
+      .map((s) => headingKey(s.heading)),
+  );
+}
+
+/** The share of a profile's text (Earlier left out) a rewrite must keep, for a profile at least PROFILE_DAMAGE_FLOOR long. */
+export const PROFILE_MIN_KEPT_SHARE = 0.5;
+export const PROFILE_DAMAGE_FLOOR = 1_200;
+const CORE_PROFILE_SECTIONS = ['now', 'traits', 'circles'];
+
+/**
+ * How a rewrite of a profile damaged it, compared with `before`: the core sections (Now, Traits, Circles &
+ * people; Earlier may be trimmed away) it had and lost, and whether less than PROFILE_MIN_KEPT_SHARE of its
+ * text outside Earlier is left. Damaged = Now lost, two core sections lost, or that much text gone: one
+ * section can legitimately go (someone who left their only circle).
+ */
+export function profileDamage(before: string, after: string): { lost: string[]; shrunk: boolean; damaged: boolean } {
+  const had = headingKeys(before);
+  const has = headingKeys(after);
+  const lost = CORE_PROFILE_SECTIONS.filter((key) => had.has(key) && !has.has(key));
+  const length = withoutEarlier(before).length;
+  const shrunk = length >= PROFILE_DAMAGE_FLOOR && withoutEarlier(after).length < length * PROFILE_MIN_KEPT_SHARE;
+  return { lost, shrunk, damaged: lost.includes('now') || lost.length >= 2 || shrunk };
+}
+
 /**
  * What is off about a note's shape (a profile against PROFILE_SECTIONS, anything else against
  * TOPIC_SECTIONS): missing `## Now`, sections out of order. Advisory: writers may retry or log, the

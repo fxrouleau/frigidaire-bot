@@ -216,6 +216,25 @@ type KeywordHits = { exact: Memory[]; partial: Memory[] };
  */
 export const NON_PERSON_SUBJECTS: ReadonlySet<string> = new Set(['server', 'bot', 'general', 'everyone', 'here']);
 
+/**
+ * An `event` row is a dated milestone the nightly dream folds into the notes, so the TTL sweep leaves one its
+ * owner hasn't dreamed yet (above their watermark: dreams that kept failing, a crowded night) for up to this
+ * much past its TTL: a milestone is never lost unread, and a row nobody will ever dream still goes.
+ */
+const EVENT_DREAM_GRACE_HOURS = 60 * 24;
+/** The subjects of rows about the server as a whole (the group's journal, see NotesStore.journalSince). */
+const GROUP_SUBJECTS_JSON = JSON.stringify([...NON_PERSON_SUBJECTS].filter((s) => s !== 'bot'));
+/**
+ * Whether a memories row is above its owner's dream watermark: its person (by its stamped id) or, for a row
+ * about the server, the group; a row filed under a bare name counts as never dreamed. Binds the group subjects.
+ */
+const AWAITS_DREAM_SQL = `memories.journal_seq > COALESCE((
+  SELECT d.journal_watermark FROM dream_state d
+  WHERE (memories.subject_user_id IS NOT NULL AND d.scope = 'person' AND d.owner_id = memories.subject_user_id)
+     OR (memories.subject_user_id IS NULL AND d.scope = 'group' AND d.owner_id = ''
+         AND lower(memories.subject) IN (SELECT value FROM json_each(?)))
+), 0)`;
+
 /** The `source` of the rows the personality learner writes (its observation and self-improvement passes). */
 export const LEARNER_SOURCES = { observation: 'observation', selfImprovement: 'self-improvement' } as const;
 
@@ -1057,14 +1076,22 @@ export class MemoryStore {
   sweepExpiredMemories(): { expired: number } {
     let expired = 0;
     const breakdown: string[] = [];
+    const dreams = this.hasDreamState();
 
     for (const [category, ttlHours] of Object.entries(this.ttls)) {
       // TTL of 0 (or anything non-positive/invalid) = expiry disabled for this category.
       if (!Number.isFinite(ttlHours) || ttlHours <= 0) continue;
 
-      const rows = this.stmt(
-        "SELECT id FROM memories WHERE active = 1 AND category = ? AND updated_at < datetime('now', ?)",
-      ).all(category, `-${ttlHours} hours`) as { id: number }[];
+      const rows = (
+        category === 'event' && dreams
+          ? this.stmt(
+              `SELECT id FROM memories WHERE active = 1 AND category = ? AND updated_at < datetime('now', ?)
+                 AND NOT (updated_at >= datetime('now', ?) AND ${AWAITS_DREAM_SQL})`,
+            ).all(category, `-${ttlHours} hours`, `-${ttlHours + EVENT_DREAM_GRACE_HOURS} hours`, GROUP_SUBJECTS_JSON)
+          : this.stmt(
+              "SELECT id FROM memories WHERE active = 1 AND category = ? AND updated_at < datetime('now', ?)",
+            ).all(category, `-${ttlHours} hours`)
+      ) as { id: number }[];
 
       for (const row of rows) {
         this.deactivate(row.id);
@@ -1079,6 +1106,11 @@ export class MemoryStore {
       logger.info(`Expired ${expired} ephemeral memories past their TTL (${breakdown.join(', ')})`);
     }
     return { expired };
+  }
+
+  /** Whether memory.db holds the notes' dream state (NotesStore creates it; a bare MemoryStore has none). */
+  private hasDreamState(): boolean {
+    return this.stmt("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dream_state'").get() !== undefined;
   }
 
   /**

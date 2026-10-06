@@ -5,20 +5,26 @@ const recordUsage = vi.hoisted(() => vi.fn());
 vi.mock('./usage', async (importOriginal) => ({ ...(await importOriginal<typeof import('./usage')>()), recordUsage }));
 
 import { createReplayClient } from '../test-support/openRouterFetch';
-import { DECISIONS_ENDPOINT, type JudgeInput, createEdgyJudge, isDecisionModel } from './messageJudge';
+import {
+  createDetailedEdgyJudge,
+  createEdgyJudge,
+  DECISIONS_ENDPOINT,
+  isDecisionModel,
+  type JudgeInput,
+} from './messageJudge';
 import { FEATURE_HEADER } from './usage';
 
 const TEXT_INPUT: JudgeInput = {
   author: 'Jasper',
   text: 'you are all clowns',
-  imageUrls: [],
+  visuals: [],
   attachmentNames: [],
   mediaNotes: [],
 };
 const IMAGE_ONLY_INPUT: JudgeInput = {
   author: 'Jasper',
   text: '',
-  imageUrls: ['https://cdn.discordapp.com/attachments/1/2/spicy.png'],
+  visuals: [{ label: 'picture spicy.png', frames: ['https://cdn.discordapp.com/attachments/1/2/spicy.png'] }],
   attachmentNames: ['spicy.png'],
   mediaNotes: [],
 };
@@ -26,7 +32,7 @@ const IMAGE_ONLY_INPUT: JudgeInput = {
 const GIF_INPUT: JudgeInput = {
   author: 'Jasper',
   text: 'lol https://klipy.com/gifs/some-reaction',
-  imageUrls: ['data:image/jpeg;base64,c3RpbGw='],
+  visuals: [{ label: 'GIF from Klipy "Some Reaction" (its still)', frames: ['data:image/jpeg;base64,c3RpbGw='] }],
   attachmentNames: [],
   mediaNotes: ['gif on Klipy "Some Reaction": tags: reaction'],
 };
@@ -154,10 +160,52 @@ describe('createEdgyJudge with a decision model', () => {
         'lol https://klipy.com/gifs/some-reaction',
         'What it showed:',
         '- gif on Klipy "Some Reaction": tags: reaction',
-        'Images below: its pictures, the stills of the GIFs it linked and frames from its videos.',
+        'Below, each thing it showed: what it is, then its frames.',
       ].join('\n'),
     });
-    expect(parts[1]).toEqual({ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,c3RpbGw=' } });
+    // Each visual is labelled before its frames, so the model knows which frames belong together.
+    expect(parts[1]).toEqual({ type: 'text', text: '1. GIF from Klipy "Some Reaction" (its still)' });
+    expect(parts[2]).toEqual({ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,c3RpbGw=' } });
+  });
+
+  it('asks the chat model to say what it sees before its verdict, and returns both', async () => {
+    const { client, requests } = chatClientSaying(
+      '{"shows": "A man in a \\"cowboy\\" hat dancing; caption: \\"me when\\"", "edgy": false}',
+    );
+    const judge = createDetailedEdgyJudge({ model: 'typesafe/jev-1.13', client, fallbackModel: 'vision-model' });
+
+    expect(await judge(GIF_INPUT)).toEqual({
+      edgy: false,
+      model: 'vision-model',
+      shows: 'A man in a "cowboy" hat dancing; caption: "me when"',
+    });
+    const system = (requests[0] as { messages: Array<{ role: string; content: string }> }).messages[0].content;
+    expect(system).toContain('{"shows": "…", "edgy": true}');
+    expect(system).toContain('read any caption or on-screen text');
+  });
+
+  it("takes the answer's own verdict, not an \"edgy\": … that a described caption happens to contain", async () => {
+    const { client } = chatClientSaying('The sign reads "edgy": true as a joke. {"shows": "a sign", "edgy": false}');
+    expect(await createEdgyJudge({ model: 'some/chat-model', client })(TEXT_INPUT)).toBe(false);
+    const broken = chatClientSaying('{"shows": "a caption "edgy": false", "edgy": true');
+    expect(await createEdgyJudge({ model: 'some/chat-model', client: broken.client })(TEXT_INPUT)).toBe(true);
+  });
+
+  it('counts subtle and implied offensive humor as edgy, and never calls a link harmless for being a link', async () => {
+    const { client, requests } = chatClientSaying('{"edgy": true}');
+    const { fetchImpl, bodies } = decisionsFetch({ noul: 0.9 });
+    await createEdgyJudge({ model: 'some/chat-model', client })(TEXT_INPUT);
+    await createEdgyJudge({ model: 'typesafe/jev-1.13', apiKey: 'sk-test', fetch: fetchImpl })(TEXT_INPUT);
+
+    const system = (requests[0] as { messages: Array<{ role: string; content: string }> }).messages[0].content;
+    const criteria = (bodies[0] as { questions: { edgy: { criteria: { true: string; false: string } } } }).questions
+      .edgy.criteria;
+    for (const text of [system, criteria.true]) {
+      expect(text).toContain('racist or ethnic humor');
+      expect(text).toContain('also when only implied by a caption, a picture or who is shown');
+      expect(text).toContain('subtle, ironic or "just a reaction GIF"');
+    }
+    expect(criteria.false).not.toMatch(/\blinks\b/);
   });
 
   it('falls back to the decision model on the words when the chat model cannot judge a message that showed something', async () => {
@@ -176,7 +224,7 @@ describe('createEdgyJudge with a decision model', () => {
     const { fetchImpl, bodies } = decisionsFetch({ noul: 0.8 });
     const judge = createEdgyJudge({ model: 'typesafe/jev-1.13', apiKey: 'sk-test', fetch: fetchImpl });
 
-    expect(await judge({ ...GIF_INPUT, imageUrls: [] })).toBe(true);
+    expect(await judge({ ...GIF_INPUT, visuals: [] })).toBe(true);
     expect(await judge(TEXT_INPUT)).toBe(true);
 
     expect((bodies[0] as { state: { media?: string } }).state.media).toContain('Some Reaction');
@@ -204,6 +252,22 @@ describe('createEdgyJudge with a decision model', () => {
     await judge(TEXT_INPUT);
 
     expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ feature: 'judge', model: 'typesafe/jev-1.13' }));
+  });
+
+  it('tags its calls with another feature when asked (the live eval)', async () => {
+    const { fetchImpl } = decisionsFetch({ noul: 0.91 });
+    const judge = createEdgyJudge({ model: 'typesafe/jev-1.13', apiKey: 'sk-test', fetch: fetchImpl, feature: 'eval' });
+
+    await judge(TEXT_INPUT);
+
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ feature: 'eval' }));
+  });
+
+  it('reports the probability and the model with a detailed verdict', async () => {
+    const { fetchImpl } = decisionsFetch({ noul: 0.25 });
+    const judge = createDetailedEdgyJudge({ model: 'typesafe/jev-1.13', apiKey: 'sk-test', fetch: fetchImpl });
+
+    expect(await judge(TEXT_INPUT)).toEqual({ edgy: false, model: 'typesafe/jev-1.13', probability: 0.25 });
   });
 
   it('returns undefined when there is no API key and no chat client', async () => {

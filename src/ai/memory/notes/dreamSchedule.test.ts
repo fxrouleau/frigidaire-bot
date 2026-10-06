@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '../../../logger';
 import { MemoryStore } from '../memoryStore';
 import type { DreamOutcome, NightlyDreamResult } from './dreamer';
+import type { Note } from './notesStore';
 import { DREAM_LEASE_KEY, takeDreamLease } from './dreamLease';
 import {
   DREAM_FIRST_CHECK_DELAY_MS,
@@ -10,6 +11,7 @@ import {
   DreamScheduler,
   type DreamStateStore,
   dueNight,
+  failureReason,
   formatDreamReport,
   formatUsd,
   NIGHTLY_DREAM_HOLDER,
@@ -23,7 +25,11 @@ const NAMES: Record<string, string> = { [REMI]: 'Remi', [DALE]: 'Dale', [NOVA]: 
 const nameOf = (id: string) => NAMES[id];
 
 const person = (ownerId: string) => ({ scope: 'person', ownerId }) as const;
-const updated = (ownerId: string, changeSummary: string, costUsd?: number): DreamOutcome => ({
+const updated = (
+  ownerId: string,
+  changeSummary: string,
+  costUsd?: number,
+): Extract<DreamOutcome, { status: 'updated' }> => ({
   status: 'updated',
   owner: person(ownerId),
   written: [],
@@ -60,20 +66,41 @@ describe('dueNight', () => {
 });
 
 describe('formatDreamReport', () => {
-  it('names who changed and what, the group, the unchanged and failed, and the cost', () => {
+  const note = (topic: string, scope: 'person' | 'circle' = 'person') => ({ topic, scope }) as unknown as Note;
+
+  it('heads the report with the day, the counts and the cost, then a line per owner with what changed', () => {
     const result: NightlyDreamResult = {
       day: '2026-09-26',
       people: [
-        updated(REMI, 'new job at the bakery'),
-        updated(DALE, 'quit Valorant'),
+        { ...updated(REMI, 'new job at the bakery'), written: [note('profile'), note('work'), note('mtg', 'circle')] },
+        { ...updated(DALE, ''), removed: [note('games')] },
         { status: 'unchanged', owner: person(NOVA), watermark: 3 },
-        { status: 'failed', owner: person('100000000000000009'), error: '500', cause: 'error' },
+        {
+          status: 'failed',
+          owner: person('100000000000000009'),
+          error: 'note "profile": the content is 4105 characters, over the 4000 limit',
+          cause: 'answer',
+          lastDreamAt: '2026-09-20 08:01:00',
+        },
       ],
-      group: { status: 'updated', owner: { scope: 'group' }, written: [], removed: [], changeSummary: 'new lore', watermark: 4 },
+      group: {
+        status: 'updated',
+        owner: { scope: 'group' },
+        written: [note('lore')],
+        removed: [],
+        changeSummary: 'new lore: the 2026 LAN, where the whole crew stayed up until 6 am on the last night',
+        watermark: 4,
+      },
       costUsd: 0.1834,
     };
     expect(formatDreamReport(result, nameOf)).toBe(
-      '🌙 dream · updated 2 profiles (Remi: new job at the bakery; Dale: quit Valorant) · group: new lore · 1 unchanged · 1 failed (someone; retried tomorrow) · $0.18',
+      [
+        '🌙 dream · Sep 26 · 3 updated · 1 unchanged · 1 failed, retried tomorrow · $0.18',
+        '• Remi [profile, work, circle:mtg]: new job at the bakery',
+        '• Dale [-games]: (no summary)',
+        '• the group [lore]: new lore: the 2026 LAN, where the whole crew stayed up until 6 am on the last night',
+        '✖ someone: "profile" too long (4,105 of 4,000) · last good dream Sep 20',
+      ].join('\n'),
     );
   });
 
@@ -87,30 +114,72 @@ describe('formatDreamReport', () => {
     expect(formatDreamReport({ day: '2026-09-26', people: [] }, nameOf)).toBeUndefined();
   });
 
-  it('reports a night that only failed, and caps the names', () => {
+  it('reports a night that only failed, and caps the lines', () => {
     const failed: NightlyDreamResult = {
       day: '2026-09-26',
-      people: [],
-      group: { status: 'failed', owner: { scope: 'group' }, error: 'refused', cause: 'answer' },
+      people: [{ status: 'failed', owner: person(DALE), error: '429 Rate limit exceeded', cause: 'error', lastDreamAt: null }],
+      group: { status: 'failed', owner: { scope: 'group' }, error: 'the answer is not a JSON object', cause: 'answer' },
     };
-    expect(formatDreamReport(failed, nameOf)).toBe('🌙 dream · 1 failed (the group; retried tomorrow)');
+    expect(formatDreamReport(failed, nameOf)).toBe(
+      [
+        '🌙 dream · Sep 26 · 2 failed, retried tomorrow',
+        '✖ Dale: 429 Rate limit exceeded · no notes yet',
+        '✖ the group: the answer was not JSON',
+      ].join('\n'),
+    );
+
+    // Notes from the import, never dreamed since: said so, not "no notes".
+    const imported: NightlyDreamResult = {
+      day: '2026-10-06',
+      people: [
+        {
+          status: 'failed',
+          owner: person(REMI),
+          error: 'note "profile": the content is 4105 characters, over the 4000 limit',
+          cause: 'answer',
+          lastDreamAt: null,
+          notesUpdatedAt: '2026-09-27 18:35:00',
+        },
+      ],
+    };
+    expect(formatDreamReport(imported, nameOf)).toContain(
+      '✖ Remi: "profile" too long (4,105 of 4,000) · notes from Sep 27, no good dream since',
+    );
 
     const many: NightlyDreamResult = {
       day: '2026-09-26',
-      people: Array.from({ length: 10 }, (_, i) => updated(`10000000000000010${i}`, `change ${i}`)),
+      people: Array.from({ length: 30 }, (_, i) => updated(`1000000000000001${String(i).padStart(2, '0')}`, `change ${i}`)),
     };
-    const line = formatDreamReport(many, nameOf) ?? '';
-    expect(line).toContain('updated 10 profiles (someone: change 0;');
-    expect(line).toContain('someone: change 7; +2 more)');
-    expect(line).not.toContain('change 8');
+    const lines = (formatDreamReport(many, nameOf) ?? '').split('\n');
+    expect(lines[0]).toBe('🌙 dream · Sep 26 · 30 updated');
+    expect(lines).toHaveLength(27);
+    expect(lines[25]).toBe('• someone: change 24');
+    expect(lines[26]).toBe('… and 5 more');
   });
 
-  it('clips long change summaries and formats small costs', () => {
-    const line = formatDreamReport({ day: 'd', people: [updated(REMI, 'x'.repeat(200))], costUsd: 0.002 }, nameOf);
-    expect(line).toContain(`Remi: ${'x'.repeat(79)}…)`);
-    expect(line).toMatch(/· <\$0\.01$/);
+  it('keeps change summaries whole (they are capped at 300 characters already) and formats small costs', () => {
+    const summary = `${'a long sentence about what changed '.repeat(5)}end`;
+    const report = formatDreamReport({ day: '2026-10-06', people: [updated(REMI, summary)], costUsd: 0.002 }, nameOf);
+    expect(report).toContain(`• Remi: ${summary}`);
+    expect(report).toMatch(/^🌙 dream · Oct 6 · 1 updated · <\$0\.01\n/);
     expect(formatUsd(0)).toBe('$0.00');
     expect(formatUsd(1.234)).toBe('$1.23');
+  });
+});
+
+describe('failureReason', () => {
+  it('says why a dream failed in a few words', () => {
+    expect(failureReason('circle "mtg": the content is 6400 characters, over the 6000 limit; topic "x" appears twice')).toBe(
+      'circle "mtg" too long (6,400 of 6,000)',
+    );
+    expect(failureReason('the answer was cut off at the length limit')).toBe('the answer was cut off');
+    expect(failureReason('the notes changed while dreaming (profile): not saved over them')).toBe(
+      'the notes changed while it dreamed (an edit came first)',
+    );
+    expect(failureReason('the profile lost its "## Traits" section: write the whole profile')).toBe(
+      'the rewrite dropped profile sections',
+    );
+    expect(failureReason(`500 ${'x'.repeat(300)}`)).toHaveLength(120);
   });
 });
 
@@ -157,7 +226,7 @@ describe('DreamScheduler.check', () => {
     expect(await s.check()).toBeUndefined();
     expect(runs).toBe(1);
     expect(state.values.get(DREAM_NIGHT_KEY)).toBe('2026-09-26');
-    expect(reports).toEqual(['🌙 dream · updated 1 profile (Remi: new job) · $0.05']);
+    expect(reports).toEqual(['🌙 dream · Sep 26 · 1 updated · $0.05\n• Remi: new job']);
 
     clock = new Date('2026-09-27T08:01:00Z');
     await s.check();

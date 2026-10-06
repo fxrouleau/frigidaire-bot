@@ -212,14 +212,22 @@ describe('buildPersonalityPrompt (memory-quality rules)', () => {
     expect(prompt).toContain('transcription, not a memory');
   });
 
-  it('requires time-bound observations to use the event category (14-day TTL)', () => {
-    expect(prompt).toContain('Anything time-bound MUST be "event"');
-    expect(prompt).toContain('events expire automatically after ~2 weeks');
+  it('says every saved row ends up in the permanent notes (no TTL to lean on)', () => {
+    expect(prompt).toContain("folded into the bot's permanent notes");
+    expect(prompt).not.toMatch(/expire automatically/);
   });
 
-  it('requires image/GIF shares to use the image category (24-hour TTL)', () => {
-    expect(prompt).toContain('Any observation describing an image share MUST be "image"');
-    expect(prompt).toContain('expire automatically after ~a day');
+  it('keeps events to dated milestones and notable plans: never logistics, routine plans or meals', () => {
+    expect(prompt).toContain('something out of the ordinary, with its date (and place, when said)');
+    expect(prompt).toContain('or a plan for one (a trip, an outing somewhere');
+    expect(prompt).toContain('NEVER the logistics');
+    expect(prompt).toContain('routine plans (gaming tonight');
+  });
+
+  it('never asks for image shares, outside news or feedback about the bot', () => {
+    expect(prompt).toContain('A shared image, GIF or meme is never an observation in itself');
+    expect(prompt).toContain('News and trivia from outside the server');
+    expect(prompt).toContain('Feedback about the bot itself');
   });
 
   it('requires current-display-name subjects with Discord IDs (identity normalization)', () => {
@@ -233,8 +241,8 @@ describe('buildPersonalityPrompt (memory-quality rules)', () => {
     expect(prompt).not.toContain('canonical name from the known server identities list');
   });
 
-  it('offers the full category set including image in the JSON output template', () => {
-    expect(prompt).toContain('fact|preference|personality|event|vibe|image');
+  it('offers the person categories, without image, in the JSON output template', () => {
+    expect(prompt).toContain('"category": "fact|preference|personality|event|vibe"');
   });
 
   it('interpolates the identities, emojis, and existing-memories sections', () => {

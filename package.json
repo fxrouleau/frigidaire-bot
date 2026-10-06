@@ -37,6 +37,7 @@
     "replay": "tsx src/test-support/replayCli.ts",
     "eval:gate": "tsx src/gate/eval/runEval.ts",
     "eval:persona": "tsx src/evals/persona/cli.ts",
+    "eval:deleted-repost": "tsx src/evals/deletedRepost/runEval.ts",
     "memory": "tsx src/ai/memory/bootstrap/cli.ts",
     "memory:export": "tsx src/ai/memory/bootstrap/cli.ts export",
     "memory:check": "tsx src/ai/memory/bootstrap/cli.ts import --check",

@@ -471,6 +471,36 @@ describe('dream state', () => {
     expect(notes.pendingDreams()).toEqual({ people: [expect.objectContaining({ owner: remi })] });
   });
 
+  it("keeps a milestone event past its TTL until its owner's dream has read it (60 days at most)", async () => {
+    const age = (id: number, modifier: string) =>
+      db().prepare("UPDATE memories SET updated_at = datetime('now', ?) WHERE id = ?").run(modifier, id);
+    const pending = await memory.save({ category: 'event', subject: 'Remi', content: 'moved to Ottawa', subject_user_id: REMI });
+    const server = await memory.save({ category: 'event', subject: 'server', content: 'the 2026 LAN happened' });
+    const stale = await memory.save({ category: 'event', subject: 'Remi', content: 'won a tournament', subject_user_id: REMI });
+    age(pending, '-15 days');
+    age(server, '-15 days');
+    age(stale, '-80 days');
+
+    expect(memory.sweepExpiredMemories()).toEqual({ expired: 1 });
+    expect(memory.getAllActive().map((m) => m.id).sort()).toEqual([pending, server].sort());
+
+    notes.recordDreamSuccess(remi, notes.journalHighWater());
+    notes.recordDreamSuccess(group, notes.journalHighWater());
+    expect(memory.sweepExpiredMemories()).toEqual({ expired: 2 });
+  });
+
+  it('keeps image rows out of what a dream reads, and out of who is pending', async () => {
+    await memory.save({ category: 'image', subject: 'Remi', content: 'shared a meme', subject_user_id: REMI });
+    await memory.save({ category: 'image', subject: 'server', content: 'a meme dump' });
+    expect(notes.pendingDreams()).toEqual({ people: [] });
+    await memory.save({ category: 'fact', subject: 'Remi', content: 'bakery', subject_user_id: REMI });
+
+    expect(notes.pendingDreams().people.map((p) => [p.owner, p.newRows])).toEqual([[remi, 1]]);
+    expect(notes.newJournal(remi, { dream: true }).map((r) => r.content)).toEqual(['bakery']);
+    // Chat still sees what is newer than the notes.
+    expect(notes.newJournal(remi).map((r) => r.content)).toEqual(['shared a meme', 'bakery']);
+  });
+
   it("never dreams a junk id the old learner left behind, only people the bot knows or a writer vouched for", async () => {
     memory.upsertIdentity(REMI, 'Remi');
     const GARBLED = '100000000000000777';

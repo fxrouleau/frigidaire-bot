@@ -93,11 +93,16 @@ const DAY_MS = 24 * HOUR_MS;
 export const DEFAULT_CHAT_MODEL = 'z-ai/glm-5.3-flash';
 export const DEFAULT_IMAGE_MODEL = 'google/gemini-3.1-flash-image';
 export const DEFAULT_LEARNER_MODEL = 'z-ai/glm-5.3-flash';
-// Opus over Qwen here because Qwen3-VL, despite being a strong generalist vision model, had no grasp of
-// Twitch/meme-emote culture — it kept describing every Pepe variant as "green frog with wide eyes"
-// regardless of whether it was monkaW, pepega, or FeelsGoodMan. Captions are one-shot per emoji and
-// cached forever, so paying Opus rates here is pennies.
-export const DEFAULT_EMOJI_CAPTION_MODEL = 'anthropic/claude-opus-4.7';
+// First-pass emoji captions from the image (one-shot per new or renamed emoji). GLM-5.3-Flash since October
+// 2026 (the owner's pick: it reads images, at a fraction of Opus's price). History: Claude Opus replaced
+// Qwen3-VL, which had no grasp of Twitch/meme-emote culture and described every Pepe variant as "green frog
+// with wide eyes" whether it was monkaW, pepega or FeelsGoodMan; the prompt names the common families.
+export const DEFAULT_EMOJI_CAPTION_MODEL = 'z-ai/glm-5.3-flash';
+// The usage-grounded caption job (src/reactions/usageCaptions.ts) rewrites the "for …" half of up to 40
+// captions a week from how the group uses each emoji: text only (the uses and the current caption), so
+// any text model works. It ran on the Opus-priced caption model until October 2026; GLM 5.3 (not Flash) is
+// the owner's pick.
+export const DEFAULT_EMOJI_USAGE_CAPTION_MODEL = 'z-ai/glm-5.3';
 export const DEFAULT_EMBEDDING_MODEL = 'qwen/qwen3-embedding-8b';
 /**
  * Memory v2's nightly dream (and, by default, owner edits and the built-in bootstrap): the model that turns
@@ -267,6 +272,10 @@ export const config = {
     get emojiCaption(): string {
       return envString('EMOJI_CAPTION_MODEL') ?? DEFAULT_EMOJI_CAPTION_MODEL;
     },
+    /** The usage-grounded caption job's model (text only). */
+    get emojiUsageCaption(): string {
+      return envString('EMOJI_USAGE_CAPTION_MODEL') ?? DEFAULT_EMOJI_USAGE_CAPTION_MODEL;
+    },
     get learner(): string {
       return envString('LEARNER_MODEL') ?? DEFAULT_LEARNER_MODEL;
     },
@@ -278,11 +287,19 @@ export const config = {
     },
     /**
      * Model that judges deleted messages (see deleteRepost): the TypeSafe decision model by default (a
-     * calibrated yes/no for ~$0.00001), or any chat model id. Image-only messages and decision-model
-     * failures fall back to CHAT_MODEL.
+     * calibrated yes/no for ~$0.00001), or any chat model id. A message that showed something (pictures, GIF
+     * frames, a video's keyframes) and decision-model failures go to messageJudgeVision.
      */
     get messageJudge(): string {
       return envString('DELETE_REPOST_MODEL') ?? DEFAULT_DECISION_MODEL;
+    },
+    /**
+     * The chat model that judges what a deleted message showed (must read images): CHAT_MODEL unless set. On
+     * the owner's deleted GIFs (the live eval, src/evals/deletedRepost/) GLM-5.3-Flash caught 7 of 8 and
+     * google/gemini-3.5-flash-lite 8 of 8 (~$0.002 a judged message); the owner kept GLM.
+     */
+    get messageJudgeVision(): string {
+      return envString('DELETE_REPOST_VISION_MODEL') ?? this.chat;
     },
     /**
      * Chat models OpenRouter falls back to, in order, when the primary errors (down, rate-limited,
@@ -954,8 +971,12 @@ export const config = {
     },
     /** Candidate chat models to compare; defaults to the configured CHAT_MODEL. */
     get models(): string[] {
-      const fromEnv = envCsv('EVAL_MODELS');
+      const fromEnv = this.explicitModels;
       return fromEnv.length > 0 ? fromEnv : [config.models.chat];
+    },
+    /** EVAL_MODELS as given ([] when unset): an eval with another default than CHAT_MODEL reads this. */
+    get explicitModels(): string[] {
+      return envCsv('EVAL_MODELS');
     },
     get judgeModel(): string {
       return envString('EVAL_JUDGE_MODEL') ?? DEFAULT_EVAL_JUDGE_MODEL;
@@ -1098,6 +1119,7 @@ export function describeEffectiveConfig(): string {
     `image=${models.image}`,
     `embedding=${models.embedding}`,
     `emojiCaption=${models.emojiCaption}`,
+    `emojiUsageCaption=${models.emojiUsageCaption}`,
     // Plumbing
     `discordToken=${config.discord.token ? 'set' : 'MISSING'}`,
     `openRouter=key:${config.openRouter.apiKey ? 'set' : 'MISSING'},timeout:${formatDuration(config.openRouter.timeoutMs)},retries:${config.openRouter.maxRetries}`,
@@ -1134,7 +1156,7 @@ export function describeEffectiveConfig(): string {
     feature('deleteRepost', deleteRepost.userIds.length > 0, [
       `users:${deleteRepost.userIds.length}`,
       `mode:${deleteRepost.mode}`,
-      ...(deleteRepost.mode === 'edgy' ? [`judge:${models.messageJudge}`] : []),
+      ...(deleteRepost.mode === 'edgy' ? [`judge:${models.messageJudge}`, `vision:${models.messageJudgeVision}`] : []),
     ]),
     `reminders=max:${config.reminders.maxPerUser}/user`,
     `birthdays=announce:${birthdayAnnounce},seed:${birthdays.seed.length}`,

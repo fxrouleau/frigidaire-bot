@@ -8,7 +8,10 @@
 // every deletion qualifies (always), and the message is reposted through a webhook wearing the
 // author's name and avatar. A watched member's side account (LINKED_ACCOUNTS) is watched too, and its
 // messages are reposted as that account. The judge sees what the message showed, not just its text: its
-// pictures, frames and the soundtrack of its videos, and the GIFs it linked (deletedMessageMedia.ts).
+// pictures, frames and the soundtrack of its videos, and the GIFs it linked (deletedMessageMedia.ts; a GIF
+// favorited from Discord's picker is an unsigned CDN link, signed through the bot's REST client first:
+// src/discordCdn.ts). A message that was nothing but links the bot couldn't open is never judged blind
+// (a link alone always read as harmless): it is left deleted as undecided.
 //
 // A webhook can upload 10 MB per file (level-1 boosts don't raise it). Videos up to 100 MB are saved
 // anyway, within a cap on what all snapshots hold at once, and one that gets reposted is first shrunk
@@ -19,7 +22,14 @@ import { getMediaTranscoder } from './ai/media';
 import { downloadMedia } from './ai/media/download';
 import { createEdgyJudge, type MessageJudge } from './ai/messageJudge';
 import { config, type DeleteRepostMode } from './config';
-import { attachmentKind, describeForJudge, type JudgeMedia, type SnapshotAttachment } from './deletedMessageMedia';
+import {
+  attachmentKind,
+  defaultJudgeMediaDeps,
+  describeForJudge,
+  type JudgeMedia,
+  type SnapshotAttachment,
+} from './deletedMessageMedia';
+import { createAttachmentUrlSigner, type UrlSigner } from './discordCdn';
 import { isSamePerson } from './linkedAccounts';
 import { logger } from './logger';
 import { recordRelay } from './relay';
@@ -68,8 +78,13 @@ export type DeletedMessageReposterOptions = {
   windowMs?: () => number;
   mode?: () => DeleteRepostMode;
   judge?: MessageJudge;
-  /** What the saved attachments and the text's GIF links show, for the judge. Default: describeForJudge. */
-  judgeMedia?: (content: string, attachments: SnapshotAttachment[]) => Promise<JudgeMedia>;
+  /**
+   * What the saved attachments and the text's GIF and image links show, for the judge; `signUrls` signs the
+   * Discord attachment links the CDN won't serve as written. Default: describeForJudge.
+   */
+  judgeMedia?: (content: string, attachments: SnapshotAttachment[], signUrls: UrlSigner) => Promise<JudgeMedia>;
+  /** The signer for a deleted message's links. Default: Discord's refresh-urls route over the bot's REST client. */
+  signer?: (message: Message | PartialMessage) => UrlSigner;
   /** An attachment's bytes, refused past `maxBytes`. Default: downloadMedia (Discord's CDN, streamed and capped). */
   fetchAttachment?: (url: string, maxBytes: number) => Promise<Buffer | undefined>;
   /** A video re-encoded under the upload limit, or undefined when it can't be. Default: ffmpeg. */
@@ -120,6 +135,28 @@ function regretPayloads(content: string, attachments: SnapshotAttachment[]): Web
   return payloads;
 }
 
+/** What a judgement rests on, for the log (sizes and counts only: no content). */
+function describeMedia(content: string, media: JudgeMedia): string {
+  const frames = media.visuals.reduce((sum, v) => sum + v.frames.length, 0);
+  const parts = [`${content.length} chars of text`];
+  if (media.visuals.length > 0) parts.push(`${media.visuals.length} visual(s) (${frames} frame(s))`);
+  if (media.notes.length > 0) parts.push(`${media.notes.length} media note(s)`);
+  if (media.unreadableLinks.length > 0) parts.push(`${media.unreadableLinks.length} link(s) that could not be opened`);
+  return parts.join(', ');
+}
+
+/**
+ * Whether the judge would only see links it couldn't open: nothing shown, nothing saved, and no words but
+ * those links. Judged on the bare link, a GIF always read as harmless.
+ */
+export function isBlind(content: string, attachments: SnapshotAttachment[], media: JudgeMedia): boolean {
+  if (media.visuals.length > 0 || attachments.length > 0 || media.unreadableLinks.length === 0) return false;
+  let rest = content;
+  for (const link of media.unreadableLinks) rest = rest.split(link).join(' ');
+  // The markdown a link sits in (a spoiler, a masked link, emphasis, a trailing period) says nothing either.
+  return rest.replace(/[\s|*_~`()[\]<>.,!?:;'"]+/g, '').length === 0;
+}
+
 export class DeletedMessageReposter {
   private readonly snapshots = new Map<string, MessageSnapshot>();
   private readonly botDeleted = new Set<string>();
@@ -127,7 +164,12 @@ export class DeletedMessageReposter {
   private readonly windowMs: () => number;
   private readonly mode: () => DeleteRepostMode;
   private readonly judge: MessageJudge;
-  private readonly judgeMedia: (content: string, attachments: SnapshotAttachment[]) => Promise<JudgeMedia>;
+  private readonly judgeMedia: (
+    content: string,
+    attachments: SnapshotAttachment[],
+    signUrls: UrlSigner,
+  ) => Promise<JudgeMedia>;
+  private readonly signer: (message: Message | PartialMessage) => UrlSigner;
   private readonly fetchAttachment: (url: string, maxBytes: number) => Promise<Buffer | undefined>;
   private readonly shrinkVideo: (data: Buffer) => Promise<Buffer | undefined>;
   private readonly send: typeof sendViaWebhook;
@@ -139,7 +181,11 @@ export class DeletedMessageReposter {
     this.windowMs = opts.windowMs ?? (() => config.deleteRepost.windowMs);
     this.mode = opts.mode ?? (() => config.deleteRepost.mode);
     this.judge = opts.judge ?? createEdgyJudge();
-    this.judgeMedia = opts.judgeMedia ?? ((content, attachments) => describeForJudge(content, attachments));
+    this.judgeMedia =
+      opts.judgeMedia ??
+      ((content, attachments, signUrls) =>
+        describeForJudge(content, attachments, { ...defaultJudgeMediaDeps(), signUrls }));
+    this.signer = opts.signer ?? ((message) => createAttachmentUrlSigner(message.client.rest));
     this.fetchAttachment = opts.fetchAttachment ?? downloadAttachment;
     this.shrinkVideo = opts.shrinkVideo ?? shrinkWithFfmpeg;
     this.send = opts.send ?? sendViaWebhook;
@@ -165,7 +211,10 @@ export class DeletedMessageReposter {
     const limits = attachments.map((a) => {
       if (a.size <= MAX_ATTACHMENT_BYTES) return MAX_ATTACHMENT_BYTES;
       // Too big to repost: only a video can be brought under the upload limit.
-      if (attachmentKind(a) !== 'video' || a.size > MAX_VIDEO_BYTES) return 0;
+      if (attachmentKind(a) !== 'video' || a.size > MAX_VIDEO_BYTES) {
+        logger.info(`deletedMessages: not saving ${a.name} (${megabytes(a.size)}): too big to repost`);
+        return 0;
+      }
       if (this.heldVideoBytes + a.size > MAX_HELD_VIDEO_BYTES) {
         logger.info(
           `deletedMessages: not saving ${a.name} (${megabytes(a.size)}): ${megabytes(this.heldVideoBytes)} of videos already held`,
@@ -232,16 +281,20 @@ export class DeletedMessageReposter {
     if (snapshot.content.length === 0 && attachments.length === 0) return 'empty';
 
     if (this.mode() === 'edgy') {
-      const media = await this.judgeMedia(snapshot.content, attachments);
-      if (media.imageUrls.length > 0 || media.notes.length > 0) {
-        logger.info(
-          `deletedMessages: judging ${snapshot.id} with ${media.imageUrls.length} image(s) and ${media.notes.length} media note(s)`,
+      // Built lazily: only a message with an unsigned attachment link needs it.
+      const signUrls: UrlSigner = (urls) => this.signer(message)(urls);
+      const media = await this.judgeMedia(snapshot.content, attachments, signUrls);
+      logger.info(`deletedMessages: judging ${snapshot.id} on ${describeMedia(snapshot.content, media)}`);
+      if (isBlind(snapshot.content, attachments, media)) {
+        logger.warn(
+          `deletedMessages: could not open anything ${snapshot.id} showed, and it said nothing else; leaving it deleted`,
         );
+        return 'undecided';
       }
       const verdict = await this.judge({
         author: snapshot.identity.name,
         text: snapshot.content,
-        imageUrls: media.imageUrls,
+        visuals: media.visuals,
         attachmentNames: snapshot.attachmentNames,
         mediaNotes: media.notes,
       });

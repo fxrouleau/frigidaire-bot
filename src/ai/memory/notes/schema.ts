@@ -24,22 +24,33 @@ export type NoteUpdatedBy = (typeof NOTE_WRITERS)[number];
 /** Every person has this topic once they have notes at all: who they are (see PROFILE_SECTIONS). */
 export const PROFILE_TOPIC = 'profile';
 
-/** Size limits, checked on every write. */
+/**
+ * Size limits, checked on every write. The writers' prompts ask for the targets, well under the hard
+ * limits: a model can't count characters, and a note written up to its limit fails the next night as soon
+ * as one thing is added (the dream on GLM did, every night, for everyone whose bootstrap profile sat at 99%).
+ */
 export const NOTE_LIMITS = {
   /** A person's profile. */
   profileMaxChars: 4_000,
+  /** What a profile aims for: chat turns show a profile's first 3,000 characters without Earlier. */
+  profileTargetChars: 3_200,
   /** Any other topic (a person's or the group's). */
   topicMaxChars: 8_000,
+  topicTargetChars: 6_500,
   /** A circle's note. */
   circleMaxChars: 6_000,
+  circleTargetChars: 5_000,
   /** Topics per person, the profile included. */
   maxPersonTopics: 10,
   /** Topics for the group. */
   maxGroupTopics: 8,
   /** Active circles in all. */
   maxCircles: 60,
-  /** Active circles one member currently belongs to (former memberships don't count). */
-  maxCirclesPerMember: 12,
+  /**
+   * Active circles one member currently belongs to (former memberships don't count). 16 since Oct 2026: at 12
+   * the import had to end real memberships to fit the core members, who all sat at exactly 12.
+   */
+  maxCirclesPerMember: 16,
   /** Members of one circle (current and former), and the fewest a circle can have. */
   maxCircleMembers: 30,
   minCircleMembers: 2,
@@ -148,6 +159,12 @@ const SNOWFLAKE_LIKE = /\b\d{15,21}\b/g;
 export function maxCharsFor(scope: NoteScope, topic: string): number {
   if (scope === 'circle') return NOTE_LIMITS.circleMaxChars;
   return scope === 'person' && topic === PROFILE_TOPIC ? NOTE_LIMITS.profileMaxChars : NOTE_LIMITS.topicMaxChars;
+}
+
+/** The size a writer aims for in a note's content (see NOTE_LIMITS): well under maxCharsFor(). */
+export function targetCharsFor(scope: NoteScope, topic: string): number {
+  if (scope === 'circle') return NOTE_LIMITS.circleTargetChars;
+  return scope === 'person' && topic === PROFILE_TOPIC ? NOTE_LIMITS.profileTargetChars : NOTE_LIMITS.topicTargetChars;
 }
 
 /** The topic limit of an owner. */
@@ -390,6 +407,11 @@ export function validateNotesOutput(
   const seen = new Set<string>();
   const rawNotes = Array.isArray(fields.notes) ? fields.notes : [];
   if (ctx.scope === 'circle' && rawNotes.length > 0) errors.push('an edit of a circle writes only "circles"');
+  // Whether the answer holds a profile at all, valid or not: one refused for its size is still there.
+  const hasProfile = rawNotes.some(
+    (entry) =>
+      entry && typeof entry === 'object' && normalizeTopic((entry as Record<string, unknown>).topic) === PROFILE_TOPIC,
+  );
   for (const entry of ctx.scope === 'circle' ? [] : rawNotes) {
     const result = validateNoteDraft(entry, ctx);
     if (!result.ok) {
@@ -439,7 +461,7 @@ export function validateNotesOutput(
   }
   if (ctx.scope === 'circle' && circles.length !== 1) errors.push('an edit of a circle writes exactly that circle');
 
-  if (ctx.requireProfile && ctx.scope === 'person' && !seen.has(PROFILE_TOPIC)) {
+  if (ctx.requireProfile && ctx.scope === 'person' && !hasProfile) {
     errors.push('a person\'s notes must include the "profile" topic');
   }
   if (ctx.scope !== 'circle') {
@@ -485,25 +507,27 @@ export function clampSummary(raw: unknown): string {
 }
 
 /**
- * Parses a model's text answer into a NotesOutput: the JSON object itself, or the first `{…}` span in
- * it (models like ```json fences), then validateNotesOutput().
+ * The JSON in a model's text answer: the whole text, or the first `{…}` span in it (models like ```json
+ * fences). Undefined when neither parses.
  */
-export function parseNotesOutput(
-  text: string,
-  ctx: NoteValidationContext & { requireProfile?: boolean },
-): ValidationResult<NotesOutput> {
+export function extractJson(text: string): { value: unknown } | undefined {
   const candidates = [text.trim()];
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   if (start >= 0 && end > start) candidates.push(text.slice(start, end + 1));
   for (const candidate of candidates) {
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(candidate);
-    } catch {
-      continue;
-    }
-    return validateNotesOutput(parsed, ctx);
+      return { value: JSON.parse(candidate) };
+    } catch {}
   }
-  return { ok: false, errors: ['the answer is not a JSON object'] };
+  return undefined;
+}
+
+/** Parses a model's text answer into a NotesOutput: extractJson(), then validateNotesOutput(). */
+export function parseNotesOutput(
+  text: string,
+  ctx: NoteValidationContext & { requireProfile?: boolean },
+): ValidationResult<NotesOutput> {
+  const json = extractJson(text);
+  return json ? validateNotesOutput(json.value, ctx) : { ok: false, errors: ['the answer is not a JSON object'] };
 }
