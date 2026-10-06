@@ -137,13 +137,13 @@ describe('config', () => {
     }
     expect(config.dream).toMatchObject({
       enabled: true,
-      model: 'z-ai/glm-5.3-flash',
+      model: 'z-ai/glm-5.3',
       reasoning: 'medium',
       hour: 4,
       maxPeoplePerNight: 20,
       reportEnabled: true,
-      editModel: 'z-ai/glm-5.3-flash',
-      bootstrapModel: 'z-ai/glm-5.3-flash',
+      editModel: 'z-ai/glm-5.3',
+      bootstrapModel: 'z-ai/glm-5.3',
     });
     expect(config.learner.captureIdleMinutes).toBe(20);
     expect(config.learner.captureMaxSpanMinutes).toBe(120);
@@ -367,7 +367,7 @@ describe('describeEffectiveConfig', () => {
         'linkedAccounts=1',
         'reportChannel=set(digest:on@7d,deploy:on)',
         'learning=idle:20m,span:2h,min:5,ignore:2,selfImprovement:on',
-        'dream=on(model:z-ai/glm-5.3-flash,reasoning:medium,hour:4,max:20,report:on)',
+        'dream=on(model:z-ai/glm-5.3,reasoning:medium,hour:4,max:20,report:on)',
         'owners=app',
         'links=verify:on,fixers:x3/ig3/tt3/rd2/bsky3,translate:en,alerts:on',
         'deleteRepost=off',
@@ -416,7 +416,7 @@ describe('describeEffectiveConfig', () => {
     }
     const tokens = describeEffectiveConfig().split(' ');
     expect(tokens).toContain(
-      'dream=on(model:z-ai/glm-5.3-flash,reasoning:medium,hour:5,max:20,report:no-channel,edit:edit/model)',
+      'dream=on(model:z-ai/glm-5.3,reasoning:medium,hour:5,max:20,report:no-channel,edit:edit/model)',
     );
     expect(tokens).toContain('owners=1');
     vi.stubEnv('MEMORY_DREAM_ENABLED', 'off');

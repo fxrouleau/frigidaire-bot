@@ -914,7 +914,7 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 | Variable | Default | Meaning |
 |---|---|---|
 | `MEMORY_DREAM_ENABLED` | true | the nightly dream (off ⇒ notes only change through edits and imports) |
-| `MEMORY_DREAM_MODEL` | `z-ai/glm-5.3-flash` | the dream (ZDR) |
+| `MEMORY_DREAM_MODEL` | `z-ai/glm-5.3` | the dream (ZDR) |
 | `MEMORY_DREAM_REASONING` | `medium` | `off` \| `low` \| `medium` \| `high`: reasoning effort of the dream, edits and bootstrap; `off` sends none (use it with Claude) |
 | `MEMORY_DREAM_HOUR` | 4 | Eastern hour (0..23) from which the day's dream runs, catching up the same day |
 | `MEMORY_DREAM_MAX_PEOPLE_PER_NIGHT` | 20 | people dreamed per night, most recently active first (1..500) |

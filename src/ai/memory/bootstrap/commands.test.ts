@@ -165,7 +165,7 @@ describe('runCli', () => {
     expect(code).toBe(0);
     expect(client).not.toHaveBeenCalled();
     expect(out[0]).toBe('Archive: 2 messages over 1 month → 1 segment (1 still to read).');
-    expect(out[1]).toBe('Model: z-ai/glm-5.3-flash ($4.00/M in, $20.00/M out).');
+    expect(out[1]).toBe('Model: z-ai/glm-5.3 ($4.00/M in, $20.00/M out).');
     expect(out[2]).toMatch(/^Estimated: ~[\d,]+ input \+ ~300 output tokens ≈ \$0\.\d\d\.$/);
   });
 

@@ -106,11 +106,13 @@ export const DEFAULT_EMOJI_USAGE_CAPTION_MODEL = 'z-ai/glm-5.3';
 export const DEFAULT_EMBEDDING_MODEL = 'qwen/qwen3-embedding-8b';
 /**
  * Memory v2's nightly dream (and, by default, owner edits and the built-in bootstrap): the model that turns
- * the journal into per-person notes. The chat model: cheap, zero-data-retention hosts, and it only runs
- * nightly for people with new journal rows (docs/memory.md). It reasons, so the dream asks for
+ * the journal into per-person notes (docs/memory.md). GLM 5.3 since October 2026: replaying real dreams on
+ * five candidates, it invented nothing, kept the most history and never failed, for ~$0.05 a dream (Claude
+ * Opus ~5× the cost; GLM-5.3-Flash, the default before, embellished and trimmed history, and once saved a
+ * profile of invented stories; GPT-6 Luna gutted topic notes). It reasons, so the dream asks for
  * MEMORY_DREAM_REASONING's effort (a model that only reasons when asked, like Claude, wants `off`).
  */
-export const DEFAULT_DREAM_MODEL = 'z-ai/glm-5.3-flash';
+export const DEFAULT_DREAM_MODEL = 'z-ai/glm-5.3';
 export const DREAM_REASONING_EFFORTS = ['off', 'low', 'medium', 'high'] as const;
 export type DreamReasoningEffort = (typeof DREAM_REASONING_EFFORTS)[number];
 /**
