@@ -167,7 +167,7 @@ ${SIZE_TARGETS}
 
 Answer with ONE JSON object and nothing else:
 ${JSON_SHAPE}
-- "notes" always holds the profile, in full (repeat it unchanged when nothing about it changed), plus every other topic note you created or changed, in full. Leave unchanged topic notes out: they stay as they are. "removed_topics": topics to delete (never the profile).
+- "notes": every note you created or changed, each in full: the profile when it changed (always, when they have no profile yet), and any topic notes. Leave unchanged notes out, the profile included: they stay as they are. "removed_topics": topics to delete (never the profile).
 - "circles" and "occasions": only the ones you created or changed, each in full. "archived_circles": circles that are over.
 - "change_summary": what changed, in ${SUMMARY_RULE} ("new job at the bakery; quit Valorant"); "" when nothing did.`;
 

@@ -356,6 +356,27 @@ describe('dreamPerson', () => {
     expect(notes.getNote(remi, 'profile')?.content).toContain('Works day shifts at the bakery');
   });
 
+  it('leaves an existing profile unchanged when the answer leaves it out, and requires one from someone without', async () => {
+    await saveFact('Plays Valorant with Dale on Fridays.');
+    const before = notes.getNote(remi, 'profile')?.content;
+    const topicOnly = createCapturingClient([
+      reply({ notes: [{ topic: 'games', title: 'Games', content: '## Now\nValorant with Dale on Fridays.' }], change_summary: 'Friday Valorant' }),
+    ]);
+    expect(await dreamPerson(REMI, deps(topicOnly.client))).toMatchObject({ status: 'updated' });
+    expect(topicOnly.requests).toHaveLength(1);
+    expect(notes.getNote(remi, 'profile')?.content).toBe(before);
+    expect(notes.getNote(remi, 'games')?.content).toBe('## Now\nValorant with Dale on Fridays.');
+
+    // Dale has no notes yet: an answer without a profile is refused and repaired.
+    await memory.save({ category: 'fact', subject: 'Dale', subject_user_id: DALE, content: 'Plays bass.', source: 'observation' });
+    const noProfile = createCapturingClient([
+      reply({ notes: [{ topic: 'music', title: 'Music', content: '## Now\nBass.' }], change_summary: 'bass' }),
+      reply({ notes: [{ topic: 'profile', title: 'Dale', content: '## Now\nPlays bass.' }], change_summary: 'bass' }),
+    ]);
+    expect(await dreamPerson(DALE, deps(noProfile.client))).toMatchObject({ status: 'updated' });
+    expect(messagesOf(noProfile.requests[1])[3].content).toContain('must include the "profile" topic');
+  });
+
   it('feeds a write the store refuses back as errors (a circle the person is not in)', async () => {
     await saveFact('Dale and Nova started a book club.');
     const { client, requests } = createCapturingClient([
@@ -387,14 +408,14 @@ describe('dreamPerson', () => {
     await saveFact('Works day shifts at the bakery now.');
     const { client, requests } = createCapturingClient([
       reply('no json here'),
-      reply({ notes: [{ topic: 'games', title: 'Games', content: 'Deadlock.' }], change_summary: 'x' }),
+      reply({ notes: [{ topic: 'Bad Slug!', title: 'Games', content: 'Deadlock.' }], change_summary: 'x' }),
     ]);
     const outcome = await dreamPerson(REMI, deps(client));
     expect(outcome).toMatchObject({ status: 'failed', owner: remi });
-    expect(outcome.status === 'failed' ? outcome.error : '').toContain('must include the "profile" topic');
+    expect(outcome.status === 'failed' ? outcome.error : '').toContain('the topic must be a lowercase slug');
     expect(requests).toHaveLength(2);
     expect(notes.getDreamState(remi)).toMatchObject({ journalWatermark: 0 });
-    expect(notes.getDreamState(remi).lastError).toContain('profile');
+    expect(notes.getDreamState(remi).lastError).toContain('lowercase slug');
     expect(notes.getProfile(REMI)?.version).toBe(1);
     expect(notes.newJournal(remi)).toHaveLength(1);
   });
