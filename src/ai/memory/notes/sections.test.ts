@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { earlierPart, noteShapeWarnings, splitSections, withoutEarlier } from './sections';
+import {
+  earlierPart,
+  noteShapeWarnings,
+  occasionShapeWarnings,
+  planFirst,
+  splitSections,
+  withoutEarlier,
+} from './sections';
 
 const PROFILE = `Remi, the group's night owl.
 
@@ -63,5 +70,26 @@ describe('noteShapeWarnings', () => {
       'no "## Traits" section',
       'no "## Circles & people" section',
     ]);
+  });
+});
+
+describe('occasions', () => {
+  it('expects a Plan ahead, what happened (and no Plan) once past, nothing of a trace', () => {
+    expect(occasionShapeWarnings('## Plan\nFlights booked.', 'plan')).toEqual([]);
+    expect(occasionShapeWarnings('Flights booked.', 'plan')).toEqual(['no "## Plan" section']);
+    expect(occasionShapeWarnings('## What happened\nSunburns.\n\n## Legacy\n"Ladder Dale."', 'history')).toEqual([]);
+    expect(occasionShapeWarnings('## Plan\nFlights.', 'history')).toEqual([
+      'no "## What happened" section',
+      'still has its "## Plan" section',
+    ]);
+    expect(occasionShapeWarnings('A trip.', 'trace')).toEqual([]);
+  });
+
+  it('moves the Plan (with its subsections) right after the opening text', () => {
+    const note = 'The group trip.\n\n## So far\nDay one.\n\n## Plan\nFlights booked.\n### Open\nHotel?\n\n## Earlier\nx';
+    expect(planFirst(note)).toBe(
+      'The group trip.\n\n## Plan\nFlights booked.\n\n### Open\nHotel?\n\n## So far\nDay one.\n\n## Earlier\nx',
+    );
+    expect(planFirst('  ## So far\nNo plan.  ')).toBe('## So far\nNo plan.');
   });
 });

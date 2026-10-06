@@ -7,6 +7,7 @@
 //   import --check  validate a notes tree without loading it (the load itself happens at bot startup)
 //   observations  validate the playbook's observation log; rebuild its per-person views and cast sheet
 //   bootstrap     the built-in bootstrap over OpenRouter: --dry-run (estimate) or --run
+//   archive       put circles and occasions away now, as the nightly lifecycle pass would: --dry-run lists
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type OpenAI from 'openai';
@@ -15,9 +16,24 @@ import { config } from '../../../config';
 import type { ModelPricing } from '../../modelCatalog';
 import { makeDefaultEmbeddingProvider } from '../embeddingProvider';
 import { MemoryStore } from '../memoryStore';
-import { type NightlyDreamResult, runDreamsUntilCaughtUp } from '../notes/dreamer';
-import { NotesStore } from '../notes/notesStore';
+import {
+  archiveShared,
+  type LifecycleOutcome,
+  type NightlyDreamResult,
+  runDreamsUntilCaughtUp,
+} from '../notes/dreamer';
+import { takeDreamLease } from '../notes/dreamLease';
+import {
+  type ActivityMonth,
+  circlePresence,
+  easternToday,
+  isArchived,
+  parseActivitySeed,
+  yearlyCadence,
+} from '../notes/lifecycle';
+import { type Note, NotesStore } from '../notes/notesStore';
 import { loadEvidencePassages } from '../notes/passages';
+import { NOTE_LIMITS, normalizeTopic } from '../notes/schema';
 import {
   type BootstrapEstimate,
   estimateBootstrap,
@@ -84,7 +100,17 @@ export const USAGE = `usage: memory <command> [options]
             [--max-segments N] [--no-dream]
       The built-in bootstrap over OpenRouter (MEMORY_BOOTSTRAP_MODEL, zero data retention):
       --dry-run counts and prices it; --run reads the archive into the journal (resumable),
-      then dreams everyone's notes once the whole archive is read.`;
+      then dreams everyone's notes once the whole archive is read.
+
+  archive <slug>… [--dry-run]
+      Put circles and occasions away now (a slug may say which: circle:yugioh, occasion:ski-trip-2027):
+      each is compacted to a short historical trace (one MEMORY_DREAM_MODEL call, zero data retention),
+      a circle's current memberships end, and it stays readable and searchable. --dry-run lists them.
+
+  seed-activity <file.json> [--dry-run]
+      Record circles' activity by month from the archive, {"<slug>": {"2019-03": 12, …}, …} (a month
+      already recorded keeps the larger weight, so running it twice changes nothing). It says how each
+      circle stands afterwards (present, fading, or due for archiving tonight). --dry-run only says.`;
 
 type Args = { positional: string[]; flags: Map<string, string | true> };
 
@@ -428,7 +454,194 @@ async function bootstrapCommand(args: Args, deps: CliDeps): Promise<number> {
   return result.segmentsFailed > 0 ? 1 : 0;
 }
 
-/** Runs one command line; resolves to the exit code. */
+/** The holder label of the archive command's dream lease (what the bot's scheduler logs while it waits). */
+export const ARCHIVE_HOLDER = 'the memory archive command (CLI)';
+
+/**
+ * The circle or occasion a slug names: `circle:<slug>` / `occasion:<slug>`, or a bare slug that only one of
+ * them has. An error line otherwise.
+ */
+function findArchiveTarget(notes: NotesStore, raw: string): { note: Note } | { error: string } {
+  const [kind, rest] = raw.includes(':') ? raw.split(/:(.*)/s, 2) : [undefined, raw];
+  const slug = normalizeTopic(rest);
+  if (!slug || (kind !== undefined && kind !== 'circle' && kind !== 'occasion')) {
+    return { error: `"${raw}" is not a slug (or circle:<slug> / occasion:<slug>)` };
+  }
+  const circle = kind === 'occasion' ? undefined : notes.getCircle(slug);
+  const occasion = kind === 'circle' ? undefined : notes.getOccasion(slug);
+  if (circle && occasion) {
+    return { error: `"${slug}" is both a circle and an occasion: say circle:${slug} or occasion:${slug}` };
+  }
+  const note = circle ?? occasion;
+  return note ? { note } : { error: `there is no ${kind ?? 'circle or occasion'} "${slug}"` };
+}
+
+/** One line on what archiving a note does: `circle yugioh "The Yu-Gi-Oh crew": 3 members (2 current, …)`. */
+function describeArchive(note: Note, month: string): string {
+  const current = note.members.filter((m) => m.until === null).length;
+  const people =
+    note.scope === 'circle'
+      ? `${counted(note.members.length, 'member')}${current > 0 ? ` (${current} current: their memberships end ${month})` : ''}`
+      : counted(note.members.length, 'participant');
+  return `${note.scope} ${note.topic} "${note.title}": ${people}; ${formatCount(note.content.length)} characters → a trace of ≤ ${formatCount(NOTE_LIMITS.archivedTargetChars)}`;
+}
+
+/**
+ * `archive <slug>… [--dry-run]`: the owner's one-off archiving, through the nightly lifecycle pass's own
+ * code path (dreamer.ts archiveShared: one compaction call each, NotesStore.archiveNote: status archived, a
+ * circle's current memberships ended). Every slug must name a circle or an occasion, or nothing is archived
+ * (a typo never half-runs). Already archived notes that are short enough are skipped. Holds the dream lease
+ * while it runs, like `bootstrap --run`: not alongside the bot's nightly dream.
+ */
+async function archiveCommand(args: Args, deps: CliDeps): Promise<number> {
+  if (args.positional.length === 0) throw new UsageError('archive needs at least one circle or occasion slug');
+  const dryRun = args.flags.has('dry-run');
+  const stores = (deps.openStores ?? (() => openDataStores(deps.dataDir ?? DEFAULT_DATA_DIR)))();
+  const month = stores.notes.today().slice(0, 7);
+  const targets: Note[] = [];
+  const errors: string[] = [];
+  for (const raw of [...new Set(args.positional)]) {
+    const found = findArchiveTarget(stores.notes, raw);
+    if ('error' in found) errors.push(found.error);
+    else if (targets.some((t) => t.id === found.note.id)) continue;
+    else if (isArchived(found.note) && found.note.content.length <= NOTE_LIMITS.archivedMaxChars) {
+      deps.io.out(`${found.note.scope} ${found.note.topic} is already archived: skipped.`);
+    } else targets.push(found.note);
+  }
+  if (errors.length > 0) {
+    deps.io.err(`Nothing archived: ${errors.join('; ')}.`);
+    return 1;
+  }
+  if (targets.length === 0) {
+    deps.io.out('Nothing to archive.');
+    return 0;
+  }
+  deps.io.out(`${dryRun ? 'Would archive' : 'Archiving'} ${counted(targets.length, 'note')}:`);
+  for (const note of targets) deps.io.out(`  - ${describeArchive(note, month)}`);
+  if (dryRun) return 0;
+
+  const client = (deps.client ?? (() => undefined))();
+  if (!client) {
+    deps.io.err('OPENROUTER_API_KEY is not set: archiving compacts each note with the dream model.');
+    return 1;
+  }
+  const taken = takeDreamLease(stores.memory, ARCHIVE_HOLDER);
+  if (!taken.ok) {
+    deps.io.err(
+      `${taken.heldBy.holder} has been running since ${taken.heldBy.since} (Eastern): nothing archived. Run this again once it is done.`,
+    );
+    return 1;
+  }
+  const outcomes: LifecycleOutcome[] = [];
+  try {
+    for (const note of targets) {
+      const why = isArchived(note) ? 'compact' : 'requested';
+      const outcome = await archiveShared(note, why, {
+        notes: stores.notes,
+        memory: stores.memory,
+        client,
+        ...(deps.now ? { now: deps.now } : {}),
+      });
+      outcomes.push(outcome);
+      if (outcome.status === 'archived') {
+        deps.io.out(
+          `  ✓ ${note.scope} ${note.topic}: archived (${formatCount(outcome.note.content.length)} characters).`,
+        );
+      } else if (outcome.status === 'failed') {
+        deps.io.err(`  ✖ ${note.scope} ${note.topic}: ${outcome.error}`);
+      }
+    }
+  } finally {
+    taken.lease.release();
+  }
+  const done = outcomes.filter((o) => o.status === 'archived').length;
+  const failed = outcomes.length - done;
+  const cost = outcomes.reduce((sum, o) => sum + (o.costUsd ?? 0), 0);
+  deps.io.out(
+    `Done: ${counted(done, 'note')} archived${failed > 0 ? `, ${failed} failed (run it again to retry them)` : ''}, ${formatUsd(cost)}. Undo is in the notes viewer ("What does Fridge know?").`,
+  );
+  return failed > 0 ? 1 : 0;
+}
+
+export { parseActivitySeed } from '../notes/lifecycle';
+
+/** `present (R 0.82)`, `fading (R 0.31) · yearly (usually Feb)`, `archive tonight (R 0.04)`. */
+function describePresence(circle: Note, series: ActivityMonth[], today: string): string {
+  const presence = circlePresence(circle, series, today);
+  const state = presence.state === 'archive' ? 'archived tonight' : presence.state;
+  const r = presence.r !== undefined ? ` (R ${presence.r.toFixed(2)})` : ' (no activity: by membership)';
+  const cadence = yearlyCadence(series);
+  return `${state}${r}${cadence ? ` · ${cadence.label}` : ''}`;
+}
+
+/**
+ * `seed-activity <file.json> [--dry-run]`: records circles' monthly activity computed from the archive (the
+ * decay's starting point: lifecycle.ts CIRCLE_DECAY), raising each month to its weight (idempotent). A file
+ * that doesn't parse is refused whole; a slug that names no circle is skipped with a warning. Seeding never
+ * brings an archived circle back (old months are history). Says how each circle stands afterwards.
+ */
+async function seedActivityCommand(args: Args, deps: CliDeps): Promise<number> {
+  const file = args.positional[0];
+  if (!file || args.positional.length > 1) throw new UsageError('seed-activity needs exactly one JSON file');
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    deps.io.err(`${file}: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+  const parsed = parseActivitySeed(raw, easternToday((deps.now ?? (() => new Date()))()));
+  if (!parsed.ok) {
+    deps.io.err(`${file}: nothing seeded, ${counted(parsed.errors.length, 'problem')}:`);
+    for (const error of parsed.errors) deps.io.err(`  - ${error}`);
+    return 1;
+  }
+  const dryRun = args.flags.has('dry-run');
+  const stores = (deps.openStores ?? (() => openDataStores(deps.dataDir ?? DEFAULT_DATA_DIR)))();
+  const today = stores.notes.today();
+  const unknown: string[] = [];
+  let seeded = 0;
+  for (const [slug, months] of parsed.seed) {
+    const circle = stores.notes.getCircle(slug);
+    if (!circle) {
+      unknown.push(slug);
+      continue;
+    }
+    const merged = new Map(stores.notes.activityOf(circle.id).map((m) => [m.month, m]));
+    for (const [month, weight] of Object.entries(months)) {
+      const seen = merged.get(month);
+      merged.set(month, { ...seen, month, weight: Math.max(seen?.weight ?? 0, weight) });
+    }
+    if (!dryRun) {
+      const result = stores.notes.recordActivity(circle.id, months, { mode: 'max', revive: false });
+      if (!result.ok) {
+        deps.io.err(`  ✖ ${slug}: ${result.error}`);
+        continue;
+      }
+    }
+    seeded++;
+    const keys = Object.keys(months).sort();
+    const total = Object.values(months).reduce((sum, w) => sum + w, 0);
+    const span = keys.length > 0 ? `${keys[0]} → ${keys[keys.length - 1]}` : 'none';
+    const state = isArchived(circle)
+      ? 'archived (stays archived)'
+      : describePresence(circle, [...merged.values()], today);
+    deps.io.out(`  - ${slug}: ${counted(keys.length, 'month')} (${span}), weight ${formatCount(total)} → ${state}`);
+  }
+  if (unknown.length > 0) deps.io.out(`warning: no circle ${unknown.join(', ')}: skipped.`);
+  deps.io.out(
+    `${dryRun ? 'Would seed' : 'Seeded'} ${counted(seeded, 'circle')}.${dryRun ? '' : " Circles due for archiving are archived by tonight's dream (10 a night, the faintest first)."}`,
+  );
+  return 0;
+}
+
+/** SQLite's "database is locked" (better-sqlite3 waits its 5-second busy timeout first). */
+function isBusyError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && (code === 'SQLITE_BUSY' || code.startsWith('SQLITE_BUSY_'));
+}
+
+/** Runs one command line; resolves to the exit code. A database another process keeps locked fails cleanly. */
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const [command, ...rest] = argv;
   try {
@@ -442,6 +655,10 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         return await observationsCommand(args, deps);
       case 'bootstrap':
         return await bootstrapCommand(args, deps);
+      case 'archive':
+        return await archiveCommand(args, deps);
+      case 'seed-activity':
+        return await seedActivityCommand(args, deps);
       case undefined:
       case 'help':
       case '--help':
@@ -454,6 +671,12 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     if (error instanceof UsageError) {
       deps.io.err(`${error.message}\n\n${USAGE}`);
       return 2;
+    }
+    if (isBusyError(error)) {
+      deps.io.err(
+        'failed: the database is busy (another process, the bot or a second command, kept it locked past the 5-second wait). Nothing was changed: run it again in a moment.',
+      );
+      return 1;
     }
     deps.io.err(`failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
     return 1;

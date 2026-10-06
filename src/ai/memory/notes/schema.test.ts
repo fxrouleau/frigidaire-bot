@@ -8,6 +8,7 @@ import {
   validateCircleDraft,
   validateNoteDraft,
   validateNotesOutput,
+  validateOccasionDraft,
 } from './schema';
 
 const REMI = '100000000000000001';
@@ -163,7 +164,16 @@ describe('parseNotesOutput', () => {
     const text = `Here you go:\n\`\`\`json\n${JSON.stringify({ notes: [], removed_topics: [], change_summary: 'nothing' })}\n\`\`\``;
     expect(parseNotesOutput(text, { scope: 'group' })).toEqual({
       ok: true,
-      value: { notes: [], removed_topics: [], circles: [], removed_circles: [], change_summary: 'nothing' },
+      value: {
+        notes: [],
+        removed_topics: [],
+        circles: [],
+        removed_circles: [],
+        archived_circles: [],
+        occasions: [],
+        removed_occasions: [],
+        change_summary: 'nothing',
+      },
     });
   });
 
@@ -280,5 +290,165 @@ describe('validateNotesOutput with circles', () => {
       ).ok,
     ).toBe(false);
     expect(validateNotesOutput({ circles: [] }, { scope: 'circle' }).ok).toBe(false);
+  });
+});
+
+describe('validateOccasionDraft', () => {
+  const trip = (over: Record<string, unknown> = {}) => ({
+    slug: 'ski-trip-2027',
+    title: 'Ski trip',
+    content: '## Plan\nA week at Tremblant; chalet booked, lift passes still open.',
+    starts_on: '2027-01-10',
+    ends_on: '2027-01-17',
+    place: 'Tremblant',
+    status: 'planned',
+    participants: [
+      { id: REMI, role: 'organizer' },
+      { id: DALE, until: '2026-12', role: 'bailed' },
+      { id: NOVA, role: 'maybe' },
+    ],
+    ...over,
+  });
+  const errorsOf = (over: Record<string, unknown>) => {
+    const result = validateOccasionDraft(trip(over));
+    return result.ok ? [] : result.errors;
+  };
+
+  it('accepts an occasion with dates, place, status and dated participants', () => {
+    const result = validateOccasionDraft(trip({ aliases: ['the ski trip'] }));
+    expect(result.ok && result.value).toEqual({
+      slug: 'ski-trip-2027',
+      title: 'Ski trip',
+      content: '## Plan\nA week at Tremblant; chalet booked, lift passes still open.',
+      aliases: ['the ski trip'],
+      starts_on: '2027-01-10',
+      ends_on: '2027-01-17',
+      place: 'Tremblant',
+      status: 'planned',
+      participants: [
+        { id: REMI, since: null, until: null, role: 'organizer' },
+        { id: DALE, since: null, until: '2026-12', role: 'bailed' },
+        { id: NOVA, since: null, until: null, role: 'maybe' },
+      ],
+      circle: null,
+    });
+    // A round of a tradition names its circle by slug.
+    const round = validateOccasionDraft(trip({ circle: 'Winter-Dinners' }));
+    expect(round.ok && round.value.circle).toBe('winter-dinners');
+    expect(errorsOf({ circle: 'the winter dinners' })[0]).toContain('"circle" must be a circle\'s slug');
+  });
+
+  it('reads an absent status and place as none, partial dates, and "members" when "participants" is missing', () => {
+    const { participants, ...rest } = trip({ status: undefined, place: undefined, starts_on: '2027-01', ends_on: null });
+    const result = validateOccasionDraft({ ...rest, members: participants });
+    expect(result.ok && [result.value.status, result.value.place, result.value.starts_on, result.value.ends_on]).toEqual(
+      [null, null, '2027-01', null],
+    );
+    expect(validateOccasionDraft(trip({ status: 'PAST' })).ok).toBe(true);
+  });
+
+  it('refuses missing or bad dates, an end before the start, an unknown status and a bad place', () => {
+    expect(errorsOf({ starts_on: undefined })).toEqual([
+      'occasion "ski-trip-2027": "starts_on" is required (YYYY, YYYY-MM or YYYY-MM-DD)',
+    ]);
+    expect(errorsOf({ starts_on: 'next January' })[0]).toContain('"starts_on" must be YYYY');
+    expect(errorsOf({ ends_on: '2027-01-02' })).toEqual([
+      'occasion "ski-trip-2027": it ends (2027-01-02) before it starts (2027-01-10)',
+    ]);
+    expect(errorsOf({ status: 'postponed' })[0]).toContain('"status" must be one of planned, happening, past');
+    expect(errorsOf({ place: 'a\nb' })[0]).toContain('"place" must be plain one-line text');
+    expect(errorsOf({ place: 'x'.repeat(NOTE_LIMITS.placeMaxChars + 1) })[0]).toContain('"place" must be plain');
+  });
+
+  it('holds participants, size and markup to the same rules as circles', () => {
+    expect(errorsOf({ participants: [{ id: REMI }] })).toEqual([
+      'occasion "ski-trip-2027": an occasion has at least 2 participants',
+    ]);
+    expect(errorsOf({ participants: [{ id: REMI }, { id: REMI }] })[0]).toContain('participant');
+    expect(errorsOf({ content: 'x'.repeat(NOTE_LIMITS.occasionMaxChars + 1) })[0]).toContain('over the 4000 limit');
+    expect(errorsOf({ content: 'flying with <@100000000000000009>' })[0]).toContain('a Discord mention');
+    // A participant's own id may appear in the text, nobody else's.
+    expect(errorsOf({ content: `organized by ${REMI}` })).toEqual([]);
+    expect(errorsOf({ content: 'organized by 100000000000000009' })[0]).toContain("wasn't in the input");
+  });
+});
+
+describe('validateNotesOutput with occasions and archived circles', () => {
+  const pair = {
+    slug: 'remi-and-dale',
+    title: 'Remi & Dale',
+    content: 'Best friends since school.',
+    members: [{ id: REMI }, { id: DALE }],
+  };
+  const trip = {
+    slug: 'orchard-trip',
+    title: 'Orchard trip',
+    content: '## Plan\nSaturday at the orchard.',
+    starts_on: '2026-10-17',
+    participants: [{ id: REMI }, { id: NOVA }],
+  };
+  const errorsOf = (raw: unknown, scope: 'person' | 'group' | 'circle' | 'occasion' = 'person') => {
+    const result = validateNotesOutput(raw, { scope });
+    return result.ok ? [] : result.errors;
+  };
+
+  it('reads occasions, removed occasions and archived circles, and defaults them to []', () => {
+    const result = validateNotesOutput(
+      { notes: [], occasions: [trip], removed_occasions: ['old-trip'], archived_circles: ['yugioh'] },
+      { scope: 'person' },
+    );
+    expect(
+      result.ok && [
+        result.value.occasions.map((o) => o.slug),
+        result.value.removed_occasions,
+        result.value.archived_circles,
+      ],
+    ).toEqual([['orchard-trip'], ['old-trip'], ['yugioh']]);
+    const bare = validateNotesOutput({ notes: [] }, { scope: 'group' });
+    expect(bare.ok && [bare.value.occasions, bare.value.removed_occasions, bare.value.archived_circles]).toEqual([
+      [],
+      [],
+      [],
+    ]);
+  });
+
+  it('refuses an occasion twice or written and removed, and a circle both archived and removed or merged away', () => {
+    expect(errorsOf({ notes: [], occasions: [trip, trip] })).toEqual(['occasion "orchard-trip" appears twice']);
+    expect(errorsOf({ notes: [], occasions: [trip], removed_occasions: ['orchard-trip'] })).toEqual([
+      'occasion "orchard-trip" is both written and removed',
+    ]);
+    expect(errorsOf({ notes: [], removed_circles: ['yugioh'], archived_circles: ['yugioh'] })).toEqual([
+      'circle "yugioh" is both removed and archived',
+    ]);
+    expect(errorsOf({ notes: [], circles: [{ ...pair, merged_from: ['yugioh'] }], archived_circles: ['yugioh'] })).toEqual(
+      ['circle "yugioh" is both merged away and archived'],
+    );
+    // Written and archived: saved with that text, archived.
+    expect(errorsOf({ notes: [], circles: [pair], archived_circles: ['remi-and-dale'] })).toEqual([]);
+  });
+
+  it('keeps an edit of an occasion to exactly that occasion', () => {
+    expect(errorsOf({ occasions: [trip], change_summary: 'x' }, 'occasion')).toEqual([]);
+    expect(errorsOf({ occasions: [] }, 'occasion')).toContain('an occasion is written exactly: one entry in "occasions"');
+    expect(errorsOf({ occasions: [trip], circles: [pair] }, 'occasion')).toContain(
+      'an occasion is written alone: no circles, no removals',
+    );
+    expect(
+      errorsOf({ notes: [{ topic: 'lore', title: 'Lore', content: 'x' }], occasions: [trip] }, 'occasion'),
+    ).toContain('an occasion is written in "occasions" only');
+  });
+
+  it('lets an edit of a circle archive it as it is, but write nothing else', () => {
+    expect(errorsOf({ archived_circles: ['remi-and-dale'] }, 'circle')).toEqual([]);
+    expect(errorsOf({ circles: [pair], archived_circles: ['remi-and-dale'] }, 'circle')).toEqual([]);
+    expect(errorsOf({ circles: [pair], archived_circles: ['yugioh'] }, 'circle')).toEqual([
+      'an edit of a circle archives no other circle',
+    ]);
+    expect(errorsOf({ archived_circles: ['a', 'b'] }, 'circle')).toEqual([
+      'an edit of a circle writes exactly that circle',
+    ]);
+    expect(errorsOf({ circles: [pair], occasions: [trip] }, 'circle')).toEqual([
+      'an edit of a circle writes no occasions',
+    ]);
   });
 });

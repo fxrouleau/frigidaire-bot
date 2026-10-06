@@ -7,9 +7,18 @@
 import { canonicalUserId } from '../../../linkedAccounts';
 import { formatRelativeAge } from '../../utils';
 import { CORRECTION_CATEGORY, type Memory } from '../memoryStore';
+import {
+  daysBetween,
+  describePhase,
+  isArchived,
+  OCCASION_LIFECYCLE,
+  occasionDates,
+  occasionPhase,
+  partialDateStart,
+} from './lifecycle';
 import type { CircleMembership, Note } from './notesStore';
 import type { CircleMember } from './schema';
-import { earlierPart, withoutEarlier } from './sections';
+import { earlierPart, planFirst, withoutEarlier } from './sections';
 
 /** The chat turn's cap on the speaker's profile, and on everyone else's. */
 export const SPEAKER_PROFILE_MAX_CHARS = 3_000;
@@ -27,6 +36,9 @@ export const CIRCLE_MAX_CHARS = 1_500;
 export const MAX_CIRCLES_PER_TURN = 3;
 /** Current members of a circle that must be in the conversation for its note to be shown. */
 export const CIRCLE_MIN_PRESENT = 2;
+/** An occasion's note in a chat turn (its Plan first), and how many occasions one turn shows at most. */
+export const OCCASION_MAX_CHARS = 1_000;
+export const MAX_OCCASIONS_PER_TURN = 2;
 
 /** A note version's identity in a conversation window: a new version is new, the same one never repeats. */
 export function noteKey(note: Pick<Note, 'id' | 'version'>): string {
@@ -290,13 +302,15 @@ export function circlesNamedIn<T extends Pick<Note, 'title' | 'topic' | 'aliases
  * Which circles a chat turn shows, best first, at most `max`: the ones the message names, then the ones
  * with at least CIRCLE_MIN_PRESENT current members among `present` (the speaker, the people mentioned or
  * named, the window's recent participants), most present members first. Circles in `skip` (already shown
- * this window) are left out.
+ * this window) are left out, and a circle `canBePresent` turns down (a fading one: lifecycle.ts
+ * CIRCLE_DECAY) comes in only when the message names it.
  */
 export function pickCircles(args: {
   circles: Note[];
   text: string;
   present: ReadonlySet<string>;
   skip?: (circle: Note) => boolean;
+  canBePresent?: (circle: Note) => boolean;
   max?: number;
 }): { circle: Note; reason: CircleReason }[] {
   const max = args.max ?? MAX_CIRCLES_PER_TURN;
@@ -304,6 +318,7 @@ export function pickCircles(args: {
   const named = circlesNamedIn(args.text, candidates).map((circle) => ({ circle, reason: 'named' as const }));
   const byPresence = candidates
     .filter((c) => !named.some((n) => n.circle.id === c.id))
+    .filter((c) => args.canBePresent?.(c) ?? true)
     .map((circle) => ({
       circle,
       present: circle.members.filter((m) => m.until === null && args.present.has(m.memberId)).length,
@@ -312,6 +327,81 @@ export function pickCircles(args: {
     .sort((a, b) => b.present - a.present || a.circle.title.localeCompare(b.circle.title))
     .map(({ circle }) => ({ circle, reason: 'members' as const }));
   return [...named, ...byPresence].slice(0, max);
+}
+
+/**
+ * An occasion's participants as one line: who is in, then who dropped out (an `until`):
+ * `Remi (organizer), Dale; dropped out: Nova (until 2026-12)`.
+ */
+export function describeParticipants(members: CircleMember[], nameOf: (userId: string) => string | undefined): string {
+  const label = (m: CircleMember, span: string) => {
+    const details = [span, m.role ?? ''].filter((d) => d).join(', ');
+    const name = nameOf(m.memberId) ?? 'someone';
+    return details ? `${name} (${details})` : name;
+  };
+  const going = members.filter((m) => m.until === null).map((m) => label(m, ''));
+  const out = members.filter((m) => m.until !== null).map((m) => label(m, `until ${m.until}`));
+  return [going.join(', '), out.length > 0 ? `dropped out: ${out.join(', ')}` : ''].filter((p) => p).join('; ');
+}
+
+/** Why an occasion's note is in a chat turn. */
+export type OccasionReason = 'named' | 'participants';
+
+/**
+ * Which occasions a chat turn shows, best first, at most `max` (MAX_OCCASIONS_PER_TURN): the ones the
+ * message names (title, slug words or alias; planned, happening, past or cancelled), then planned ones
+ * starting within OCCASION_LIFECYCLE.upcomingDays and happening ones with a current participant among
+ * `present` (the speaker, the people mentioned or named, the window's recent participants), happening first,
+ * then the soonest. Archived occasions are never picked, and neither is anything in `skip` (already shown
+ * this window).
+ */
+export function pickOccasions(args: {
+  occasions: Note[];
+  text: string;
+  present: ReadonlySet<string>;
+  today: string;
+  skip?: (occasion: Note) => boolean;
+  max?: number;
+}): { occasion: Note; reason: OccasionReason }[] {
+  const max = args.max ?? MAX_OCCASIONS_PER_TURN;
+  const candidates = args.occasions.filter((o) => o.active && !isArchived(o) && !args.skip?.(o));
+  const named = circlesNamedIn(args.text, candidates).map((occasion) => ({ occasion, reason: 'named' as const }));
+  const soon = (o: Note) => {
+    const phase = occasionPhase(o, args.today);
+    if (phase === 'happening') return 0;
+    if (phase !== 'planned' || !o.startsOn) return undefined;
+    const days = daysBetween(args.today, partialDateStart(o.startsOn));
+    return days <= OCCASION_LIFECYCLE.upcomingDays ? Math.max(1, days + 1) : undefined;
+  };
+  const open = candidates
+    .filter((o) => !named.some((n) => n.occasion.id === o.id))
+    .filter((o) => o.members.some((m) => m.until === null && args.present.has(m.memberId)))
+    .map((occasion) => ({ occasion, rank: soon(occasion) }))
+    .filter((o): o is { occasion: Note; rank: number } => o.rank !== undefined)
+    .sort((a, b) => a.rank - b.rank || a.occasion.title.localeCompare(b.occasion.title))
+    .map(({ occasion }) => ({ occasion, reason: 'participants' as const }));
+  return [...named, ...open].slice(0, max);
+}
+
+/**
+ * An occasion's note for a chat turn: its title, dates, place, where it is today, its participants and why
+ * it is shown, then the note (its Plan first, Earlier left out), capped.
+ */
+export function renderOccasionNote(args: {
+  occasion: Note;
+  reason: OccasionReason;
+  maxChars: number;
+  nameOf: (userId: string) => string | undefined;
+  now: Date;
+  today: string;
+}): string {
+  const { occasion } = args;
+  const age = formatRelativeAge(occasion.updatedAt, args.now);
+  const why = args.reason === 'named' ? 'it came up in this message' : 'some of its people are in this conversation';
+  const where = occasion.place ? ` in ${occasion.place}` : '';
+  const people = describeParticipants(occasion.members, args.nameOf) || 'nobody listed';
+  const head = `Your notes on the occasion "${occasion.title}" (${occasionDates(occasion)}${where}; ${describePhase(occasion, args.today)}; with ${people}; ${why}${age ? `; updated ${age}` : ''}):`;
+  return `${head}\n${excerpt(planFirst(withoutEarlier(occasion.content)), args.maxChars)}`;
 }
 
 /**

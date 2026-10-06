@@ -6,7 +6,7 @@ import process from 'node:process';
 import { Events } from 'discord.js';
 import { getConversationPersistence } from './ai/conversationPersistence';
 import { personalityLearner } from './ai/learnerInstance';
-import { getMemoryStore } from './ai/memory';
+import { getMemoryStore, getNotesStore } from './ai/memory';
 import { importNotesAtStartup } from './ai/memory/bootstrap/importer';
 import { runStartupMemoryMaintenance } from './ai/memory/startupMaintenance';
 import { closeArchiveStore } from './archive/archiveStore';
@@ -55,6 +55,14 @@ try {
   runStartupMemoryMaintenance(getMemoryStore());
 } catch (error) {
   logger.warn('Memory maintenance on startup failed:', error);
+}
+
+// The notes tables up front, outside any transaction: an in-place upgrade (the occasions one rebuilds the
+// notes table) runs here, before the import or a chat turn reads them.
+try {
+  getNotesStore();
+} catch (error) {
+  logger.warn('Opening the notes store failed:', error);
 }
 
 // Memory v2's bootstrap drop-in: a notes tree in data/memory-import/ is loaded here, before login, so no

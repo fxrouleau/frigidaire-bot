@@ -19,7 +19,13 @@ import {
   type RecordedResponse,
 } from '../test-support/fakeInteraction';
 import { renderViewer, type ViewerState, VIEWER_TTL_MS } from './notesViewer';
-import { EDIT_DRAFT_DEADLINE_MS, editFingerprint, handleViewerInteraction, PendingEdits } from './notesViewerActions';
+import {
+  EDIT_DRAFT_DEADLINE_MS,
+  editFingerprint,
+  editTargetFor,
+  handleViewerInteraction,
+  PendingEdits,
+} from './notesViewerActions';
 import { LINES } from './respond';
 
 // Fictional cast, placeholder snowflakes.
@@ -158,6 +164,9 @@ function output(over: Partial<NotesOutput> = {}): NotesOutput {
     removed_topics: [],
     circles: [],
     removed_circles: [],
+    archived_circles: [],
+    occasions: [],
+    removed_occasions: [],
     change_summary: 'moved to Laval',
     ...over,
   };
@@ -888,5 +897,29 @@ describe('editFingerprint', () => {
       { updatedBy: 'dream' },
     );
     expect(editFingerprint(notes, target, out)).not.toBe(before);
+  });
+
+  it("covers an occasion edit's own occasion and the circles an answer archives", () => {
+    notes.writeOccasions(
+      [
+        {
+          slug: 'ski-trip-2027',
+          title: 'Ski trip',
+          content: '## Plan\nx',
+          starts_on: '2027-01-10',
+          participants: [{ id: REMI }, { id: NOVA }],
+        },
+      ],
+      { updatedBy: 'dream' },
+    );
+    const occasion = notes.getOccasion('ski-trip-2027');
+    const screen = { kind: 'note' as const, noteId: occasion?.id ?? 0 };
+    expect(editTargetFor({ kind: 'person', id: REMI }, screen, notes)).toEqual({ scope: 'occasion', slug: 'ski-trip-2027' });
+    const target = { scope: 'occasion', slug: 'ski-trip-2027' } as const;
+    const before = editFingerprint(notes, target, output({ notes: [] }));
+    expect(before).toMatch(/^occasion:ski-trip-2027@\d+\.1$/);
+    expect(editFingerprint(notes, { scope: 'group' }, output({ notes: [], archived_circles: ['mtg'] }))).toContain(
+      'circle:mtg@',
+    );
   });
 });

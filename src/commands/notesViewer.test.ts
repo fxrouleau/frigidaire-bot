@@ -274,6 +274,148 @@ describe('renderViewer limits', () => {
   });
 });
 
+describe('occasions and archived circles in the viewer', () => {
+  beforeEach(() => {
+    notes.writeNotes(remi, [{ topic: 'profile', title: 'Remi', content: '## Now\nHere.' }], { updatedBy: 'dream' });
+    const trip = (slug: string, title: string, startsOn: string, endsOn: string | null) => ({
+      slug,
+      title,
+      content: '## Plan\nThe plan.',
+      starts_on: startsOn,
+      ends_on: endsOn,
+      place: 'Tremblant',
+      participants: [{ id: REMI, role: 'organizer' }, { id: DALE, until: '2026-11', role: 'bailed' }],
+    });
+    notes.writeOccasions(
+      [
+        trip('lan-2027', 'Summer LAN', '2027-07-01', null),
+        trip('ski-trip-2027', 'Ski trip', '2027-01-10', '2027-01-17'),
+        trip('old-trip', 'Old trip', '2025-03-01', null),
+      ],
+      { updatedBy: 'dream' },
+    );
+    notes.archiveNote(notes.getOccasion('old-trip')?.id ?? 0, { updatedBy: 'dream', content: 'A trace.' });
+    notes.writeCircles(
+      [
+        { slug: 'mtg', title: 'The MTG crew', content: '## Now\nDrafts.', members: [{ id: REMI }, { id: DALE }] },
+        { slug: 'yugioh', title: 'The Yu-Gi-Oh crew', content: 'A trace.', members: [{ id: REMI, since: '2018' }, { id: NOVA }] },
+      ],
+      { updatedBy: 'dream', archiveCircles: ['yugioh'] },
+    );
+  });
+
+  it("lists a person's live circles, then occasions upcoming first, then archived ones, then the journal", () => {
+    const options = viewerOptions({ kind: 'person', id: REMI }, ctx());
+    expect(options.map((o) => o.label)).toEqual([
+      'Remi',
+      'The MTG crew',
+      'Ski trip',
+      'Summer LAN',
+      'The Yu-Gi-Oh crew',
+      'Old trip',
+      'Raw memories',
+    ]);
+    expect(options[2].description).toBe('occasion · planned, starts in 107 days · 2027-01-10 to 2027-01-17');
+    expect(options[4].description).toMatch(/^archived circle \(2018–2026-09\) · updated/);
+    expect(options[5].description).toBe('occasion · archived · 2025-03-01');
+    const group = viewerOptions({ kind: 'group' }, ctx()).map((o) => o.label);
+    expect(group).toEqual(['Group notes', 'Ski trip', 'Summer LAN', 'The MTG crew', 'The Yu-Gi-Oh crew', 'Old trip']);
+  });
+
+  it('shows an occasion with when, where and who, and the owner can edit or undo it', () => {
+    const occasion = notes.getOccasion('ski-trip-2027');
+    const payload = renderViewer(
+      { subject: { kind: 'person', id: REMI }, screen: { kind: 'note', noteId: occasion?.id ?? 0 }, page: 0 },
+      ctx(),
+    );
+    const embed = payload.embeds[0];
+    expect(embed.author?.name).toBe('Occasion');
+    expect(embed.title).toBe('Ski trip');
+    expect(embed.fields).toEqual([
+      { name: 'When', value: '2027-01-10 to 2027-01-17 · planned, starts in 107 days' },
+      { name: 'Where', value: 'Tremblant' },
+      { name: 'Participants', value: 'Remi (organizer); dropped out: Dale (until 2026-11, bailed)' },
+    ]);
+    expect(allCustomIds(payload).map((id) => parseViewerCustomId(id)?.action)).toContain('edit');
+    const archived = notes.getCircle('yugioh');
+    const circlePayload = renderViewer(
+      { subject: { kind: 'person', id: REMI }, screen: { kind: 'note', noteId: archived?.id ?? 0 }, page: 0 },
+      ctx(),
+    );
+    expect(circlePayload.embeds[0].author?.name).toBe('Circle (archived)');
+  });
+
+  it("previews an occasion's dates and status, and a circle archived, as fields", () => {
+    const payload = renderPreview(
+      {
+        token: 'tok123',
+        changeSummary: 'moved; archived',
+        instruction: 'it moved to March; the yu-gi-oh crew is over',
+        expiresAt: NOW.getTime() + VIEWER_TTL_MS,
+        changes: [
+          {
+            kind: 'occasion',
+            key: 'ski-trip-2027',
+            title: 'Ski trip',
+            change: 'changed',
+            before: '## Plan\nJanuary.',
+            after: '## Plan\nMarch.',
+            membersBefore: [],
+            membersAfter: [],
+            detailsBefore: { status: 'planned', startsOn: '2027-01-10', endsOn: '2027-01-17', place: 'Tremblant', circle: null },
+            detailsAfter: { status: 'planned', startsOn: '2027-03-01', endsOn: '2027-03-08', place: 'Tremblant', circle: null },
+          },
+          {
+            kind: 'circle',
+            key: 'yugioh',
+            title: 'The Yu-Gi-Oh crew',
+            change: 'changed',
+            before: 'x',
+            after: 'x',
+            membersBefore: [{ memberId: REMI, since: '2018', until: null, role: null }],
+            membersAfter: [{ memberId: REMI, since: '2018', until: '2026-09', role: null }],
+            detailsBefore: { status: null, startsOn: null, endsOn: null, place: null, circle: null },
+            detailsAfter: { status: 'archived', startsOn: null, endsOn: null, place: null, circle: null },
+          },
+        ],
+      },
+      0,
+      { memory, now: NOW },
+    );
+    expect(payload.embeds[0].title).toBe('Ski trip (occasion ski-trip-2027)');
+    expect(payload.embeds[0].fields).toEqual([{ name: 'When', value: '2027-01-10 to 2027-01-17 → 2027-03-01 to 2027-03-08' }]);
+    const archive = renderPreview(
+      {
+        token: 'tok123',
+        changeSummary: 'x',
+        instruction: 'x',
+        expiresAt: NOW.getTime() + VIEWER_TTL_MS,
+        changes: [
+          {
+            kind: 'circle',
+            key: 'yugioh',
+            title: 'The Yu-Gi-Oh crew',
+            change: 'changed',
+            before: 'x',
+            after: 'x',
+            membersBefore: [{ memberId: REMI, since: '2018', until: null, role: null }],
+            membersAfter: [{ memberId: REMI, since: '2018', until: '2026-09', role: null }],
+            detailsBefore: { status: null, startsOn: null, endsOn: null, place: null, circle: null },
+            detailsAfter: { status: 'archived', startsOn: null, endsOn: null, place: null, circle: null },
+          },
+        ],
+      },
+      0,
+      { memory, now: NOW },
+    );
+    expect(archive.embeds[0].fields).toEqual([
+      { name: 'Members before', value: 'Remi (since 2018)' },
+      { name: 'Members after', value: 'formerly Remi (2018–2026-09)' },
+      { name: 'Status', value: 'live → archived' },
+    ]);
+  });
+});
+
 describe('editModal', () => {
   it('asks "What should change?" in a paragraph input of up to 4,000 characters', () => {
     const modal = editModal({ kind: 'person', id: REMI }, { kind: 'note', noteId: 7 }, `Edit notes on ${'Remi'.repeat(20)}`);

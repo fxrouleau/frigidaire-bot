@@ -714,9 +714,22 @@ describe('circles', () => {
     const result = notes.writeCircles(circles, { updatedBy: 'dream' });
     expect(result.ok).toBe(false);
     expect(result.ok ? [] : result.errors).toContain(
-      `member ${REMI} would be in ${NOTE_LIMITS.maxCirclesPerMember + 1} circles, over the limit of ${NOTE_LIMITS.maxCirclesPerMember}`,
+      `member ${REMI} would be current in ${NOTE_LIMITS.maxCirclesPerMember + 1} present circles, over the limit of ${NOTE_LIMITS.maxCirclesPerMember} (fading and archived circles don't count): give someone who drifted away an "until", or archive a circle that is over`,
     );
     expect(notes.listCircles()).toEqual([]);
+  });
+
+  it('counts only present circles toward a member\'s limit: fading ones leave room', () => {
+    const circles = Array.from({ length: NOTE_LIMITS.maxCirclesPerMember }, (_, i) =>
+      mtg({ slug: `c${i}`, members: [{ id: REMI }, { id: DALE }] }),
+    );
+    expect(notes.writeCircles(circles, { updatedBy: 'dream' }).ok).toBe(true);
+    const extra = mtg({ slug: 'extra', members: [{ id: REMI }, { id: DALE }] });
+    expect(notes.writeCircles([extra], { updatedBy: 'dream' }).ok).toBe(false);
+    // One of them last came up long ago: fading, it no longer counts.
+    const old = notes.getCircle('c0');
+    notes.recordActivity(old?.id ?? 0, { '2026-06': 3, '2026-07': 3 }, { mode: 'add' });
+    expect(notes.writeCircles([extra], { updatedBy: 'dream' }).ok).toBe(true);
   });
 
   it('applies a validated writer output for a person, the group or one circle', () => {
@@ -725,6 +738,9 @@ describe('circles', () => {
       removed_topics: [],
       circles: [{ ...mtg(), aliases: [], members: [{ id: REMI }, { id: DALE }], merged_from: [] }],
       removed_circles: [],
+      archived_circles: [],
+      occasions: [],
+      removed_occasions: [],
       change_summary: 'first notes',
     };
     const result = notes.applyNotesOutput(remi, output, { updatedBy: 'dream' });

@@ -167,6 +167,74 @@ describe('formatDreamReport', () => {
   });
 });
 
+describe('formatDreamReport with the lifecycle pass', () => {
+  const shared = (scope: 'circle' | 'occasion', topic: string, title: string, status: Note['status']): Note => ({
+    id: 1,
+    scope,
+    ownerId: null,
+    topic,
+    title,
+    content: 'x',
+    aliases: [],
+    members: [],
+    version: 2,
+    updatedAt: '2026-10-06 08:30:00',
+    updatedBy: 'dream',
+    active: true,
+    status,
+    startsOn: null,
+    endsOn: null,
+    place: null,
+    circle: null,
+  });
+
+  it('says what became history, came back, was archived, failed and fades, and what waits', () => {
+    const result: NightlyDreamResult = {
+      day: '2026-10-06',
+      people: [updated(REMI, 'new job')],
+      lifecycle: [
+        { status: 'history', note: shared('occasion', 'orchard-trip', 'Orchard trip', 'past'), changeSummary: 'x' },
+        { status: 'history', note: shared('occasion', 'bbq', 'The BBQ', 'cancelled'), changeSummary: 'x' },
+        { status: 'archived', note: shared('circle', 'yugioh', 'Yu-Gi-Oh', 'archived'), why: 'dormant' },
+        { status: 'archived', note: shared('circle', 'dbfz', 'DBFZ', 'archived'), why: 'dormant' },
+        { status: 'archived', note: shared('occasion', 'lan-2026', 'LAN', 'archived'), why: 'ended' },
+        {
+          status: 'failed',
+          scope: 'circle',
+          slug: 'chess',
+          title: 'Chess',
+          task: 'archive',
+          error: "couldn't compact it to a trace: the trace is 1,600 characters",
+          cause: 'answer',
+        },
+      ],
+      lifecycleDeferred: 4,
+      fading: ['tarkov', 'mtg'],
+      revived: ['winter-dinners'],
+      costUsd: 0.05,
+    };
+    expect(formatDreamReport(result, nameOf)).toBe(
+      [
+        '🌙 dream · Oct 6 · 1 updated · 1 failed, retried tomorrow · $0.05',
+        '• Remi: new job',
+        '📖 rewritten as history: Orchard trip, The BBQ (called off)',
+        '↩ came back: 1 circle: winter-dinners',
+        '🗄 archived 2 circles: yugioh, dbfz · 1 occasion: lan-2026',
+        "✖ circle chess: couldn't archive it (couldn't compact it to a trace: the trace is 1,600 characters)",
+        '-# 4 more to archive or rewrite wait for the next nights',
+        '🍂 fading: 2 circles: tarkov, mtg',
+      ].join('\n'),
+    );
+  });
+
+  it('never posts for circles that only fade, but does for one that came back', () => {
+    expect(formatDreamReport({ day: '2026-10-06', people: [], fading: ['tarkov'] }, nameOf)).toBeUndefined();
+    expect(formatDreamReport({ day: '2026-10-06', people: [], revived: ['yugioh'] }, nameOf)).toBe(
+      '🌙 dream · Oct 6\n↩ came back: 1 circle: yugioh',
+    );
+  });
+});
+
 describe('failureReason', () => {
   it('says why a dream failed in a few words', () => {
     expect(failureReason('circle "mtg": the content is 6400 characters, over the 6000 limit; topic "x" appears twice')).toBe(

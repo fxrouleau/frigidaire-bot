@@ -25,7 +25,14 @@ import {
   type ModalSubmitInteraction,
   type StringSelectMenuInteraction,
 } from 'discord.js';
-import { applyEdit, type EditProposal, type EditTarget, previewChanges } from '../ai/memory/notes/dreamer';
+import {
+  applyEdit,
+  type EditProposal,
+  type EditTarget,
+  ownerTarget,
+  previewChanges,
+  touchedSlugs,
+} from '../ai/memory/notes/dreamer';
 import type { Note, NotesStore } from '../ai/memory/notes/notesStore';
 import type { NotesOutput } from '../ai/memory/notes/schema';
 import { config } from '../config';
@@ -162,38 +169,41 @@ async function draftWithin(
 
 /**
  * The versions an edit is drafted against: the target's notes (a person's or the group's topics, or the one
- * circle) and every circle the output touches, as `key@id.version` (or `-` for none). Confirm refuses when
- * it changed, so a draft never silently overwrites what the dream (or another edit) wrote meanwhile.
+ * circle or occasion) and every circle and occasion the output touches, as `key@id.version` (or `-` for
+ * none). Confirm refuses when it changed, so a draft never silently overwrites what the dream (or another
+ * edit) wrote meanwhile.
  */
 export function editFingerprint(notes: NotesStore, target: EditTarget, output: NotesOutput): string {
   const parts: string[] = [];
-  if (target.scope !== 'circle') {
-    for (const note of notes.listNotes(target)) parts.push(`${note.topic}@${note.id}.${note.version}`);
+  const owner = ownerTarget(target);
+  if (owner) {
+    for (const note of notes.listNotes(owner)) parts.push(`${note.topic}@${note.id}.${note.version}`);
   }
-  const slugs = new Set<string>([
-    ...output.circles.flatMap((c) => [c.slug, ...c.merged_from]),
-    ...output.removed_circles,
-    ...(target.scope === 'circle' ? [target.slug] : []),
-  ]);
-  for (const slug of [...slugs].sort()) {
+  const { circles, occasions } = touchedSlugs(target, output);
+  for (const slug of circles) {
     const circle = notes.getCircle(slug);
     parts.push(`circle:${slug}@${circle ? `${circle.id}.${circle.version}` : '-'}`);
+  }
+  for (const slug of occasions) {
+    const occasion = notes.getOccasion(slug);
+    parts.push(`occasion:${slug}@${occasion ? `${occasion.id}.${occasion.version}` : '-'}`);
   }
   return parts.join(',');
 }
 
-/** What an Edit on a screen changes: the circle it shows, else the subject (a person or the group). */
+/** What an Edit on a screen changes: the circle or occasion it shows, else the subject (a person or the group). */
 export function editTargetFor(subject: ViewerSubject, screen: ViewerScreen, notes: NotesStore): EditTarget {
   if (screen.kind === 'note') {
     const note = notes.getNoteById(screen.noteId);
     if (note?.active && note.scope === 'circle') return { scope: 'circle', slug: note.topic };
+    if (note?.active && note.scope === 'occasion') return { scope: 'occasion', slug: note.topic };
   }
   // The main account, as proposeEdit() answers for (a draft for another target is dropped).
   return subject.kind === 'group' ? { scope: 'group' } : { scope: 'person', ownerId: canonicalUserId(subject.id) };
 }
 
 function describeTarget(target: EditTarget): string {
-  if (target.scope === 'circle') return `circle ${target.slug}`;
+  if (target.scope === 'circle' || target.scope === 'occasion') return `${target.scope} ${target.slug}`;
   return target.scope === 'group' ? 'the group' : `person ${target.ownerId}`;
 }
 
@@ -227,6 +237,7 @@ async function postAudit(interaction: ViewerInteraction, deps: CommandDeps, line
 /** Whose notes a target is, in words: "Remi's notes", "the group's notes", "circle The MTG crew". */
 function targetLabel(target: EditTarget, notes: NotesStore, views: Views): string {
   if (target.scope === 'circle') return `circle "${notes.getCircle(target.slug)?.title ?? target.slug}"`;
+  if (target.scope === 'occasion') return `occasion "${notes.getOccasion(target.slug)?.title ?? target.slug}"`;
   if (target.scope === 'group') return "the group's notes";
   return `${views.name({ kind: 'person', id: target.ownerId })}'s notes`;
 }
@@ -431,9 +442,11 @@ async function openEditModal(
   const title =
     target.scope === 'circle'
       ? `Edit circle: ${notes.getCircle(target.slug)?.title ?? target.slug}`
-      : target.scope === 'group'
-        ? "Edit the group's notes"
-        : `Edit notes on ${views.name(subject)}`;
+      : target.scope === 'occasion'
+        ? `Edit occasion: ${notes.getOccasion(target.slug)?.title ?? target.slug}`
+        : target.scope === 'group'
+          ? "Edit the group's notes"
+          : `Edit notes on ${views.name(subject)}`;
   await interaction.showModal(editModal(subject, screen, title));
 }
 
@@ -566,9 +579,15 @@ async function confirmEdit(
     return;
   }
 
-  const describe = (note: Note) => `${note.scope === 'circle' ? `circle ${note.topic}` : note.topic} v${note.version}`;
+  const label = (note: Note) =>
+    note.scope === 'circle' || note.scope === 'occasion'
+      ? `${note.status === 'archived' ? 'archived ' : ''}${note.scope} ${note.topic}`
+      : note.topic;
+  const describe = (note: Note) => `${label(note)} v${note.version}`;
   const saved = result.written.map(describe);
-  const removed = result.removed.map((n) => (n.scope === 'circle' ? `circle ${n.topic}` : n.topic));
+  const removed = result.removed.map((n) =>
+    n.scope === 'circle' || n.scope === 'occasion' ? `${n.scope} ${n.topic}` : n.topic,
+  );
   logger.info(
     `notes viewer: ${interaction.user.username} saved an edit of ${describeTarget(target)} (${[...saved, ...removed.map((r) => `-${r}`)].join(', ') || 'nothing new'}): ${edit.changeSummary}`,
   );
@@ -640,8 +659,8 @@ async function undoNote(
   const screen: ViewerScreen = restored.active ? { kind: 'note', noteId } : { kind: 'home' };
   await interaction.update(update(await views.render({ subject, screen, page: 0 }, notice)));
   const what =
-    restored.scope === 'circle'
-      ? `circle "${restored.title}"`
+    restored.scope === 'circle' || restored.scope === 'occasion'
+      ? `${restored.scope} "${restored.title}"`
       : `${subject.kind === 'group' ? "the group's" : `${views.name(subject)}'s`} "${restored.topic}" note`;
   await postAudit(
     interaction,

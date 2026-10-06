@@ -155,4 +155,61 @@ describe('buildCaptureKnowledge', () => {
     expect(text).toContain('* Nova said so 1×: Plays chess');
     expect(text).not.toContain('Movie night');
   });
+
+  it("lists the open occasions of the people in the part, so updates name them instead of starting new ones", () => {
+    const trip = (slug: string, title: string, startsOn: string, over: Record<string, unknown> = {}) => ({
+      slug,
+      title,
+      content: '## Plan\nChalet booked; lift passes still open.',
+      starts_on: startsOn,
+      place: 'Tremblant',
+      participants: [{ id: REMI, role: 'organizer' }, { id: DALE }],
+      ...over,
+    });
+    notes.writeOccasions(
+      [
+        trip('ski-trip-2027', 'Ski trip', '2027-01-10', { ends_on: '2027-01-17' }),
+        trip('bbq', 'The BBQ', '2026-09-12', { status: 'past' }),
+        trip('lan-2025', 'Old LAN', '2025-06-01', { status: 'past' }),
+        trip('chess-night', 'Chess night', '2026-10-01', { participants: [{ id: NOVA }, { id: DALE }] }),
+      ],
+      { updatedBy: 'dream' },
+    );
+    const text = knowledge([{ userId: REMI, name: 'Remi' }]);
+    expect(text).toContain(
+      'Occasions these people are part of (an update, a change of plan or a cancellation is an "event" row that starts with the occasion\'s title):',
+    );
+    expect(text).toContain(
+      '- "Ski trip" (2027-01-10 to 2027-01-17, Tremblant; planned, starts in 112 days; with Remi (organizer), Dale; notes updated today): ## Plan Chalet booked; lift passes still open.',
+    );
+    // Recently past still counts (updates come in after); long past and other people's don't.
+    expect(text).toContain('- "The BBQ" (2026-09-12, Tremblant; past, ended 8 days ago;');
+    expect(text).not.toContain('Old LAN');
+    expect(text).not.toContain('Chess night');
+    expect(knowledge([{ userId: NOVA, name: 'Nova' }])).toContain('- "Chess night"');
+    expect(knowledge([{ name: 'Someone' }])).not.toContain('Occasions these people');
+  });
+
+  it("never lets the occasions take the server block's guaranteed place under a budget", async () => {
+    notes.writeOccasions(
+      [
+        {
+          slug: 'chess-night',
+          title: 'Chess night',
+          content: '## Plan\nBoards at the cafe.',
+          starts_on: '2026-10-01',
+          participants: [{ id: NOVA }, { id: DALE }],
+        },
+      ],
+      { updatedBy: 'dream' },
+    );
+    await memory.save({ category: 'vibe', subject: 'server', content: `Movie night is Fridays. ${'Popcorn. '.repeat(30)}` });
+    const people = [{ userId: NOVA, name: 'Nova' }];
+    const full = buildCaptureKnowledge({ store: memory, notes, people, now });
+    const occasions = full.slice(0, full.indexOf('\n\nThe server:'));
+    expect(occasions).toContain('- "Chess night"');
+    const text = buildCaptureKnowledge({ store: memory, notes, people, now, maxChars: occasions.length + 10 });
+    expect(text).toContain('- "Chess night"');
+    expect(text).toContain('Movie night is Fridays.');
+  });
 });
