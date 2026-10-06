@@ -9,6 +9,7 @@ import { AgentOrchestrator } from './agent';
 import { ConversationPersistence } from './conversationPersistence';
 import { getNotesStore, setMemoryStoreForTesting } from './memory';
 import { MemoryStore } from './memory/memoryStore';
+import { addDays, easternToday } from './memory/notes/lifecycle';
 import type { NotesStore } from './memory/notes/notesStore';
 import type { ConversationEntry } from './types';
 
@@ -395,5 +396,71 @@ describe('circle notes', () => {
       createFakeMessage({ ...BASE, messageId: '99020', content: 'yo', channelMessages: [daleEarlier] }).message,
     );
     expect(dynamicText(provider, 0)).toContain('Your notes on the circle "The MTG crew" (several of its members');
+  });
+
+  it('leaves a fading circle out unless the message names it', async () => {
+    const mtg = notes.getCircle('mtg');
+    notes.recordActivity(mtg?.id ?? 0, { [addDays(easternToday(new Date()), -75).slice(0, 7)]: 3 }, { mode: 'add' });
+    const provider = new FakeProvider([textResponse('one'), textResponse('two')]);
+    await makeAgent(provider).handleMention(
+      createFakeMessage({
+        ...BASE,
+        messageId: '99030',
+        content: `<@${DALE}> you in friday?`,
+        mentionedUsers: [{ id: DALE, displayName: 'Dale' }],
+      }).message,
+    );
+    expect(dynamicText(provider, 0)).not.toContain('The MTG crew" (');
+    await makeAgent(provider).handleMention(
+      createFakeMessage({ ...BASE, messageId: '99031', content: 'are the drafters still a thing' }).message,
+    );
+    expect(dynamicText(provider, 1)).toContain('Your notes on the circle "The MTG crew" (it came up in this message;');
+  });
+});
+
+describe('occasion notes', () => {
+  const today = () => easternToday(new Date());
+  const trip = (over: Record<string, unknown> = {}) => ({
+    slug: 'ski-trip',
+    title: 'Ski trip',
+    content: 'The group trip.\n\n## So far\nNothing yet.\n\n## Plan\nFlights booked, hotel still open.',
+    aliases: ['the ski trip'],
+    starts_on: addDays(today(), 20),
+    ends_on: addDays(today(), 27),
+    place: 'Tremblant',
+    participants: [{ id: REMI, role: 'organizer' }, { id: DALE }],
+    ...over,
+  });
+
+  it('shows an upcoming occasion the speaker takes part in, Plan first, once per window version', async () => {
+    notes.writeOccasions([trip()], { updatedBy: 'dream' });
+    const provider = new FakeProvider([textResponse('one'), textResponse('two')]);
+    const agent = makeAgent(provider);
+    await agent.handleMention(createFakeMessage({ ...BASE, messageId: '99101', content: 'so hyped' }).message);
+    await agent.handleMention(createFakeMessage({ ...BASE, messageId: '99102', content: 'still hyped' }).message);
+    const first = dynamicText(provider, 0);
+    expect(first).toContain(
+      `Your notes on the occasion "Ski trip" (${addDays(today(), 20)} to ${addDays(today(), 27)} in Tremblant; planned, starts in 20 days; with Remi (organizer), Dale; some of its people are in this conversation;`,
+    );
+    expect(first.indexOf('## Plan')).toBeLessThan(first.indexOf('## So far'));
+    expect(dynamicText(provider, 1)).not.toContain('Your notes on the occasion');
+  });
+
+  it('shows a past occasion only when named, and an archived or far-off one never by itself', async () => {
+    notes.writeOccasions(
+      [
+        trip({ slug: 'bbq', title: 'The BBQ', aliases: [], starts_on: addDays(today(), -30), ends_on: null, status: 'past' }),
+        trip({ slug: 'lan', title: 'Summer LAN', aliases: [], starts_on: addDays(today(), 120), ends_on: null }),
+      ],
+      { updatedBy: 'dream' },
+    );
+    const provider = new FakeProvider([textResponse('one'), textResponse('two')]);
+    await makeAgent(provider).handleMention(createFakeMessage({ ...BASE, messageId: '99110', content: 'yo' }).message);
+    expect(dynamicText(provider, 0)).not.toContain('Your notes on the occasion');
+    await makeAgent(provider).handleMention(
+      createFakeMessage({ ...BASE, messageId: '99111', content: 'remember the bbq?' }).message,
+    );
+    expect(dynamicText(provider, 1)).toContain('Your notes on the occasion "The BBQ" (');
+    expect(dynamicText(provider, 1)).toContain('it came up in this message');
   });
 });

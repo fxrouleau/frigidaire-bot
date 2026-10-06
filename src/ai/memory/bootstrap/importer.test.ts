@@ -223,6 +223,45 @@ describe('importNotesAtStartup', () => {
     expect(importNotesAtStartup({ dir, memory, notes, archive })).toBeUndefined();
   });
 
+  it("records a tree's activity.json with its circles, so old circles no longer count toward a member's limit", () => {
+    const circle = (i: number) =>
+      [
+        '---',
+        `title: Circle ${i}`,
+        `members: [{"id": "${REMI}"}, {"id": "${DALE}"}]`,
+        '---',
+        '## Now',
+        `Circle ${i} things.`,
+      ].join('\n');
+    const files: Record<string, string> = { 'manifest.json': manifest(0), [`people/${REMI}/profile.md`]: REMI_PROFILE };
+    for (let i = 0; i <= NOTE_LIMITS.maxCirclesPerMember; i++) files[`circles/circle-${i}.md`] = circle(i);
+    writeTree(dir, files);
+    // Without activity, every one of them counts: one too many, refused.
+    expect(importNotesAtStartup({ dir, memory, notes, archive, now: () => clock })).toMatchObject({ status: 'refused' });
+    takeImportReport();
+    writeTree(dir, {
+      'activity.json': JSON.stringify({
+        'circle-0': { '2019-03': 40, '2019-04': 12 },
+        'circle-1': { '2026-08': 9, '2026-09': 14 },
+        'no-such-circle': { '2020-01': 3 },
+      }),
+    });
+    const read = readNotesTree(dir);
+    expect(read.ok && read.warnings).toContain('activity.json: no circle file for no-such-circle, ignored');
+    expect(importNotesAtStartup({ dir, memory, notes, archive, now: () => clock })).toMatchObject({ status: 'imported' });
+    expect(notes.activityOf(notes.getCircle('circle-0')?.id ?? 0)).toEqual([
+      { month: '2019-03', weight: 40 },
+      { month: '2019-04', weight: 12 },
+    ]);
+    expect(notes.activityOf(notes.getCircle('circle-1')?.id ?? 0)).toHaveLength(2);
+  });
+
+  it('refuses a malformed activity.json', () => {
+    writeTree(dir, { ...goodTree(), 'activity.json': JSON.stringify({ mtg: { spring: 3 } }) });
+    const read = readNotesTree(dir);
+    expect(read.ok ? [] : read.errors).toEqual(['activity.json: mtg: "spring" is not YYYY-MM']);
+  });
+
   it("replaces an imported person's topics and the circles, and leaves everything else alone", () => {
     notes.writeNotes(
       { scope: 'person', ownerId: REMI },
@@ -312,7 +351,7 @@ describe('importNotesAtStartup', () => {
   });
 
   it('rolls everything back when the store refuses one write (all or nothing)', () => {
-    // One circle more than the per-member limit for Remi, found only by the store.
+    // One circle too many for Remi: over the per-member limit, found only by the store.
     const circles: Record<string, string> = {};
     for (let i = 0; i <= NOTE_LIMITS.maxCirclesPerMember; i++) {
       circles[`circles/c${i}.md`] = `---\ntitle: C${i}\nmembers: [{"id": "${REMI}"}, {"id": "${DALE}"}]\n---\nx`;

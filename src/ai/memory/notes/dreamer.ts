@@ -35,11 +35,15 @@ import { formatIdentityLines } from '../../promptSections';
 import { featureRequestOptions, type UsageFeature } from '../../usage';
 import { extractUsage } from '../../usageFetch';
 import { parseSqliteUtc } from '../../utils';
-import type { Identity, Memory, MemoryStore } from '../memoryStore';
+import { type Identity, type Memory, type MemoryStore, relatedUserIdsOf } from '../memoryStore';
+import { circlesNamedIn } from './context';
 import { type DreamLeaseHolder, takeDreamLease } from './dreamLease';
 import {
+  ARCHIVE_TRACE_SYSTEM,
+  buildArchiveTracePrompt,
   buildEditPrompt,
   buildGroupDreamPrompt,
+  buildOccasionHistoryPrompt,
   buildPersonDreamPrompt,
   CIRCLES_FULL_BUDGET_CHARS,
   easternDay,
@@ -51,16 +55,47 @@ import {
   pickEvidence,
   renderCircles,
   renderJournal,
+  renderOccasions,
   renderPassages,
   renderRoster,
   repairPrompt,
 } from './dreamPrompts';
-import type { Note, NoteChange, NotesStore, PendingDream, WriteNotesResult } from './notesStore';
+import {
+  type ActivityMonth,
+  type ArchiveReason,
+  analyzeActivity,
+  byOccasionRelevance,
+  CIRCLE_DECAY,
+  circlePresence,
+  defaultOccasionStatus,
+  describeRevivals,
+  easternDayOfTimestamp,
+  easternToday,
+  isArchived,
+  monthLabel,
+  occasionEndDay,
+  occasionPhase,
+  partialDateStart,
+  phaseByDates,
+  planLifecycle,
+} from './lifecycle';
+import {
+  detailsOf,
+  endCurrentMemberships,
+  type Note,
+  type NoteChange,
+  type NoteDetails,
+  type NotesStore,
+  type PendingDream,
+  type WriteNotesResult,
+} from './notesStore';
 import { type EvidencePassage, type EvidencePassageOptions, loadEvidencePassages } from './passages';
 import {
   type CircleMember,
   clampSummary,
+  contentProblems,
   extractJson,
+  isSharedScope,
   maxCharsFor,
   NOTE_LIMITS,
   type NoteOwner,
@@ -74,6 +109,7 @@ import {
 import {
   headingKeys,
   noteShapeWarnings,
+  occasionShapeWarnings,
   PROFILE_DAMAGE_FLOOR,
   PROFILE_MIN_KEPT_SHARE,
   profileDamage,
@@ -121,8 +157,11 @@ export const GROUP_REFRESH_DAYS = 7;
 /** How much of the members' change history since its last dream the group pass reads. */
 const GROUP_CHANGES = { maxVersions: 400, maxPeople: 40, perPerson: 4, summaryChars: 200 } as const;
 
-/** What an owner edit changes: a person's notes (and their circles), the group's, or one circle. */
-export type EditTarget = NoteOwner | { scope: 'circle'; slug: string };
+/**
+ * What an owner edit changes: a person's notes (and their circles and occasions), the group's, one circle
+ * or one occasion.
+ */
+export type EditTarget = NoteOwner | { scope: 'circle'; slug: string } | { scope: 'occasion'; slug: string };
 
 /** What the writers need; tests inject every piece. */
 export type DreamDeps = {
@@ -156,9 +195,11 @@ export type DreamOutcome =
       watermark: number;
       /** What the call cost (USD, from the usage response), when reported. */
       costUsd?: number;
+      /** Archived circles the dream's rows brought back (shared activity: creditCircleActivity). */
+      revived?: Note[];
     }
   /** The model looked and nothing needed rewriting; the watermark still moved. */
-  | { status: 'unchanged'; owner: NoteOwner; watermark: number; costUsd?: number }
+  | { status: 'unchanged'; owner: NoteOwner; watermark: number; costUsd?: number; revived?: Note[] }
   /** Nothing above the watermark: no call was made. */
   | { status: 'skipped'; owner: NoteOwner; reason: 'nothing-new' }
   /**
@@ -192,12 +233,48 @@ export type GroupDreamPlan =
   | { run: false }
   | { run: true; why: 'new-rows' | 'weekly-refresh'; context: GroupDreamContext; changedNotes: number };
 
-/** One night's run: every person dreamed (most recently active first, capped), then the group. */
+/** One step of the nightly lifecycle pass (runLifecycle): an occasion rewritten as history, or a note archived. */
+export type LifecycleOutcome =
+  | {
+      status: 'history';
+      /** The occasion's new version. */
+      note: Note;
+      changeSummary: string;
+      costUsd?: number;
+    }
+  | {
+      status: 'archived';
+      /** The circle's or occasion's archived version. */
+      note: Note;
+      why: ArchiveReason;
+      costUsd?: number;
+    }
+  | {
+      status: 'failed';
+      scope: 'circle' | 'occasion';
+      slug: string;
+      title: string;
+      task: 'history' | 'archive';
+      error: string;
+      /** As DreamOutcome's: 'error' when a call failed, 'answer' when no answer was usable. */
+      cause: 'error' | 'answer';
+      costUsd?: number;
+    };
+
+/** One night's run: every person dreamed (most recently active first, capped), then the group, then the lifecycle pass. */
 export type NightlyDreamResult = {
   /** The Eastern date of the night (YYYY-MM-DD): the once-a-day watermark. */
   day: string;
   people: DreamOutcome[];
   group?: DreamOutcome;
+  /** The lifecycle pass: occasions rewritten as history, circles and occasions archived (or failed). */
+  lifecycle?: LifecycleOutcome[];
+  /** Lifecycle work due but left for the following nights (the per-night caps). */
+  lifecycleDeferred?: number;
+  /** Live circles fading (slugs, the faintest first: lifecycle.ts CIRCLE_DECAY). */
+  fading?: string[];
+  /** Archived circles that came back tonight (slugs): shared activity, or a linked occasion. */
+  revived?: string[];
   /** Total cost of the night's calls (USD), when reported. */
   costUsd?: number;
 };
@@ -247,7 +324,22 @@ export function dreamReasoning(): { reasoning?: { effort: 'low' | 'medium' | 'hi
   return effort === 'off' ? {} : { reasoning: { effort } };
 }
 
-type ModelAnswer = { text: string; truncated: boolean; costUsd?: number };
+type ModelAnswer = { text: string; truncated: boolean; filtered: boolean; costUsd?: number };
+
+/**
+ * An error OpenRouter reports inside a 200 answer: an upstream provider's failure (a 429, a 5xx) that the
+ * SDK never sees as an HTTP error. Thrown, so the dream records it as a call error (it counts toward the
+ * night's outage stop and wastes no repair round on an "empty answer").
+ */
+class UpstreamError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | undefined,
+  ) {
+    super(message);
+    this.name = 'UpstreamError';
+  }
+}
 
 /** One ZDR completion, tagged for the usage ledger; its cost read off the response when reported. */
 async function askModel(
@@ -271,10 +363,17 @@ async function askModel(
     maxRetries: 1,
     ...(signal ? { signal } : {}),
   });
+  const upstream = (response as { error?: { message?: unknown; code?: unknown } }).error;
+  if (upstream) {
+    const status = typeof upstream.code === 'number' ? upstream.code : undefined;
+    const message = typeof upstream.message === 'string' ? upstream.message : 'unknown upstream error';
+    throw new UpstreamError(`${status ?? 'upstream'} ${message}`, status);
+  }
   const choice = response.choices?.[0];
   return {
     text: choice?.message?.content ?? '',
     truncated: choice?.finish_reason === 'length',
+    filtered: choice?.finish_reason === 'content_filter',
     costUsd: extractUsage(response, feature)?.cost,
   };
 }
@@ -322,11 +421,14 @@ async function draftWithRepair<T>(args: {
       text = prepared.text;
       if (prepared.costUsd !== undefined) costUsd = (costUsd ?? 0) + prepared.costUsd;
     }
-    const result: Checked<T> = answer.truncated
-      ? { ok: false, errors: ['the answer was cut off at the length limit'] }
-      : text.trim()
-        ? args.check(text)
-        : { ok: false, errors: ['the answer was empty'] };
+    const result: Checked<T> = answer.filtered
+      ? // The provider's moderation, not the model: asking again gets the same stop, so no repair round.
+        { ok: false, final: true, errors: ["the provider's content filter stopped the answer"] }
+      : answer.truncated
+        ? { ok: false, errors: ['the answer was cut off at the length limit'] }
+        : text.trim()
+          ? args.check(text)
+          : { ok: false, errors: ['the answer was empty'] };
     if (result.ok || result.final) return { result, costUsd };
     const last = attempt >= MAX_REPAIRS;
     logger.info(
@@ -366,7 +468,7 @@ function oversizedEntries(answer: unknown, scope: NoteScope): OversizedEntry[] {
     (Array.isArray(raw) ? raw : []).filter(
       (e): e is Record<string, unknown> => !!e && typeof e === 'object' && !Array.isArray(e),
     );
-  if (scope !== 'circle') {
+  if (!isSharedScope(scope)) {
     for (const entry of objects(fields.notes)) {
       const topic = normalizeTopic(entry.topic);
       const length = contentLength(entry);
@@ -376,18 +478,18 @@ function oversizedEntries(answer: unknown, scope: NoteScope): OversizedEntry[] {
         found.push({ kind: 'note', key: topic, length, max, target: targetCharsFor(scope, topic), entry });
     }
   }
-  for (const entry of objects(fields.circles)) {
-    const slug = normalizeTopic(entry.slug);
-    const length = contentLength(entry);
-    if (!slug || length === undefined || length <= NOTE_LIMITS.circleMaxChars) continue;
-    found.push({
-      kind: 'circle',
-      key: slug,
-      length,
-      max: NOTE_LIMITS.circleMaxChars,
-      target: NOTE_LIMITS.circleTargetChars,
-      entry,
-    });
+  const shared: [kind: 'circle' | 'occasion', raw: unknown][] = [
+    ['circle', fields.circles],
+    ['occasion', fields.occasions],
+  ];
+  for (const [kind, raw] of shared) {
+    for (const entry of objects(raw)) {
+      const slug = normalizeTopic(entry.slug);
+      const length = contentLength(entry);
+      const max = maxCharsFor(kind, '');
+      if (!slug || length === undefined || length <= max) continue;
+      found.push({ kind, key: slug, length, max, target: targetCharsFor(kind, ''), entry });
+    }
   }
   return found;
 }
@@ -472,7 +574,7 @@ async function shrinkOversized(
   let costUsd: number | undefined;
   let changed = false;
   for (const item of items) {
-    const what = item.kind === 'circle' ? `circle "${item.key}"` : `"${item.key}"`;
+    const what = item.kind === 'note' ? `"${item.key}"` : `${item.kind} "${item.key}"`;
     try {
       const shrunk = await shrinkNote(ctx.client, ctx.model, item, ctx.currentOf?.(item.kind, item.key));
       if (shrunk.costUsd !== undefined) costUsd = (costUsd ?? 0) + shrunk.costUsd;
@@ -498,25 +600,33 @@ async function shrinkOversized(
 
 /**
  * The versions a writer's prompt was built from, each as `id.version`: the target's notes (a person's or
- * the group's; none for a circle) by topic, and every active circle by slug. Taken with the prompt,
- * compared again right before the save (changedSince).
+ * the group's; none for a circle or an occasion) by topic, and every active circle and occasion (archived
+ * ones included) by slug. Taken with the prompt, compared again right before the save (changedSince).
  */
-type NotesBasis = { notes: Map<string, string>; circles: Map<string, string> };
+type NotesBasis = { notes: Map<string, string>; circles: Map<string, string>; occasions: Map<string, string> };
 
 const versionKey = (note: Note) => `${note.id}.${note.version}`;
 
+/** The person or group an edit target is, or undefined for a circle or an occasion. */
+export function ownerTarget(target: EditTarget): NoteOwner | undefined {
+  return target.scope === 'person' || target.scope === 'group' ? target : undefined;
+}
+
 function notesBasis(notes: NotesStore, target: EditTarget): NotesBasis {
+  const owner = ownerTarget(target);
   return {
-    notes: new Map(target.scope === 'circle' ? [] : notes.listNotes(target).map((n) => [n.topic, versionKey(n)])),
-    circles: new Map(notes.listCircles().map((c) => [c.topic, versionKey(c)])),
+    notes: new Map(owner ? notes.listNotes(owner).map((n) => [n.topic, versionKey(n)]) : []),
+    circles: new Map(notes.listCircles({ includeArchived: true }).map((c) => [c.topic, versionKey(c)])),
+    occasions: new Map(notes.listOccasions({ includeArchived: true }).map((o) => [o.topic, versionKey(o)])),
   };
 }
 
 /**
  * What changed since `basis` that an answer depends on: any of the target's notes (rewritten, undone, added
- * or removed meanwhile: an owner edit or undo, a dream, another process's writer) and the circles the
- * answer writes, merges or removes (plus a circle edit's own circle). Topics, and circles as
- * `circle:<slug>`; empty when none did. The viewer's Confirm applies the same rule (editFingerprint).
+ * or removed meanwhile: an owner edit or undo, a dream, another process's writer) and the circles and
+ * occasions the answer writes, merges, archives or removes (plus a circle's or occasion's own, for an edit
+ * of one). Topics, circles as `circle:<slug>`, occasions as `occasion:<slug>`; empty when none did. The
+ * viewer's Confirm applies the same rule (editFingerprint).
  */
 function changedSince(notes: NotesStore, target: EditTarget, basis: NotesBasis, output?: NotesOutput): string[] {
   const current = notesBasis(notes, target);
@@ -524,15 +634,33 @@ function changedSince(notes: NotesStore, target: EditTarget, basis: NotesBasis, 
   for (const topic of new Set([...basis.notes.keys(), ...current.notes.keys()])) {
     if (basis.notes.get(topic) !== current.notes.get(topic)) changed.push(topic);
   }
-  const slugs = new Set([
-    ...(output?.circles.flatMap((c) => [c.slug, ...c.merged_from]) ?? []),
-    ...(output?.removed_circles ?? []),
-    ...(target.scope === 'circle' ? [target.slug] : []),
-  ]);
-  for (const slug of [...slugs].sort()) {
+  const { circles, occasions } = touchedSlugs(target, output);
+  for (const slug of circles) {
     if (basis.circles.get(slug) !== current.circles.get(slug)) changed.push(`circle:${slug}`);
   }
+  for (const slug of occasions) {
+    if (basis.occasions.get(slug) !== current.occasions.get(slug)) changed.push(`occasion:${slug}`);
+  }
   return changed;
+}
+
+/**
+ * The circle and occasion slugs a write depends on, sorted: what the output writes, merges, archives or
+ * removes, plus the target's own circle or occasion. Shared with the viewer's editFingerprint.
+ */
+export function touchedSlugs(target: EditTarget, output?: NotesOutput): { circles: string[]; occasions: string[] } {
+  const circles = new Set([
+    ...(output?.circles.flatMap((c) => [c.slug, ...c.merged_from]) ?? []),
+    ...(output?.removed_circles ?? []),
+    ...(output?.archived_circles ?? []),
+    ...(target.scope === 'circle' ? [target.slug] : []),
+  ]);
+  const occasions = new Set([
+    ...(output?.occasions.map((o) => o.slug) ?? []),
+    ...(output?.removed_occasions ?? []),
+    ...(target.scope === 'occasion' ? [target.slug] : []),
+  ]);
+  return { circles: [...circles].sort(), occasions: [...occasions].sort() };
 }
 
 // ---- Shared pieces ----
@@ -547,8 +675,247 @@ function allowedIdsFrom(identities: Identity[], extra: Iterable<string> = []): s
   return [...new Set([...identities.map((i) => i.discord_user_id), ...extra])];
 }
 
+/** The member ids of circles (or participant ids of occasions). */
 function circleMemberIds(circles: Note[]): string[] {
   return circles.flatMap((c) => c.members.map((m) => m.memberId));
+}
+
+/** `profile`, `circle:mtg`, `occasion:ski-trip-2027`: how a written note reads in a log or report line. */
+export function noteLabel(note: Pick<Note, 'scope' | 'topic'>): string {
+  return isSharedScope(note.scope) ? `${note.scope}:${note.topic}` : note.topic;
+}
+
+/** All the text of a dream's journal rows, for finding which circles they name. */
+function rowsText(rows: Memory[]): string {
+  return rows.map((r) => r.content).join('\n');
+}
+
+/** The members (main ids) a journal row is about: its subject and its related members. */
+function rowPeople(row: Memory): Set<string> {
+  const ids = new Set<string>();
+  if (row.subject_user_id) ids.add(canonicalUserId(row.subject_user_id));
+  for (const id of relatedUserIdsOf(row)) ids.add(canonicalUserId(id));
+  return ids;
+}
+
+/** How many of a circle's members (current or former) are among `people`. */
+function membersAmong(circle: Pick<Note, 'members'>, people: ReadonlySet<string>): number {
+  return new Set(circle.members.map((m) => canonicalUserId(m.memberId)).filter((id) => people.has(id))).size;
+}
+
+/**
+ * Whether a journal row is shared activity of a circle: it involves at least two of its members (current or
+ * former, side accounts folded). A circle is a shared thing: one person doing it alone feeds their own notes,
+ * never the circle's activity (the owner: "if I play Yu-Gi-Oh now, the Yu-Gi-Oh circle shouldn't return").
+ */
+export function isSharedActivity(row: Memory, circle: Pick<Note, 'members'>): boolean {
+  return membersAmong(circle, rowPeople(row)) >= 2;
+}
+
+/** The Eastern month (`YYYY-MM`) a journal row was last seen in. */
+function rowMonth(row: Memory): string | undefined {
+  return easternDayOfTimestamp(row.last_seen_at ?? row.updated_at)?.slice(0, 7);
+}
+
+/** Whether a journal row is shared activity of a circle that names it (its title, slug or an alias). */
+function namesSharedActivity(row: Memory, circle: Note): boolean {
+  return isSharedActivity(row, circle) && circlesNamedIn(row.content, [circle]).length > 0;
+}
+
+/**
+ * Circle activity from a dream's journal rows (lifecycle.ts CIRCLE_DECAY), by the month each row was last
+ * seen. Only rows that involve two or more of a circle's members count for it, and:
+ * - a row that names circles (title, slug or alias) counts for those, CIRCLE_DECAY.dreamRowWeight each: the
+ *   only activity that can make a month real, confirm a return or bring an archived circle back
+ *   (NotesStore.recordActivity: provisionally until the return is real; the members behind the rows current
+ *   again; postponed when it would pass a limit);
+ * - a row that names none ("Remi and Dale moved in together") is ambient: it counts only for the circles that
+ *   are present today, at most CIRCLE_DECAY.ambientMonthCap a month, never as real activity and never for a
+ *   fading or archived circle.
+ * Only the rows filed under the dream's own owner come here (a row about two people sits in both journals and
+ * would count twice). Never throws; owner edits never come here.
+ */
+export function creditCircleActivity(
+  notes: NotesStore,
+  rows: Memory[],
+  circles: Note[],
+  label = 'dream',
+  today: string = easternToday(new Date()),
+): { revived: Note[] } {
+  const revived: Note[] = [];
+  try {
+    const candidates = [
+      ...new Map(circles.filter((c) => c.scope === 'circle' && c.active).map((c) => [c.id, c])).values(),
+    ];
+    const activity = notes.circleActivity();
+    const presentIds = new Set(
+      candidates
+        .filter((c) => !isArchived(c) && circlePresence(c, activity.get(c.id) ?? [], today).state === 'present')
+        .map((c) => c.id),
+    );
+    const credit = new Map<
+      number,
+      { months: Record<string, number>; ambient: Record<string, number>; rows: number; people: Set<string> }
+    >();
+    const entry = (id: number) => {
+      let found = credit.get(id);
+      if (!found) {
+        found = { months: {}, ambient: {}, rows: 0, people: new Set() };
+        credit.set(id, found);
+      }
+      return found;
+    };
+    for (const row of rows) {
+      const month = rowMonth(row);
+      if (!month) continue;
+      const shared = candidates.filter((c) => isSharedActivity(row, c));
+      if (shared.length === 0) continue;
+      const named = circlesNamedIn(row.content, shared);
+      if (named.length > 0) {
+        const people = rowPeople(row);
+        for (const circle of named) {
+          const e = entry(circle.id);
+          e.months[month] = (e.months[month] ?? 0) + CIRCLE_DECAY.dreamRowWeight;
+          e.rows++;
+          for (const m of circle.members) if (people.has(canonicalUserId(m.memberId))) e.people.add(m.memberId);
+        }
+        continue;
+      }
+      for (const circle of shared) {
+        if (!presentIds.has(circle.id)) continue;
+        const e = entry(circle.id);
+        e.ambient[month] = (e.ambient[month] ?? 0) + 1;
+      }
+    }
+    for (const [id, credited] of credit) {
+      const result = notes.recordActivity(id, credited.months, {
+        mode: 'add',
+        ambient: credited.ambient,
+        revive: credited.rows > 0,
+        members: credited.people,
+        reason: `${credited.rows} journal ${credited.rows === 1 ? 'row' : 'rows'} naming it, with several of its members`,
+      });
+      if (result.ok && result.revived) {
+        revived.push(result.revived);
+        logger.info(
+          `${label}: circle "${result.revived.topic}" came back (shared activity in ${result.changed.join(', ')})`,
+        );
+      }
+    }
+  } catch (error) {
+    logger.warn(`${label}: recording circle activity failed:`, error);
+  }
+  return { revived };
+}
+
+/** What a circle's activity says in a dream's input: presence (when not present), rhythm, revivals. */
+function circleMeta(
+  circle: Note,
+  activity: ReadonlyMap<number, ActivityMonth[]>,
+  today: string,
+): Record<string, string> {
+  if (circle.scope !== 'circle') return {};
+  const series = activity.get(circle.id) ?? [];
+  const analysis = analyzeActivity(series);
+  const meta: Record<string, string> = {};
+  if (!isArchived(circle)) {
+    const presence = circlePresence(circle, series, today);
+    if (presence.state !== 'present') meta.presence = presence.provisional ? 'fading (provisional)' : 'fading';
+  }
+  if (analysis?.lastReal) meta.last_active = monthLabel(analysis.lastReal);
+  if (analysis?.cadence) meta.cadence = analysis.cadence.label;
+  const revivals = describeRevivals(analysis, today);
+  if (revivals.length > 0) meta.history = revivals.join('; ');
+  return meta;
+}
+
+/** A circle's activity in words for its archive trace: when it was last really active, its rhythm, revivals. */
+function activityHistory(series: ActivityMonth[], today: string): string[] {
+  const analysis = analyzeActivity(series);
+  if (!analysis) return [];
+  return [
+    `last really active ${monthLabel(analysis.lastReal)}`,
+    ...(analysis.cadence ? [analysis.cadence.label] : []),
+    ...describeRevivals(analysis, today),
+  ];
+}
+
+/** The months (`YYYY-MM`) from one partial date's month to another's, both included. */
+function monthsBetween(from: string, to: string): string[] {
+  const months: string[] = [];
+  let year = Number(from.slice(0, 4));
+  let month = from.length >= 7 ? Number(from.slice(5, 7)) : 1;
+  const end = to.slice(0, 7).length === 7 ? to.slice(0, 7) : `${to.slice(0, 4)}-12`;
+  for (let guard = 0; guard < 60; guard++) {
+    const key = `${year}-${String(month).padStart(2, '0')}`;
+    if (key > end) break;
+    months.push(key);
+    month = month === 12 ? 1 : month + 1;
+    if (month === 1) year++;
+  }
+  return months;
+}
+
+/**
+ * Linked occasions that happened count as their circle's activity (a real return:
+ * CIRCLE_DECAY.realReturnWeight per month it covered, up to this month), when at least two of the circle's
+ * members took part. An archived circle whose tradition happened again comes back. Idempotent (each month
+ * is raised to that weight, never added twice). Returns the circles that came back.
+ */
+export function creditLinkedOccasions(notes: NotesStore, today: string): Note[] {
+  const revived: Note[] = [];
+  for (const occasion of notes.listOccasions()) {
+    if (!occasion.circle || !occasion.startsOn) continue;
+    const phase = occasionPhase(occasion, today);
+    if (phase !== 'happening' && phase !== 'past') continue;
+    const circle = notes.getCircle(occasion.circle);
+    if (!circle) continue;
+    const going = new Set(occasion.members.filter((m) => m.until === null).map((m) => canonicalUserId(m.memberId)));
+    if (membersAmong(circle, going) < 2) continue;
+    const end = occasionEndDay(occasion) ?? partialDateStart(occasion.startsOn);
+    const until = end < today ? end : today;
+    const months: Record<string, number> = {};
+    for (const month of monthsBetween(occasion.startsOn, until)) months[month] = CIRCLE_DECAY.realReturnWeight;
+    const result = notes.recordActivity(circle.id, months, {
+      mode: 'max',
+      revive: true,
+      // Its members who took part are current again if it comes back.
+      members: going,
+      reason: `${occasion.title} happened`,
+    });
+    if (result.ok && result.revived) {
+      revived.push(result.revived);
+      logger.info(`dream: circle "${circle.topic}" came back: its occasion "${occasion.topic}" happened`);
+    }
+  }
+  return revived;
+}
+
+/**
+ * Problems with a dream's answer that brings an archived circle back without a shared comeback: the new
+ * journal rows must name it (title, slug or alias) in a row with two or more of its members (a row about its
+ * members that names no circle is not its comeback), and the revived circle must list at least two of its
+ * members as current. One person's activity goes in their own notes; a different set of people doing the
+ * same thing is a new circle.
+ */
+function revivalProblems(notes: NotesStore, output: NotesOutput, rows: Memory[]): string[] {
+  const problems: string[] = [];
+  for (const draft of output.circles) {
+    const existing = notes.getCircle(draft.slug);
+    if (!existing || !isArchived(existing) || output.archived_circles.includes(draft.slug)) continue;
+    if (!rows.some((row) => namesSharedActivity(row, existing))) {
+      problems.push(
+        `circle "${draft.slug}" is archived and no new journal row names it with two or more of its members: leave it out of "circles" (it stays archived). A row about its members that doesn't name it is not its comeback`,
+      );
+      continue;
+    }
+    const current = new Set(draft.members.filter((m) => !m.until).map((m) => canonicalUserId(m.id)));
+    if (membersAmong(existing, current) >= 2) continue;
+    problems.push(
+      `circle "${draft.slug}" is archived: bring it back only when at least two of its members are doing it together again, and list them as current ("until": null). One person's activity goes in their own notes (a topic note: "plays GOAT-format Yu-Gi-Oh since Oct 2026"); a different set of people doing the same thing is a new circle (it may mention the old era), not this one`,
+    );
+  }
+  return problems;
 }
 
 /** The oldest rows above the watermark, capped; the rest wait for the next dream. */
@@ -584,12 +951,21 @@ function ownerLabel(owner: NoteOwner, name?: string): string {
 }
 
 /** Advisory shape checks on what a dream wrote (the store never refuses a note for its shape). */
-function logShapeWarnings(label: string, written: Note[]): void {
+function logShapeWarnings(label: string, written: Note[], today?: string): void {
   for (const note of written) {
     if (note.scope === 'circle' || !note.active) continue;
-    const kind = note.topic === PROFILE_TOPIC && note.scope === 'person' ? 'profile' : 'topic';
-    const warnings = noteShapeWarnings(note.content, kind);
-    if (warnings.length > 0) logger.info(`dream: ${label}'s "${note.topic}" note: ${warnings.join('; ')}`);
+    let warnings: string[];
+    if (note.scope === 'occasion') {
+      const phase = occasionPhase(note, today ?? easternToday(new Date()));
+      warnings = occasionShapeWarnings(
+        note.content,
+        phase === 'archived' ? 'trace' : phase === 'past' || note.status === 'past' ? 'history' : 'plan',
+      );
+    } else {
+      const kind = note.topic === PROFILE_TOPIC && note.scope === 'person' ? 'profile' : 'topic';
+      warnings = noteShapeWarnings(note.content, kind);
+    }
+    if (warnings.length > 0) logger.info(`dream: ${label}'s "${noteLabel(note)}" note: ${warnings.join('; ')}`);
   }
 }
 
@@ -620,10 +996,7 @@ function finishDream(
     return { status: 'unchanged', owner, watermark, ...cost };
   }
   logShapeWarnings(label, saved.written);
-  const touched = [
-    ...saved.written.map((n) => (n.scope === 'circle' ? `circle:${n.topic}` : n.topic)),
-    ...saved.removed.map((n) => `-${n.scope === 'circle' ? `circle:${n.topic}` : n.topic}`),
-  ];
+  const touched = [...saved.written.map(noteLabel), ...saved.removed.map((n) => `-${noteLabel(n)}`)];
   logger.info(
     `dream: ${label} updated [${touched.join(', ')}] (journal through #${watermark})${formatCost(outcome.costUsd)}: ${output.change_summary || '(no summary)'}`,
   );
@@ -652,17 +1025,35 @@ function droppedMemberProblems(
   nameOf: (userId: string) => string | undefined,
 ): string[] {
   const problems: string[] = [];
+  const dropped = (existing: Note, listedIds: string[]) => {
+    const listed = new Set(listedIds.map((id) => canonicalUserId(id)));
+    return [...new Set(existing.members.map((m) => canonicalUserId(m.memberId)))].filter((id) => !listed.has(id));
+  };
+  const who = (ids: string[]) => ids.map((id) => `${nameOf(id) ?? 'a member'} (id:${id})`).join(', ');
   for (const draft of output.circles) {
     const existing = notes.getCircle(draft.slug);
-    if (!existing) continue;
-    const listed = new Set(draft.members.map((m) => canonicalUserId(m.id)));
-    const dropped = [...new Set(existing.members.map((m) => canonicalUserId(m.memberId)))].filter(
-      (id) => !listed.has(id),
-    );
-    if (dropped.length === 0) continue;
-    const who = dropped.map((id) => `${nameOf(id) ?? 'a member'} (id:${id})`).join(', ');
+    const left = existing
+      ? dropped(
+          existing,
+          draft.members.map((m) => m.id),
+        )
+      : [];
+    if (left.length === 0) continue;
     problems.push(
-      `circle "${draft.slug}" leaves out members it has: keep ${who} in "members" (the full membership every time; give someone who left an "until")`,
+      `circle "${draft.slug}" leaves out members it has: keep ${who(left)} in "members" (the full membership every time; give someone who left an "until")`,
+    );
+  }
+  for (const draft of output.occasions) {
+    const existing = notes.getOccasion(draft.slug);
+    const left = existing
+      ? dropped(
+          existing,
+          draft.participants.map((m) => m.id),
+        )
+      : [];
+    if (left.length === 0) continue;
+    problems.push(
+      `occasion "${draft.slug}" leaves out participants it has: keep ${who(left)} in "participants" (the full list every time; give someone who bailed an "until")`,
     );
   }
   return problems;
@@ -716,8 +1107,14 @@ function checkAndSaveDream(
     parse: Parameters<typeof parseNotesOutput>[1];
     basis: NotesBasis;
     excerptOnly: ReadonlySet<string>;
+    /** Occasions shown as excerpts or one line (archived): never rewritten. */
+    occasionsExcerptOnly?: ReadonlySet<string>;
+    /** Archived circles and occasions shown as one line: never removed or merged away either. */
+    archivedOnly?: { circles?: ReadonlySet<string>; occasions?: ReadonlySet<string> };
     allowedIds: string[];
     nameOf: (userId: string) => string | undefined;
+    /** The journal rows the dream read: an archived circle comes back only when they name it. */
+    rows: Memory[];
   },
 ): Checked<Saved> {
   const parsed = parseNotesOutput(text, check.parse);
@@ -734,7 +1131,8 @@ function checkAndSaveDream(
     }
     if (!parsed.ok) return parsed;
     const problems = [
-      ...excerptOnlyProblems(parsed.value, check.excerptOnly),
+      ...excerptOnlyProblems(parsed.value, check.excerptOnly, check.occasionsExcerptOnly, check.archivedOnly),
+      ...revivalProblems(deps.notes, parsed.value, check.rows),
       ...droppedMemberProblems(deps.notes, parsed.value, check.nameOf),
       ...profileRewriteProblems(deps.notes, owner, parsed.value),
     ];
@@ -828,8 +1226,7 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
     const person =
       formatIdentityLines(identities.filter((i) => accounts.has(i.discord_user_id)))[0] ??
       `- ${name} (id:${ownerId}): not in SERVER PEOPLE (they may have left)`;
-    const circles = deps.notes.circlesOf(ownerId, { includeFormer: true }).map((c) => c.circle);
-    const circleView = renderCircles(`CIRCLES ${name} is or was in`, circles, nameOf);
+    const shared = personSharedView(deps.notes, ownerId, name, rows, nameOf, now);
     const ctx: JournalRenderContext = { ownerId, nameOf, canonical: canonicalUserId };
     const prompt = buildPersonDreamPrompt({
       now,
@@ -837,11 +1234,12 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
       person,
       name,
       notes: deps.notes.listNotes(owner),
-      circles: circleView.text,
+      circles: shared.circles.text,
+      occasions: shared.occasions.text,
       journal: renderJournal(rows, ctx),
       passages: passagesFor(deps, rows, ctx),
     });
-    const allowedIds = allowedIdsFrom(identities, [...accounts, ...circleMemberIds(circles)]);
+    const allowedIds = allowedIdsFrom(identities, [...accounts, ...circleMemberIds(shared.notes)]);
     const watermark = highestSeq(rows);
     const basis = notesBasis(deps.notes, owner);
 
@@ -867,15 +1265,182 @@ export async function dreamPerson(rawOwnerId: string, deps: DreamDeps): Promise<
         checkAndSaveDream(deps, owner, text, {
           parse: { scope: 'person', requireProfile: true, allowedIds },
           basis,
-          excerptOnly: circleView.excerptOnly,
+          excerptOnly: shared.circles.excerptOnly,
+          occasionsExcerptOnly: shared.occasions.excerptOnly,
+          archivedOnly: { circles: shared.circles.archivedOnly, occasions: shared.occasions.archivedOnly },
           allowedIds,
           nameOf,
+          rows,
         }),
     });
-    return finishDream(deps, owner, label, watermark, outcome);
+    // Rows filed under this person only: a row about two people sits in both journals.
+    const own = rows.filter((r) => r.subject_user_id && canonicalUserId(r.subject_user_id) === ownerId);
+    return withActivity(
+      deps,
+      finishDream(deps, owner, label, watermark, outcome),
+      own,
+      shared.notes.filter((n) => n.scope === 'circle'),
+      label,
+    );
   } catch (error) {
     return failDream(deps, owner, label, error);
   }
+}
+
+type RenderedShared = { text: string; excerptOnly: Set<string>; archivedOnly: Set<string> };
+
+/**
+ * Sorts circles for a dream's input: in full, as an excerpt (never rewritten), or as one line (archived).
+ * A live circle that is `fullWhenLive` (the person is in it; for the group, any) and present is shown in
+ * full; a fading one, or one the person left, only as an excerpt unless the new rows name it. An archived one
+ * only as a line, unless a row names it with two or more of its members (it may be back: revivalProblems);
+ * one person's rows, or rows about its members that name no circle, never bring it in.
+ */
+function sortCircles(
+  circles: { circle: Note; fullWhenLive: boolean }[],
+  rows: Memory[],
+  activity: ReadonlyMap<number, ActivityMonth[]>,
+  today: string,
+): { full: Note[]; excerpts: Note[]; archived: Note[] } {
+  const named = new Set(
+    circlesNamedIn(
+      rowsText(rows),
+      circles.map((c) => c.circle),
+    ).map((c) => c.id),
+  );
+  const full: Note[] = [];
+  const excerpts: Note[] = [];
+  const archived: Note[] = [];
+  for (const { circle, fullWhenLive } of circles) {
+    if (isArchived(circle)) {
+      (rows.some((row) => namesSharedActivity(row, circle)) ? full : archived).push(circle);
+      continue;
+    }
+    const present = circlePresence(circle, activity.get(circle.id) ?? [], today).state === 'present';
+    if ((fullWhenLive && present) || named.has(circle.id)) full.push(circle);
+    else excerpts.push(circle);
+  }
+  return { full, excerpts, archived };
+}
+
+/**
+ * The circles and occasions a person's dream shows: the circles they are in and that are present, in full;
+ * fading ones and the ones they left as excerpts (unless a new row names them), archived ones as one line
+ * each (unless a new row names them with two of their members: sortCircles), each with its rhythm and revivals; their occasions in full, the most relevant
+ * first, archived ones one line each. Also every note shown (for the ids the answer may carry). This is most
+ * of what a dream reads that isn't the person's own: a long-time member was in dozens of circles.
+ */
+function personSharedView(
+  notes: NotesStore,
+  ownerId: string,
+  name: string,
+  rows: Memory[],
+  nameOf: (userId: string) => string | undefined,
+  now: Date,
+): { circles: RenderedShared; occasions: RenderedShared; notes: Note[] } {
+  const today = easternToday(now);
+  const activity = notes.circleActivity();
+  const memberships = notes.circlesOf(ownerId, { includeFormer: true, includeArchived: true });
+  const { full, excerpts, archived } = sortCircles(
+    memberships.map((m) => ({ circle: m.circle, fullWhenLive: m.membership.until === null })),
+    rows,
+    activity,
+    today,
+  );
+  const occasions = notes
+    .occasionsOf(ownerId, { includeFormer: true, includeArchived: true })
+    .map((o) => o.occasion)
+    .sort(byOccasionRelevance(today));
+  return {
+    circles: renderCircles(
+      `CIRCLES ${name} is or was in`,
+      full,
+      nameOf,
+      CIRCLES_FULL_BUDGET_CHARS,
+      {},
+      {
+        excerpts,
+        archived,
+        meta: (c) => circleMeta(c, activity, today),
+      },
+    ),
+    occasions: renderOccasions(
+      `OCCASIONS ${name} is or was part of`,
+      occasions.filter((o) => !isArchived(o)),
+      nameOf,
+      today,
+      { archived: occasions.filter(isArchived) },
+    ),
+    notes: [...full, ...excerpts, ...archived, ...occasions],
+  };
+}
+
+/**
+ * The circles and occasions the group pass shows: every present circle in full (within the budget), fading
+ * ones as excerpts, archived ones one line each (unless a new row names them: sortCircles), each with
+ * its rhythm and revivals; every occasion in full, the most relevant first, archived ones one line each.
+ */
+function groupSharedView(
+  notes: NotesStore,
+  rows: Memory[],
+  nameOf: (userId: string) => string | undefined,
+  now: Date,
+): { circles: RenderedShared; occasions: RenderedShared; notes: Note[] } {
+  const today = easternToday(now);
+  const activity = notes.circleActivity();
+  const all = notes.listCircles({ includeArchived: true });
+  const { full, excerpts, archived } = sortCircles(
+    all.map((circle) => ({ circle, fullWhenLive: true })),
+    rows,
+    activity,
+    today,
+  );
+  const occasions = notes.listOccasions({ includeArchived: true }).sort(byOccasionRelevance(today));
+  return {
+    circles: renderCircles(
+      'CIRCLES',
+      full,
+      nameOf,
+      CIRCLES_FULL_BUDGET_CHARS,
+      {},
+      {
+        excerpts,
+        archived,
+        meta: (c) => circleMeta(c, activity, today),
+      },
+    ),
+    occasions: renderOccasions(
+      'OCCASIONS',
+      occasions.filter((o) => !isArchived(o)),
+      nameOf,
+      today,
+      { archived: occasions.filter(isArchived) },
+    ),
+    notes: [...all, ...occasions],
+  };
+}
+
+/**
+ * After a saved dream: its own rows' shared activity counts for the circles it saw or wrote
+ * (creditCircleActivity); the circles that came back ride on the outcome.
+ */
+function withActivity(
+  deps: DreamDeps,
+  outcome: DreamOutcome,
+  rows: Memory[],
+  circles: Note[],
+  label: string,
+): DreamOutcome {
+  if (outcome.status !== 'updated' && outcome.status !== 'unchanged') return outcome;
+  const written = outcome.status === 'updated' ? outcome.written.filter((n) => n.scope === 'circle' && n.active) : [];
+  // A circle this very answer archived stays archived: the dream judged it over.
+  const justArchived = new Set(written.filter(isArchived).map((n) => n.id));
+  const candidates = [...circles, ...written]
+    .filter((c) => !justArchived.has(c.id))
+    .map((c) => deps.notes.getNoteById(c.id) ?? c);
+  const today = easternToday((deps.now ?? (() => new Date()))());
+  const { revived } = creditCircleActivity(deps.notes, rows, candidates, `dream: ${label}`, today);
+  return revived.length > 0 ? { ...outcome, revived } : outcome;
 }
 
 // ---- The group dream ----
@@ -903,19 +1468,19 @@ export async function dreamGroup(
     const nameOf = nameResolver(memory);
     const now = (deps.now ?? (() => new Date()))();
     const identities = memory.getAllIdentities();
-    const circles = deps.notes.listCircles();
-    const circleView = renderCircles('CIRCLES', circles, nameOf);
+    const shared = groupSharedView(deps.notes, rows, nameOf, now);
     const ctx: JournalRenderContext = { nameOf, canonical: canonicalUserId };
     const prompt = buildGroupDreamPrompt({
       now,
       roster: renderRoster(identities),
       notes: deps.notes.listNotes(owner),
-      circles: circleView.text,
+      circles: shared.circles.text,
+      occasions: shared.occasions.text,
       personChanges: context.personChanges.map((c) => ({ name: c.name, changeSummary: c.changeSummary })),
       journal: renderJournal(rows, ctx),
       passages: passagesFor(deps, rows, ctx),
     });
-    const allowedIds = allowedIdsFrom(identities, circleMemberIds(circles));
+    const allowedIds = allowedIdsFrom(identities, circleMemberIds(shared.notes));
     // A refresh reads no rows: the watermark stays where it is.
     const watermark = Math.max(highestSeq(rows), deps.notes.getDreamState(owner).journalWatermark);
     const basis = notesBasis(deps.notes, owner);
@@ -935,12 +1500,21 @@ export async function dreamGroup(
         checkAndSaveDream(deps, owner, text, {
           parse: { scope: 'group', allowedIds },
           basis,
-          excerptOnly: circleView.excerptOnly,
+          excerptOnly: shared.circles.excerptOnly,
+          occasionsExcerptOnly: shared.occasions.excerptOnly,
+          archivedOnly: { circles: shared.circles.archivedOnly, occasions: shared.occasions.archivedOnly },
           allowedIds,
           nameOf,
+          rows,
         }),
     });
-    return finishDream(deps, owner, label, watermark, outcome);
+    return withActivity(
+      deps,
+      finishDream(deps, owner, label, watermark, outcome),
+      rows.filter((r) => !r.subject_user_id),
+      shared.notes.filter((n) => n.scope === 'circle'),
+      label,
+    );
   } catch (error) {
     return failDream(deps, owner, label, error);
   }
@@ -1017,9 +1591,366 @@ export function planGroupDream(deps: Pick<DreamDeps, 'notes' | 'memory'>, now: D
   return { run: true, why: 'weekly-refresh', context, changedNotes: changes.length };
 }
 
+// ---- The lifecycle pass ----
+
+/** Calls one archive makes at most: the second aims lower when the first trace came back too long. */
+const COMPACT_ATTEMPTS = 2;
+
+const ARCHIVE_REASONS: Record<ArchiveReason, string> = {
+  ended: 'it ended months ago',
+  cancelled: 'it was called off',
+  dormant: 'it faded out, nothing shared in a long time',
+  compact: 'compacted to a trace',
+  requested: "the owner's archive command",
+};
+
+/**
+ * A circle's or occasion's short historical trace (ARCHIVE_TRACE_SYSTEM): up to COMPACT_ATTEMPTS small
+ * calls (tag memory_dream), aiming at NOTE_LIMITS.archivedTargetChars, then a fifth lower. A trace is used
+ * only when it is within NOTE_LIMITS.archivedMaxChars and passes the note rules (markdown only, no ids but
+ * its members'). `content` is undefined (with the last problem) when none did.
+ */
+async function compactNote(
+  client: OpenAI,
+  model: string,
+  args: {
+    note: Note;
+    why: ArchiveReason;
+    nameOf: (id: string) => string | undefined;
+    today: string;
+    journal?: string;
+    history?: string[];
+  },
+): Promise<{ content?: string; problem?: string; costUsd?: number }> {
+  const { note } = args;
+  const allowed = new Set(note.members.map((m) => m.memberId));
+  let aim: number = NOTE_LIMITS.archivedTargetChars;
+  let costUsd: number | undefined;
+  let problem = 'no usable trace came back';
+  for (let attempt = 0; attempt < COMPACT_ATTEMPTS; attempt++) {
+    const answer = await askModel(client, model, DREAM_FEATURE, [
+      { role: 'system', content: ARCHIVE_TRACE_SYSTEM },
+      { role: 'user', content: buildArchiveTracePrompt({ ...args, aim }) },
+    ]);
+    if (answer.costUsd !== undefined) costUsd = (costUsd ?? 0) + answer.costUsd;
+    if (answer.truncated) {
+      problem = 'the trace was cut off at the length limit';
+      continue;
+    }
+    const checked = contentProblems(unfenced(answer.text), 'the trace', NOTE_LIMITS.archivedMaxChars, allowed);
+    if (checked.content && checked.errors.length === 0) return { content: checked.content, costUsd };
+    problem = checked.errors[0] ?? 'the trace was empty';
+    if ((checked.content?.length ?? 0) > NOTE_LIMITS.archivedMaxChars) aim = Math.round(aim * 0.8);
+  }
+  return { problem, costUsd };
+}
+
+function lifecycleFailure(
+  note: Note,
+  task: 'history' | 'archive',
+  error: string,
+  cause: 'error' | 'answer',
+  costUsd?: number,
+): Extract<LifecycleOutcome, { status: 'failed' }> {
+  return {
+    status: 'failed',
+    scope: note.scope === 'occasion' ? 'occasion' : 'circle',
+    slug: note.topic,
+    title: note.title,
+    task,
+    error,
+    cause,
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
+}
+
+/**
+ * Archives a circle or an occasion as a short historical trace: one small call (compactNote; an occasion
+ * never written as history also gets its journal window), then NotesStore.archiveNote (status 'archived', a
+ * circle's current memberships ended, refused when the note changed meanwhile). The nightly lifecycle pass
+ * and the owner's `memory archive` command (bootstrap CLI) both archive through here. Never throws.
+ */
+export async function archiveShared(
+  note: Note,
+  why: ArchiveReason,
+  deps: DreamDeps,
+  now: Date = (deps.now ?? (() => new Date()))(),
+): Promise<LifecycleOutcome> {
+  const label = `${note.scope} "${note.topic}"`;
+  try {
+    const client = deps.client ?? getOpenRouterClient();
+    if (!client) return lifecycleFailure(note, 'archive', 'OPENROUTER_API_KEY is not set', 'error');
+    const nameOf = nameResolver(deps.memory);
+    const today = easternToday(now);
+    const neverHistory = note.scope === 'occasion' && note.status !== 'past' && !isArchived(note);
+    const rows = neverHistory ? deps.notes.occasionJournal(note) : [];
+    const journal = rows.length > 0 ? renderJournal(rows, { nameOf, canonical: canonicalUserId }) : undefined;
+    const compacted = await compactNote(client, deps.model ?? config.dream.model, {
+      note,
+      why,
+      nameOf,
+      today,
+      journal,
+      history: note.scope === 'circle' ? activityHistory(deps.notes.activityOf(note.id), today) : [],
+    });
+    if (!compacted.content) {
+      const error = `couldn't compact it to a trace: ${compacted.problem ?? 'no answer'}`;
+      logger.warn(`dream: archiving ${label} failed${formatCost(compacted.costUsd)}: ${error}`);
+      return lifecycleFailure(note, 'archive', error, 'answer', compacted.costUsd);
+    }
+    const saved = deps.notes.archiveNote(note.id, {
+      content: compacted.content,
+      updatedBy: 'dream',
+      reason: `archived as a trace: ${ARCHIVE_REASONS[why]}`,
+      expectVersion: note.version,
+    });
+    if (!saved.ok) {
+      const error = errorText(saved.errors);
+      logger.warn(`dream: archiving ${label} failed${formatCost(compacted.costUsd)}: ${error}`);
+      return lifecycleFailure(note, 'archive', error, 'answer', compacted.costUsd);
+    }
+    const archived = saved.written[0] ?? deps.notes.getNoteById(note.id) ?? note;
+    logger.info(
+      `dream: archived ${label} (${ARCHIVE_REASONS[why]}): ${note.content.length} → ${archived.content.length} characters${formatCost(compacted.costUsd)}`,
+    );
+    return {
+      status: 'archived',
+      note: archived,
+      why,
+      ...(compacted.costUsd !== undefined ? { costUsd: compacted.costUsd } : {}),
+    };
+  } catch (error) {
+    const message = describeError(error);
+    logger.warn(`dream: archiving ${label} failed: ${message}`);
+    return lifecycleFailure(note, 'archive', message, 'error');
+  }
+}
+
+/**
+ * The occasion pass's answer, checked and saved in one IMMEDIATE transaction: refused for good when the
+ * occasion changed while the model was thinking (an owner edit), refused (repair round) when it writes
+ * another occasion, drops a participant, or stays "planned" although its dates are behind; saved as a
+ * dream version of that occasion. A missing status reads as "past".
+ */
+function saveOccasionHistory(
+  deps: DreamDeps,
+  occasion: Note,
+  text: string,
+  check: { allowedIds: string[]; nameOf: (userId: string) => string | undefined; today: string },
+): Checked<{ note: Note; changeSummary: string }> {
+  const parsed = parseNotesOutput(text, { scope: 'occasion', allowedIds: check.allowedIds });
+  const save = (): Checked<{ note: Note; changeSummary: string }> => {
+    const current = deps.notes.getOccasion(occasion.topic);
+    if (!current || current.id !== occasion.id || current.version !== occasion.version) {
+      return {
+        ok: false,
+        final: true,
+        errors: [`the occasion changed while dreaming: not saved over it; the next night reads the new version`],
+      };
+    }
+    if (!parsed.ok) return parsed;
+    const draft = parsed.value.occasions[0];
+    if (draft.slug !== occasion.topic) {
+      return { ok: false, errors: [`write the occasion "${occasion.topic}" itself, keeping its slug`] };
+    }
+    const over = phaseByDates(draft.starts_on, draft.ends_on, check.today) === 'past';
+    if (draft.status === 'archived') {
+      return {
+        ok: false,
+        errors: ['"status" is "past" (or "cancelled", or "planned" with new dates), not "archived"'],
+      };
+    }
+    if (draft.status === null) draft.status = over ? 'past' : 'planned';
+    if ((draft.status === 'planned' || draft.status === 'happening') && over) {
+      return {
+        ok: false,
+        errors: [
+          `it is over by its dates (${draft.ends_on ?? draft.starts_on}): "status" is "past" (or "cancelled" if it never happened), or give its new dates if it was moved`,
+        ],
+      };
+    }
+    const problems = droppedMemberProblems(deps.notes, parsed.value, check.nameOf);
+    if (problems.length > 0) return { ok: false, errors: problems };
+    const saved = deps.notes.applyNotesOutput({ scope: 'occasion', slug: occasion.topic }, parsed.value, {
+      updatedBy: 'dream',
+      allowedIds: check.allowedIds,
+    });
+    if (!saved.ok) return { ok: false, errors: saved.errors };
+    return {
+      ok: true,
+      value: {
+        note: saved.written[0] ?? deps.notes.getOccasion(occasion.topic) ?? current,
+        changeSummary: parsed.value.change_summary,
+      },
+    };
+  };
+  return deps.memory.sharedDatabase().transaction(save).immediate();
+}
+
+/**
+ * The occasion pass for one occasion that is over by its dates and was never written as history: one
+ * MEMORY_DREAM_MODEL call (tag memory_dream, the dream's repair round and shrink step) over the occasion,
+ * the journal rows of its participants around its dates and those that name it (NotesStore.occasionJournal)
+ * and their cited passages, answered as the occasion rewritten as history (status "past"; "cancelled" when
+ * it never happened; new dates when it moved). Never throws.
+ */
+export async function dreamOccasionHistory(
+  occasion: Note,
+  deps: DreamDeps,
+  now: Date = (deps.now ?? (() => new Date()))(),
+): Promise<LifecycleOutcome> {
+  const label = `occasion "${occasion.topic}"`;
+  try {
+    const client = deps.client ?? getOpenRouterClient();
+    if (!client) return lifecycleFailure(occasion, 'history', 'OPENROUTER_API_KEY is not set', 'error');
+    const memory = deps.memory;
+    const nameOf = nameResolver(memory);
+    const identities = memory.getAllIdentities();
+    const today = easternToday(now);
+    const rows = deps.notes.occasionJournal(occasion);
+    const ctx: JournalRenderContext = { nameOf, canonical: canonicalUserId };
+    const prompt = buildOccasionHistoryPrompt({
+      now,
+      today,
+      roster: renderRoster(identities),
+      occasion: renderOccasions('THE OCCASION', [occasion], nameOf, today, { budget: Number.POSITIVE_INFINITY }).text,
+      journal: renderJournal(rows, ctx),
+      passages: passagesFor(deps, rows, ctx),
+    });
+    const allowedIds = allowedIdsFrom(identities, circleMemberIds([occasion]));
+    const model = deps.model ?? config.dream.model;
+    const outcome = await draftWithRepair<{ note: Note; changeSummary: string }>({
+      client,
+      model,
+      feature: DREAM_FEATURE,
+      system: prompt.system,
+      user: prompt.user,
+      label: `dream: ${label}`,
+      scope: 'occasion',
+      mode: 'dream',
+      prepare: (text) => shrinkOversized(text, 'occasion', { client, model, label: `dream: ${label}` }),
+      check: (text) => saveOccasionHistory(deps, occasion, text, { allowedIds, nameOf, today }),
+    });
+    const cost = outcome.costUsd !== undefined ? { costUsd: outcome.costUsd } : {};
+    if (!outcome.result.ok) {
+      const error = errorText(outcome.result.errors);
+      logger.warn(`dream: rewriting ${label} as history failed${formatCost(outcome.costUsd)}: ${error}`);
+      return lifecycleFailure(occasion, 'history', error, 'answer', outcome.costUsd);
+    }
+    const { note, changeSummary } = outcome.result.value;
+    logShapeWarnings(label, [note], today);
+    logger.info(
+      `dream: rewrote ${label} as history (${note.status}, journal ${rows.length} rows)${formatCost(outcome.costUsd)}: ${changeSummary || '(no summary)'}`,
+    );
+    return { status: 'history', note, changeSummary, ...cost };
+  } catch (error) {
+    const message = describeError(error);
+    logger.warn(`dream: rewriting ${label} as history failed: ${message}`);
+    return lifecycleFailure(occasion, 'history', message, 'error');
+  }
+}
+
+/**
+ * bot_state key of the lifecycle steps whose last try failed on the answer: `{"<note id>": <its version>}`.
+ * Those go after the untried ones (planLifecycle `failed`) until the note gets a new version or a step on it
+ * succeeds, so a few notes the model can't handle never starve the rest.
+ */
+export const LIFECYCLE_FAILED_KEY = 'lifecycle:failed';
+
+function readLifecycleFailures(deps: DreamDeps): Map<number, number> {
+  try {
+    const raw = JSON.parse(deps.memory.getState(LIFECYCLE_FAILED_KEY) ?? '{}') as unknown;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return new Map();
+    return new Map(
+      Object.entries(raw as Record<string, unknown>)
+        .filter(([id, version]) => Number.isInteger(Number(id)) && typeof version === 'number')
+        .map(([id, version]) => [Number(id), version as number]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * The nightly lifecycle pass (lifecycle.ts planLifecycle): occasions over by their dates are rewritten as
+ * history (dreamOccasionHistory), then past and cancelled occasions due, archived notes still too long and
+ * circles that faded out (CIRCLE_DECAY) are archived (archiveShared), each capped per night
+ * (LIFECYCLE_PER_NIGHT; the rest wait). Notes whose last step failed on the answer go last
+ * (LIFECYCLE_FAILED_KEY). Stops after MAX_FAILURES_IN_A_ROW failed calls in a row (an outage). Never throws.
+ */
+export async function runLifecycle(
+  deps: DreamDeps,
+  now: Date = (deps.now ?? (() => new Date()))(),
+): Promise<LifecycleRun> {
+  const today = easternToday(now);
+  let plan: ReturnType<typeof planLifecycle>;
+  let revived: Note[] = [];
+  const failedBefore = readLifecycleFailures(deps);
+  let versions = new Map<number, number>();
+  try {
+    revived = creditLinkedOccasions(deps.notes, today);
+    const occasions = deps.notes.listOccasions({ includeArchived: true });
+    const circles = deps.notes.listCircles({ includeArchived: true });
+    versions = new Map([...occasions, ...circles].map((n) => [n.id, n.version]));
+    plan = planLifecycle({
+      occasions,
+      circles,
+      today,
+      activity: deps.notes.circleActivity(),
+      failed: new Set([...failedBefore].filter(([id, version]) => versions.get(id) === version).map(([id]) => id)),
+    });
+  } catch (error) {
+    logger.warn('dream: planning the lifecycle pass failed; skipped tonight:', error);
+    return { outcomes: [], deferred: 0, fading: [], revived };
+  }
+  const fading = plan.fading.map((c) => c.topic);
+  if (plan.history.length === 0 && plan.archive.length === 0) {
+    return { outcomes: [], deferred: plan.deferred, fading, revived };
+  }
+  logger.info(
+    `dream: lifecycle pass: ${plan.history.length} occasion(s) to rewrite as history, ${plan.archive.length} note(s) to archive${plan.deferred > 0 ? `, ${plan.deferred} left for the next nights` : ''}.`,
+  );
+  const outcomes: LifecycleOutcome[] = [];
+  let failures = 0;
+  const steps: { note: Note; run: () => Promise<LifecycleOutcome> }[] = [
+    ...plan.history.map((occasion) => ({ note: occasion, run: () => dreamOccasionHistory(occasion, deps, now) })),
+    ...plan.archive.map((task) => ({ note: task.note, run: () => archiveShared(task.note, task.why, deps, now) })),
+  ];
+  // Only failures on notes that still exist at the version they failed at are kept.
+  const failedAfter = new Map([...failedBefore].filter(([id, version]) => versions.get(id) === version));
+  for (const step of steps) {
+    const outcome = await step.run();
+    outcomes.push(outcome);
+    if (outcome.status === 'failed' && outcome.cause === 'answer') failedAfter.set(step.note.id, step.note.version);
+    else if (outcome.status !== 'failed') failedAfter.delete(step.note.id);
+    failures = outcome.status === 'failed' && outcome.cause === 'error' ? failures + 1 : 0;
+    if (failures >= MAX_FAILURES_IN_A_ROW) {
+      logger.warn(`dream: ${failures} lifecycle calls failed in a row; stopping (the rest wait for the next night).`);
+      break;
+    }
+  }
+  try {
+    deps.memory.setState(LIFECYCLE_FAILED_KEY, JSON.stringify(Object.fromEntries(failedAfter)));
+  } catch (error) {
+    logger.warn('dream: recording the lifecycle failures failed:', error);
+  }
+  return { outcomes, deferred: plan.deferred, fading, revived };
+}
+
+/** What the lifecycle pass did (runLifecycle). */
+export type LifecycleRun = {
+  outcomes: LifecycleOutcome[];
+  /** Due but left for the following nights. */
+  deferred: number;
+  /** Live circles fading (slugs, the faintest first). */
+  fading: string[];
+  /** Archived circles their linked occasions brought back. */
+  revived: Note[];
+};
+
 // ---- One night ----
 
-function addCost(total: number | undefined, outcome: DreamOutcome | undefined): number | undefined {
+function addCost(total: number | undefined, outcome: DreamOutcome | LifecycleOutcome | undefined): number | undefined {
   const cost = outcome && 'costUsd' in outcome ? outcome.costUsd : undefined;
   return cost === undefined ? total : (total ?? 0) + cost;
 }
@@ -1074,15 +2005,37 @@ export async function runNightlyDream(deps: DreamDeps & { maxPeople?: number }):
   const people: DreamOutcome[] = [];
   const run = await dreamPeople(pending.people, withClient, people, 0);
   const group = run.stopped ? undefined : await dreamGroupIfDue(withClient, now);
-  return nightResult(day, people, group ? [group] : []);
+  // The lifecycle pass last: tonight's dreams may have archived circles it compacts, or rewritten an
+  // occasion as history already.
+  const lifecycle = run.stopped ? undefined : await runLifecycle(withClient, now);
+  return nightResult(day, people, group ? [group] : [], lifecycle);
 }
 
-/** A run's result: the outcomes, the last group outcome, and the summed cost. */
-function nightResult(day: string, people: DreamOutcome[], groups: DreamOutcome[]): NightlyDreamResult {
+/** A run's result: the outcomes, the last group outcome, the lifecycle pass, and the summed cost. */
+function nightResult(
+  day: string,
+  people: DreamOutcome[],
+  groups: DreamOutcome[],
+  lifecycle?: LifecycleRun,
+): NightlyDreamResult {
   const group = groups.at(-1);
   let costUsd: number | undefined;
-  for (const outcome of [...people, ...groups]) costUsd = addCost(costUsd, outcome);
-  return { day, people, ...(group ? { group } : {}), ...(costUsd !== undefined ? { costUsd } : {}) };
+  for (const outcome of [...people, ...groups, ...(lifecycle?.outcomes ?? [])]) costUsd = addCost(costUsd, outcome);
+  // Circles that came back tonight: through a dream's shared rows, or a linked occasion that happened.
+  const revived = [
+    ...[...people, ...groups].flatMap((o) => ('revived' in o && o.revived ? o.revived : [])),
+    ...(lifecycle?.revived ?? []),
+  ].map((c) => c.topic);
+  return {
+    day,
+    people,
+    ...(group ? { group } : {}),
+    ...(lifecycle && lifecycle.outcomes.length > 0 ? { lifecycle: lifecycle.outcomes } : {}),
+    ...(lifecycle && lifecycle.deferred > 0 ? { lifecycleDeferred: lifecycle.deferred } : {}),
+    ...(lifecycle && lifecycle.fading.length > 0 ? { fading: lifecycle.fading } : {}),
+    ...(revived.length > 0 ? { revived: [...new Set(revived)] } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
 }
 
 /**
@@ -1246,41 +2199,64 @@ type EditView = {
   target: EditTarget;
   notes?: Note[];
   circles: Note[];
+  /** Occasions shown in full. */
+  occasions: Note[];
 };
 
-/** What an edit of `target` shows the model, or an error when the target doesn't exist. */
+/**
+ * What an edit of `target` shows the model, or an error when the target doesn't exist: one circle or
+ * occasion (archived ones too: the owner may edit a trace); the group's notes with every live circle and
+ * occasion; a person's notes with the live circles they are or were in and their live occasions.
+ */
 function editView(target: EditTarget, deps: DreamDeps): EditView | { error: string } {
   if (target.scope === 'circle') {
     const slug = normalizeTopic(target.slug);
     const circle = slug ? deps.notes.getCircle(slug) : undefined;
     if (!slug || !circle) return { error: `there is no circle "${target.slug}"` };
+    const archived = isArchived(circle) ? ' It is archived: keep it archived unless the instruction revives it.' : '';
     return {
       scope: 'circle',
-      what: `the circle "${circle.title}" (slug "${circle.topic}"): write exactly this circle, keeping its slug`,
+      what: `the circle "${circle.title}" (slug "${circle.topic}"): write exactly this circle, keeping its slug, or only archive it.${archived}`,
       label: `circle "${slug}"`,
       target: { scope: 'circle', slug },
       circles: [circle],
+      occasions: [],
+    };
+  }
+  if (target.scope === 'occasion') {
+    const slug = normalizeTopic(target.slug);
+    const occasion = slug ? deps.notes.getOccasion(slug) : undefined;
+    if (!slug || !occasion) return { error: `there is no occasion "${target.slug}"` };
+    return {
+      scope: 'occasion',
+      what: `the occasion "${occasion.title}" (slug "${occasion.topic}", status "${occasion.status ?? 'planned'}"): write exactly this occasion, keeping its slug`,
+      label: `occasion "${slug}"`,
+      target: { scope: 'occasion', slug },
+      circles: [],
+      occasions: [occasion],
     };
   }
   if (target.scope === 'group') {
     return {
       scope: 'group',
-      what: "your notes on the group as a whole (the server's circles are shown too)",
+      what: "your notes on the group as a whole (the server's circles and occasions are shown too)",
       label: "the group's notes",
       target,
       notes: deps.notes.listNotes(target),
       circles: deps.notes.listCircles(),
+      occasions: deps.notes.listOccasions(),
     };
   }
   const ownerId = canonicalUserId(target.ownerId);
   const name = nameResolver(deps.memory)(ownerId) ?? 'this member';
   return {
     scope: 'person',
-    what: `your notes on ${name}: their profile, their topic notes and the circles they are or were in`,
+    what: `your notes on ${name}: their profile, their topic notes, the circles they are or were in and their occasions`,
     label: `${name}'s notes (${ownerId})`,
     target: { scope: 'person', ownerId },
     notes: deps.notes.listNotes({ scope: 'person', ownerId }),
     circles: deps.notes.circlesOf(ownerId, { includeFormer: true }).map((c) => c.circle),
+    occasions: deps.notes.occasionsOf(ownerId, { includeFormer: true }).map((o) => o.occasion),
   };
 }
 
@@ -1308,23 +2284,43 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
 
     const nameOf = nameResolver(deps.memory);
     const identities = deps.memory.getAllIdentities();
-    const circleView = renderCircles(
-      view.scope === 'circle' ? 'THE CIRCLE' : 'CIRCLES',
-      view.circles,
-      nameOf,
-      CIRCLES_FULL_BUDGET_CHARS,
-      { targets: false },
-    );
+    const now = (deps.now ?? (() => new Date()))();
+    const today = easternToday(now);
+    const circleView =
+      view.scope === 'occasion'
+        ? { text: '', excerptOnly: new Set<string>() }
+        : renderCircles(
+            view.scope === 'circle' ? 'THE CIRCLE' : 'CIRCLES',
+            view.circles,
+            nameOf,
+            CIRCLES_FULL_BUDGET_CHARS,
+            { targets: false },
+          );
+    const occasionView =
+      view.scope === 'circle'
+        ? { text: '', excerptOnly: new Set<string>() }
+        : renderOccasions(
+            view.scope === 'occasion' ? 'THE OCCASION' : 'OCCASIONS',
+            [...view.occasions].sort(byOccasionRelevance(today)),
+            nameOf,
+            today,
+            { view: { targets: false } },
+          );
     const prompt = buildEditPrompt({
-      now: (deps.now ?? (() => new Date()))(),
+      now,
       roster: renderRoster(identities),
       what: view.what,
       notes: view.notes,
       circles: circleView.text,
+      occasions: occasionView.text,
       instruction,
     });
     const owned = view.target.scope === 'person' ? accountIdsFor(view.target.ownerId) : [];
-    const allowedIds = allowedIdsFrom(identities, [...owned, ...circleMemberIds(view.circles)]);
+    const allowedIds = allowedIdsFrom(identities, [
+      ...owned,
+      ...circleMemberIds(view.circles),
+      ...circleMemberIds(view.occasions),
+    ]);
     const basis = notesBasis(deps.notes, view.target);
 
     const { result, costUsd } = await draftWithRepair<NotesOutput>({
@@ -1350,7 +2346,7 @@ export async function proposeEdit(request: EditRequest, deps: DreamDeps): Promis
           };
         }
         if (!parsed.ok) return parsed;
-        const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly);
+        const excerpts = excerptOnlyProblems(parsed.value, circleView.excerptOnly, occasionView.excerptOnly);
         if (excerpts.length > 0) return { ok: false, errors: excerpts };
         const dryRun = dryRunEdit(deps, view.target, parsed.value, allowedIds);
         return dryRun.ok ? parsed : { ok: false, errors: dryRun.errors };
@@ -1392,10 +2388,10 @@ export function applyEdit(
   });
 }
 
-/** One note or circle a writer output would change, for a before/after preview. */
+/** One note, circle or occasion a writer output would change, for a before/after preview. */
 export type ProposedChange = {
-  kind: 'note' | 'circle';
-  /** The topic or circle slug. */
+  kind: 'note' | 'circle' | 'occasion';
+  /** The topic, circle or occasion slug. */
   key: string;
   /** The new title (the current one for a removal). */
   title: string;
@@ -1404,12 +2400,15 @@ export type ProposedChange = {
   before?: string;
   /** Proposed content (absent when removed). */
   after?: string;
-  /** A circle's membership now / as proposed (main ids). */
+  /** A circle's membership (an occasion's participants) now / as proposed (main ids). */
   membersBefore?: CircleMember[];
   membersAfter?: CircleMember[];
-  /** A circle's aliases now / as proposed. */
+  /** A circle's or occasion's aliases now / as proposed. */
   aliasesBefore?: string[];
   aliasesAfter?: string[];
+  /** A circle's or occasion's status, dates and place now / as proposed (a circle archived or revived). */
+  detailsBefore?: NoteDetails;
+  detailsAfter?: NoteDetails;
 };
 
 function sameMembership(a: CircleMember[], b: CircleMember[]): boolean {
@@ -1420,14 +2419,17 @@ function sameMembership(a: CircleMember[], b: CircleMember[]): boolean {
 
 /**
  * What saving `output` for `target` would change, against the store's current state: notes added,
- * changed or removed, circles added, changed (content, title, aliases or membership) or removed/merged
- * away. Identical drafts are left out. Pure read; the order is notes (as in the output, then removals),
- * then circles.
+ * changed or removed, circles added, changed (content, title, aliases, membership, archived or revived) or
+ * removed/merged away, occasions added, changed (content, title, aliases, participants, dates, place,
+ * status) or removed. Identical drafts are left out. Pure read; the order is notes (as in the output, then
+ * removals), then circles, then occasions. A circle's membership after an archive shows its current
+ * memberships ended, as the store saves them.
  */
 export function previewChanges(notes: NotesStore, target: EditTarget, output: NotesOutput): ProposedChange[] {
   const changes: ProposedChange[] = [];
-  if (target.scope !== 'circle') {
-    const current = new Map(notes.listNotes(target).map((n) => [n.topic, n]));
+  const owner = ownerTarget(target);
+  if (owner) {
+    const current = new Map(notes.listNotes(owner).map((n) => [n.topic, n]));
     for (const draft of output.notes) {
       const existing = current.get(draft.topic);
       if (existing && existing.title === draft.title && existing.content === draft.content) continue;
@@ -1461,20 +2463,35 @@ export function previewChanges(notes: NotesStore, target: EditTarget, output: No
       aliasesBefore: existing.aliases,
     });
   };
-  for (const draft of output.circles) {
-    const existing = notes.getCircle(draft.slug);
-    const members: CircleMember[] = draft.members.map((m) => ({
+  const archiveMonth = notes.today().slice(0, 7);
+  const archiving = new Set(output.archived_circles);
+  const asMembers = (drafts: { id: string; since?: string | null; until?: string | null; role?: string | null }[]) =>
+    drafts.map((m) => ({
       memberId: canonicalUserId(m.id),
       since: m.since ?? null,
       until: m.until ?? null,
       role: m.role ?? null,
     }));
+  const circleDetails = (archived: boolean): NoteDetails => ({
+    status: archived ? 'archived' : null,
+    startsOn: null,
+    endsOn: null,
+    place: null,
+    circle: null,
+  });
+  for (const draft of output.circles) {
+    const existing = notes.getCircle(draft.slug);
+    const archived = archiving.has(draft.slug);
+    const drafted = asMembers(draft.members);
+    const members = archived ? endCurrentMemberships(drafted, archiveMonth) : drafted;
+    const detailsAfter = circleDetails(archived);
     const same =
       existing &&
       existing.title === draft.title &&
       existing.content === draft.content &&
       JSON.stringify(existing.aliases) === JSON.stringify(draft.aliases) &&
-      sameMembership(existing.members, members);
+      sameMembership(existing.members, members) &&
+      isArchived(existing) === archived;
     if (!same) {
       changes.push({
         kind: 'circle',
@@ -1482,15 +2499,89 @@ export function previewChanges(notes: NotesStore, target: EditTarget, output: No
         title: draft.title,
         change: existing ? 'changed' : 'added',
         ...(existing
-          ? { before: existing.content, membersBefore: existing.members, aliasesBefore: existing.aliases }
+          ? {
+              before: existing.content,
+              membersBefore: existing.members,
+              aliasesBefore: existing.aliases,
+              detailsBefore: detailsOf(existing) ?? circleDetails(false),
+            }
           : {}),
         after: draft.content,
         membersAfter: members,
         aliasesAfter: draft.aliases,
+        detailsAfter,
       });
     }
     for (const merged of draft.merged_from) removedCircle(merged);
   }
   for (const slug of output.removed_circles) removedCircle(slug);
+  // Circles archived as they are.
+  for (const slug of output.archived_circles) {
+    if (output.circles.some((c) => c.slug === slug)) continue;
+    const existing = notes.getCircle(slug);
+    if (!existing || isArchived(existing)) continue;
+    changes.push({
+      kind: 'circle',
+      key: slug,
+      title: existing.title,
+      change: 'changed',
+      before: existing.content,
+      after: existing.content,
+      membersBefore: existing.members,
+      membersAfter: endCurrentMemberships(existing.members, archiveMonth),
+      aliasesBefore: existing.aliases,
+      aliasesAfter: existing.aliases,
+      detailsBefore: circleDetails(false),
+      detailsAfter: circleDetails(true),
+    });
+  }
+
+  for (const draft of output.occasions) {
+    const existing = notes.getOccasion(draft.slug);
+    const members = asMembers(draft.participants);
+    const detailsAfter: NoteDetails = {
+      status: draft.status ?? existing?.status ?? defaultOccasionStatus(draft.starts_on, draft.ends_on, notes.today()),
+      startsOn: draft.starts_on,
+      endsOn: draft.ends_on,
+      place: draft.place,
+      circle: draft.circle,
+    };
+    const detailsBefore = existing ? (detailsOf(existing) ?? undefined) : undefined;
+    const same =
+      existing &&
+      existing.title === draft.title &&
+      existing.content === draft.content &&
+      JSON.stringify(existing.aliases) === JSON.stringify(draft.aliases) &&
+      sameMembership(existing.members, members) &&
+      JSON.stringify(detailsBefore) === JSON.stringify(detailsAfter);
+    if (same) continue;
+    changes.push({
+      kind: 'occasion',
+      key: draft.slug,
+      title: draft.title,
+      change: existing ? 'changed' : 'added',
+      ...(existing
+        ? { before: existing.content, membersBefore: existing.members, aliasesBefore: existing.aliases, detailsBefore }
+        : {}),
+      after: draft.content,
+      membersAfter: members,
+      aliasesAfter: draft.aliases,
+      detailsAfter,
+    });
+  }
+  for (const slug of output.removed_occasions) {
+    const existing = notes.getOccasion(slug);
+    if (!existing) continue;
+    changes.push({
+      kind: 'occasion',
+      key: slug,
+      title: existing.title,
+      change: 'removed',
+      before: existing.content,
+      membersBefore: existing.members,
+      aliasesBefore: existing.aliases,
+      detailsBefore: detailsOf(existing) ?? undefined,
+    });
+  }
   return changes;
 }

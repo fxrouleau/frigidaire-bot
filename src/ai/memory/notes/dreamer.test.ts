@@ -399,6 +399,31 @@ describe('dreamPerson', () => {
     expect(notes.newJournal(remi)).toHaveLength(1);
   });
 
+  it('records an upstream error OpenRouter reports inside a 200 answer as a call error, without a repair round', async () => {
+    await saveFact('Works day shifts at the bakery now.');
+    const { client, requests } = createCapturingClient([
+      { body: { error: { message: 'Provider returned error: rate limited', code: 429 } } },
+    ]);
+
+    const outcome = await dreamPerson(REMI, deps(client));
+
+    expect(outcome).toMatchObject({ status: 'failed', cause: 'error' });
+    expect(outcome.status === 'failed' ? outcome.error : '').toContain('429 Provider returned error');
+    expect(requests).toHaveLength(1);
+    expect(notes.getDreamState(remi).journalWatermark).toBe(0);
+  });
+
+  it("names a provider's content filter as the reason, and asks no repair round (it would stop again)", async () => {
+    await saveFact('Works day shifts at the bakery now.');
+    const { client, requests } = createCapturingClient([reply('', { finish: 'content_filter' })]);
+
+    const outcome = await dreamPerson(REMI, deps(client));
+
+    expect(outcome).toMatchObject({ status: 'failed', cause: 'answer' });
+    expect(outcome.status === 'failed' ? outcome.error : '').toContain("the provider's content filter stopped the answer");
+    expect(requests).toHaveLength(1);
+  });
+
   it('turns a model error into a recorded failure, never a throw', async () => {
     await saveFact('Works day shifts at the bakery now.');
     const { client } = createCapturingClient([{ status: 400, body: { error: { message: 'model not found' } } }]);

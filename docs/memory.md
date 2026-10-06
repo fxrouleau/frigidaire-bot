@@ -6,8 +6,9 @@ examples are the test suite's fictional cast (Remi, Dale, Nova, Ozzie); ids are 
 
 > **Status: built.** Every part below is in: the data model, chat-time use and tools, capture at
 > conversation end, the nightly dream (with the weekly group refresh), the viewer with the owner's edit and
-> undo, and the bootstrap tooling (export, playbook, startup import, built-in bootstrap). What is deliberately
-> left for later is under [Not yet](#not-yet). Code: [Code map](#code-map).
+> undo, the bootstrap tooling (export, playbook, startup import, built-in bootstrap), and the lifecycle of
+> shared notes ([occasions, decay and archiving](#occasions-decay-and-archiving)). What is deliberately left
+> for later is under [Not yet](#not-yet). Code: [Code map](#code-map).
 
 ## Why
 
@@ -76,16 +77,20 @@ speaker in `said_by`. It never expires.
 
 | Table | Contents |
 |---|---|
-| `notes` | One row per note: `scope` (`person` \| `group` \| `circle`), `owner_id` (the person's main id; `''` for the group and circles), `topic` (a slug: `profile`, `games`, `running-jokes`; a circle's unique slug such as `mtg`), `title`, `content` (markdown), `aliases` (JSON, circles only), `version`, `updated_at`, `updated_by` (`dream` \| `edit` \| `bootstrap` \| `import` \| `undo`), `active`. `UNIQUE(scope, owner_id, topic)`. |
-| `note_members` | A circle's members, dated: `(note_id, member_id, since, until, role)`. `since`/`until` are partial dates (`2021`, `2021-06`, `2021-06-15`); `until` NULL means still a member. Someone who left the MTG crew in 2023 stays listed with `until = 2023`. |
-| `note_versions` | The version history (the current one included): title, content, aliases, a circle's membership snapshot, active, when, who, and the reason (the dream's change summary, the owner's instruction, "undo of v3", "merged into mtg"), and `linked`: the other notes' versions the same write made (the circles a merge deactivated). Undo restores the previous version as a new version, membership included, and undoes a merge whole: the circles it merged away come back with it. After each night it is trimmed to the newest 50 versions per note; bootstrap and owner-edit versions are always kept. |
+| `notes` | One row per note: `scope` (`person` \| `group` \| `circle` \| `occasion`), `owner_id` (the person's main id; `''` for the group, circles and occasions), `topic` (a slug: `profile`, `games`, `running-jokes`; a circle's or occasion's slug, unique within its scope, such as `mtg` or `ski-trip-2027`), `title`, `content` (markdown), `aliases` (JSON, circles and occasions), `version`, `updated_at`, `updated_by` (`dream` \| `edit` \| `bootstrap` \| `import` \| `undo`), `active`, and for shared notes `status` (a circle: `archived` or NULL; an occasion: `planned` \| `happening` \| `past` \| `cancelled` \| `archived`), and for occasions `starts_on`/`ends_on` (partial dates), `place` and `circle` (the slug of the circle it belongs to, a tradition's round). `UNIQUE(scope, owner_id, topic)`. A database from before occasions has its table rebuilt in place at startup (SQLite can't alter a CHECK: foreign keys off, copy, rename, one transaction, every id kept). |
+| `note_members` | A circle's members or an occasion's participants, dated: `(note_id, member_id, since, until, role)`. `since`/`until` are partial dates (`2021`, `2021-06`, `2021-06-15`); `until` NULL means still a member. Someone who left the MTG crew in 2023 stays listed with `until = 2023`; someone who bailed on a trip keeps their place with an `until` (and a role like "bailed"). |
+| `note_versions` | The version history (the current one included): title, content, aliases, a circle's or occasion's membership snapshot and `details` (status, dates, place, circle link), active, when, who, and the reason (the dream's change summary, the owner's instruction, "undo of v3", "merged into mtg", "archived as a trace: …", "came back: …"), and `linked`: the other notes' versions the same write made (the circles a merge deactivated). Undo restores the previous version as a new version, membership and details included (undoing an archive brings the circle back, full text and memberships), and undoes a merge whole: the circles it merged away come back with it. After each night it is trimmed to the newest 50 versions per note; bootstrap and owner-edit versions are always kept. |
+| `note_activity` | A circle's activity by month: `(note_id, month 'YYYY-MM', weight, ambient, revival)`. `weight`: the journal rows a dream folds that name it and involve two or more of its members (3 each), its linked occasions that happen, and a seed from the archive (`memory seed-activity`, a notes tree's `activity.json`); `ambient`: rows about two of its members that named no circle, while it is present (≤ 3 a month, never real); `revival` marks the month it came back from the archive. It drives the circle's decay ([below](#decay-circles-fade-by-use)). |
 | `notes_fts` | FTS5 over active notes (title, content, aliases). A plain FTS table kept by triggers on `notes` alone: correct by construction (a delete of a missing row is harmless, unlike the external-content 'delete' command). |
 | `dream_state` | Per person and for the group: `journal_watermark` (the highest `journal_seq` folded into the notes), `last_dream_at`, `last_error`. Circles have none: the person and group dreams maintain them. |
 
-Limits, validated on every write: profile ≤ 4,000 chars, other topics ≤ 8,000, circles ≤ 6,000 (the writers
-aim at targets well under them, 3,200 / 6,500 / 5,000: a model can't count, and a note written up to its limit
-fails the next time anything is added); ≤ 10 topics per person, ≤ 8 for the group; ≤ 60 active circles, nobody currently in more than 16; 2–30 members per circle;
-≤ 8 aliases. Titles are one line ≤ 80 chars. Markdown only: no Discord mention, emoji, timestamp or channel
+Limits, validated on every write: profile ≤ 4,000 chars, other topics ≤ 8,000, circles ≤ 6,000, occasions
+≤ 4,000 (the writers aim at targets well under them, 3,200 / 6,500 / 5,000 / 3,000: a model can't count, and a
+note written up to its limit fails the next time anything is added); an archived note's trace aims at 1,200
+(≤ 1,500); ≤ 10 topics per person, ≤ 8 for the group; ≤ 60 live circles (present and fading; archived ones
+never count), nobody currently in more than 16 *present* circles (fading and archived ones don't count, so a
+member's old circles never crowd out their real ones); ≤ 30 occasions that aren't archived; 2–30 members per
+circle, 2–30 participants per occasion; ≤ 8 aliases; an occasion's place ≤ 80 chars. Titles are one line ≤ 80 chars. Markdown only: no Discord mention, emoji, timestamp or channel
 syntax, no `@everyone`, no HTML, and no Discord id that wasn't in the writer's input. Every write is all or
 nothing; a note breaking a rule is refused, never clamped into a different meaning.
 
@@ -130,6 +135,140 @@ content, and merges duplicates (`merged_from`). The group notes stay for truly s
 
 A person's dream or edit can only change circles that person is or was in.
 
+### Occasions
+
+An occasion is a note about one notable thing specific members do together at a date: a trip, an outing
+somewhere, a tournament ("a ski trip to Tremblant in February", "an orchard trip in the fall").
+The owner's idea: "It's not an ongoing thing. It's more of a once thing: the details are more important before,
+but after it's more of a historical thing, where some facts are more important after than before, or stuff that
+happened during the trip remains core memories. It's like a group that expires, but expires gracefully and not
+fully." So an occasion carries its dates (`starts_on`, an optional `ends_on`, partial dates), a `place`, its
+participants (dated like circle members: someone who bailed keeps an `until`), an optional link to the circle
+it belongs to (each year's outing of a tradition), and a lifecycle status:
+
+| Phase | When | Shape |
+|---|---|---|
+| planned | ahead of `starts_on` (at its precision: a "2027-01" trip is happening all January) | `## Plan` (when, where, who, bookings, open questions: logistics belong here, unlike in profiles) |
+| happening | from `starts_on` to `ends_on` (or the day itself) | `## Plan` and `## So far` |
+| past | after it ended | `## What happened` (stories, highlights, outcomes, quotes) and `## Legacy` (the running jokes and core memories it left) |
+| cancelled | a writer said it's off | as it was |
+| archived | months later | a short historical trace |
+
+Planned, happening and past are derived from the dates and today (Eastern) unless the note is cancelled or
+archived; the stored status says how it was written (a `past` one was rewritten as history). The shape is
+advisory (`occasionShapeWarnings()`), like the other notes. Two to thirty participants: one person's own plan
+stays in their profile. A person's dream may write the occasions they take or took part in; the group dream
+any; the owner's Edit works on one, its archived state included.
+
+## Occasions, decay and archiving
+
+Shared notes don't balloon forever: "your life gets more complex, but stuff gets put away also". The nightly
+**lifecycle pass** runs after the night's dreams (`runLifecycle`, planned by `lifecycle.ts planLifecycle`), each
+step one small call through the dream's own call path (ZDR, `memory_dream`, `MEMORY_DREAM_REASONING`):
+
+- **Rewrite as history**: an occasion written while ahead or under way, over by its dates for 2 days, gets one
+  call with its note, the journal rows of its participants from 3 days before it to 7 days after it (and the
+  ones that name it, from 60 days before to 30 after), and their cited passages, answered as the occasion
+  rewritten as history (`status` "past"; "cancelled" if it never happened; new dates and "planned" if it moved).
+  The dream's repair round and shrink step apply; a rewrite that drops a participant or stays planned although
+  it is over is refused. At most 10 a night.
+- **Archive**: a past occasion 90 days after it ended, a cancelled one 14 days after it was called off, a circle
+  that faded out (below), and an archived note still longer than a trace (a writer archived it as it was; never
+  one the owner last edited) are compacted to a short historical trace (≤ 1,200 characters: what it was, when,
+  who, the highlights, the legacy; an occasion never written as history also gets its journal window) with one
+  call each (two at most, the second aiming lower), then archived: status `archived`, a circle's current
+  memberships end at the archive's month. At most 10 a night, the longest over first (circles: the faintest
+  first). Nothing is deleted: an archived note stays readable and searchable (read_note, search_notes, the
+  viewer), and Undo brings it back whole.
+- **An undo sticks**: a circle or occasion whose current version is an undo (the owner undid an archive, a
+  history rewrite or a compaction) is left out of the pass for 90 days (`UNDO_KEEPS_DAYS`); a circle due for
+  archiving meanwhile is only listed as fading.
+- **Failures go last**: a note whose last step failed on the answer (bot_state `lifecycle:failed`, note id →
+  version) is tried after every untried one, until it gets a new version or a step on it works, so a few notes
+  the model can't handle never starve the rest. An outage (3 call errors in a row) still stops the pass.
+
+Archived notes leave the dreams' full inputs (one line each: never rewritten, removed or merged away, unless a
+new row names an archived circle with two or more of its members), chat context and the limits. A profile
+keeps at most a dated line in Earlier about an archived circle or occasion.
+
+### Decay: circles fade by use
+
+The owner: "the more it's used, the longer it stays present; short bursts won't last long, a long thing that
+keeps being re-used lasts longer, even with a break", and a yearly tradition must never expire. Like spaced
+repetition (`lifecycle.ts CIRCLE_DECAY`), each circle has its active months (`note_activity`), a stability S in
+days and a retrievability R = exp(−days since the end of its last real active month / S):
+
+- A month is **real** when it weighs ≥ 10 (archive messages, credited journal rows; a linked occasion counts as
+  10), or another weighed month lies within 3 calendar months of it (sustained use, or a comeback confirmed:
+  quarterly meetings confirm each other whatever the month lengths), or it falls in the yearly rhythm of the
+  months before it. The first month counts as real. Anything else is a blip: one passing mention years later.
+- S starts at 30 days, and every gap between two real months adds its full length: sustained use and re-use
+  after a break both strengthen it, so S grows to about the span the circle was really in use (monthly for three
+  years, or a quarterly meeting, ends near the cap; a month every other month for a year and a half, about 515
+  days). A blip adds only 7 and doesn't move the clock, so it can't make an old circle look permanent. S is
+  capped at 3 years.
+- A blip still counts for a while: R is at least exp(−days since the blip / 60), but on a blip alone a circle is
+  never more than fading.
+- **Present** (R ≥ 0.5): a circle like any other. **Fading** (0.15 ≤ R < 0.5): kept, but only brought into a chat
+  turn when named, and an excerpt in the dreams (unless a new row names it). Below 0.15 the lifecycle pass
+  archives it.
+- Without any weighed month (before a seed), a circle falls back to its membership: archived once nobody is in it
+  and the last member left 180 days ago; present otherwise.
+
+Examples (tested in `lifecycle.test.ts`): a one-month burst fades within a month and is archived about two months
+after it; something used monthly for three years stays present through a year off (S ≈ 1,094, R(366) ≈ 0.72) and
+is archived about five and a half years after; a yearly thing seen twice (S ≈ 30 + 365) is still there a year
+later (R ≈ 0.40), survives a skipped year (R ≈ 0.16), and a third round keeps it present all year; a burst plus
+one stray mention five years later is a blip, never a yearly rhythm.
+
+**Activity is shared, and names the circle**: a journal row counts for a circle only when it involves at least
+two of its members (current or former, side accounts folded: its subject and related members), credited after a
+successful dream from the rows filed under that dream's own owner (a row is never counted twice). "If I play
+Yu-Gi-Oh now, like GOAT format, the Yu-Gi-Oh circle shouldn't return for years": one person doing the thing alone
+feeds their own notes, never the circle. And:
+- a row that **names** circles (title, slug or alias) counts for those, 3 per row (`dreamRowWeight`: a row is a
+  distilled observation, worth several archive messages; four rows in a month make it real). Only named rows can
+  make a month real, confirm a return or bring an archived circle back;
+- a row that names **no** circle ("Remi and Dale moved in together") is ambient: it counts only for the circles
+  that are present today, at most 3 a month (`note_activity.ambient`), like a blip (never real, never a
+  confirmation), and never for a fading or archived circle.
+
+A linked occasion with two of its members taking part counts as 10 for its month. Owner edits are not activity.
+
+**Revival**: an archived circle comes back on new shared activity that names it: provisionally, as fading (S 60
+days from the revival month), until the return is real (substantial or confirmed, as above): then the gap since
+its last real activity is added and it is present again (the comeback is evidence the thing persists). The
+members behind the reviving rows are current again. A revival that would pass a limit (60 live circles, or a
+member's 16 present circles) is postponed and logged, its activity kept for when there is room. Unconfirmed, it
+decays back and is archived again about four months later, its trace noting the blip ("came back briefly in Mar
+2027"); its old stability is kept, so a later real comeback still benefits. A writer writing an archived circle
+back (the dream, the owner's Edit) or an undo of its archive is a real return. The dream's prompts: never write
+or revive an archived circle for one person's activity (it goes in their own notes: "plays GOAT-format Yu-Gi-Oh
+since Oct 2026") or for rows that don't name it; when a different set of people starts the same thing, that's a
+new circle (it may mention the old era). A dream answer that revives an archived circle is refused (repair
+round) unless a new row names it with two or more of its members and the answer lists at least two of them as
+current. Revivals are recorded (`note_activity.revival`) and shown to the dreams and in the trace ("revived Mar
+2027", "brief revival Mar 2027").
+
+**Cadence**: real weight (≥ 10) in the same one- or two-month window of the year (December–January wraps: one
+winter is one season) in at least two different years, with most of the circle's weight (≥ 60%, by weight, so a
+little booking chatter in other months doesn't hide the season) in that window, is a yearly rhythm: `yearly
+(Feb)` after two seasons, `yearly (usually Feb)` from three; shown next to the circle in the dreams' input and in
+the viewer. A month is judged by the rhythm of the months before it (a month never makes its own cadence), and
+its returns in that rhythm count as real.
+
+**Limits**: a write is refused for a limit (60 live circles, 30 occasions not archived, 16 present circles per
+member) only when it makes that count worse than before the write: a store already past one (a limit lowered,
+an old revival) keeps saving writes that don't add to it.
+
+**Seeding**: `memory seed-activity <file.json>` records each circle's monthly counts computed from the archive
+(`{"<slug>": {"YYYY-MM": count}}`, months two or more members shared; no month after this one, Eastern), raising
+each month to its count (running it twice changes nothing, never reviving anything), and says how each circle
+stands afterwards; a notes tree's `activity.json` (same format) is recorded with its circles at the import,
+before the limits are checked. A CLI command that finds memory.db locked by another process past the 5-second
+wait says so and changes nothing (the occasions upgrade at startup takes an IMMEDIATE lock, so it waits instead
+of failing).
+
 ## Chat-time use
 
 Per turn, the dynamic context carries, for the speaker, the people @-mentioned and the people named in plain
@@ -142,9 +281,14 @@ text (≤ 3 each):
 
 People without notes yet fall back to their plain memories (corrections labelled as claims). Then circles
 (≤ 3, up to 1,500 chars each, Earlier left out): the ones the message names (title, slug words or alias, as
-whole words), then the ones with at least two current members in the conversation (the speaker, the people
-above, the window's recent participants). Everything is shown once per window per note version (noteKeys,
-persisted with the window), deduped against what the window already showed.
+whole words), then the present ones (not fading: [decay](#decay-circles-fade-by-use)) with at least two current
+members in the conversation (the speaker, the people above, the window's recent participants); archived circles
+never. Then occasions (≤ 2, up to 1,000 chars each, the Plan section first, Earlier left out), with their dates,
+place, where they are today ("planned, starts in 12 days") and participants: the ones the message names (any
+phase but archived: a past one only then), then planned ones starting within 60 days and happening ones that a
+current participant in the conversation takes part in, happening first, then the soonest. Everything is shown
+once per window per note version (noteKeys, persisted with the window), deduped against what the window already
+showed.
 
 The static prompt carries a short group section: the group's `vibe` and `lore` notes, Earlier left out, up to
 2,500 chars. It changes at most nightly, so the provider's prefix cache survives within a window. Corrections
@@ -159,9 +303,9 @@ Tools:
 
 | Tool | What it does |
 |---|---|
-| `list_notes({person?})` | A person's topics (size, age) and circles (former ones marked, with spans), plus how many journal rows and corrections are newer than the notes; without a person, everyone with notes, the group's topics and every circle with its current members. |
-| `read_note({person?, topic?, circle?})` | A full note, Earlier included: a person's topic (default `profile`, followed by the rows and corrections newer than it), a group topic (`person: "group"`, followed by the open corrections about the group), or a circle by slug, title or alias. |
-| `search_notes({query})` | FTS over every note (people, group, circles) with snippets. |
+| `list_notes({person?})` | A person's topics (size, age), circles (former and archived ones marked, with spans) and occasions (upcoming first, with phase, dates, place and their role), plus how many journal rows and corrections are newer than the notes; without a person, everyone with notes, the group's topics, every circle with its current members (archived ones marked) and every occasion. |
+| `read_note({person?, topic?, circle?, occasion?})` | A full note, Earlier included: a person's topic (default `profile`, followed by the rows and corrections newer than it; a topic that is one of their circles or occasions reads it), a group topic (`person: "group"`, followed by the open corrections about the group), or a circle or an occasion by slug, title or alias (archived ones too; the kind asked for first, then the other: models mix them up). |
+| `search_notes({query})` | FTS over every note (people, group, circles, occasions; archived ones marked) with snippets. |
 | `record_correction({person, correction})` | Files a `correction` journal row about a member (or the group): the speaker in `said_by`, the triggering message as evidence. Self-corrections are authoritative; anyone else's is a claim. |
 | `recall_memories`, `remember_fact`, `forget_memory`, `set_member_info` | Unchanged (remember_fact now keeps its message as evidence). |
 
@@ -220,8 +364,12 @@ A row's first and last seen are when the newest message it cites was posted.
 
 **What it already knows**: for a part's authors and up to 5 members it talks about, their profile without
 Earlier (≤ 1,000 chars), their circles, and the journal rows (≤ 12) and open corrections (≤ 5) newer than
-their notes; a person without notes yet gets their 25 most recent memories. For the server, its notes
-(≤ 1,500 chars together) and the server rows newer than them (without notes, the 25 most recent).
+their notes; a person without notes yet gets their 25 most recent memories. Then their open occasions (planned
+or happening, or past or cancelled within two weeks; ≤ 8, the most relevant first): title, dates, place, phase,
+participants and the first 300 characters (Plan first), under a heading asking that an update, a change of plan
+or a cancellation be an `event` row that starts with the occasion's title ("Ski trip: moved to March 2027"),
+so it updates the occasion instead of starting a second one. For the server, its notes (≤ 1,500 chars together)
+and the server rows newer than them (without notes, the 25 most recent).
 
 Usage tag `memory_capture` (it replaces `learner`; the self-improvement pass keeps `self_improvement` and runs
 once per part). Each capture logs one line:
@@ -250,7 +398,14 @@ learner left on a row whose name the startup stamp couldn't resolve never become
 person's journal is the rows stamped with any of their ids, the rows naming them among related members, and
 id-less rows filed under a name only they go by: a row under a name two members share (one's IRL name, the
 other's nickname) is left for the stamp, never read into both people's notes. The call gets:
-- the rules (below), the person's names (identities), ALL their current notes and circles;
+- the rules (below), the person's names (identities), ALL their current notes;
+- their circles: the ones they are in and that are present, in full; fading ones and the ones they left as
+  excerpts (never rewritten), archived ones as one line each (never rewritten, removed or merged away) — except
+  a circle a new row names (for an archived one, a row that names it with two or more of its members), which is
+  shown in full; each with its presence, its yearly rhythm and its revivals. A long-time member was in dozens
+  of circles over the years, and this is most of a dream's input that isn't their own;
+- their occasions in full, the most relevant first (dates, place, status, where each is from today,
+  participants with ids), archived ones as one line each (never written by a dream);
 - the new journal rows: dated, category, source and speaker, recurrence count and seen span, related members,
   the quote; corrections say who made them and whether they are authoritative (about themself) or a
   third-party claim to weigh. At most the oldest 300 rows per dream; the rest wait for the next night (the
@@ -284,14 +439,41 @@ The answer is JSON:
     }
   ],
   "removed_circles": [],
+  "archived_circles": ["yugioh"],
+  "occasions": [
+    {
+      "slug": "ski-trip-2027",
+      "title": "Ski trip",
+      "content": "## Plan\nA week at Tremblant; chalet booked, lift passes still open.",
+      "aliases": ["the ski trip"],
+      "starts_on": "2027-01-10",
+      "ends_on": "2027-01-17",
+      "place": "Tremblant",
+      "status": "planned",
+      "participants": [
+        { "id": "100000000000000001", "role": "organizer" },
+        { "id": "100000000000000002", "until": "2026-12", "role": "bailed" }
+      ],
+      "circle": null
+    }
+  ],
+  "removed_occasions": [],
   "change_summary": "quit Valorant; runs the MTG drafts"
 }
 ```
 
+`archived_circles` puts a circle that is over away (as it is; written in `circles` too, with that text); a
+circle written in `circles` without being listed there is live again. An occasion without a `status` keeps its
+stored one (a new one is planned, or past when its dates are behind); its `circle` must be an existing circle.
+
 It is validated (profile present, sizes, slugs, markdown only, no Discord markup, no ids of other people unless
-they were in the input, circle membership shape and dates; a rewritten circle keeps every member it has, current
-or former, since someone who left gets an `until` and only the owner's edit removes a member) and saved all or
-nothing as new versions (`updated_by = 'dream'`). A note that comes back over its size limit is first
+they were in the input, circle membership and occasion participants' shape and dates, an occasion's dates (it
+can't end before it starts); a rewritten circle keeps every member it has, current or former, since someone who
+left gets an `until` and only the owner's edit removes a member, and a rewritten occasion every participant; an
+archived circle comes back only when a new row names it with two of its members and two of them are listed as
+current) and saved all or nothing as new versions (`updated_by = 'dream'`). After a saved dream, its rows'
+shared activity is credited to the circles it saw or wrote ([decay](#decay-circles-fade-by-use)): named rows as
+weight, unnamed pair rows as ambient for present circles only. A note that comes back over its size limit is first
 rewritten on its own (one small call per note, aiming at its target, then 20% lower), far cheaper and surer
 than resending the whole prompt. A profile rewrite that drops a section the profile had (Earlier aside) or
 keeps less than half of it is refused (GLM once saved a 3,900-character profile as 900 characters of Now). A
@@ -311,17 +493,23 @@ Dream rules (the prompt): merge new facts; resolve contradictions (newer wins; a
 anything; a third-party claim is weighed, never blindly applied); weigh by recency × recurrence; keep dates
 and spans in the text ("since 2024", "as of Sept 2026", "2019–2026, constant") and move superseded or
 long-unseen facts to a short Earlier section written as history instead of deleting them; an upcoming notable
-plan goes in Now with its date and people and, once its date is past, becomes a dated line of what happened
-(or is dropped); never logistics or routine plans; profile = about 3,200 chars: Now (who they are these days
-and their notable upcoming plans, ~150–250 words) · Traits (~50–100 words) · Circles & people (a dozen words
-per current circle) · a few dated Earlier footnotes; every note and circle shown carries its size against its
-target and limit; details go to topic notes; `image` rows are never read;
-create, update and merge circles for recurring shared things; no censoring or paraphrasing away of what people
-are like; no speculation beyond the journal and its passages; English.
+plan of several members goes in an occasion (its details there; the profile keeps one short line in Now while
+it is ahead and, once past, a dated line when it still matters); one person's own plan goes in their Now the
+same way; outside an occasion's Plan never logistics or routine plans; profile = about 3,200 chars: Now (who
+they are these days and their notable upcoming plans, ~150–250 words) · Traits (~50–100 words) · Circles &
+people (a dozen words per current circle; former and archived circles and archived occasions at most a dated
+line in Earlier) · a few dated Earlier footnotes; every note, circle and occasion shown carries its size against
+its target and limit; details go to topic notes; `image` rows are never read; create, update and merge circles
+for recurring shared things (one person's activity never; a different set of people is a new circle),
+archive the ones that are over; create and update occasions for notable shared one-off things (written as
+history once past); no censoring or paraphrasing away of what people are like; no speculation beyond the
+journal and its passages; English.
 
 After the people, a group pass: journal rows about the server (no person) plus what changed in the members'
 notes since the group's last dream (each person's dated change summaries and the owner's edits, from the
-note versions) become the group notes (and any circle). It runs on any night the group has new rows, and
+note versions) become the group notes (and any circle or occasion; it sees every present circle in full,
+fading ones as excerpts, archived ones and archived occasions as lines, every other occasion in full). Then
+the [lifecycle pass](#occasions-decay-and-archiving). It runs on any night the group has new rows, and
 otherwise at least weekly: when its last dream is 7 days old (or it never dreamed) and a person's notes or a
 circle changed since, it runs that night with no journal rows (a refresh, about $0.08 a week), so the vibe
 and lore keep up with how the members changed.
@@ -331,17 +519,27 @@ Report: after a night with changes or failures, a header and a line per owner, t
 
 ```
 🌙 dream · Oct 6 · 2 updated · 1 failed, retried tomorrow · $0.06
-• Remi [profile, work]: new job at the bakery
+• Remi [profile, work, occasion:ski-trip-2027]: new job at the bakery; Ski trip planned
 • the group [lore]: new lore: the 2026 LAN
+📖 rewritten as history: Orchard trip
+↩ came back: 1 circle: winter-dinners
+🗄 archived 6 circles: yugioh, dbfz, … · 1 occasion: lan-2026
 ✖ Dale: "profile" too long (4,105 of 4,000) · last good dream Sep 29
+-# 12 more to archive or rewrite wait for the next nights
+🍂 fading: 3 circles: tarkov, chess, mtg
 ```
+
+Circles that only fade never make a report on their own (they would every night).
 
 Tags `memory_dream` (the shrink calls too) and `memory_edit` for owner edits (`MEMORY_EDIT_MODEL`, default the
 dream model). Calls send `MEMORY_DREAM_REASONING`'s effort (`off` sends none, for a model that only reasons
 when asked) and a `max_tokens` of 32,000, with a 10-minute timeout per attempt.
 
-Owner edits (`proposeEdit`) show the model the target's notes (a person's with their circles, the group's with
-every circle, or one circle) and the instruction; the draft is checked against the store in a rolled-back
+Owner edits (`proposeEdit`) show the model the target's notes (a person's with their live circles and
+occasions, the group's with every live circle and occasion, or one circle or occasion, archived ones included)
+and the instruction (an edit may archive a circle: `archived_circles`, with or without rewriting it; editing an
+archived circle keeps it archived unless the instruction revives it; an occasion's archived state is its
+status); the draft is checked against the store in a rolled-back
 transaction (one repair round when refused), so the preview never shows something Confirm would refuse. A draft
 whose notes changed while the model was drafting (a dream saved meanwhile) is refused ("ask again"), so Confirm
 can never put back what the dream replaced.
@@ -359,12 +557,15 @@ the dream only processes rows added after it.
 - The person's `profile` first. Its first page also says what the notes don't reflect yet: how many journal
   rows are newer, and the open corrections with who made them.
 - A select menu (at most 25 entries): their topics, their circles (current ones, then former ones with their
-  spans), and **Raw memories**, the journal list with the ids `forget_memory` takes.
+  spans), their occasions (upcoming first, with phase and dates), then archived circles and occasions, and
+  **Raw memories**, the journal list with the ids `forget_memory` takes. A circle shows its members, other
+  names and its activity (`fading · last active Jul 2026 · yearly (usually Feb) · brief revival May 2026`); an
+  occasion its dates and phase, its place and participants.
 - Prev/Next when a note is longer than one page (~3,800 characters, cut before a heading or at a paragraph).
 - A footer with the version, its age and who last changed it (the nightly dream, an owner edit, the bootstrap,
   an import, an undo). A circle also shows its members (dated, with roles) and its other names.
 
-Right-clicking the bot shows the group's notes, then every circle (before the group has notes of its own, it
+Right-clicking the bot shows the group's notes, then every live occasion and circle, then the archived ones (before the group has notes of its own, it
 opens on an empty **Group notes** entry, where the owner's Edit starts them). People without notes see their raw
 memories; someone the bot knows nothing about gets one plain line. Everyone can view everyone.
 
@@ -373,8 +574,9 @@ accepted members, not people only invited; a linked side account counts):
 - **Edit**: a modal ("What should change?", ≤ 4,000 chars) → the edit model gets the target's notes (a
   person's with their circles) and the instruction → the message becomes a before/after preview, one change
   per page: a line diff (`-` before, `+` after) and, for a circle, its membership and other names before and
-  after → **Confirm** saves new versions (`updated_by = 'edit'`, reason = the instruction) / **Cancel**. Edit
-  on a circle edits that circle; anywhere else it edits the person's (or the group's) notes.
+  after (an occasion's dates, place and status; a circle archived or revived, its memberships ended) →
+  **Confirm** saves new versions (`updated_by = 'edit'`, reason = the instruction) / **Cancel**. Edit on a
+  circle or an occasion edits that one; anywhere else it edits the person's (or the group's) notes.
 - **Undo vN**: restores the version before the shown one as a new version (membership included for a circle).
   Undoing a circle's merge also brings back the circles it merged away (unless one changed since), and a circle a
   merge created offers Undo v1, which removes it and brings back what it merged.
@@ -418,6 +620,8 @@ missing, and nothing says the bot will ever get it.
 | `import --check [DIR] [--people FILE]` (`yarn memory:check`) | validates a notes tree with the import's own loader, against a scratch store |
 | `observations [WORKDIR] [--people FILE]` | the playbook's bookkeeping: validates the observation log, rebuilds its per-person views and the cast sheet |
 | `bootstrap --dry-run \| --run [--from YYYY-MM] [--to YYYY-MM] [--segment-tokens N] [--max-segments N] [--no-dream]` (`yarn memory:bootstrap`) | the built-in bootstrap |
+| `archive <slug>… [--dry-run]` | the owner's one-off archiving: each circle or occasion (`circle:<slug>` / `occasion:<slug>` when both exist) compacted to its trace through the lifecycle pass's own code path (one call each, ZDR), a circle's current memberships ended; every slug must name something or nothing is archived; holds the dream lease like `bootstrap --run`; `--dry-run` lists what it would do |
+| `seed-activity <file.json> [--dry-run]` | records circles' monthly activity from the archive (`{"<slug>": {"YYYY-MM": count}}`), raising each month to its count, and says how each circle stands (present, fading, archived tonight; its rhythm) |
 
 ### 1. Export
 
@@ -498,7 +702,14 @@ manifest.json         {"format": "frigidaire-notes", "version": 1, "journal_high
 people/<main id>/profile.md, people/<main id>/<topic>.md
 group/<topic>.md
 circles/<slug>.md
+activity.json         optional: {"<circle slug>": {"YYYY-MM": count}, …}
 ```
+
+`activity.json` (the format `seed-activity` takes; months two or more members shared) is recorded with the
+tree's circles, before the limits are checked, so a member's old circles already count as fading (the
+per-member limit counts only present circles); entries for circles the tree doesn't have are ignored with a
+warning. The tree has no occasions and can't mark a circle archived; archived circles it doesn't hold are left
+alone (they are history), live ones it doesn't hold are removed as before.
 
 Each note is markdown under a front matter block: `title:` (plain text), and for a circle `aliases:` and
 `members:` as one-line JSON (`[{"id": "…", "since": "2021", "until": "2023-02", "role": "organizer"}]`).
@@ -605,6 +816,16 @@ Deliberately left out of memory v2, for a later change:
 - **Token counts are estimates** (export sizes, chunking, the dry run's cost), said as such where printed.
 - **Recurrence starts at deploy**: rows written before memory v2 start with `seen_count` 1 and their
   created/updated times as first/last seen.
+- **The notes tree has no occasions** (no `occasions/` folder in the export, the playbook or the import), and no
+  way to mark a circle archived; the dreams create occasions from the journal, and `memory archive` puts circles
+  away.
+- **A failing lifecycle step is retried, last**: a rewrite or an archive that fails on the answer goes after
+  every untried one the next nights (a small call), and is reported each time, until it works, its note
+  changes or the owner steps in.
+- **The yearly rhythm isn't used in chat yet**: it is shown to the dreams and in the viewer, and keeps a
+  tradition's returns real, but nothing says "it's that time of year" in a conversation.
+- **An archived occasion is never revived by a dream** (only the owner's Edit changes its status); next year's
+  round of a tradition is a new occasion linked to the circle.
 
 ## Code map
 
@@ -612,13 +833,14 @@ Deliberately left out of memory v2, for a later change:
 |---|---|
 | `src/ai/memory/memoryStore.ts` | the journal: new columns, the journal clock, recurrence on merges, `relatedUserIdsOf()` |
 | `src/ai/memory/evidence.ts` | `JournalEvidence`: normalize, merge, (de)serialize |
-| `src/ai/memory/notes/schema.ts` | note/circle shapes, limits, validators, `NotesOutput` + `parseNotesOutput()` (shared by every writer) |
-| `src/ai/memory/notes/notesStore.ts` | `NotesStore`: reads, circles, search, all-or-nothing writes, undo, journal queries, dream state |
-| `src/ai/memory/notes/sections.ts` | the Now / Traits / Circles & people / Earlier shape |
+| `src/ai/memory/notes/schema.ts` | note/circle/occasion shapes, limits, validators, `NotesOutput` + `parseNotesOutput()` (shared by every writer) |
+| `src/ai/memory/notes/notesStore.ts` | `NotesStore`: reads, circles, occasions, search, all-or-nothing writes, archiving, circle activity, undo, journal queries (an occasion's window), dream state, the in-place upgrade |
+| `src/ai/memory/notes/lifecycle.ts` | occasion phases, the circle decay (`CIRCLE_DECAY`, `analyzeActivity`, `circlePresence`, `yearlyCadence`), the activity seed format, the nightly plan (`planLifecycle`) |
+| `src/ai/memory/notes/sections.ts` | the Now / Traits / Circles & people / Earlier shape; an occasion's Plan / What happened shape |
 | `src/ai/memory/notes/context.ts` | how notes render into prompts (chat turn, circles, group section, summaries) |
 | `src/ai/memory/notes/passages.ts` | cited passages from archive.db for the dream |
-| `src/ai/memory/notes/dreamer.ts` | the writers: `dreamPerson()`, `dreamGroup()` and `planGroupDream()` (new rows or the weekly refresh), `runNightlyDream()`, `runDreamsUntilCaughtUp()` (the bootstrap), `proposeEdit()`, `previewChanges()`, `applyEdit()` |
-| `src/ai/memory/notes/dreamPrompts.ts` | the dream, group and edit prompts and how their input is rendered |
+| `src/ai/memory/notes/dreamer.ts` | the writers: `dreamPerson()`, `dreamGroup()` and `planGroupDream()` (new rows or the weekly refresh), `runNightlyDream()`, `runDreamsUntilCaughtUp()` (the bootstrap), the lifecycle pass (`runLifecycle()`, `dreamOccasionHistory()`, `archiveShared()`, `creditCircleActivity()`, `creditLinkedOccasions()`), `proposeEdit()`, `previewChanges()`, `applyEdit()` |
+| `src/ai/memory/notes/dreamPrompts.ts` | the dream, group, edit, occasion-history and archive-trace prompts and how their input is rendered |
 | `src/ai/memory/notes/dreamSchedule.ts`, `src/events/memoryDream.ts` | once per Eastern day from `MEMORY_DREAM_HOUR`, the report, the version trim |
 | `src/ai/memory/notes/dreamLease.ts` | one dream at a time across processes (the night, a bootstrap's catch-up) |
 | `src/ai/captureTrigger.ts` | when the learner reads a channel (`CaptureTrigger`, `ConversationEndTrigger`) |

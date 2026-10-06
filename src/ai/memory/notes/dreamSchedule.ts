@@ -12,7 +12,11 @@
 //   🌙 dream · Sep 26 · 2 updated · 1 failed, retried tomorrow · $0.18
 //   • Remi [profile, work]: new job at the bakery
 //   • the group [lore]: new lore: the 2026 LAN
+//   📖 rewritten as history: Ski trip
+//   🗄 archived 6 circles: yugioh, mtg, … · 1 occasion: orchard-trip
 //   ✖ Dale: "profile" too long (4,105 of 4,000) · last good dream Sep 20
+//
+// The lifecycle lines come from the lifecycle pass after the dreams (dreamer.ts runLifecycle).
 //
 // After each night the notes' version history is trimmed to the newest 50 versions per note (bootstrap and
 // owner-edit versions are always kept). The check is one bot_state read, so it simply runs every minute
@@ -24,7 +28,13 @@ import { logger } from '../../../logger';
 import { getReportChannelId, sendToReportChannel } from '../../reportChannel';
 import { easternParts } from '../../utils';
 import { getMemoryStore, getNotesStore } from '../index';
-import { type DreamOutcome, type NightlyDreamResult, runNightlyDream } from './dreamer';
+import {
+  type DreamOutcome,
+  type LifecycleOutcome,
+  type NightlyDreamResult,
+  noteLabel,
+  runNightlyDream,
+} from './dreamer';
 import { type DreamLeaseHolder, type DreamLeaseResult, takeDreamLease } from './dreamLease';
 import { easternDay, easternDayOf } from './dreamPrompts';
 import { NOTE_VERSIONS_KEPT } from './notesStore';
@@ -79,6 +89,7 @@ export function failureReason(error: string): string {
   if (error.includes('not a JSON object')) return 'the answer was not JSON';
   if (error.includes('cut off at the length limit')) return 'the answer was cut off';
   if (error.includes('the answer was empty')) return 'the answer was empty';
+  if (error.includes("the provider's content filter")) return "blocked by the provider's content filter";
   if (error.includes('the notes changed while dreaming'))
     return 'the notes changed while it dreamed (an edit came first)';
   if (error.includes('the profile lost its')) return 'the rewrite dropped profile sections';
@@ -96,12 +107,55 @@ function lastGood(outcome: Extract<DreamOutcome, { status: 'failed' }>): string 
   return written ? ` · notes from ${shortDay(written)}, no good dream since` : ' · no notes yet';
 }
 
-/** What a dream wrote, like the log line: `profile, food, circle:chez-dv, -games`. */
+/** What a dream wrote, like the log line: `profile, food, circle:mtg, occasion:ski-trip-2027, -games`. */
 function touched(outcome: Extract<DreamOutcome, { status: 'updated' }>): string {
-  return [
-    ...outcome.written.map((n) => (n.scope === 'circle' ? `circle:${n.topic}` : n.topic)),
-    ...outcome.removed.map((n) => `-${n.scope === 'circle' ? `circle:${n.topic}` : n.topic}`),
-  ].join(', ');
+  return [...outcome.written.map(noteLabel), ...outcome.removed.map((n) => `-${noteLabel(n)}`)].join(', ');
+}
+
+/** `6 circles: yugioh, mtg, …` (at most LIFECYCLE_NAMES slugs shown). */
+const LIFECYCLE_NAMES = 12;
+function countedSlugs(slugs: string[], one: string, many: string): string {
+  const shown = slugs.slice(0, LIFECYCLE_NAMES).join(', ');
+  const more = slugs.length > LIFECYCLE_NAMES ? `, … ${slugs.length - LIFECYCLE_NAMES} more` : '';
+  return `${slugs.length} ${slugs.length === 1 ? one : many}: ${shown}${more}`;
+}
+
+/**
+ * The lifecycle report lines: rewrites as history, revivals, archives, failures, what waits, and the
+ * circles fading.
+ */
+function lifecycleLines(result: NightlyDreamResult): string[] {
+  const outcomes = result.lifecycle ?? [];
+  const deferred = result.lifecycleDeferred ?? 0;
+  const lines: string[] = [];
+  const history = outcomes.filter((o): o is Extract<LifecycleOutcome, { status: 'history' }> => o.status === 'history');
+  if (history.length > 0) {
+    const titles = history.map((o) => (o.note.status === 'cancelled' ? `${o.note.title} (called off)` : o.note.title));
+    lines.push(`📖 rewritten as history: ${titles.join(', ')}`);
+  }
+  if (result.revived && result.revived.length > 0) {
+    lines.push(`↩ came back: ${countedSlugs(result.revived, 'circle', 'circles')}`);
+  }
+  const archived = outcomes.filter(
+    (o): o is Extract<LifecycleOutcome, { status: 'archived' }> => o.status === 'archived',
+  );
+  const circles = archived.filter((o) => o.note.scope === 'circle').map((o) => o.note.topic);
+  const occasions = archived.filter((o) => o.note.scope === 'occasion').map((o) => o.note.topic);
+  const parts = [
+    circles.length > 0 ? countedSlugs(circles, 'circle', 'circles') : '',
+    occasions.length > 0 ? countedSlugs(occasions, 'occasion', 'occasions') : '',
+  ].filter((p) => p);
+  if (parts.length > 0) lines.push(`🗄 archived ${parts.join(' · ')}`);
+  for (const o of outcomes) {
+    if (o.status !== 'failed') continue;
+    const what = o.task === 'history' ? "couldn't rewrite it as history" : "couldn't archive it";
+    lines.push(`✖ ${o.scope} ${o.slug}: ${what} (${clip(o.error, REPORT_REASON_CHARS)})`);
+  }
+  if (deferred > 0) lines.push(`-# ${deferred} more to archive or rewrite wait for the next nights`);
+  if (result.fading && result.fading.length > 0) {
+    lines.push(`🍂 fading: ${countedSlugs(result.fading, 'circle', 'circles')}`);
+  }
+  return lines;
 }
 
 /** `$0.18`; `<$0.01` for a few tenths of a cent. */
@@ -127,12 +181,16 @@ export function formatDreamReport(
   const updated = owners.filter((o): o is Extract<DreamOutcome, { status: 'updated' }> => o.status === 'updated');
   const failed = owners.filter((o): o is Extract<DreamOutcome, { status: 'failed' }> => o.status === 'failed');
   const unchanged = owners.filter((o) => o.status === 'unchanged').length;
-  if (updated.length === 0 && failed.length === 0) return undefined;
+  const lifecycle = result.lifecycle ?? [];
+  const lifecycleFailed = lifecycle.filter((o) => o.status === 'failed').length;
+  // Circles merely fading never make a report on their own (they would every night).
+  const changed = updated.length + failed.length + lifecycle.length + (result.revived?.length ?? 0);
+  if (changed === 0) return undefined;
 
   const header = [`🌙 dream · ${shortDay(result.day)}`];
   if (updated.length > 0) header.push(`${updated.length} updated`);
   if (unchanged > 0) header.push(`${unchanged} unchanged`);
-  if (failed.length > 0) header.push(`${failed.length} failed, retried tomorrow`);
+  if (failed.length + lifecycleFailed > 0) header.push(`${failed.length + lifecycleFailed} failed, retried tomorrow`);
   if (result.costUsd !== undefined) header.push(formatUsd(result.costUsd));
 
   const lines = [
@@ -141,6 +199,7 @@ export function formatDreamReport(
       return `• ${ownerName(o, nameOf)}${what ? ` [${what}]` : ''}: ${o.changeSummary.trim() || '(no summary)'}`;
     }),
     ...failed.map((o) => `✖ ${ownerName(o, nameOf)}: ${failureReason(o.error)}${lastGood(o)}`),
+    ...lifecycleLines(result),
   ];
   const shown = lines.slice(0, REPORT_MAX_LINES);
   const more = lines.length > shown.length ? [`… and ${lines.length - shown.length} more`] : [];
@@ -151,8 +210,14 @@ export function formatDreamReport(
 function summaryLine(result: NightlyDreamResult): string {
   const count = (status: DreamOutcome['status']) => result.people.filter((o) => o.status === status).length;
   const group = result.group ? `; group ${result.group.status}` : '';
+  const steps = result.lifecycle ?? [];
+  const step = (status: LifecycleOutcome['status']) => steps.filter((o) => o.status === status).length;
+  const lifecycle =
+    steps.length > 0
+      ? `; lifecycle: ${step('history')} rewritten as history, ${step('archived')} archived, ${step('failed')} failed`
+      : '';
   const cost = result.costUsd !== undefined ? ` · ${formatUsd(result.costUsd)}` : '';
-  return `dream: night ${result.day} done: ${count('updated')} updated, ${count('unchanged')} unchanged, ${count('failed')} failed${group}${cost}`;
+  return `dream: night ${result.day} done: ${count('updated')} updated, ${count('unchanged')} unchanged, ${count('failed')} failed${group}${lifecycle}${cost}`;
 }
 
 export type DreamSchedulerOptions = {

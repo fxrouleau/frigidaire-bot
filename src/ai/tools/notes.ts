@@ -1,7 +1,8 @@
 // Memory v2 notes tools (docs/memory.md): the chat model's "ls" / "cat" / "grep" over its notes on people,
-// the group and circles, and record_correction, which files a correction in the journal right away (shown
-// next to the notes from then on, folded in by the nightly dream). Notes are read-only here: only the
-// dream, the owner's edits and the bootstrap write them.
+// the group, circles and occasions (archived ones included: they stay readable as a historical trace), and
+// record_correction, which files a correction in the journal right away (shown next to the notes from then
+// on, folded in by the nightly dream). Notes are read-only here: only the dream, the owner's edits and the
+// bootstrap write them.
 import { canonicalUserId } from '../../linkedAccounts';
 import { logger } from '../../logger';
 import { getMemoryStore, getNotesStore } from '../memory';
@@ -11,12 +12,14 @@ import {
   circlesNamedIn,
   correctionLine,
   describeMembers,
+  describeParticipants,
   formatNoteSize,
   GROUP_CORRECTIONS_HEADING,
   journalLine,
   membershipSpan,
   renderCorrections,
 } from '../memory/notes/context';
+import { byOccasionRelevance, describePhase, isArchived, occasionDates } from '../memory/notes/lifecycle';
 import type { Note, NotesStore } from '../memory/notes/notesStore';
 import { normalizeTopic, PROFILE_TOPIC } from '../memory/notes/schema';
 import { buildPeopleDirectory, currentName, type ResolvedPerson, requesterOf, resolvePersonRef } from '../people';
@@ -61,29 +64,55 @@ function resolveMember(
   return resolvePersonRef(ref, buildPeopleDirectory(ctx.message));
 }
 
-/** A circle by slug, title or alias (case-insensitive), among the active ones. */
-function findCircle(notes: NotesStore, ref: string): Note | undefined {
-  const bySlug = notes.getCircle(ref);
+/** A shared note by slug, title or alias (case-insensitive) among `candidates`, live ones before archived. */
+function findShared(bySlug: Note | undefined, candidates: Note[], ref: string): Note | undefined {
   if (bySlug) return bySlug;
-  const circles = notes.listCircles();
-  const exact = circles.find(
+  const sorted = [...candidates].sort((a, b) => Number(isArchived(a)) - Number(isArchived(b)));
+  const exact = sorted.find(
     (c) => c.title.toLowerCase() === ref.toLowerCase() || c.aliases.some((a) => a.toLowerCase() === ref.toLowerCase()),
   );
-  return exact ?? circlesNamedIn(ref, circles)[0];
+  return exact ?? circlesNamedIn(ref, sorted)[0];
+}
+
+/** A circle by slug, title or alias (case-insensitive), archived ones included. */
+function findCircle(notes: NotesStore, ref: string): Note | undefined {
+  return findShared(notes.getCircle(ref), notes.listCircles({ includeArchived: true }), ref);
+}
+
+/** An occasion by slug, title or alias (case-insensitive), archived ones included. */
+function findOccasion(notes: NotesStore, ref: string): Note | undefined {
+  return findShared(notes.getOccasion(ref), notes.listOccasions({ includeArchived: true }), ref);
 }
 
 function circleHeader(circle: Note, store: MemoryStore, now: Date): string {
   const age = formatRelativeAge(circle.updatedAt, now);
   const aliases = circle.aliases.length > 0 ? `; also called ${circle.aliases.join(', ')}` : '';
-  return `${circle.title} (circle "${circle.topic}"${aliases}; members: ${describeMembers(circle.members, nameOf(store)) || 'none'}; v${circle.version}${age ? `, updated ${age}` : ''} by ${circle.updatedBy})`;
+  const archived = isArchived(circle) ? 'archived ' : '';
+  return `${circle.title} (${archived}circle "${circle.topic}"${aliases}; members: ${describeMembers(circle.members, nameOf(store)) || 'none'}; v${circle.version}${age ? `, updated ${age}` : ''} by ${circle.updatedBy})`;
+}
+
+function occasionHeader(occasion: Note, store: MemoryStore, now: Date, today: string): string {
+  const age = formatRelativeAge(occasion.updatedAt, now);
+  const aliases = occasion.aliases.length > 0 ? `; also called ${occasion.aliases.join(', ')}` : '';
+  const where = occasion.place ? ` in ${occasion.place}` : '';
+  return `${occasion.title} (occasion "${occasion.topic}"${aliases}; ${occasionDates(occasion)}${where}; ${describePhase(occasion, today)}; participants: ${describeParticipants(occasion.members, nameOf(store)) || 'none'}; v${occasion.version}${age ? `, updated ${age}` : ''} by ${occasion.updatedBy})`;
+}
+
+/** An occasion as one listing line: `- ski-trip-2027: "Ski trip" (planned, starts in 9 days; 2027-01-10 to …; 1.2k chars)`. */
+function occasionListLine(occasion: Note, now: Date, today: string, place?: string): string {
+  return `- ${occasion.topic}: "${occasion.title}" (${describePhase(occasion, today)}; ${occasionDates(occasion)}${occasion.place ? ` in ${occasion.place}` : ''}${place ? `; ${place}` : ''}; ${noteStats(occasion, now)})`;
 }
 
 // ---- list_notes ----
 
 function listFor(notes: NotesStore, person: ResolvedPerson, now: Date): string {
   const owner = { scope: 'person' as const, ownerId: person.userId };
+  const today = notes.today();
   const topics = notes.listNotes(owner);
-  const circles = notes.circlesOf(person.userId, { includeFormer: true });
+  const circles = notes.circlesOf(person.userId, { includeFormer: true, includeArchived: true });
+  const occasions = notes
+    .occasionsOf(person.userId, { includeFormer: true, includeArchived: true })
+    .sort((a, b) => byOccasionRelevance(today)(a.occasion, b.occasion));
   const pending = notes.newJournal({ ...owner, names: person.names });
   const corrections = pending.filter((m) => m.category === CORRECTION_CATEGORY).length;
   const lines: string[] = [];
@@ -99,8 +128,17 @@ function listFor(notes: NotesStore, person: ResolvedPerson, now: Date): string {
     lines.push('Circles:');
     for (const { circle, membership } of circles) {
       const span = membershipSpan(membership);
-      const status = membership.until === null ? '' : 'former member, ';
+      const status = isArchived(circle) ? 'archived, ' : membership.until === null ? '' : 'former member, ';
       lines.push(`- ${circle.topic}: "${circle.title}" (${status}${span ? `${span}, ` : ''}${noteStats(circle, now)})`);
+    }
+  }
+  if (occasions.length > 0) {
+    lines.push('Occasions:');
+    for (const { occasion, membership } of occasions) {
+      const place = [membership.role ?? '', membership.until ? `dropped out ${membership.until}` : '']
+        .filter((p) => p)
+        .join(', ');
+      lines.push(occasionListLine(occasion, now, today, place || undefined));
     }
   }
   if (pending.length > 0) {
@@ -135,15 +173,22 @@ function listEveryone(notes: NotesStore, store: MemoryStore, now: Date): string 
     lines.push('The group:');
     for (const note of group) lines.push(`- ${note.topic}: "${note.title}" (${noteStats(note, now)})`);
   }
-  const circles = all.filter((n) => n.scope === 'circle');
+  const circles = all.filter((n) => n.scope === 'circle').sort((a, b) => Number(isArchived(a)) - Number(isArchived(b)));
   if (circles.length > 0) {
     lines.push('Circles:');
     for (const circle of circles) {
       const members = circle.members
         .filter((m) => m.until === null)
         .map((m) => currentName(m.memberId, 'someone', store));
-      lines.push(`- ${circle.topic}: "${circle.title}" (${members.join(', ') || 'no current members'})`);
+      const who = isArchived(circle) ? 'archived' : members.join(', ') || 'no current members';
+      lines.push(`- ${circle.topic}: "${circle.title}" (${who})`);
     }
+  }
+  const today = notes.today();
+  const occasions = all.filter((n) => n.scope === 'occasion').sort(byOccasionRelevance(today));
+  if (occasions.length > 0) {
+    lines.push('Occasions:');
+    for (const occasion of occasions) lines.push(occasionListLine(occasion, now, today));
   }
   return lines.length > 0 ? lines.join('\n') : 'No notes yet: the nightly dream writes them from what you pick up.';
 }
@@ -151,7 +196,7 @@ function listEveryone(notes: NotesStore, store: MemoryStore, now: Date): string 
 const listNotesTool: ToolDefinition = {
   name: 'list_notes',
   description:
-    "List your notes: for one person, their topics (profile, games, work, …) with size and age, and their circles (groups and pairs they belong to: the MTG crew, two best friends); without a person, everyone who has notes, the group's topics and every circle. Use it to see what you know before reading a note.",
+    "List your notes: for one person, their topics (profile, games, work, …) with size and age, their circles (groups and pairs they belong to: the MTG crew, two best friends) and their occasions (trips, outings and other one-off things they do with others, upcoming first); without a person, everyone who has notes, the group's topics, every circle and every occasion. Archived circles and occasions are history kept as a short trace. Use it to see what you know before reading a note.",
   parameters: {
     type: 'object',
     properties: {
@@ -186,6 +231,15 @@ function readCircle(circle: Note, store: MemoryStore, now: Date): string {
   return `${circleHeader(circle, store, now)}\n\n${circle.content}`;
 }
 
+function readOccasion(occasion: Note, store: MemoryStore, now: Date, today: string): string {
+  return `${occasionHeader(occasion, store, now, today)}\n\n${occasion.content}`;
+}
+
+/** A circle or an occasion read in full. */
+function readShared(note: Note, notes: NotesStore, store: MemoryStore, now: Date): string {
+  return note.scope === 'occasion' ? readOccasion(note, store, now, notes.today()) : readCircle(note, store, now);
+}
+
 function readPersonNote(
   notes: NotesStore,
   store: MemoryStore,
@@ -196,15 +250,23 @@ function readPersonNote(
   const owner = { scope: 'person' as const, ownerId: person.userId };
   const note = notes.getNote(owner, topic);
   if (!note) {
-    // A topic that is one of their circles reads the circle.
+    // A topic that is one of their circles or occasions reads it.
+    const isTheirs = (shared: Note | undefined) => shared?.members.some((m) => m.memberId === person.userId);
     const circle = notes.getCircle(topic);
-    if (circle?.members.some((m) => m.memberId === person.userId)) return readCircle(circle, store, now);
+    if (circle && isTheirs(circle)) return readCircle(circle, store, now);
+    const occasion = notes.getOccasion(topic);
+    if (occasion && isTheirs(occasion)) return readOccasion(occasion, store, now, notes.today());
     const topics = notes.listNotes(owner).map((n) => n.topic);
-    const circles = notes.circlesOf(person.userId, { includeFormer: true }).map((c) => c.circle.topic);
-    if (topics.length === 0 && circles.length === 0) {
+    const circles = notes
+      .circlesOf(person.userId, { includeFormer: true, includeArchived: true })
+      .map((c) => c.circle.topic);
+    const occasions = notes
+      .occasionsOf(person.userId, { includeFormer: true, includeArchived: true })
+      .map((o) => o.occasion.topic);
+    if (topics.length === 0 && circles.length === 0 && occasions.length === 0) {
       return `No notes on ${person.displayName} yet (the nightly dream writes them). recall_memories searches what you've picked up about them.`;
     }
-    return `${person.displayName} has no "${topic}" note. Topics: ${topics.join(', ') || 'none'}${circles.length > 0 ? `; circles: ${circles.join(', ')}` : ''}.`;
+    return `${person.displayName} has no "${topic}" note. Topics: ${topics.join(', ') || 'none'}${circles.length > 0 ? `; circles: ${circles.join(', ')}` : ''}${occasions.length > 0 ? `; occasions: ${occasions.join(', ')}` : ''}.`;
   }
   const age = formatRelativeAge(note.updatedAt, now);
   const lines = [
@@ -238,19 +300,24 @@ function readPersonNote(
 const readNoteTool: ToolDefinition = {
   name: 'read_note',
   description:
-    'Read one of your notes in full, including its dated "Earlier" history the context note leaves out: a person\'s topic (default their profile), a group topic, or a circle (by its slug, title or another name for it). list_notes shows what exists.',
+    'Read one of your notes in full, including its dated "Earlier" history the context note leaves out: a person\'s topic (default their profile), a group topic, a circle, or an occasion (a trip, an outing: its plan, or what happened). Circles and occasions are found by slug, title or another name for them, archived ones too. list_notes shows what exists.',
   parameters: {
     type: 'object',
     properties: {
       person: {
         type: 'string',
-        description: 'Whose note: any name they go by, an @mention, "me", or "group". Omit when reading a circle.',
+        description:
+          'Whose note: any name they go by, an @mention, "me", or "group". Omit when reading a circle or an occasion.',
       },
       topic: {
         type: 'string',
         description: 'The topic slug, e.g. "profile", "games", "running-jokes". Default "profile".',
       },
       circle: { type: 'string', description: 'A circle: its slug (e.g. "mtg"), title or another name for it.' },
+      occasion: {
+        type: 'string',
+        description: 'An occasion: its slug (e.g. "ski-trip-2027"), title ("Ski trip") or another name for it.',
+      },
     },
     required: [],
     additionalProperties: false,
@@ -260,15 +327,22 @@ const readNoteTool: ToolDefinition = {
     const notes = getNotesStore(store);
     const now = new Date();
     const circleRef = text(args.circle);
+    const occasionRef = text(args.occasion);
     const ref = text(args.person);
     const rawTopic = text(args.topic);
     const topic = rawTopic ? normalizeTopic(rawTopic) : PROFILE_TOPIC;
 
-    if (circleRef || (!ref && rawTopic)) {
-      const circle = findCircle(notes, circleRef || rawTopic);
-      if (circle) return readCircle(circle, store, now);
-      const known = notes.listCircles().map((c) => c.topic);
-      return `No circle "${circleRef || rawTopic}". Circles: ${known.join(', ') || 'none yet'}.`;
+    // A circle or an occasion asked for by name: the kind asked for first, then the other (the model mixes
+    // them up: "the ski trip" asked for as a circle still reads the occasion).
+    const sharedRef = occasionRef || circleRef || (!ref && rawTopic ? rawTopic : '');
+    if (sharedRef) {
+      const found = occasionRef
+        ? (findOccasion(notes, sharedRef) ?? findCircle(notes, sharedRef))
+        : (findCircle(notes, sharedRef) ?? findOccasion(notes, sharedRef));
+      if (found) return readShared(found, notes, store, now);
+      const circles = notes.listCircles({ includeArchived: true }).map((c) => c.topic);
+      const occasions = notes.listOccasions({ includeArchived: true }).map((o) => o.topic);
+      return `No circle or occasion "${sharedRef}". Circles: ${circles.join(', ') || 'none yet'}. Occasions: ${occasions.join(', ') || 'none yet'}.`;
     }
     if (!ref) return 'Say whose note (person, or "group") or which circle.';
     if (!topic) return `"${rawTopic}" is not a topic: topics are lowercase slugs like "profile" or "running-jokes".`;
@@ -302,7 +376,7 @@ const readNoteTool: ToolDefinition = {
 const searchNotesTool: ToolDefinition = {
   name: 'search_notes',
   description:
-    'Keyword search across all your notes (people, the group, circles), older dated history included. Returns which note matched with a snippet; read_note opens it. For raw details and exact wording, recall_memories searches the journal.',
+    'Keyword search across all your notes (people, the group, circles, occasions; archived ones too), older dated history included. Returns which note matched with a snippet; read_note opens it. For raw details and exact wording, recall_memories searches the journal.',
   parameters: {
     type: 'object',
     properties: { query: { type: 'string', description: 'A few distinctive words.' } },
@@ -316,9 +390,10 @@ const searchNotesTool: ToolDefinition = {
     const hits = getNotesStore(store).searchNotes(query, { limit: SEARCH_LIMIT });
     if (hits.length === 0) return `No notes mention "${query}". recall_memories searches the raw journal.`;
     const lines = hits.map(({ note, snippet }) => {
+      const archived = isArchived(note) ? 'archived ' : '';
       const where =
-        note.scope === 'circle'
-          ? `circle "${note.title}" (circle: ${note.topic})`
+        note.scope === 'circle' || note.scope === 'occasion'
+          ? `${archived}${note.scope} "${note.title}" (${note.scope}: ${note.topic})`
           : note.scope === 'group'
             ? `the group · ${note.topic}`
             : `${currentName(note.ownerId ?? '', 'someone', store)} · ${note.topic}`;

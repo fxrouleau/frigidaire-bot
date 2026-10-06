@@ -1,9 +1,10 @@
 // The notes viewer behind "What does Fridge know?" (memory v2, docs/memory.md "Viewer and owner edits"):
 // a private message showing one note at a time — a person's `profile` first, a select menu of their other
-// topics and their circles, Prev/Next when a note is longer than one page, a footer with the version, its
-// age and who last changed it. Right-clicking the bot shows the group's notes (and every circle). People
-// without notes yet see the raw memory list (the journal) instead, which stays one pick away for everyone
-// else too (its ids are what forget_memory takes).
+// topics, their circles and their occasions (upcoming first; archived ones last), Prev/Next when a note is
+// longer than one page, a footer with the version, its age and who last changed it. Right-clicking the bot
+// shows the group's notes (and every circle and occasion). People without notes yet see the raw memory
+// list (the journal) instead, which stays one pick away for everyone else too (its ids are what
+// forget_memory takes).
 //
 // The owner also gets Edit (a modal: "What should change?" → the edit model drafts it → a before/after
 // preview → Confirm/Cancel) and Undo (the shown note back to its previous version); the handlers live in
@@ -31,12 +32,24 @@ import { type Memory, type MemoryStore, SELF_DIAGNOSIS_CATEGORIES } from '../ai/
 import {
   correctionLine,
   describeMembers,
+  describeParticipants,
   formatNoteSize,
   membershipSpan,
   renderCorrections,
 } from '../ai/memory/notes/context';
 import type { ProposedChange } from '../ai/memory/notes/dreamer';
-import type { CircleMembership, Note, NotesStore } from '../ai/memory/notes/notesStore';
+import {
+  analyzeActivity,
+  byOccasionRelevance,
+  circlePresence,
+  describePhase,
+  describeRevivals,
+  easternToday,
+  isArchived,
+  monthLabel,
+  occasionDates,
+} from '../ai/memory/notes/lifecycle';
+import type { CircleMembership, Note, NoteDetails, NotesStore } from '../ai/memory/notes/notesStore';
 import { type CircleMember, type NoteUpdatedBy, PROFILE_TOPIC } from '../ai/memory/notes/schema';
 import { currentName, memoryKeyFor } from '../ai/people';
 import { formatRelativeAge } from '../ai/utils';
@@ -370,12 +383,19 @@ function personNotes(ctx: ViewerContext, id: string): Note[] {
 
 function circleDescription(membership: CircleMembership | undefined, circle: Note, now: Date): string {
   const current = circle.members.filter((m) => m.until === null).length;
-  const place = membership
-    ? membership.membership.until === null
-      ? `circle · ${current} members`
-      : `former member${membershipSpan(membership.membership) ? ` (${membershipSpan(membership.membership)})` : ''}`
-    : `circle · ${current} members`;
+  const place = isArchived(circle)
+    ? `archived circle${membership && membershipSpan(membership.membership) ? ` (${membershipSpan(membership.membership)})` : ''}`
+    : membership
+      ? membership.membership.until === null
+        ? `circle · ${current} members`
+        : `former member${membershipSpan(membership.membership) ? ` (${membershipSpan(membership.membership)})` : ''}`
+      : `circle · ${current} members`;
   return `${place} · ${age(circle.updatedAt, now)}`;
+}
+
+/** An occasion's menu line: `occasion · planned, starts in 9 days · 2027-01-10 to 2027-01-17`. */
+function occasionDescription(occasion: Note, today: string): string {
+  return `occasion · ${describePhase(occasion, today)} · ${occasionDates(occasion)}`;
 }
 
 /**
@@ -390,7 +410,8 @@ const GROUP_HOME_OPTION: ViewerOption = {
 
 /**
  * The select menu's entries for a subject, at most 25: notes first (the group's empty screen while it has
- * none), then circles, then (a person) the journal.
+ * none), then live circles and occasions (upcoming occasions first), then archived ones, then (a person)
+ * the journal. What doesn't fit is cut from the end of the circles and occasions, archived ones first.
  */
 export function viewerOptions(subject: ViewerSubject, ctx: ViewerContext): ViewerOption[] {
   const noteOption = (note: Note): ViewerOption => ({
@@ -401,31 +422,48 @@ export function viewerOptions(subject: ViewerSubject, ctx: ViewerContext): Viewe
       DISCORD_LIMITS.optionText,
     ),
   });
+  const described = (note: Note, description: string): ViewerOption => ({
+    ...noteOption(note),
+    description: clip(description, DISCORD_LIMITS.optionText),
+  });
+  const today = easternToday(ctx.now);
+  const byRelevance = byOccasionRelevance(today);
   const max = DISCORD_LIMITS.selectOptions;
   if (subject.kind === 'group') {
     const topics = ctx.notes.listNotes({ scope: 'group' }).map(noteOption);
-    const allCircles = ctx.notes.listCircles();
-    const home = topics.length === 0 && allCircles.length > 0 ? [GROUP_HOME_OPTION] : [];
-    const circles = allCircles.slice(0, Math.max(0, max - topics.length - home.length)).map((circle) => ({
-      ...noteOption(circle),
-      description: clip(circleDescription(undefined, circle, ctx.now), DISCORD_LIMITS.optionText),
-    }));
-    return [...home, ...topics, ...circles];
+    const allCircles = ctx.notes.listCircles({ includeArchived: true });
+    const allOccasions = ctx.notes.listOccasions({ includeArchived: true }).sort(byRelevance);
+    const home = topics.length === 0 && allCircles.length + allOccasions.length > 0 ? [GROUP_HOME_OPTION] : [];
+    const circle = (c: Note) => described(c, circleDescription(undefined, c, ctx.now));
+    const occasion = (o: Note) => described(o, occasionDescription(o, today));
+    const shared = [
+      ...allOccasions.filter((o) => !isArchived(o)).map(occasion),
+      ...allCircles.filter((c) => !isArchived(c)).map(circle),
+      ...allCircles.filter(isArchived).map(circle),
+      ...allOccasions.filter(isArchived).map(occasion),
+    ].slice(0, Math.max(0, max - topics.length - home.length));
+    return [...home, ...topics, ...shared];
   }
   const topics = personNotes(ctx, subject.id).map(noteOption);
-  const circles = ctx.notes
-    .circlesOf(subject.id, { includeFormer: true })
-    .slice(0, Math.max(0, max - topics.length - 1))
-    .map((membership) => ({
-      ...noteOption(membership.circle),
-      description: clip(circleDescription(membership, membership.circle, ctx.now), DISCORD_LIMITS.optionText),
-    }));
+  const memberships = ctx.notes.circlesOf(subject.id, { includeFormer: true, includeArchived: true });
+  const occasions = ctx.notes
+    .occasionsOf(subject.id, { includeFormer: true, includeArchived: true })
+    .map((o) => o.occasion)
+    .sort(byRelevance);
+  const circle = (m: CircleMembership) => described(m.circle, circleDescription(m, m.circle, ctx.now));
+  const occasion = (o: Note) => described(o, occasionDescription(o, today));
+  const shared = [
+    ...memberships.filter((m) => !isArchived(m.circle)).map(circle),
+    ...occasions.filter((o) => !isArchived(o)).map(occasion),
+    ...memberships.filter((m) => isArchived(m.circle)).map(circle),
+    ...occasions.filter(isArchived).map(occasion),
+  ].slice(0, Math.max(0, max - topics.length - 1));
   const journal: ViewerOption = {
     screen: { kind: 'journal' },
     label: 'Raw memories',
     description: 'what I picked up, newest first, with the ids forget_memory takes',
   };
-  return [...topics, ...circles, journal];
+  return [...topics, ...shared, journal];
 }
 
 /** What a screen resolves to: the note it shows, the journal, or nothing (an empty viewer). */
@@ -519,15 +557,46 @@ function pendingField(note: Note, ctx: ViewerContext): APIEmbedField | undefined
   return field('Not in the notes yet', lines.join('\n'));
 }
 
+/** A circle's members, or an occasion's when, where, status and participants, and their other names. */
 function circleFields(note: Note, ctx: ViewerContext): APIEmbedField[] {
+  if (note.scope === 'occasion') {
+    const today = easternToday(ctx.now);
+    const fields = [
+      field('When', escapeMarkdown(`${occasionDates(note)} · ${describePhase(note, today)}`)),
+      ...(note.place ? [field('Where', escapeMarkdown(note.place))] : []),
+      field('Participants', escapeMarkdown(describeParticipants(note.members, nameOf(ctx.memory)))),
+    ];
+    if (note.aliases.length > 0) fields.push(field('Also called', escapeMarkdown(note.aliases.join(', '))));
+    return fields;
+  }
   if (note.scope !== 'circle') return [];
   const fields = [field('Members', escapeMarkdown(describeMembers(note.members, nameOf(ctx.memory))))];
   if (note.aliases.length > 0) fields.push(field('Also called', escapeMarkdown(note.aliases.join(', '))));
+  const activity = activityLine(note, ctx);
+  if (activity) fields.push(field('Activity', escapeMarkdown(activity)));
   return fields;
 }
 
+/** A circle's decay in a line (lifecycle.ts CIRCLE_DECAY): `fading · last active Jul 2026 · yearly (usually Feb)`. */
+function activityLine(circle: Note, ctx: ViewerContext): string {
+  const series = ctx.notes.activityOf(circle.id);
+  const analysis = analyzeActivity(series);
+  if (!analysis) return '';
+  const today = easternToday(ctx.now);
+  const state = isArchived(circle) ? '' : circlePresence(circle, series, today).state;
+  return [
+    state === 'archive' ? 'fading out (archived tonight)' : state,
+    `last active ${monthLabel(analysis.lastReal)}`,
+    analysis.cadence?.label ?? '',
+    ...describeRevivals(analysis, today),
+  ]
+    .filter((part) => part)
+    .join(' · ');
+}
+
 function authorFor(note: Note, subject: ViewerSubject, name: string): string {
-  if (note.scope === 'circle') return 'Circle';
+  if (note.scope === 'circle') return isArchived(note) ? 'Circle (archived)' : 'Circle';
+  if (note.scope === 'occasion') return isArchived(note) ? 'Occasion (archived)' : 'Occasion';
   if (note.scope === 'group' || subject.kind === 'group') return "The group's notes";
   return clip(`Notes on ${name}`, DISCORD_LIMITS.embedTitle);
 }
@@ -709,8 +778,33 @@ export type EditPreview = {
   expiresAt: number;
 };
 
-function membersText(members: CircleMember[] | undefined, memory: MemoryStore): string {
-  return escapeMarkdown(describeMembers(members ?? [], nameOf(memory)) || 'nobody');
+function membersText(
+  members: CircleMember[] | undefined,
+  memory: MemoryStore,
+  kind: 'circle' | 'occasion' = 'circle',
+): string {
+  const describe = kind === 'occasion' ? describeParticipants : describeMembers;
+  return escapeMarkdown(describe(members ?? [], nameOf(memory)) || 'nobody');
+}
+
+/** A circle's or occasion's status, dates and place before → after, as preview fields (only what changes). */
+function detailFields(before: NoteDetails | undefined, after: NoteDetails | undefined): APIEmbedField[] {
+  if (!after) return [];
+  const fields: APIEmbedField[] = [];
+  const status = (d: NoteDetails | undefined) => d?.status ?? 'live';
+  if (before && status(before) !== status(after)) {
+    fields.push(field('Status', `${status(before)} → ${status(after)}`));
+  } else if (!before && after.status) fields.push(field('Status', after.status));
+  const when = (d: NoteDetails | undefined) => (d?.startsOn ? occasionDates(d) : '');
+  if (when(after) && when(before) !== when(after)) {
+    fields.push(
+      field('When', escapeMarkdown(before && when(before) ? `${when(before)} → ${when(after)}` : when(after))),
+    );
+  }
+  if ((before?.place ?? '') !== (after.place ?? '')) {
+    fields.push(field('Where', escapeMarkdown(`${before?.place || '—'} → ${after.place || '—'}`)));
+  }
+  return fields;
 }
 
 /**
@@ -734,21 +828,23 @@ export function renderPreview(
   ].join('\n');
 
   const fields: APIEmbedField[] = [];
-  if (change.kind === 'circle') {
+  if (change.kind === 'circle' || change.kind === 'occasion') {
+    const label = change.kind === 'occasion' ? 'Participants' : 'Members';
     const membersBefore = JSON.stringify(change.membersBefore ?? []);
     const membersAfter = JSON.stringify(change.membersAfter ?? []);
     if (change.change !== 'removed' && membersBefore !== membersAfter) {
       if (change.change === 'changed')
-        fields.push(field('Members before', membersText(change.membersBefore, ctx.memory)));
-      fields.push(field('Members after', membersText(change.membersAfter, ctx.memory)));
+        fields.push(field(`${label} before`, membersText(change.membersBefore, ctx.memory, change.kind)));
+      fields.push(field(`${label} after`, membersText(change.membersAfter, ctx.memory, change.kind)));
     }
     const aliasesBefore = (change.aliasesBefore ?? []).join(', ');
     const aliasesAfter = (change.aliasesAfter ?? []).join(', ');
     if (change.change !== 'removed' && aliasesBefore !== aliasesAfter) {
       fields.push(field('Also called', escapeMarkdown(`${aliasesBefore || '—'} → ${aliasesAfter || '—'}`)));
     }
+    if (change.change !== 'removed') fields.push(...detailFields(change.detailsBefore, change.detailsAfter));
   }
-  const what = change.kind === 'circle' ? `circle ${change.key}` : change.key;
+  const what = change.kind === 'note' ? change.key : `${change.kind} ${change.key}`;
   const frame: APIEmbed = {
     author: { name: `Change ${at + 1}/${count} · ${change.change}` },
     title: clip(`${change.title} (${what})`, DISCORD_LIMITS.embedTitle),

@@ -314,3 +314,160 @@ describe('runCli', () => {
     expect(fs.existsSync(path.join(tmp, 'nowhere'))).toBe(false);
   });
 });
+
+describe('archive and seed-activity', () => {
+  const OCTOBER = new Date('2026-10-06T16:00:00Z');
+  let local: NotesStore;
+  const localDeps = (extra: Partial<CliDeps> = {}) =>
+    deps({ openStores: () => ({ archive, memory, notes: local }), now: () => OCTOBER, ...extra });
+  const trace = (text: string) => ({
+    body: { ...(chatCompletionBody(text) as object), usage: { prompt_tokens: 500, completion_tokens: 200, cost: 0.001 } },
+  });
+
+  beforeEach(() => {
+    local = new NotesStore(memory, { now: () => OCTOBER });
+    local.writeCircles(
+      [
+        {
+          slug: 'yugioh',
+          title: 'The Yu-Gi-Oh crew',
+          content: '## Now\nFriday duels at the card shop.',
+          members: [
+            { id: REMI, since: '2018' },
+            { id: DALE, since: '2018' },
+          ],
+        },
+      ],
+      { updatedBy: 'import' },
+    );
+    local.writeOccasions(
+      [
+        {
+          slug: 'lan-2025',
+          title: 'The 2025 LAN',
+          content: '## What happened\nA weekend LAN.',
+          starts_on: '2025-03-01',
+          status: 'past',
+          participants: [{ id: REMI }, { id: DALE }],
+        },
+      ],
+      { updatedBy: 'dream' },
+    );
+  });
+
+  it('lists what it would archive with --dry-run, then archives each with one trace call, holding the dream lease', async () => {
+    expect(await runCli(['archive', 'yugioh', 'occasion:lan-2025', '--dry-run'], localDeps())).toBe(0);
+    expect(out).toContain('Would archive 2 notes:');
+    expect(out).toContain(
+      '  - circle yugioh "The Yu-Gi-Oh crew": 2 members (2 current: their memberships end 2026-10); 37 characters → a trace of ≤ 1,200',
+    );
+    expect(local.getCircle('yugioh')?.status).toBeNull();
+
+    out.length = 0;
+    let leaseHeld = false;
+    const { client, requests } = createCapturingClient(
+      [trace('## History\nFriday duels 2018–2026.'), trace('## History\nA weekend LAN in March 2025.')],
+      {
+        onRequest: () => {
+          const probe = takeDreamLease(memory, 'probe');
+          leaseHeld = !probe.ok;
+          if (probe.ok) probe.lease.release();
+        },
+      },
+    );
+    expect(await runCli(['archive', 'yugioh', 'occasion:lan-2025'], localDeps({ client: () => client }))).toBe(0);
+    expect(leaseHeld).toBe(true);
+    expect(requests).toHaveLength(2);
+    expect(requests.every((r) => r.headers.get('X-Frigidaire-Feature') === 'memory_dream')).toBe(true);
+    expect(requests.every((r) => (r.body.provider as { zdr?: boolean }).zdr === true)).toBe(true);
+    expect(local.getCircle('yugioh')).toMatchObject({ status: 'archived', content: '## History\nFriday duels 2018–2026.' });
+    expect(local.getCircle('yugioh')?.members.map((m) => m.until)).toEqual(['2026-10', '2026-10']);
+    expect(local.getVersions(local.getCircle('yugioh')?.id ?? 0)[0].reason).toBe(
+      "archived as a trace: the owner's archive command",
+    );
+    expect(local.getOccasion('lan-2025')?.status).toBe('archived');
+    expect(out.at(-1)).toBe('Done: 2 notes archived, $0.0020. Undo is in the notes viewer ("What does Fridge know?").');
+    const after = takeDreamLease(memory, 'after');
+    expect(after.ok).toBe(true);
+    if (after.ok) after.lease.release();
+
+    // Already archived and short: skipped, nothing to do.
+    out.length = 0;
+    expect(await runCli(['archive', 'yugioh'], localDeps({ client: () => client }))).toBe(0);
+    expect(out).toEqual(['circle yugioh is already archived: skipped.', 'Nothing to archive.']);
+  });
+
+  it('archives nothing when a slug names nothing (or two things), without a key, or while the bot dreams', async () => {
+    expect(await runCli(['archive', 'yugioh', 'yu-gi-oh'], localDeps())).toBe(1);
+    expect(err.at(-1)).toBe('Nothing archived: there is no circle or occasion "yu-gi-oh".');
+    local.writeOccasions(
+      [{ slug: 'yugioh', title: 'Yu-Gi-Oh night', content: 'x', starts_on: '2026-11-01', participants: [{ id: REMI }, { id: DALE }] }],
+      { updatedBy: 'dream' },
+    );
+    expect(await runCli(['archive', 'yugioh'], localDeps())).toBe(1);
+    expect(err.at(-1)).toContain('"yugioh" is both a circle and an occasion: say circle:yugioh or occasion:yugioh');
+    expect(await runCli(['archive', 'circle:yugioh'], localDeps({ client: () => undefined }))).toBe(1);
+    expect(err.at(-1)).toContain('OPENROUTER_API_KEY is not set');
+    const nightly = takeDreamLease(memory, 'the nightly dream');
+    if (!nightly.ok) throw new Error('lease');
+    const { client, requests } = createCapturingClient([]);
+    expect(await runCli(['archive', 'circle:yugioh'], localDeps({ client: () => client }))).toBe(1);
+    nightly.lease.release();
+    expect(requests).toHaveLength(0);
+    expect(err.at(-1)).toContain('the nightly dream has been running since');
+    expect(local.getCircle('yugioh')?.status).toBeNull();
+    expect(await runCli(['archive'], localDeps())).toBe(2);
+  });
+
+  it('seeds circle activity from a file, idempotently, saying how each circle stands', async () => {
+    const file = path.join(tmp, 'activity.json');
+    local.writeCircles(
+      [{ slug: 'tarkov', title: 'Tarkov', content: '## Now\nRaids.', members: [{ id: REMI }, { id: DALE }] }],
+      { updatedBy: 'import' },
+    );
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        yugioh: { '2019-02': 30, '2020-02': 25, '2021-02': 12 },
+        tarkov: { '2026-08': 40, '2026-09': 25 },
+        nobody: { '2020-01': 1 },
+      }),
+    );
+    expect(await runCli(['seed-activity', file, '--dry-run'], localDeps())).toBe(0);
+    expect(local.activityOf(local.getCircle('yugioh')?.id ?? 0)).toEqual([]);
+    expect(out).toContain('  - yugioh: 3 months (2019-02 → 2021-02), weight 67 → archived tonight (R 0.07) · yearly (usually Feb)');
+    expect(out).toContain('  - tarkov: 2 months (2026-08 → 2026-09), weight 65 → present (R 0.91)');
+    expect(out).toContain('warning: no circle nobody: skipped.');
+    expect(out.at(-1)).toBe('Would seed 2 circles.');
+
+    out.length = 0;
+    expect(await runCli(['seed-activity', file], localDeps())).toBe(0);
+    expect(await runCli(['seed-activity', file], localDeps())).toBe(0);
+    expect(local.activityOf(local.getCircle('yugioh')?.id ?? 0)).toEqual([
+      { month: '2019-02', weight: 30 },
+      { month: '2020-02', weight: 25 },
+      { month: '2021-02', weight: 12 },
+    ]);
+
+    // A malformed file seeds nothing.
+    fs.writeFileSync(file, JSON.stringify({ yugioh: { March: 2 }, tarkov: { '2026-10': -1 } }));
+    expect(await runCli(['seed-activity', file], localDeps())).toBe(1);
+    expect(err).toContain('  - yugioh: "March" is not YYYY-MM');
+    expect(err).toContain('  - tarkov 2026-10: the weight must be a whole number ≥ 0');
+    fs.writeFileSync(file, JSON.stringify({ tarkov: { '2099-01': 3 } }));
+    expect(await runCli(['seed-activity', file], localDeps())).toBe(1);
+    expect(err).toContain('  - tarkov 2099-01: a month in the future');
+    expect(local.activityOf(local.getCircle('tarkov')?.id ?? 0)).toHaveLength(2);
+  });
+
+  it('fails cleanly when another process keeps the database locked', async () => {
+    const busy = Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+    const locked = localDeps({
+      openStores: () => {
+        throw busy;
+      },
+    });
+    expect(await runCli(['archive', 'yugioh'], locked)).toBe(1);
+    expect(err.at(-1)).toMatch(/^failed: the database is busy .* Nothing was changed: run it again in a moment\.$/);
+  });
+});

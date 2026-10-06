@@ -76,6 +76,11 @@ function circle(overrides: Partial<Note> = {}): Note {
     updatedAt: '2026-09-20 08:00:00',
     updatedBy: 'dream',
     active: true,
+    status: null,
+    startsOn: null,
+    endsOn: null,
+    place: null,
+    circle: null,
     ...overrides,
   };
 }
@@ -209,10 +214,39 @@ describe('renderCircles', () => {
         { slug: 'mtg', title: 'x', content: 'y', aliases: [], members: [], merged_from: [] },
       ],
       removed_circles: [],
+      archived_circles: [],
+      occasions: [],
+      removed_occasions: [],
       change_summary: '',
     };
     expect(excerptOnlyProblems(output, new Set(['old-crew']))).toEqual([
       'circle "old-crew" was only shown as an excerpt: leave it out of "circles"',
+    ]);
+  });
+
+  it("refuses removing or merging away an archived circle or occasion a dream saw only as one line", () => {
+    const output: NotesOutput = {
+      notes: [],
+      removed_topics: [],
+      circles: [{ slug: 'cards', title: 'x', content: 'y', aliases: [], members: [], merged_from: ['yugioh', 'old-crew'] }],
+      removed_circles: ['dbfz', 'old-crew'],
+      archived_circles: [],
+      occasions: [],
+      removed_occasions: ['lan-2025'],
+      change_summary: '',
+    };
+    const archivedOnly = { circles: new Set(['yugioh', 'dbfz']), occasions: new Set(['lan-2025']) };
+    expect(excerptOnlyProblems(output, new Set(['old-crew']), new Set(), archivedOnly)).toEqual([
+      'circle "dbfz" is archived (shown as one line): leave it out of "removed_circles"',
+      'circle "yugioh" is archived (shown as one line): don\'t merge it into "cards"',
+      'occasion "lan-2025" is archived (shown as one line): leave it out of "removed_occasions"',
+    ]);
+    // The owner's edits pass no one-liners: removing stays theirs to ask for.
+    expect(excerptOnlyProblems(output, new Set())).toEqual([]);
+    // What renderCircles showed as one line is what a dream may not throw away.
+    const archived = circle({ topic: 'yugioh', title: 'The Yu-Gi-Oh crew', status: 'archived' });
+    expect([...renderCircles('CIRCLES', [], () => undefined, undefined, {}, { archived: [archived] }).archivedOnly]).toEqual([
+      'yugioh',
     ]);
   });
 });
@@ -317,8 +351,9 @@ describe('prompts', () => {
     // An owner edit changes nothing else: it is never told to shrink toward a target.
     expect(EDIT_SYSTEM).not.toContain('Aim for about');
     for (const system of [PERSON_DREAM_SYSTEM, GROUP_DREAM_SYSTEM]) {
-      expect(system).toContain('An upcoming plan goes in Now as upcoming, with its date and who is in it');
-      expect(system).toContain('once TODAY is past its date, write it as what happened');
+      expect(system).toContain('Something specific members do together belongs in an occasion');
+      expect(system).toContain('a profile keeps one short line for it in Now while it is ahead');
+      expect(system).toContain('once it is past, a dated line of what it was');
       expect(system).toContain('at most about 100 characters');
     }
     expect(PERSON_DREAM_SYSTEM).toContain('about 3,200 characters (some 500 words) in all');

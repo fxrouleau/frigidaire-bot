@@ -149,8 +149,70 @@ describe('read_note', () => {
     expect(await run('read_note', { person: 'Remi', topic: 'work' })).toBe(
       'Remi has no "work" note. Topics: profile, games; circles: mtg.',
     );
-    expect(await run('read_note', { circle: 'chess club' })).toBe('No circle "chess club". Circles: mtg.');
+    expect(await run('read_note', { circle: 'chess club' })).toBe(
+      'No circle or occasion "chess club". Circles: mtg. Occasions: none yet.',
+    );
     expect(await run('read_note', { person: 'Remi', topic: 'Not A Slug!' })).toContain('is not a topic');
+  });
+});
+
+describe('occasions and archived circles', () => {
+  beforeEach(() => {
+    notes.writeOccasions(
+      [
+        {
+          slug: 'ski-trip-2027',
+          title: 'Ski trip',
+          content: '## Plan\nA week at Tremblant; chalet booked.',
+          aliases: ['the ski trip'],
+          starts_on: '2027-01-10',
+          ends_on: '2027-01-17',
+          place: 'Tremblant',
+          participants: [{ id: REMI, role: 'organizer' }, { id: DALE }],
+        },
+      ],
+      { updatedBy: 'dream' },
+    );
+    notes.writeCircles(
+      [
+        {
+          slug: 'yugioh',
+          title: 'The Yu-Gi-Oh crew',
+          content: '## History\nFriday duels at the card shop, 2018–2020.',
+          members: [{ id: REMI }, { id: NOVA }],
+        },
+      ],
+      { updatedBy: 'dream', archiveCircles: ['yugioh'] },
+    );
+  });
+
+  it("lists a person's occasions and marks archived circles", async () => {
+    const remi = await run('list_notes', { person: 'me' });
+    expect(remi).toContain(
+      'Occasions:\n- ski-trip-2027: "Ski trip" (planned, starts in 107 days; 2027-01-10 to 2027-01-17 in Tremblant; organizer; ',
+    );
+    expect(remi).toContain('- yugioh: "The Yu-Gi-Oh crew" (archived, ');
+    const all = await run('list_notes', {});
+    expect(all).toContain('- yugioh: "The Yu-Gi-Oh crew" (archived)');
+    expect(all).toContain('Occasions:\n- ski-trip-2027: "Ski trip" (planned, starts in 107 days;');
+  });
+
+  it('reads an occasion by slug, title or alias, even when asked for as a circle, and an archived circle', async () => {
+    const trip = await run('read_note', { occasion: 'Ski trip' });
+    expect(trip).toContain(
+      'Ski trip (occasion "ski-trip-2027"; also called the ski trip; 2027-01-10 to 2027-01-17 in Tremblant; planned, starts in 107 days; participants: Remi (organizer), Dale; v1, updated today by dream)',
+    );
+    expect(trip).toContain('## Plan\nA week at Tremblant; chalet booked.');
+    expect(await run('read_note', { circle: 'the ski trip' })).toContain('(occasion "ski-trip-2027"');
+    expect(await run('read_note', { person: 'Remi', topic: 'ski-trip-2027' })).toContain('(occasion "ski-trip-2027"');
+    expect(await run('read_note', { circle: 'yugioh' })).toContain('The Yu-Gi-Oh crew (archived circle "yugioh"');
+  });
+
+  it('finds occasions and archived circles by search', async () => {
+    expect(await run('search_notes', { query: 'chalet' })).toContain('- occasion "Ski trip" (occasion: ski-trip-2027): ');
+    expect(await run('search_notes', { query: 'duels' })).toContain(
+      '- archived circle "The Yu-Gi-Oh crew" (circle: yugioh): ',
+    );
   });
 });
 

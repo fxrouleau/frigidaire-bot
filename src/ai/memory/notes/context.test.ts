@@ -5,9 +5,13 @@ import {
   circleNames,
   circlesNamedIn,
   describeMembers,
+  describeParticipants,
   excerpt,
   formatNoteSize,
+  OCCASION_MAX_CHARS,
   pickCircles,
+  pickOccasions,
+  renderOccasionNote,
   profileSummary,
   renderGroupSection,
 } from './context';
@@ -16,6 +20,7 @@ import type { Note } from './notesStore';
 const REMI = '100000000000000001';
 const DALE = '100000000000000002';
 const NOVA = '100000000000000003';
+const JASPER = '100000000000000004';
 const NAMES: Record<string, string> = { [REMI]: 'Remi', [DALE]: 'Dale', [NOVA]: 'Nova' };
 
 function circle(id: number, over: Partial<Note> = {}): Note {
@@ -36,6 +41,11 @@ function circle(id: number, over: Partial<Note> = {}): Note {
     updatedAt: '2026-09-20 12:00:00',
     updatedBy: 'dream',
     active: true,
+    status: null,
+    startsOn: null,
+    endsOn: null,
+    place: null,
+    circle: null,
     ...over,
   };
 }
@@ -73,6 +83,84 @@ describe('pickCircles', () => {
     expect(pickCircles({ circles: [named], text: 'hi', present: new Set([REMI, NOVA]) })).toEqual([]);
     expect(pickCircles({ circles: [named], text: 'hi', present: new Set([REMI, DALE]) })).toHaveLength(1);
     expect(pickCircles({ circles: [named], text: 'mtg', present, skip: () => true })).toEqual([]);
+  });
+
+  it('brings a fading circle in only when the message names it', () => {
+    const fading = circle(1);
+    const present = new Set([REMI, DALE]);
+    expect(pickCircles({ circles: [fading], text: 'hi', present, canBePresent: () => false })).toEqual([]);
+    expect(
+      pickCircles({ circles: [fading], text: 'mtg tonight?', present, canBePresent: () => false }).map((p) => p.reason),
+    ).toEqual(['named']);
+  });
+});
+
+describe('occasions in a chat turn', () => {
+  const today = '2027-01-01';
+  const occasion = (id: number, over: Partial<Note> = {}): Note =>
+    circle(id, {
+      scope: 'occasion',
+      topic: 'ski-trip-2027',
+      title: 'Ski trip',
+      aliases: ['the ski trip'],
+      content: 'The group trip.\n\n## So far\nNothing yet.\n\n## Plan\nFlights booked, hotel still open.\n\n## Earlier\n- First talked about in 2025.',
+      members: [
+        { memberId: REMI, since: null, until: null, role: 'organizer' },
+        { memberId: DALE, since: null, until: null, role: null },
+        { memberId: NOVA, since: null, until: '2026-12', role: 'bailed' },
+      ],
+      status: 'planned',
+      startsOn: '2027-01-10',
+      endsOn: '2027-01-17',
+      place: 'Tremblant',
+      ...over,
+    });
+
+  it('picks named occasions, then upcoming (≤60 days) or happening ones someone here takes part in, at most 2', () => {
+    const soon = occasion(1);
+    const far = occasion(2, { topic: 'lan-2027', title: 'Summer LAN', aliases: [], startsOn: '2027-07-01', endsOn: null });
+    const now = occasion(3, { topic: 'ski-trip', title: 'Ski trip', aliases: [], startsOn: '2026-12-30', endsOn: '2027-01-03' });
+    const past = occasion(4, { topic: 'bbq', title: 'The BBQ', aliases: [], status: 'past', startsOn: '2026-08-01', endsOn: null });
+    const archived = occasion(5, { topic: 'old-lan', title: 'Old LAN', aliases: [], status: 'archived' });
+    const all = [soon, far, now, past, archived];
+    const pick = (text: string, present: string[], max?: number) =>
+      pickOccasions({ occasions: all, text, present: new Set(present), today, max }).map((p) => [p.occasion.topic, p.reason]);
+    expect(pick('so hyped', [REMI])).toEqual([
+      ['ski-trip', 'participants'],
+      ['ski-trip-2027', 'participants'],
+    ]);
+    // A past occasion only when named; an archived one never; someone who bailed doesn't bring it in.
+    expect(pick('remember the bbq?', [JASPER])).toEqual([['bbq', 'named']]);
+    expect(pick('old lan was fun', [REMI], 5).map((p) => p[0])).not.toContain('old-lan');
+    expect(pick('anyone around?', [NOVA])).toEqual([]);
+    expect(pick('what about the summer lan', [JASPER])).toEqual([['lan-2027', 'named']]);
+    expect(
+      pickOccasions({ occasions: all, text: 'hey', present: new Set([REMI]), today, skip: (o) => o.id === 3 }).map(
+        (p) => p.occasion.topic,
+      ),
+    ).toEqual(['ski-trip-2027']);
+  });
+
+  it('renders an occasion with its dates, where it is, its people, and its Plan first', () => {
+    const text = renderOccasionNote({
+      occasion: occasion(1),
+      reason: 'participants',
+      maxChars: OCCASION_MAX_CHARS,
+      nameOf: (id) => NAMES[id],
+      now: new Date('2027-01-01T12:00:00Z'),
+      today,
+    });
+    expect(text.split('\n')[0]).toBe(
+      'Your notes on the occasion "Ski trip" (2027-01-10 to 2027-01-17 in Tremblant; planned, starts in 9 days; with Remi (organizer), Dale; dropped out: Nova (until 2026-12, bailed); some of its people are in this conversation; updated 3mo ago):',
+    );
+    expect(text).toContain('The group trip.\n\n## Plan\nFlights booked, hotel still open.\n\n## So far\nNothing yet.');
+    expect(text).not.toContain('First talked about');
+  });
+
+  it('describes participants: who is in, then who dropped out', () => {
+    expect(describeParticipants(occasion(1).members, (id) => NAMES[id])).toBe(
+      'Remi (organizer), Dale; dropped out: Nova (until 2026-12, bailed)',
+    );
   });
 });
 

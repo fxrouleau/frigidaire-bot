@@ -29,14 +29,18 @@ import {
   GROUP_CORRECTIONS_HEADING,
   NEW_JOURNAL_LIMIT,
   noteKey,
+  OCCASION_MAX_CHARS,
   OPEN_CORRECTIONS_LIMIT,
   OTHER_PROFILE_MAX_CHARS,
   pickCircles,
+  pickOccasions,
   renderCircleNote,
   renderGroupSection,
+  renderOccasionNote,
   renderPersonNotes,
   SPEAKER_PROFILE_MAX_CHARS,
 } from './memory/notes/context';
+import { circlePresence } from './memory/notes/lifecycle';
 import type { CircleMembership, Note, NotesStore } from './memory/notes/notesStore';
 import { PROFILE_TOPIC } from './memory/notes/schema';
 import { getModelContextLengths, type ModelContextLengths } from './modelCatalog';
@@ -1266,8 +1270,10 @@ Right before each new message you get a context note with the current time (East
    * (profile without its Earlier footnotes + their circles + journal rows newer than the notes + open
    * corrections, see renderPersonNotes), else their most recent memories. Then circles (≤3): the ones the
    * message names, and the ones with at least two current members in the conversation (the speaker, the
-   * people above, the window's recent participants). Plus a contextual search of the journal for the
-   * message itself. Priority for dedup: speaker > contextual > others > circles.
+   * people above, the window's recent participants). Then occasions (≤2, pickOccasions): the ones the
+   * message names, and upcoming (≤60 days) or happening ones someone in the conversation takes part in.
+   * Plus a contextual search of the journal for the message itself. Priority for dedup: speaker >
+   * contextual > others > circles > occasions.
    */
   private async buildMemorySections(
     message: Message,
@@ -1369,16 +1375,21 @@ Right before each new message you get a context note with the current time (East
     }
 
     // 4. Circles: shared notes of several members, when the message names one or several of its current
-    //    members are in the conversation.
+    //    members are in the conversation (archived circles never: listCircles leaves them out).
     const circleBlocks: string[] = [];
+    const occasionBlocks: string[] = [];
     if (notes) {
       const present = new Set([speaker.userId, ...others.map((p) => canonicalUserId(p.userId)), ...participants]);
       try {
+        // A fading circle (lifecycle.ts CIRCLE_DECAY: it hasn't come up in a while) only when named.
+        const activity = notes.circleActivity();
+        const today = notes.today();
         const picked = pickCircles({
           circles: notes.listCircles(),
           text: searchText,
           present,
           skip: (circle) => seen.notes.has(noteKey(circle)),
+          canBePresent: (circle) => circlePresence(circle, activity.get(circle.id) ?? [], today).state === 'present',
         });
         for (const { circle, reason } of picked) {
           circleBlocks.push(
@@ -1389,6 +1400,35 @@ Right before each new message you get a context note with the current time (East
         }
       } catch (error) {
         logger.warn('Failed to read circle notes:', error);
+      }
+
+      // 5. Occasions: an upcoming (≤60 days) or happening trip or outing someone here takes part in, or any
+      //    occasion the message names (a past one only then; archived ones never), at most 2, Plan first.
+      try {
+        const today = notes.today();
+        const picked = pickOccasions({
+          occasions: notes.listOccasions(),
+          text: searchText,
+          present,
+          today,
+          skip: (occasion) => seen.notes.has(noteKey(occasion)),
+        });
+        for (const { occasion, reason } of picked) {
+          occasionBlocks.push(
+            renderOccasionNote({
+              occasion,
+              reason,
+              maxChars: OCCASION_MAX_CHARS,
+              nameOf: this.nameOf(store),
+              now,
+              today,
+            }),
+          );
+          seen.notes.add(noteKey(occasion));
+          noteKeys.push(noteKey(occasion));
+        }
+      } catch (error) {
+        logger.warn('Failed to read occasion notes:', error);
       }
     }
 
@@ -1402,7 +1442,15 @@ Right before each new message you get a context note with the current time (East
         ? `Relevant to this conversation:\n${contextualMemories.map((m) => `- ${categoryLabel(m, this.nameOf(store))} ${subjectLabel(m)}: ${m.content} (${formatRelativeAge(m.updated_at)})`).join('\n')}`
         : '';
 
-    const text = [userSection, ...otherBlocks, mentionedSection, ...circleBlocks, groupSection, contextualSection]
+    const text = [
+      userSection,
+      ...otherBlocks,
+      mentionedSection,
+      ...circleBlocks,
+      ...occasionBlocks,
+      groupSection,
+      contextualSection,
+    ]
       .filter((s) => s)
       .join('\n\n');
     return { text, injectedIds, noteKeys };

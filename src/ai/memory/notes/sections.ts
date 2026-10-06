@@ -15,6 +15,13 @@
 export const PROFILE_SECTIONS = ['Now', 'Traits', 'Circles & people', 'Earlier'] as const;
 /** A topic note's or circle's sections, in order. */
 export const TOPIC_SECTIONS = ['Now', 'Earlier'] as const;
+/**
+ * An occasion's sections: while it is ahead or under way its Plan (when, where, who, bookings, open
+ * questions: logistics belong here, unlike in profiles) and what happened so far; once past, what happened
+ * and the legacy it left (running jokes, core memories).
+ */
+export const OCCASION_PLAN_SECTIONS = ['Plan', 'So far'] as const;
+export const OCCASION_HISTORY_SECTIONS = ['What happened', 'Legacy'] as const;
 /** The heading of the dated-footnotes section chat turns leave out. */
 export const EARLIER_HEADING = 'Earlier';
 
@@ -156,4 +163,42 @@ export function noteShapeWarnings(content: string, kind: 'profile' | 'topic'): s
     warnings.push(`sections out of order (expected ${expected.join(', ')})`);
   }
   return warnings;
+}
+
+/**
+ * What is off about an occasion's shape for where it is: a planned or happening one without `## Plan`, a
+ * past one without `## What happened` (or still carrying its Plan). An archived trace has no fixed shape.
+ * Advisory, like noteShapeWarnings().
+ */
+export function occasionShapeWarnings(content: string, phase: 'plan' | 'history' | 'trace'): string[] {
+  if (phase === 'trace') return [];
+  const headings = splitSections(content)
+    .filter((s) => s.level === 2)
+    .map((s) => s.heading.toLowerCase());
+  const has = (name: string) => headings.some((h) => h.startsWith(name.toLowerCase()));
+  if (phase === 'plan') return has('Plan') ? [] : ['no "## Plan" section'];
+  const warnings: string[] = [];
+  if (!has('What happened')) warnings.push('no "## What happened" section');
+  if (has('Plan')) warnings.push('still has its "## Plan" section');
+  return warnings;
+}
+
+/**
+ * The note with its `## Plan` section (and anything nested under it) moved right after the text before the
+ * first heading: what a chat turn about an upcoming occasion needs first. A note without one is returned as
+ * is (trimmed).
+ */
+export function planFirst(markdown: string): string {
+  const sections = splitSections(markdown);
+  const at = sections.findIndex((s) => s.level === 2 && s.heading.toLowerCase().startsWith('plan'));
+  if (at < 0) return markdown.trim();
+  let end = at + 1;
+  while (end < sections.length && sections[end].level > 2) end++;
+  const plan = sections.slice(at, end);
+  const rest = [...sections.slice(0, at), ...sections.slice(end)];
+  const intro = rest[0]?.level === 0 ? [rest.shift() as NoteSection] : [];
+  return [...intro, ...plan, ...rest]
+    .map((s) => s.text.trim())
+    .filter((t) => t)
+    .join('\n\n');
 }

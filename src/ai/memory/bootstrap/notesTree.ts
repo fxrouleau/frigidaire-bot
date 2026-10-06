@@ -6,6 +6,10 @@
 //   people/<main id>/<topic>.md      topic notes (games.md, work.md, …)
 //   group/<topic>.md                 the group's notes (lore.md, running-jokes.md, vibe.md, …)
 //   circles/<slug>.md                circles (mtg.md, remi-and-dale.md, …)
+//   activity.json                    optional: the circles' activity by month, {"<slug>": {"YYYY-MM": weight}}
+//                                    (months two or more members shared; lifecycle.ts CIRCLE_DECAY), recorded
+//                                    with the circles so their decay starts right (and the per-member limit
+//                                    counts only circles still present)
 //   people.json                      optional: the export's people.json (check mode reads known ids from it)
 //
 // Each note is markdown under a small front matter block; values are plain text, or JSON when they start
@@ -23,6 +27,7 @@
 // lists everything to fix. The shape rules (slugs, sizes, markup) are schema.ts's, shared with every writer.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { parseActivitySeed } from '../notes/lifecycle';
 import {
   type CircleDraft,
   NOTE_LIMITS,
@@ -54,14 +59,18 @@ export type NotesTree = {
   group?: NoteDraft[];
   /** undefined when the tree has no circles/ folder (circles are left alone). */
   circles?: CircleDraft[];
+  /** The circles' activity by month (activity.json), for circles in the tree; undefined without the file. */
+  activity?: Map<string, Record<string, number>>;
 };
 
 export type NotesTreeRead = { ok: true; tree: NotesTree; warnings: string[] } | { ok: false; errors: string[] };
 
 // Generous: the largest note is 8,000 characters of markdown plus a front matter with 30 members.
 const MAX_FILE_BYTES = 64 * 1024;
+// 60 circles × decades of months.
+const MAX_ACTIVITY_BYTES = 2 * 1024 * 1024;
 const SNOWFLAKE = /^\d{15,21}$/;
-const TOP_LEVEL = new Set(['manifest.json', 'people', 'group', 'circles', 'people.json', 'README.md']);
+const TOP_LEVEL = new Set(['manifest.json', 'people', 'group', 'circles', 'activity.json', 'people.json', 'README.md']);
 
 /** Whether a folder holds a notes tree waiting to be imported (a manifest.json at its root). */
 export function hasNotesTree(dir: string): boolean {
@@ -109,15 +118,15 @@ export function parseFrontMatter(text: string): { ok: true; value: FrontMatter }
   };
 }
 
-function readText(file: string, errors: string[], label: string): string | undefined {
+function readText(file: string, errors: string[], label: string, maxBytes = MAX_FILE_BYTES): string | undefined {
   try {
     const stat = fs.statSync(file);
     if (!stat.isFile()) {
       errors.push(`${label}: not a file`);
       return undefined;
     }
-    if (stat.size > MAX_FILE_BYTES) {
-      errors.push(`${label}: ${stat.size} bytes, over the ${MAX_FILE_BYTES}-byte limit for a note file`);
+    if (stat.size > maxBytes) {
+      errors.push(`${label}: ${stat.size} bytes, over the ${maxBytes}-byte limit for this file`);
       return undefined;
     }
     return fs.readFileSync(file, 'utf8');
@@ -324,9 +333,31 @@ export function readNotesTree(dir: string): NotesTreeRead {
     }
   }
 
+  let activity: Map<string, Record<string, number>> | undefined;
+  const activityFile = path.join(dir, 'activity.json');
+  if (fs.existsSync(activityFile)) {
+    const text = readText(activityFile, errors, 'activity.json', MAX_ACTIVITY_BYTES);
+    if (text !== undefined) {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        errors.push('activity.json: not valid JSON');
+      }
+      const parsed = raw === undefined ? undefined : parseActivitySeed(raw);
+      if (parsed && !parsed.ok) errors.push(...parsed.errors.map((e) => `activity.json: ${e}`));
+      if (parsed?.ok) {
+        const inTree = new Set((circles ?? []).map((c) => c.slug));
+        activity = new Map([...parsed.seed].filter(([slug]) => inTree.has(slug)));
+        const strays = [...parsed.seed.keys()].filter((slug) => !inTree.has(slug));
+        if (strays.length > 0) warnings.push(`activity.json: no circle file for ${strays.join(', ')}, ignored`);
+      }
+    }
+  }
+
   if (people.length === 0 && !group?.length && !circles?.length && errors.length === 0) {
     errors.push('the tree holds no notes (people/, group/ and circles/ are empty or missing)');
   }
   if (errors.length > 0 || !manifest) return { ok: false, errors };
-  return { ok: true, tree: { dir, manifest, people, group, circles }, warnings };
+  return { ok: true, tree: { dir, manifest, people, group, circles, ...(activity ? { activity } : {}) }, warnings };
 }

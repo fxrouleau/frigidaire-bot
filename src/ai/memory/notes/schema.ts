@@ -10,9 +10,31 @@
  * - `group`: the server as a whole (truly server-wide lore, running jokes, vibe).
  * - `circle`: a SET of members sharing something: an interest or sub-group (the MTG crew, the Valorant
  *   squad, roommates) or a pair (two people's history, a rivalry). One note per circle, its topic is the
- *   circle's unique slug, and its membership is dated (CircleMember).
+ *   circle's unique slug, and its membership is dated (CircleMember). A circle that is over can be archived
+ *   (status 'archived'): kept as a short historical trace.
+ * - `occasion`: one notable thing specific members do together at a date (a trip, an outing somewhere, a
+ *   tournament): its topic is a slug unique among occasions, its participants are dated like a circle's
+ *   members, and it carries `starts_on`/`ends_on` (partial dates), a `place` and a lifecycle status
+ *   (OCCASION_STATUSES). It is planned, happens, becomes history, and is archived some months later.
  */
-export type NoteScope = 'person' | 'group' | 'circle';
+export type NoteScope = 'person' | 'group' | 'circle' | 'occasion';
+
+/** The scopes whose notes are shared by a set of members (note_members): circles and occasions. */
+export type SharedScope = 'circle' | 'occasion';
+
+/**
+ * An occasion's status as its last writer gave it. `planned` and `happening` mean the note was written
+ * while the occasion was ahead or under way (its Plan); `past` that it was rewritten as history; `cancelled`
+ * that the entries said it was off; `archived` that it was compacted to a short trace. Whether an occasion is
+ * planned, happening or past right now is derived from its dates and today (lifecycle.ts occasionPhase), as
+ * long as it isn't cancelled or archived.
+ */
+export const OCCASION_STATUSES = ['planned', 'happening', 'past', 'cancelled', 'archived'] as const;
+export type OccasionStatus = (typeof OCCASION_STATUSES)[number];
+/** The status of an archived circle or occasion (a circle's status is otherwise null). */
+export const ARCHIVED_STATUS = 'archived';
+/** A note's stored status: an occasion's OccasionStatus, a circle's 'archived' (null while live); null for the rest. */
+export type NoteStatus = OccasionStatus;
 
 /** The owner of a set of topic notes. A person is always their MAIN account id (LINKED_ACCOUNTS resolved). */
 export type NoteOwner = { scope: 'person'; ownerId: string } | { scope: 'group' };
@@ -40,15 +62,32 @@ export const NOTE_LIMITS = {
   /** A circle's note. */
   circleMaxChars: 6_000,
   circleTargetChars: 5_000,
+  /** An occasion's note (its Plan while ahead; what happened and its legacy once past). */
+  occasionMaxChars: 4_000,
+  occasionTargetChars: 3_000,
+  /**
+   * The short historical trace an archived circle or occasion is compacted to (the nightly lifecycle pass):
+   * what it was, when, who, the highlights and its legacy.
+   */
+  archivedMaxChars: 1_500,
+  archivedTargetChars: 1_200,
+  /** Occasions that aren't archived, in all. */
+  maxOccasions: 30,
+  /** Participants of one occasion (current and those who bailed), and the fewest it can have. */
+  maxOccasionParticipants: 30,
+  minOccasionParticipants: 2,
+  /** Where an occasion takes place ("Tremblant", "the orchard"). */
+  placeMaxChars: 80,
   /** Topics per person, the profile included. */
   maxPersonTopics: 10,
   /** Topics for the group. */
   maxGroupTopics: 8,
-  /** Active circles in all. */
+  /** Live circles in all (present and fading: archived ones don't count). */
   maxCircles: 60,
   /**
-   * Active circles one member currently belongs to (former memberships don't count). 16 since Oct 2026: at 12
-   * the import had to end real memberships to fit the core members, who all sat at exactly 12.
+   * Present circles one member is currently in (former memberships, fading and archived circles don't count:
+   * lifecycle.ts CIRCLE_DECAY). 16, not 12: the core members all sat at 12 and the import had to end real
+   * memberships to fit.
    */
   maxCirclesPerMember: 16,
   /** Members of one circle (current and former), and the fewest a circle can have. */
@@ -89,7 +128,31 @@ export type CircleDraft = {
   merged_from: string[];
 };
 
-/** A stored circle membership. */
+/**
+ * One occasion as a writer proposes it (also its JSON shape in model output): slug, title and markdown
+ * content, other names, `starts_on` (required) and `ends_on` (optional) as partial dates, an optional short
+ * `place`, its `status` (null/absent: the stored one is kept, a new occasion gets 'planned', or 'past' when
+ * its dates are already behind), and its FULL list of participants (someone who bailed keeps their place
+ * with an `until`).
+ */
+export type OccasionDraft = {
+  slug: string;
+  title: string;
+  content: string;
+  aliases: string[];
+  starts_on: string;
+  ends_on: string | null;
+  place: string | null;
+  status: OccasionStatus | null;
+  participants: CircleMemberDraft[];
+  /**
+   * The slug of the circle it belongs to (a tradition: each year's outing is an occasion of the circle that
+   * holds it), or null. When it happens, it counts as that circle's activity.
+   */
+  circle: string | null;
+};
+
+/** A stored circle membership (also an occasion's participant). */
 export type CircleMember = {
   /** The member's main account id. */
   memberId: string;
@@ -108,21 +171,33 @@ export type CircleMember = {
  *   was in; the group's any circle);
  * - `removed_circles`: circle slugs to remove (a mistake, not a circle that drifted apart: that one keeps
  *   its history with dated `until`s);
+ * - `archived_circles`: circle slugs to archive (over: everyone moved on). A circle written in `circles`
+ *   too is saved with that content and archived; written without being listed here, an archived circle is
+ *   revived;
+ * - `occasions`: occasions to create or update, each in full (a person's output only touches occasions
+ *   that person is or was a participant of);
+ * - `removed_occasions`: occasion slugs to remove (a mistake or a duplicate);
  * - `change_summary`: a few words on what changed (the report line and the version history).
- * `circles` and `removed_circles` may be absent in the JSON (read as []).
+ * Everything but `notes`, `removed_topics` and `change_summary` may be absent in the JSON (read as []).
  */
 export type NotesOutput = {
   notes: NoteDraft[];
   removed_topics: string[];
   circles: CircleDraft[];
   removed_circles: string[];
+  archived_circles: string[];
+  occasions: OccasionDraft[];
+  removed_occasions: string[];
   change_summary: string;
 };
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; errors: string[] };
 
 export type NoteValidationContext = {
-  /** Whose output this is: a person's, the group's, or one circle's (an owner edit of a circle). */
+  /**
+   * Whose output this is: a person's, the group's, or one circle's or occasion's (an owner edit of it, or
+   * the nightly rewrite of an occasion as history).
+   */
   scope: NoteScope;
   /**
    * Discord ids that may appear in note text: the person's own account ids and ids that were in the
@@ -158,13 +233,20 @@ const SNOWFLAKE_LIKE = /\b\d{15,21}\b/g;
 /** The size limit of a note's content. */
 export function maxCharsFor(scope: NoteScope, topic: string): number {
   if (scope === 'circle') return NOTE_LIMITS.circleMaxChars;
+  if (scope === 'occasion') return NOTE_LIMITS.occasionMaxChars;
   return scope === 'person' && topic === PROFILE_TOPIC ? NOTE_LIMITS.profileMaxChars : NOTE_LIMITS.topicMaxChars;
 }
 
 /** The size a writer aims for in a note's content (see NOTE_LIMITS): well under maxCharsFor(). */
 export function targetCharsFor(scope: NoteScope, topic: string): number {
   if (scope === 'circle') return NOTE_LIMITS.circleTargetChars;
+  if (scope === 'occasion') return NOTE_LIMITS.occasionTargetChars;
   return scope === 'person' && topic === PROFILE_TOPIC ? NOTE_LIMITS.profileTargetChars : NOTE_LIMITS.topicTargetChars;
+}
+
+/** Whether a scope's notes are shared by a set of members (circles and occasions). */
+export function isSharedScope(scope: NoteScope): scope is SharedScope {
+  return scope === 'circle' || scope === 'occasion';
 }
 
 /** The topic limit of an owner. */
@@ -210,8 +292,11 @@ function titleProblems(
   return { title, errors };
 }
 
-/** Markdown content's problems within a size limit (shared by notes and circles). */
-function contentProblems(
+/**
+ * Markdown content's problems within a size limit (shared by notes, circles and occasions, and the
+ * archived trace the lifecycle pass writes). The content comes back trimmed, line ends normalized.
+ */
+export function contentProblems(
   raw: unknown,
   label: string,
   max: number,
@@ -251,7 +336,7 @@ export function validateNoteDraft(raw: unknown, ctx: NoteValidationContext): Val
 }
 
 /** Whether partial date `until` is before `since` (compared at the precision both have). */
-function endsBeforeStart(since: string, until: string): boolean {
+export function endsBeforeStart(since: string, until: string): boolean {
   const n = Math.min(since.length, until.length);
   return until.slice(0, n) < since.slice(0, n);
 }
@@ -297,71 +382,19 @@ export function validateCircleDraft(
     );
   }
 
-  const members: CircleMemberDraft[] = [];
-  const rawMembers = fields.members;
-  if (!Array.isArray(rawMembers)) errors.push(`${label}: "members" must be an array`);
-  for (const entry of Array.isArray(rawMembers) ? rawMembers : []) {
-    const member =
-      entry && typeof entry === 'object' && !Array.isArray(entry) ? (entry as Record<string, unknown>) : {};
-    const id =
-      typeof member.id === 'number' ? String(member.id) : typeof member.id === 'string' ? member.id.trim() : '';
-    if (!MEMBER_ID.test(id)) {
-      errors.push(`${label}: a member id must be a Discord id (got "${String(member.id ?? '').slice(0, 30)}")`);
-      continue;
-    }
-    if (members.some((m) => m.id === id)) {
-      errors.push(`${label}: member ${id} is listed twice`);
-      continue;
-    }
-    const since = partialDate(member.since);
-    const until = partialDate(member.until);
-    if (since === 'invalid' || until === 'invalid') {
-      errors.push(`${label}: member ${id}'s since/until must be YYYY, YYYY-MM or YYYY-MM-DD`);
-      continue;
-    }
-    if (since && until && endsBeforeStart(since, until)) {
-      errors.push(`${label}: member ${id} leaves (${until}) before joining (${since})`);
-      continue;
-    }
-    let role: string | null = null;
-    if (member.role !== undefined && member.role !== null && member.role !== '') {
-      const parsed = shortLabel(member.role, NOTE_LIMITS.roleMaxChars, new Set());
-      if (parsed === 'invalid') {
-        errors.push(`${label}: member ${id}'s role must be plain text up to ${NOTE_LIMITS.roleMaxChars} characters`);
-        continue;
-      }
-      role = parsed;
-    }
-    members.push({ id, since, until, role });
-  }
-  if (Array.isArray(rawMembers)) {
-    if (members.length < NOTE_LIMITS.minCircleMembers && errors.length === 0) {
-      errors.push(`${label}: a circle has at least ${NOTE_LIMITS.minCircleMembers} members`);
-    }
-    if (members.length > NOTE_LIMITS.maxCircleMembers) {
-      errors.push(`${label}: ${members.length} members, over the limit of ${NOTE_LIMITS.maxCircleMembers}`);
-    }
-  }
+  const members = memberList(fields.members, label, errors, {
+    field: 'members',
+    what: 'member',
+    min: NOTE_LIMITS.minCircleMembers,
+    max: NOTE_LIMITS.maxCircleMembers,
+    kind: 'a circle',
+  });
 
   const allowed = new Set([...(ctx.allowedIds ?? []), ...members.map((m) => m.id)]);
   const title = titleProblems(fields.title, label, allowed);
   const content = contentProblems(fields.content, label, NOTE_LIMITS.circleMaxChars, allowed);
   errors.push(...title.errors, ...content.errors);
-
-  const aliases: string[] = [];
-  const rawAliases = fields.aliases ?? [];
-  if (!Array.isArray(rawAliases)) errors.push(`${label}: "aliases" must be an array of names`);
-  for (const entry of Array.isArray(rawAliases) ? rawAliases : []) {
-    const alias = shortLabel(entry, NOTE_LIMITS.aliasMaxChars, allowed);
-    if (alias === 'invalid') {
-      errors.push(`${label}: an alias must be plain one-line text up to ${NOTE_LIMITS.aliasMaxChars} characters`);
-      continue;
-    }
-    if (!aliases.some((a) => a.toLowerCase() === alias.toLowerCase())) aliases.push(alias);
-  }
-  if (aliases.length > NOTE_LIMITS.maxCircleAliases) {
-    errors.push(`${label}: ${aliases.length} aliases, over the limit of ${NOTE_LIMITS.maxCircleAliases}`);
-  }
+  const aliases = aliasList(fields.aliases, label, allowed, errors);
 
   const mergedFrom: string[] = [];
   const rawMerged = fields.merged_from ?? [];
@@ -381,14 +414,187 @@ export function validateCircleDraft(
 }
 
 /**
+ * A circle's members or an occasion's participants: distinct snowflake-shaped ids, each with optional
+ * partial-date `since`/`until` (until not before since) and a short role, between `min` and `max` of them.
+ * Problems go to `errors`; the valid entries come back.
+ */
+function memberList(
+  raw: unknown,
+  label: string,
+  errors: string[],
+  opts: { field: string; what: string; min: number; max: number; kind: string },
+): CircleMemberDraft[] {
+  const members: CircleMemberDraft[] = [];
+  if (!Array.isArray(raw)) errors.push(`${label}: "${opts.field}" must be an array`);
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    const member =
+      entry && typeof entry === 'object' && !Array.isArray(entry) ? (entry as Record<string, unknown>) : {};
+    const id =
+      typeof member.id === 'number' ? String(member.id) : typeof member.id === 'string' ? member.id.trim() : '';
+    if (!MEMBER_ID.test(id)) {
+      errors.push(`${label}: a ${opts.what} id must be a Discord id (got "${String(member.id ?? '').slice(0, 30)}")`);
+      continue;
+    }
+    if (members.some((m) => m.id === id)) {
+      errors.push(`${label}: ${opts.what} ${id} is listed twice`);
+      continue;
+    }
+    const since = partialDate(member.since);
+    const until = partialDate(member.until);
+    if (since === 'invalid' || until === 'invalid') {
+      errors.push(`${label}: ${opts.what} ${id}'s since/until must be YYYY, YYYY-MM or YYYY-MM-DD`);
+      continue;
+    }
+    if (since && until && endsBeforeStart(since, until)) {
+      errors.push(`${label}: ${opts.what} ${id} leaves (${until}) before joining (${since})`);
+      continue;
+    }
+    let role: string | null = null;
+    if (member.role !== undefined && member.role !== null && member.role !== '') {
+      const parsed = shortLabel(member.role, NOTE_LIMITS.roleMaxChars, new Set());
+      if (parsed === 'invalid') {
+        errors.push(
+          `${label}: ${opts.what} ${id}'s role must be plain text up to ${NOTE_LIMITS.roleMaxChars} characters`,
+        );
+        continue;
+      }
+      role = parsed;
+    }
+    members.push({ id, since, until, role });
+  }
+  if (Array.isArray(raw)) {
+    if (members.length < opts.min && errors.length === 0) {
+      errors.push(`${label}: ${opts.kind} has at least ${opts.min} ${opts.what}s`);
+    }
+    if (members.length > opts.max) {
+      errors.push(`${label}: ${members.length} ${opts.what}s, over the limit of ${opts.max}`);
+    }
+  }
+  return members;
+}
+
+/** Other names a circle or occasion goes by (≤ NOTE_LIMITS.maxCircleAliases short one-line names, deduped). */
+function aliasList(raw: unknown, label: string, allowed: ReadonlySet<string>, errors: string[]): string[] {
+  const aliases: string[] = [];
+  const list = raw ?? [];
+  if (!Array.isArray(list)) errors.push(`${label}: "aliases" must be an array of names`);
+  for (const entry of Array.isArray(list) ? list : []) {
+    const alias = shortLabel(entry, NOTE_LIMITS.aliasMaxChars, allowed);
+    if (alias === 'invalid') {
+      errors.push(`${label}: an alias must be plain one-line text up to ${NOTE_LIMITS.aliasMaxChars} characters`);
+      continue;
+    }
+    if (!aliases.some((a) => a.toLowerCase() === alias.toLowerCase())) aliases.push(alias);
+  }
+  if (aliases.length > NOTE_LIMITS.maxCircleAliases) {
+    errors.push(`${label}: ${aliases.length} aliases, over the limit of ${NOTE_LIMITS.maxCircleAliases}`);
+  }
+  return aliases;
+}
+
+/** An occasion status from a writer: one of OCCASION_STATUSES (any case), null for none, or 'invalid'. */
+function occasionStatus(raw: unknown): OccasionStatus | null | 'invalid' {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string') return 'invalid';
+  const value = raw.trim().toLowerCase();
+  if (value === '') return null;
+  return (OCCASION_STATUSES as readonly string[]).includes(value) ? (value as OccasionStatus) : 'invalid';
+}
+
+/**
+ * One occasion as proposed by a writer: slug, one-line title, markdown content within the occasion limit,
+ * aliases, `starts_on` (a partial date, required) and `ends_on` (optional, not before it), an optional short
+ * one-line `place`, an optional status (OCCASION_STATUSES), and its participants: 2–30 like a circle's
+ * members ("members" is read when "participants" is missing: models mix them up). The participants' own ids
+ * may appear in the text. Ids are checked for shape only: the store resolves linked accounts and refuses ids
+ * nobody knows.
+ */
+export function validateOccasionDraft(
+  raw: unknown,
+  ctx: Pick<NoteValidationContext, 'allowedIds'> = {},
+): ValidationResult<OccasionDraft> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, errors: ['an occasion must be an object'] };
+  }
+  const fields = raw as Record<string, unknown>;
+  const slug = normalizeTopic(fields.slug);
+  const label = `occasion "${slug ?? (typeof fields.slug === 'string' ? fields.slug.slice(0, 40) : '?')}"`;
+  const errors: string[] = [];
+  if (!slug) {
+    errors.push(
+      `${label}: the slug must be a lowercase slug (letters, digits, single hyphens; ≤${NOTE_LIMITS.topicSlugMaxChars} chars)`,
+    );
+  }
+
+  const startsOn = partialDate(fields.starts_on);
+  const endsOn = partialDate(fields.ends_on);
+  if (startsOn === null) errors.push(`${label}: "starts_on" is required (YYYY, YYYY-MM or YYYY-MM-DD)`);
+  if (startsOn === 'invalid') errors.push(`${label}: "starts_on" must be YYYY, YYYY-MM or YYYY-MM-DD`);
+  if (endsOn === 'invalid') errors.push(`${label}: "ends_on" must be YYYY, YYYY-MM or YYYY-MM-DD, or null`);
+  if (startsOn && startsOn !== 'invalid' && endsOn && endsOn !== 'invalid' && endsBeforeStart(startsOn, endsOn)) {
+    errors.push(`${label}: it ends (${endsOn}) before it starts (${startsOn})`);
+  }
+  const status = occasionStatus(fields.status);
+  if (status === 'invalid') errors.push(`${label}: "status" must be one of ${OCCASION_STATUSES.join(', ')}`);
+
+  const participants = memberList(fields.participants ?? fields.members, label, errors, {
+    field: 'participants',
+    what: 'participant',
+    min: NOTE_LIMITS.minOccasionParticipants,
+    max: NOTE_LIMITS.maxOccasionParticipants,
+    kind: 'an occasion',
+  });
+
+  const allowed = new Set([...(ctx.allowedIds ?? []), ...participants.map((m) => m.id)]);
+  let place: string | null = null;
+  if (fields.place !== undefined && fields.place !== null && fields.place !== '') {
+    const parsed = shortLabel(fields.place, NOTE_LIMITS.placeMaxChars, allowed);
+    if (parsed === 'invalid') {
+      errors.push(`${label}: "place" must be plain one-line text up to ${NOTE_LIMITS.placeMaxChars} characters`);
+    } else place = parsed;
+  }
+  const title = titleProblems(fields.title, label, allowed);
+  const content = contentProblems(fields.content, label, NOTE_LIMITS.occasionMaxChars, allowed);
+  errors.push(...title.errors, ...content.errors);
+  const aliases = aliasList(fields.aliases, label, allowed, errors);
+  let circle: string | null = null;
+  if (fields.circle !== undefined && fields.circle !== null && fields.circle !== '') {
+    const parsed = normalizeTopic(fields.circle);
+    if (!parsed) errors.push(`${label}: "circle" must be a circle's slug, or null`);
+    else circle = parsed;
+  }
+
+  if (errors.length > 0 || !slug || !title.title || !content.content || !startsOn || startsOn === 'invalid') {
+    return { ok: false, errors };
+  }
+  return {
+    ok: true,
+    value: {
+      slug,
+      title: title.title,
+      content: content.content,
+      aliases,
+      starts_on: startsOn,
+      ends_on: endsOn === 'invalid' ? null : endsOn,
+      place,
+      status: status === 'invalid' ? null : status,
+      participants,
+      circle,
+    },
+  };
+}
+
+/**
  * A writer's whole output for one owner (see NotesOutput). Every note must pass validateNoteDraft and every
  * circle validateCircleDraft; topics and circle slugs must be unique, removed topics/circles must be slugs
  * that aren't also written, a person's profile can never be removed, and the output can't hold more
- * topics than the scope allows. An output for a circle (`ctx.scope === 'circle'`) carries no notes or
- * removed topics. With `requireProfile` (a dream's or bootstrap's full rewrite of a person) the profile
- * must be among the notes. The change summary is clamped to one line of NOTE_LIMITS.changeSummaryMaxChars.
- * Cross-owner rules (a person's output only touches that person's circles; circle and member counts)
- * are the store's (NotesStore.applyNotesOutput), which knows the current state.
+ * topics than the scope allows. Occasions must pass validateOccasionDraft, with unique slugs. An output
+ * for one circle (`ctx.scope === 'circle'`) writes exactly that circle (and may archive it); one for an
+ * occasion writes exactly that occasion and nothing else. With `requireProfile` (a dream's or bootstrap's
+ * full rewrite of a person) the profile must be among the notes. The change summary is clamped to one line
+ * of NOTE_LIMITS.changeSummaryMaxChars. Cross-owner rules (a person's output only touches that person's
+ * circles and occasions; circle, occasion and member counts) are the store's (NotesStore.applyNotesOutput),
+ * which knows the current state.
  */
 export function validateNotesOutput(
   raw: unknown,
@@ -399,20 +605,22 @@ export function validateNotesOutput(
   }
   const fields = raw as Record<string, unknown>;
   const errors: string[] = [];
+  const single = isSharedScope(ctx.scope);
 
-  if (!Array.isArray(fields.notes) && !(ctx.scope === 'circle' && fields.notes === undefined)) {
+  if (!Array.isArray(fields.notes) && !(single && fields.notes === undefined)) {
     errors.push('"notes" must be an array');
   }
   const notes: NoteDraft[] = [];
   const seen = new Set<string>();
   const rawNotes = Array.isArray(fields.notes) ? fields.notes : [];
   if (ctx.scope === 'circle' && rawNotes.length > 0) errors.push('an edit of a circle writes only "circles"');
+  if (ctx.scope === 'occasion' && rawNotes.length > 0) errors.push('an occasion is written in "occasions" only');
   // Whether the answer holds a profile at all, valid or not: one refused for its size is still there.
   const hasProfile = rawNotes.some(
     (entry) =>
       entry && typeof entry === 'object' && normalizeTopic((entry as Record<string, unknown>).topic) === PROFILE_TOPIC,
   );
-  for (const entry of ctx.scope === 'circle' ? [] : rawNotes) {
+  for (const entry of single ? [] : rawNotes) {
     const result = validateNoteDraft(entry, ctx);
     if (!result.ok) {
       errors.push(...result.errors);
@@ -427,7 +635,7 @@ export function validateNotesOutput(
   }
 
   const removed = slugList(fields.removed_topics, '"removed_topics"', 'removed topic', errors);
-  if (ctx.scope === 'circle' && removed.length > 0) errors.push('an edit of a circle removes no topics');
+  if (single && removed.length > 0) errors.push(`an edit of ${article(ctx.scope)} removes no topics`);
   for (const topic of removed) {
     if (ctx.scope === 'person' && topic === PROFILE_TOPIC) errors.push('the profile can never be removed');
     else if (seen.has(topic)) errors.push(`topic "${topic}" is both written and removed`);
@@ -454,17 +662,61 @@ export function validateNotesOutput(
   for (const slug of removedCircles) {
     if (circleSlugs.has(slug)) errors.push(`circle "${slug}" is both written and removed`);
   }
+  const mergedAway = new Set(circles.flatMap((c) => c.merged_from));
   for (const circle of circles) {
     for (const merged of circle.merged_from) {
       if (circleSlugs.has(merged)) errors.push(`circle "${merged}" is both written and merged into "${circle.slug}"`);
     }
   }
-  if (ctx.scope === 'circle' && circles.length !== 1) errors.push('an edit of a circle writes exactly that circle');
+  const archivedCircles = slugList(fields.archived_circles, '"archived_circles"', 'archived circle', errors);
+  for (const slug of archivedCircles) {
+    if (removedCircles.includes(slug)) errors.push(`circle "${slug}" is both removed and archived`);
+    else if (mergedAway.has(slug)) errors.push(`circle "${slug}" is both merged away and archived`);
+  }
+  if (ctx.scope === 'circle') {
+    // Exactly that circle: written (and maybe archived with its new text), or only archived as it is.
+    const archivesOnly = circles.length === 0 && archivedCircles.length === 1 && removedCircles.length === 0;
+    if (circles.length !== 1 && !archivesOnly) errors.push('an edit of a circle writes exactly that circle');
+    if (circles.length === 1 && archivedCircles.some((slug) => !circleSlugs.has(slug))) {
+      errors.push('an edit of a circle archives no other circle');
+    }
+  }
+
+  const occasions: OccasionDraft[] = [];
+  const occasionSlugs = new Set<string>();
+  const rawOccasions = fields.occasions ?? [];
+  if (!Array.isArray(rawOccasions)) errors.push('"occasions" must be an array');
+  for (const entry of Array.isArray(rawOccasions) ? rawOccasions : []) {
+    const result = validateOccasionDraft(entry, ctx);
+    if (!result.ok) {
+      errors.push(...result.errors);
+      continue;
+    }
+    if (occasionSlugs.has(result.value.slug)) {
+      errors.push(`occasion "${result.value.slug}" appears twice`);
+      continue;
+    }
+    occasionSlugs.add(result.value.slug);
+    occasions.push(result.value);
+  }
+  const removedOccasions = slugList(fields.removed_occasions, '"removed_occasions"', 'removed occasion', errors);
+  for (const slug of removedOccasions) {
+    if (occasionSlugs.has(slug)) errors.push(`occasion "${slug}" is both written and removed`);
+  }
+  if (ctx.scope === 'circle' && (occasions.length > 0 || removedOccasions.length > 0)) {
+    errors.push('an edit of a circle writes no occasions');
+  }
+  if (ctx.scope === 'occasion') {
+    if (occasions.length !== 1) errors.push('an occasion is written exactly: one entry in "occasions"');
+    if (circles.length > 0 || removedCircles.length > 0 || archivedCircles.length > 0 || removedOccasions.length > 0) {
+      errors.push('an occasion is written alone: no circles, no removals');
+    }
+  }
 
   if (ctx.requireProfile && ctx.scope === 'person' && !hasProfile) {
     errors.push('a person\'s notes must include the "profile" topic');
   }
-  if (ctx.scope !== 'circle') {
+  if (ctx.scope === 'person' || ctx.scope === 'group') {
     const maxTopics = maxTopicsFor(ctx.scope);
     if (notes.length > maxTopics) errors.push(`${notes.length} topics, over the limit of ${maxTopics}`);
   }
@@ -477,9 +729,16 @@ export function validateNotesOutput(
       removed_topics: removed,
       circles,
       removed_circles: removedCircles,
+      archived_circles: archivedCircles,
+      occasions,
+      removed_occasions: removedOccasions,
       change_summary: clampSummary(fields.change_summary),
     },
   };
+}
+
+function article(scope: NoteScope): string {
+  return scope === 'occasion' ? 'an occasion' : `a ${scope}`;
 }
 
 /** An optional array of slugs (deduped); problems go to `errors`. */

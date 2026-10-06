@@ -241,8 +241,11 @@ CATEGORIES (pick the right one):
 - "event": something out of the ordinary, with its date (and place, when said) — a milestone that happened (a move,
   a new job, an injury, a breakup, a tournament result, a big purchase) or a plan for one (a trip, an outing somewhere,
   a concert, a tournament): "Ski trip to Tremblant with Dale planned for Feb 2027". When a known plan changes or is
-  called off, save that ("Tremblant trip called off"). NEVER the logistics (who drives, who picks up whom, who is
-  late, who brings what, what time), routine plans (gaming tonight, dinner later), or what someone ate or watched.
+  called off, save that ("Tremblant trip called off"). When it is one of the occasions listed under what is already
+  known, start the row with that occasion's title, so it updates the occasion instead of starting a second one
+  ("Ski trip: moved to March 2027", "Ski trip: called off", "Ski trip: Dale lost his lift pass on day 2").
+  NEVER the logistics (who drives, who picks up whom, who is late, who brings what, what time), routine plans
+  (gaming tonight, dinner later), or what someone ate or watched.
 - "vibe": server-wide culture — in-jokes, running bits, group dynamics (subject "server"). Not news from outside the
   server (a streamer's win, game drama, what a card sells for) unless it became a running thing in the group.
 A shared image, GIF or meme is never an observation in itself. If an image reveals a DURABLE fact (bought a car,

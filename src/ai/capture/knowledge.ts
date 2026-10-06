@@ -7,9 +7,20 @@
 import { canonicalUserId } from '../../linkedAccounts';
 import { logger } from '../../logger';
 import type { Memory, MemoryStore } from '../memory/memoryStore';
-import { chatExcerpt, circlesLine, correctionLine } from '../memory/notes/context';
-import type { NotesStore } from '../memory/notes/notesStore';
+import { chatExcerpt, circlesLine, correctionLine, describeParticipants } from '../memory/notes/context';
+import {
+  byOccasionRelevance,
+  daysBetween,
+  describePhase,
+  easternDayOfTimestamp,
+  OCCASION_LIFECYCLE,
+  occasionDates,
+  occasionEndDay,
+  occasionPhase,
+} from '../memory/notes/lifecycle';
+import type { Note, NotesStore } from '../memory/notes/notesStore';
 import { PROFILE_TOPIC } from '../memory/notes/schema';
+import { planFirst } from '../memory/notes/sections';
 import { memoryKeyFor } from '../people';
 import { formatRelativeAge } from '../utils';
 
@@ -28,6 +39,10 @@ export const KNOWN_LIMITS = {
   groupRows: 25,
   /** Members the conversation talks about, besides its authors (the most referenced). */
   referencedPeople: 5,
+  /** Open occasions of these people (planned, happening, or past/cancelled in the last two weeks). */
+  occasions: 8,
+  /** How much of each occasion's note (its Plan first) is shown. */
+  occasionExcerptChars: 300,
 } as const;
 
 /** Someone in the conversation: their main account id when known (an unmatched old relay has only a name). */
@@ -90,14 +105,69 @@ export function buildCaptureKnowledge(args: {
     }
   }
 
+  // The server block is forced in when no person's block made it: the occasions never take that slot.
+  const noPeopleShown = blocks.length === 0;
   try {
-    keep(serverBlock(store, notes, fresh, rowLine), blocks.length === 0);
+    const ids = args.people.flatMap((p) => (p.userId ? [canonicalUserId(p.userId)] : []));
+    keep(occasionsBlock(notes, ids, nameOf, now));
+  } catch (error) {
+    pending.length = 0;
+    logger.warn("capture: couldn't read the occasions of the people in it:", error);
+  }
+
+  try {
+    keep(serverBlock(store, notes, fresh, rowLine), noPeopleShown);
   } catch (error) {
     pending.length = 0;
     logger.warn("capture: couldn't read what is known about the server:", error);
   }
 
   return blocks.length > 0 ? blocks.join('\n\n') : '(none yet)';
+}
+
+/** Whether capture should know an occasion: planned or happening, or past or cancelled within two weeks. */
+function isOpen(occasion: Note, today: string): boolean {
+  const phase = occasionPhase(occasion, today);
+  if (phase === 'planned' || phase === 'happening') return true;
+  if (phase === 'archived') return false;
+  const since = phase === 'cancelled' ? easternDayOfTimestamp(occasion.updatedAt) : occasionEndDay(occasion);
+  return since !== undefined && daysBetween(since, today) <= OCCASION_LIFECYCLE.recentlyPastDays;
+}
+
+/**
+ * The open occasions of these people (current or former participants), the most relevant first: so a
+ * conversation about a known trip becomes an update of it ("Ski trip: moved to March") instead of a
+ * second plan, and a cancellation names what was called off. '' when none.
+ */
+function occasionsBlock(
+  notes: NotesStore,
+  people: string[],
+  nameOf: (userId: string) => string | undefined,
+  now: Date,
+): string {
+  if (people.length === 0) return '';
+  const today = notes.today();
+  const byId = new Map<number, Note>();
+  for (const id of people) {
+    for (const { occasion } of notes.occasionsOf(id, { includeFormer: true })) byId.set(occasion.id, occasion);
+  }
+  const open = [...byId.values()]
+    .filter((o) => isOpen(o, today))
+    .sort(byOccasionRelevance(today))
+    .slice(0, KNOWN_LIMITS.occasions);
+  if (open.length === 0) return '';
+  const lines = open.map((o) => {
+    const where = o.place ? `, ${o.place}` : '';
+    const who = describeParticipants(o.members, nameOf) || 'nobody listed';
+    const age = formatRelativeAge(o.updatedAt, now);
+    const text = planFirst(o.content).replace(/\s+/g, ' ').trim();
+    const excerpt =
+      text.length > KNOWN_LIMITS.occasionExcerptChars
+        ? `${text.slice(0, KNOWN_LIMITS.occasionExcerptChars - 1).trimEnd()}…`
+        : text;
+    return `- "${o.title}" (${occasionDates(o)}${where}; ${describePhase(o, today)}; with ${who}${age ? `; notes updated ${age}` : ''}): ${excerpt}`;
+  });
+  return `Occasions these people are part of (an update, a change of plan or a cancellation is an "event" row that starts with the occasion's title):\n${lines.join('\n')}`;
 }
 
 function personBlock(

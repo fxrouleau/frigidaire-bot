@@ -188,7 +188,15 @@ export function loadNotesTree(
           .listCircles()
           .map((c) => c.topic)
           .filter((slug) => !keep.has(slug));
-        tally(notes.writeCircles(tree.circles, { updatedBy: 'bootstrap', reason, removeCircles }), 'circles');
+        tally(
+          notes.writeCircles(tree.circles, {
+            updatedBy: 'bootstrap',
+            reason,
+            removeCircles,
+            ...(tree.activity ? { circleActivity: tree.activity } : {}),
+          }),
+          'circles',
+        );
       }
 
       const owners: NoteOwner[] = [];
