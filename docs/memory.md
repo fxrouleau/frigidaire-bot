@@ -84,7 +84,7 @@ speaker in `said_by`. It never expires.
 
 Limits, validated on every write: profile ≤ 4,000 chars, other topics ≤ 8,000, circles ≤ 6,000 (the writers
 aim at targets well under them, 3,200 / 6,500 / 5,000: a model can't count, and a note written up to its limit
-fails the next time anything is added); ≤ 10 topics per person, ≤ 8 for the group; ≤ 60 active circles, nobody currently in more than 12; 2–30 members per circle;
+fails the next time anything is added); ≤ 10 topics per person, ≤ 8 for the group; ≤ 60 active circles, nobody currently in more than 16; 2–30 members per circle;
 ≤ 8 aliases. Titles are one line ≤ 80 chars. Markdown only: no Discord mention, emoji, timestamp or channel
 syntax, no `@everyone`, no HTML, and no Discord id that wasn't in the writer's input. Every write is all or
 nothing; a note breaking a rule is refused, never clamped into a different meaning.

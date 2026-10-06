@@ -415,7 +415,7 @@ Friday drafts at the game store (since 2021, most weeks).
 
 - Profile ≤ 4,000 characters; any other topic ≤ 8,000; a circle ≤ 6,000.
 - ≤ 10 topics per person (the profile included); ≤ 8 group topics.
-- ≤ 60 circles in all; nobody currently in more than 12; 2–30 members each.
+- ≤ 60 circles in all; nobody currently in more than 16; 2–30 members each.
 - Titles: one line, ≤ 80 characters. Slugs: as above.
 - Markdown only. Never: Discord mentions (`<@…>`, `<#…>`), custom emoji or timestamp syntax, `@everyone` /
   `@here`, HTML tags, or any 15–21-digit number (a Discord id) in a title or text. Describe emojis in words.

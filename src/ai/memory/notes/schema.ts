@@ -46,8 +46,11 @@ export const NOTE_LIMITS = {
   maxGroupTopics: 8,
   /** Active circles in all. */
   maxCircles: 60,
-  /** Active circles one member currently belongs to (former memberships don't count). */
-  maxCirclesPerMember: 12,
+  /**
+   * Active circles one member currently belongs to (former memberships don't count). 16 since Oct 2026: at 12
+   * the import had to end real memberships to fit the core members, who all sat at exactly 12.
+   */
+  maxCirclesPerMember: 16,
   /** Members of one circle (current and former), and the fewest a circle can have. */
   maxCircleMembers: 30,
   minCircleMembers: 2,
