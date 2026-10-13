@@ -210,6 +210,32 @@ describe('OpenRouterProvider request building', () => {
     expect(body.provider).toEqual({ zdr: true, sort: 'throughput' });
   });
 
+  it("cancels the request through the turn's signal (a follow-up came in mid-call)", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const hangingFetch = (_url: unknown, init?: { signal?: AbortSignal | null }) =>
+      new Promise<Response>((_resolve, reject) => {
+        requestSignal = init?.signal ?? undefined;
+        requestSignal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      });
+    const provider = new OpenRouterProvider({
+      client: new OpenAI({
+        apiKey: 'test-key',
+        baseURL: 'https://openrouter.ai/api/v1',
+        maxRetries: 2,
+        fetch: hangingFetch as unknown as typeof globalThis.fetch,
+      }),
+      model: 'test-model',
+    });
+    const controller = new AbortController();
+
+    const pending = provider.chat({ messages: [userText('hi')], tools: [], signal: controller.signal });
+    await vi.waitFor(() => expect(requestSignal).toBeDefined());
+    controller.abort();
+
+    await expect(pending).rejects.toThrow();
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   it('uses custom routing supplied via the constructor', async () => {
     const requests: unknown[] = [];
     const provider = new OpenRouterProvider({

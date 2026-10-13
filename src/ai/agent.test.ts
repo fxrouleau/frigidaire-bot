@@ -756,8 +756,9 @@ describe('AgentOrchestrator robustness', () => {
   it('serializes concurrent mentions in the same channel so the second turn sees the first reply', async () => {
     const provider = new FakeProvider([textResponse('first'), textResponse('second')]);
     const orchestrator = makeOrchestrator(provider);
-    const a = createFakeMessage({ content: 'one', channelId: 'same', messageId: 'm1' });
-    const b = createFakeMessage({ content: 'two', channelId: 'same', messageId: 'm2' });
+    // Two people: the same person's second message would be folded into the first turn (agent.steering.test.ts).
+    const a = createFakeMessage({ content: 'one', channelId: 'same', messageId: 'm1', authorId: 'user-a' });
+    const b = createFakeMessage({ content: 'two', channelId: 'same', messageId: 'm2', authorId: 'user-b' });
 
     await Promise.all([orchestrator.handleMention(a.message), orchestrator.handleMention(b.message)]);
 

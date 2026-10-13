@@ -148,7 +148,7 @@ export class OpenRouterProvider implements AiProvider {
         // @ts-expect-error OpenRouter-specific field
         provider: this.routing,
       },
-      featureRequestOptions('chat'),
+      { ...featureRequestOptions('chat'), signal: input.signal },
     );
 
     return parseOpenRouterResponse(response);

@@ -10,7 +10,10 @@ import type {
 
 export type { ChatInput };
 
-export type ScriptStep = ProviderChatResponse | { error: Error } | ((input: ChatInput) => ProviderChatResponse);
+export type ScriptStep =
+  | ProviderChatResponse
+  | { error: Error }
+  | ((input: ChatInput) => ProviderChatResponse | Promise<ProviderChatResponse>);
 
 const DEFAULT_SUPPORTED_TOOLS: ProviderToolDefinition[] = [
   {
@@ -42,7 +45,9 @@ export class FakeProvider implements AiProvider {
   }
 
   async chat(input: ChatInput): Promise<ProviderChatResponse> {
-    this.calls.push(structuredClone(input));
+    // An AbortSignal can't be cloned; what was asked is the rest.
+    const { signal: _signal, ...asked } = input;
+    this.calls.push(structuredClone(asked));
 
     const step = this.script.shift();
     if (step === undefined) {
