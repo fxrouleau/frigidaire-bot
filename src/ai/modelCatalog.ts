@@ -2,6 +2,7 @@
 // request by model:
 //   - the chat agent's history budget (context lengths)
 //   - the media features (input modalities, and the lowest `reasoning.effort` a model accepts)
+//   - the chat turn's note on how old the model's own knowledge is (`knowledge_cutoff`, when listed)
 //   - the transcription route (which endpoints serve a speech-to-text model, and whether every one of
 //     them is on OpenRouter's zero-data-retention list)
 //
@@ -52,12 +53,13 @@ export type ModelPricing = { promptUsdPerToken: number; completionUsdPerToken: n
 type CatalogEntry = {
   id?: unknown;
   context_length?: unknown;
+  knowledge_cutoff?: unknown;
   architecture?: { input_modalities?: unknown };
   reasoning?: { supported_efforts?: unknown; mandatory?: unknown } | null;
   pricing?: unknown;
 };
 
-type ParsedEntry = { info?: ModelInfo; contextLength?: number; pricing?: ModelPricing };
+type ParsedEntry = { info?: ModelInfo; contextLength?: number; pricing?: ModelPricing; knowledgeCutoff?: string };
 
 export type EndpointInfo = { provider: string; tag: string; zdr: boolean };
 
@@ -103,6 +105,19 @@ export function parseCatalogEntry(entry: CatalogEntry): ModelInfo | undefined {
   const modalities = stringArray(entry.architecture?.input_modalities);
   if (!modalities) return undefined;
   return { inputModalities: new Set(modalities), lowestEffort: lowestEffort(entry.reasoning) };
+}
+
+/**
+ * The list's `knowledge_cutoff` ("2026-02-16"; null for many models) as YYYY-MM-DD or YYYY-MM, else
+ * undefined: anything else is not a date the chat note can name.
+ */
+export function parseKnowledgeCutoff(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = /^(\d{4})-(\d{2})(?:-(\d{2}))?$/.exec(value.trim());
+  if (!match) return undefined;
+  const month = Number(match[2]);
+  const day = match[3] === undefined ? 1 : Number(match[3]);
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31 ? match[0] : undefined;
 }
 
 function parseContextLength(value: unknown): number | undefined {
@@ -268,6 +283,18 @@ export class ModelCatalog {
     return this.lookup(modelId)?.pricing;
   }
 
+  // ---- Knowledge cutoffs (the chat turn's note on how old the model's knowledge is) ----
+
+  /**
+   * Synchronous cache read of the model's listed knowledge cutoff (YYYY-MM-DD or YYYY-MM); undefined until
+   * the list has loaded, or when OpenRouter lists none (many models do not).
+   */
+  lookupKnowledgeCutoff(modelId: string): string | undefined {
+    if (!this.enabled) return undefined;
+    void this.models.refresh();
+    return this.lookup(modelId)?.knowledgeCutoff;
+  }
+
   // ---- Modalities and reasoning effort (the media features) ----
 
   /** The model's catalog entry; the static fallback when the catalog is unavailable or lacks it. */
@@ -337,8 +364,11 @@ export class ModelCatalog {
         info: parseCatalogEntry(raw),
         contextLength: parseContextLength(raw.context_length),
         pricing: parsePricing(raw.pricing),
+        knowledgeCutoff: parseKnowledgeCutoff(raw.knowledge_cutoff),
       };
-      if (entry.info || entry.contextLength !== undefined || entry.pricing) models.set(raw.id, entry);
+      if (entry.info || entry.contextLength !== undefined || entry.pricing || entry.knowledgeCutoff) {
+        models.set(raw.id, entry);
+      }
     }
     if (models.size === 0) throw new Error('the model list was empty');
     return models;

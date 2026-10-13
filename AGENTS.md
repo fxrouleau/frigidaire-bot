@@ -185,7 +185,7 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
 
   Pass options inline: `create(body, { ...featureRequestOptions('x'), timeout })`.
 - **Model catalog** (`modelCatalog.ts`): OpenRouter's public metadata, fetched with plain `fetch` (no key, no member content) and refreshed daily:
-  - `GET /models`: context lengths for the history budget; input modalities and the lowest accepted `reasoning.effort` for the media calls.
+  - `GET /models`: context lengths for the history budget; input modalities and the lowest accepted `reasoning.effort` for the media calls; `knowledge_cutoff` for the chat turn's note (listed for about a third of the models in October 2026, not GLM).
   - `GET /endpoints/zdr` and `/models/<id>/endpoints`: ZDR coverage for the speech-to-text route.
 
   A failed fetch keeps the previous copy and retries after 10 minutes. A ZDR verdict older than 3 days doesn't count. It never fetches under Vitest.
@@ -212,7 +212,7 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
    - Transcript replies never enter history.
 4. **Prompt**:
    - `entries[0]` is the static prompt: persona, SERVER PEOPLE, emoji glossary and the group's `vibe`/`lore` notes (the vibe/personality bucket before the first dream). It is byte-identical for the whole window, so the provider's prefix cache survives, and it has no timestamp.
-   - Every turn adds a **dynamic context** developer entry: the current Eastern time, `Channel: #name — topic` plus its `CHANNEL_NOTES` note (a thread inherits its parent's), `UNPROMPTED_NOTE` or `LATE_MESSAGE_NOTE` when they apply, then what the bot knows.
+   - Every turn adds a **dynamic context** developer entry: the current Eastern time with a line right under it saying the model's own knowledge is older than that date (`staleKnowledgeNote`: news and anything that changes get searched, and found dates checked; it names the month the knowledge stops and how long ago that was when OpenRouter's catalog lists a `knowledge_cutoff` for every model that may answer, the oldest of them, else it stays relative, so swapping models needs no change; the persona says the same at length, after the bot told the 2025 shutdown's food-stamp lapse as October 2026 news), `Channel: #name — topic` plus its `CHANNEL_NOTES` note (a thread inherits its parent's), `UNPROMPTED_NOTE` or `LATE_MESSAGE_NOTE` when they apply, then what the bot knows.
    - What it knows (see [Long-term memory](#long-term-memory--learning)): for the speaker, @-mentioned people (≤3) and people **named in plain text** (≤3, `findPeopleInText`), their notes (profile without Earlier, circles, newer journal rows, open corrections) or, without notes, their newest memories; the circles the message names or whose members are present; a hybrid journal search of the message. Everything is deduped against what this window already showed (memory ids and note versions).
    - The persona tells the model to look someone up (`read_note`, `recall_memories`) when they are discussed and nothing about them is in context, and to `record_correction` when someone corrects something it knows (never arguing with a self-correction).
 5. **Reply context**: when the ping replies to a message outside the window, a REPLY CONTEXT entry shows:
