@@ -16,7 +16,7 @@ A Discord bot built in **TypeScript** that lives in one private friend server as
 10. **Code sandbox** — `run_code` runs Python/bash/node in a secret-free sidecar container (math, charts, data): up to 15 minutes, 2 GB, a 20 GB workspace.
 11. **Right-click commands** — Ask Fridge, Summarize from here, Transcribe, Translate, Remember this, What does Fridge know? (a notes viewer; the owner can edit and undo).
 12. **Feature requests → GitHub** — members' requests become public issues (or +1s on existing ones). The owner's `claude-implement` label has Claude implement them in a PR.
-13. **Deleted-message repost** — a configured member's message deleted right after posting is judged ("was that edgy?", GIFs and videos by what they show) and reposted as them. Off unless `DELETE_REPOST_USER_IDS` is set.
+13. **Deleted-message repost** — a configured member's message deleted right after posting is judged ("was that edgy?", GIFs and videos by what they show) and reposted as them; so is one edited from edgy into something harmless (the version before the edit). Off unless `DELETE_REPOST_USER_IDS` is set.
 14. **Report channel & ops** — the weekly self-diagnosis digest with OpenRouter spend, a "🚀 Deployed `<sha>`" line with the channel configuration, the nightly dream's report, the owner's note edits and undos, notes imports, fixer alerts, auto-react and birthday shadow lines (with their Confirm buttons, see [Shadow approvals](#shadow-approvals-srcapprovals-event-shadowapproval)), live setting changes, `!wrapped` previews. Also a per-feature usage ledger and a rotated log file.
 15. **Live settings** — the owner can ask the bot to change its own settings (`list_settings` / `change_setting`): an allowlist of feature switches, thresholds and models, applied at once, persisted in bot.db until reset. See [Live settings](#live-settings-srcruntimesettingsts-srcaitoolssettingsts).
 
@@ -151,7 +151,7 @@ Every env var the bot reads is parsed here, in its feature's section. Values are
 | Event | Handlers |
 |---|---|
 | MessageCreate | `aiChat` (mention / reply / gate → agent), `archiveIngest`, `autoReact`, `deletedMessageCache`, `emojiUsageTracker`, `identityTracker`, `learnerActivityTracker`, `linkRepost`, `rambleRedirect`, `voiceTranscribe`, `wrappedPreview` |
-| MessageUpdate | `archiveEdit` |
+| MessageUpdate | `archiveEdit`, `deletedMessageEdit` |
 | MessageDelete | `archiveDelete`, `autoReactDelete`, `deletedMessageRepost`, `voiceTranscriptDelete` |
 | MessageBulkDelete | `archiveBulkDelete`, `autoReactBulkDelete`, `voiceTranscriptBulkDelete` |
 | Reactions | `reactionTracker` (emoji use counts), `archiveReactionAdd` / `Remove` / `RemoveAll` / `RemoveEmoji` |
@@ -448,7 +448,8 @@ For users in `DELETE_REPOST_USER_IDS` (either account of a linked pair watches b
 - The criteria count racist or ethnic humor, stereotypes and slurs (also implied by a caption or who is shown), gore and shock, dark jokes about death, disability, tragedies, religion or politics, and cruel mockery as edgy, also when subtle, ironic or "just a reaction GIF"; a link is never harmless for being a link.
 - **Live eval** (`yarn eval:deleted-repost`, `src/evals/deletedRepost/`): the owner's real cases in the gitignored `data/deleted-repost-cases.json` (never commit them: the format is in `cases.ts`), each through the real pipeline (uploads saved as the reposter saves them, links signed over REST with `CLIENT_SECRET`, no gateway login), then the judge with each `EVAL_MODELS` model (default `DELETE_REPOST_VISION_MODEL`) as the vision judge. A table per model, recall, false positives, cost, PASS/FAIL; a case whose media couldn't be opened is a pipeline failure, apart from judge misses. The JSON result keeps ids and file names only; `--show` prints what the judge saw (private). On the owner's 8 GIFs (October 2026): GLM-5.3-Flash 7/8 (the owner kept it), Gemini 3.5 Flash-Lite 8/8 (~$0.002 a judged message), no false positives on harmless controls.
 - A saved video over 10 MB is shrunk for the repost, and only then (after the verdict): `shrinkVideo` (ffmpeg) re-encodes it to H.264/AAC MP4 under 9.5 MB, its bitrate from its length and its size from the bitrate (720p down to 360p, ≤30 fps, metadata stripped), one lower retry if the encoder overshoots, and renames it `.mp4`. Past 5 minutes, or when it fails, the video is left out (and nothing is posted if it was the whole message). A 20 s 1080p clip takes ~6 s on 4 cores.
-- `DELETE_REPOST_MODE=always`: every qualifying deletion is reposted.
+- **Edits** (`deletedMessageEdit`, MessageUpdate): editing it away is the same regret. Each snapshot keeps the message as it reads now (text and the attachments still on it: an edit can remove some, never add). An edit inside the window that turns an edgy version into a harmless one (the judge on the version it replaced, then on the new one) reposts the replaced version, saved attachments included, with a `-# ✏️ before the edit · <jump link>` line, recorded as a `regret` relay **without** an `originalId` (the edited message is still up: nothing may dedupe the repost against it). An edit that keeps it edgy (a typo fix) reposts nothing, and a deletion is judged on the version that was deleted, so neither "edit it clean, then delete" nor "post it clean, edit in the edge, then delete" gets through. Edits and the deletion of one message run in order; each version is judged once (`verdicts`). An update that changes neither text nor attachments (a link preview, a pin) is ignored for free. `always` mode reposts no edits.
+- `DELETE_REPOST_MODE=always`: every qualifying deletion is reposted, as it read when deleted.
 - The repost goes through `sendViaWebhook` as the author with `parse: []`, chunked when the text exceeds 2000 characters (Nitro), and is recorded as a `regret` relay. Deletions the bot performs itself (link fixing) are excluded via `forget()`.
 
 ### Message archive, search and Wrapped (`src/archive/`, `src/ai/tools/messageSearch.ts`)
@@ -980,7 +981,7 @@ Parsed in `src/config.ts` (booleans accept `1/0`, `true/false`, `yes/no`, `on/of
 | Variable | Default | Meaning |
 |---|---|---|
 | `DELETE_REPOST_USER_IDS` | empty | csv of watched members (a linked account counts); empty ⇒ off |
-| `DELETE_REPOST_WINDOW_MS` | 120000 (2 min) | a deletion qualifies within this long after posting |
+| `DELETE_REPOST_WINDOW_MS` | 120000 (2 min) | a deletion (or an edit taking the edge off) qualifies within this long after posting |
 | `DELETE_REPOST_MODE` | `edgy` | `edgy` (judge) \| `always` |
 
 **Archive and Wrapped**

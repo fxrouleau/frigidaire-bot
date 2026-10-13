@@ -26,6 +26,8 @@ const OFFLINE_MEDIA: JudgeMediaDeps = {
 
 function makeReposter(opts: {
   verdict?: boolean | undefined;
+  /** A judge by content (overrides `verdict`). */
+  judge?: (input: JudgeInput) => Promise<boolean | undefined>;
   mode?: 'edgy' | 'always';
   attachmentBytes?: Buffer | undefined;
   media?: Partial<JudgeMediaDeps>;
@@ -44,6 +46,7 @@ function makeReposter(opts: {
     mode: () => opts.mode ?? 'edgy',
     judge: async (input) => {
       judgeCalls.push(input);
+      if (opts.judge) return opts.judge(input);
       return 'verdict' in opts ? opts.verdict : true;
     },
     judgeMedia: (content, attachments, signUrls) =>
@@ -588,4 +591,142 @@ describe('DeletedMessageReposter', () => {
   });
 
   vi.restoreAllMocks();
+});
+
+describe('DeletedMessageReposter: edits', () => {
+  // Edgy when the text says so, or when it shows a picture.
+  const byContent = async (input: JudgeInput) => input.text.includes('edgy') || input.visuals.length > 0;
+  const EDIT_LINE = '-# ✏️ before the edit · https://discord.com/channels/guild-1/channel-1/m1';
+
+  it('reposts the version an edit took the edge off, pointing at the edited message', async () => {
+    setBotDbForTesting(new BotDb(':memory:'));
+    const { reposter, judgeCalls, sendCalls } = makeReposter({ judge: byContent, now: () => T0 + 10_000 });
+    reposter.observe(jasperMessage().message);
+
+    expect(await reposter.handleEdit(jasperMessage({ content: 'nvm' }).message)).toBe('reposted');
+
+    expect(judgeCalls.map((c) => c.text)).toEqual(['something edgy', 'nvm']);
+    expect(sendCalls).toHaveLength(1);
+    const [, identity, payload] = sendCalls[0];
+    expect(identity).toMatchObject({ name: 'Jasper' });
+    expect(payload).toEqual([{ content: `something edgy\n${EDIT_LINE}`, allowedMentions: { parse: [] } }]);
+    // Theirs, and no originalId: the edited message is still up, nothing may treat the repost as a copy of it.
+    const relay = getRelay('repost-1-0');
+    expect(relay).toMatchObject({ authorId: JASPER, kind: 'regret' });
+    expect(relay?.originalId).toBeUndefined();
+  });
+
+  it('reposts nothing for an edit that keeps it edgy, and judges a later deletion on the new version, once', async () => {
+    const { reposter, judgeCalls, sendCalls } = makeReposter({ judge: byContent });
+    reposter.observe(jasperMessage().message);
+
+    const edited = jasperMessage({ content: 'something edgy, fixed the typo' }).message;
+    expect(await reposter.handleEdit(edited)).toBe('still-edgy');
+    expect(sendCalls).toHaveLength(0);
+
+    expect(await reposter.handleDelete(edited)).toBe('reposted');
+    expect(sendCalls[0][2]).toEqual([{ content: 'something edgy, fixed the typo', allowedMentions: { parse: [] } }]);
+    // The deletion reused the edit's verdict on that version.
+    expect(judgeCalls.map((c) => c.text)).toEqual(['something edgy', 'something edgy, fixed the typo']);
+  });
+
+  it('judges a deletion on the version that was deleted, not the one first posted', async () => {
+    const { reposter, sendCalls } = makeReposter({ judge: byContent });
+    reposter.observe(jasperMessage({ content: 'hello' }).message);
+
+    const edited = jasperMessage({ content: 'something edgy' }).message;
+    expect(await reposter.handleEdit(edited)).toBe('not-edgy');
+    expect(await reposter.handleDelete(edited)).toBe('reposted');
+    expect(sendCalls[0][2]).toEqual([{ content: 'something edgy', allowedMentions: { parse: [] } }]);
+  });
+
+  it('edited away, then deleted: reposted once, at the edit', async () => {
+    const { reposter, sendCalls } = makeReposter({ judge: byContent });
+    reposter.observe(jasperMessage().message);
+
+    const edited = jasperMessage({ content: 'nvm' }).message;
+    expect(await reposter.handleEdit(edited)).toBe('reposted');
+    expect(await reposter.handleDelete(edited)).toBe('not-edgy');
+    expect(sendCalls).toHaveLength(1);
+  });
+
+  it('handles an edit and a deletion right behind it in order', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { reposter, sendCalls } = makeReposter({
+      judge: async (input) => {
+        await gate;
+        return byContent(input);
+      },
+    });
+    reposter.observe(jasperMessage().message);
+
+    const edited = jasperMessage({ content: 'nvm' }).message;
+    const editing = reposter.handleEdit(edited);
+    const deleting = reposter.handleDelete(edited);
+    release();
+
+    expect(await editing).toBe('reposted');
+    expect(await deleting).toBe('not-edgy');
+    expect(sendCalls.map((call) => call[2][0].content)).toEqual([`something edgy\n${EDIT_LINE}`]);
+  });
+
+  it('reposts a picture an edit removed', async () => {
+    const bytes = await sharp({ create: { width: 64, height: 64, channels: 3, background: '#aa3300' } })
+      .png()
+      .toBuffer();
+    const { reposter, sendCalls } = makeReposter({ judge: byContent, attachmentBytes: bytes });
+    const picture = { id: 'att-pic', url: 'https://cdn.discordapp.com/attachments/1/2/spicy.png', contentType: 'image/png', name: 'spicy.png' };
+    reposter.observe(jasperMessage({ content: 'look', attachments: [picture] }).message);
+
+    expect(await reposter.handleEdit(jasperMessage({ content: 'look' }).message)).toBe('reposted');
+    expect(sendCalls[0][2]).toEqual([
+      { content: `look\n${EDIT_LINE}`, allowedMentions: { parse: [] }, files: [{ attachment: bytes, name: 'spicy.png' }] },
+    ]);
+  });
+
+  it('never judges an update that changed neither the text nor the attachments (a link preview, a pin)', async () => {
+    const { reposter, judgeCalls } = makeReposter({ judge: byContent });
+    reposter.observe(jasperMessage().message);
+
+    expect(await reposter.handleEdit(jasperMessage().message)).toBe('unchanged');
+    expect(judgeCalls).toHaveLength(0);
+  });
+
+  it('lets an edit outside the window go, and ignores edits of messages it never saw', async () => {
+    let now = T0;
+    const { reposter, judgeCalls, sendCalls } = makeReposter({ judge: byContent, now: () => now });
+    reposter.observe(jasperMessage().message);
+
+    now = T0 + 61_000;
+    expect(await reposter.handleEdit(jasperMessage({ content: 'nvm' }).message)).toBe('expired');
+    expect(await reposter.handleEdit(jasperMessage({ messageId: 'm2', content: 'nvm' }).message)).toBe('ignored');
+    expect(judgeCalls).toHaveLength(0);
+    expect(sendCalls).toHaveLength(0);
+  });
+
+  it('fails closed: no verdict on either version means no repost', async () => {
+    const before = makeReposter({ judge: async () => undefined });
+    before.reposter.observe(jasperMessage().message);
+    expect(await before.reposter.handleEdit(jasperMessage({ content: 'nvm' }).message)).toBe('undecided');
+
+    const after = makeReposter({ judge: async (input) => (input.text === 'nvm' ? undefined : true) });
+    after.reposter.observe(jasperMessage().message);
+    expect(await after.reposter.handleEdit(jasperMessage({ content: 'nvm' }).message)).toBe('undecided');
+
+    expect([...before.sendCalls, ...after.sendCalls]).toHaveLength(0);
+  });
+
+  it('reposts no edits in "always" mode, and a deletion there reposts the version that was deleted', async () => {
+    const { reposter, judgeCalls, sendCalls } = makeReposter({ mode: 'always' });
+    reposter.observe(jasperMessage().message);
+
+    const edited = jasperMessage({ content: 'nvm' }).message;
+    expect(await reposter.handleEdit(edited)).toBe('ignored');
+    expect(await reposter.handleDelete(edited)).toBe('reposted');
+    expect(judgeCalls).toHaveLength(0);
+    expect(sendCalls[0][2]).toEqual([{ content: 'nvm', allowedMentions: { parse: [] } }]);
+  });
 });

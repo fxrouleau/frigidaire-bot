@@ -13,6 +13,12 @@
 // src/discordCdn.ts). A message that was nothing but links the bot couldn't open is never judged blind
 // (a link alone always read as harmless): it is left deleted as undecided.
 //
+// Editing it away is the same regret: when an edit inside the window turns an edgy message into a harmless
+// one (new text, or a picture removed), the version it replaced is reposted, with a line pointing at the
+// edited message. An edit that keeps it edgy (a typo fix) reposts nothing, and a deletion is judged on the
+// version that was deleted, so an edit can't launder a message before it goes either. Edits and the
+// deletion of one message are handled in order, and a version is judged once.
+//
 // A webhook can upload 10 MB per file (level-1 boosts don't raise it). Videos up to 100 MB are saved
 // anyway, within a cap on what all snapshots hold at once, and one that gets reposted is first shrunk
 // to fit (ffmpeg, getMediaTranscoder().shrinkVideo): a lower resolution and bitrate, for up to 5 minutes
@@ -38,6 +44,7 @@ import {
   MAX_WEBHOOK_CONTENT,
   sendViaWebhook,
   splitMessage,
+  type WebhookCapableChannel,
   type WebhookIdentity,
 } from './utils';
 
@@ -58,20 +65,57 @@ const SNAPSHOT_GRACE_MS = 5000;
 
 export type { SnapshotAttachment };
 
+/** One version of a message: its text and the attachments still on it (an edit can remove some, never add). */
+type MessageVersion = { content: string; attachmentIds: string[] };
+
+/** An attachment saved at post time, with the Discord id the versions name it by. */
+type SavedAttachment = SnapshotAttachment & { id: string };
+
 export type MessageSnapshot = {
   id: string;
   channelId: string;
   authorId: string;
   identity: WebhookIdentity;
-  content: string;
+  /** The message as it reads now: an edit replaces it. */
+  current: MessageVersion;
   createdAt: number;
-  attachmentNames: string[];
-  attachments: Promise<SnapshotAttachment[]>;
+  /** Every attachment it was posted with, saved or not (the judge hears about all of them by name). */
+  posted: Array<{ id: string; name: string }>;
+  attachments: Promise<SavedAttachment[]>;
+  /** Verdicts by version (versionKey), so a version an edit judged isn't paid for again on deletion. */
+  verdicts: Map<string, Promise<boolean | undefined>>;
+  /** Edits and the deletion, handled one after the other. */
+  queue: Promise<unknown>;
   /** Bytes of big videos this snapshot holds against MAX_HELD_VIDEO_BYTES (0 once released). */
   heldBytes: number;
 };
 
 export type DeleteOutcome = 'ignored' | 'expired' | 'not-edgy' | 'undecided' | 'empty' | 'reposted';
+
+/**
+ * What an edit came to. `reposted`: the version it replaced was edgy and the new one isn't. `still-edgy`: a
+ * fix that kept it edgy (nothing reposted; a deletion is judged on the new version). `unchanged`: an update
+ * that changed neither the text nor the attachments (a late link preview, a pin).
+ */
+export type EditOutcome =
+  | 'ignored'
+  | 'unchanged'
+  | 'expired'
+  | 'not-edgy'
+  | 'still-edgy'
+  | 'undecided'
+  | 'empty'
+  | 'reposted';
+
+function versionKey(version: MessageVersion): string {
+  return JSON.stringify([version.content, version.attachmentIds]);
+}
+
+/** The repost of an edited-away version points at what it became (webhooks can't reply). */
+function withEditLine(content: string, editedUrl: string): string {
+  const line = `-# ✏️ before the edit · ${editedUrl}`;
+  return content.length > 0 ? `${content}\n${line}` : line;
+}
 
 export type DeletedMessageReposterOptions = {
   userIds?: () => string[];
@@ -229,9 +273,9 @@ export class DeletedMessageReposter {
       attachments.map(async (a, index) => {
         if (limits[index] === 0) return undefined;
         const data = await this.fetchAttachment(a.url, limits[index]);
-        return data ? { name: a.name, contentType: a.contentType, data } : undefined;
+        return data ? { id: a.id, name: a.name, contentType: a.contentType, data } : undefined;
       }),
-    ).then((results) => results.filter((r): r is SnapshotAttachment => r !== undefined));
+    ).then((results) => results.filter((r): r is SavedAttachment => r !== undefined));
 
     this.snapshots.set(message.id, {
       id: message.id,
@@ -241,10 +285,12 @@ export class DeletedMessageReposter {
         name: message.member?.nickname || message.author.displayName,
         avatar: message.member?.displayAvatarURL({ forceStatic: true }),
       },
-      content: message.content ?? '',
+      current: { content: message.content ?? '', attachmentIds: attachments.map((a) => a.id) },
       createdAt: message.createdTimestamp ?? now,
-      attachmentNames: attachments.map((a) => a.name),
+      posted: attachments.map((a) => ({ id: a.id, name: a.name })),
       attachments: downloads,
+      verdicts: new Map(),
+      queue: Promise.resolve(),
       heldBytes,
     });
   }
@@ -261,14 +307,44 @@ export class DeletedMessageReposter {
     const snapshot = this.snapshots.get(message.id);
     if (!snapshot) return 'ignored';
     this.snapshots.delete(message.id);
+    // The version that was deleted is the one standing now; an edit still being judged goes first.
+    const deleted = snapshot.current;
     try {
-      return await this.resolve(snapshot, message);
+      return await this.inOrder(snapshot, () => this.resolveDelete(snapshot, deleted, message));
     } finally {
       this.release(snapshot);
     }
   }
 
-  private async resolve(snapshot: MessageSnapshot, message: Message | PartialMessage): Promise<DeleteOutcome> {
+  /**
+   * An edit of a watched message (MessageUpdate). Inside the window, in edgy mode, an edit that turns an edgy
+   * version into a harmless one reposts the version it replaced. Cheap for anything else: no snapshot, or
+   * nothing but a link preview or a pin changed.
+   */
+  async handleEdit(message: Message | PartialMessage): Promise<EditOutcome> {
+    if (!this.snapshots.has(message.id)) return 'ignored';
+    let edited: Message;
+    try {
+      edited = message.partial ? await message.fetch() : message;
+    } catch {
+      return 'ignored';
+    }
+    const snapshot = this.snapshots.get(message.id);
+    if (!snapshot) return 'ignored';
+
+    const before = snapshot.current;
+    const after: MessageVersion = { content: edited.content ?? '', attachmentIds: [...edited.attachments.keys()] };
+    if (versionKey(before) === versionKey(after)) return 'unchanged';
+    // At once, before any judging: a deletion right after this edit deletes this version.
+    snapshot.current = after;
+    return this.inOrder(snapshot, () => this.resolveEdit(snapshot, before, after, edited));
+  }
+
+  private async resolveDelete(
+    snapshot: MessageSnapshot,
+    version: MessageVersion,
+    message: Message | PartialMessage,
+  ): Promise<DeleteOutcome> {
     const age = this.now() - snapshot.createdAt;
     if (age > this.windowMs()) return 'expired';
 
@@ -277,39 +353,124 @@ export class DeletedMessageReposter {
 
     // Awaited before judging: the judge sees the bytes saved at post time, because the deleted
     // message's CDN URLs stop serving its files. And nothing left to repost means nothing to pay a judge for.
-    const attachments = await snapshot.attachments;
-    if (snapshot.content.length === 0 && attachments.length === 0) return 'empty';
+    const attachments = await this.attachmentsOf(snapshot, version);
+    if (version.content.length === 0 && attachments.length === 0) return 'empty';
 
     if (this.mode() === 'edgy') {
-      // Built lazily: only a message with an unsigned attachment link needs it.
-      const signUrls: UrlSigner = (urls) => this.signer(message)(urls);
-      const media = await this.judgeMedia(snapshot.content, attachments, signUrls);
-      logger.info(`deletedMessages: judging ${snapshot.id} on ${describeMedia(snapshot.content, media)}`);
-      if (isBlind(snapshot.content, attachments, media)) {
-        logger.warn(
-          `deletedMessages: could not open anything ${snapshot.id} showed, and it said nothing else; leaving it deleted`,
-        );
-        return 'undecided';
-      }
-      const verdict = await this.judge({
-        author: snapshot.identity.name,
-        text: snapshot.content,
-        visuals: media.visuals,
-        attachmentNames: snapshot.attachmentNames,
-        mediaNotes: media.notes,
-      });
-      if (verdict === undefined) {
-        logger.warn(`deletedMessages: no verdict for ${snapshot.id}; leaving it deleted`);
-        return 'undecided';
-      }
+      const verdict = await this.verdictFor(snapshot, version, attachments, message);
+      if (verdict === undefined) return 'undecided';
       if (!verdict) return 'not-edgy';
     }
 
     const files = await this.fitForUpload(attachments);
-    if (snapshot.content.length === 0 && files.length === 0) return 'empty';
+    if (version.content.length === 0 && files.length === 0) return 'empty';
 
     logger.info(`deletedMessages: reposting ${snapshot.id} by ${snapshot.identity.name} (deleted after ${age}ms)`);
-    const reposts = await this.send(channel, snapshot.identity, regretPayloads(snapshot.content, files));
+    await this.repost(channel, snapshot, version.content, files, snapshot.id);
+    return 'reposted';
+  }
+
+  private async resolveEdit(
+    snapshot: MessageSnapshot,
+    before: MessageVersion,
+    after: MessageVersion,
+    message: Message,
+  ): Promise<EditOutcome> {
+    const age = this.now() - snapshot.createdAt;
+    if (age > this.windowMs()) return 'expired';
+    // "always" reposts every deletion as it is; an edit isn't one, and a typo fix is no regret.
+    if (this.mode() !== 'edgy') return 'ignored';
+
+    const channel = message.channel;
+    if (!isWebhookCapableChannel(channel)) return 'ignored';
+
+    const replaced = await this.attachmentsOf(snapshot, before);
+    if (before.content.length === 0 && replaced.length === 0) return 'empty';
+    const wasEdgy = await this.verdictFor(snapshot, before, replaced, message);
+    if (wasEdgy === undefined) return 'undecided';
+    if (!wasEdgy) return 'not-edgy';
+    // Only an edit that took the edge off is a regret; no verdict on the new version means no action.
+    const isEdgy = await this.verdictFor(snapshot, after, await this.attachmentsOf(snapshot, after), message);
+    if (isEdgy === undefined) return 'undecided';
+    if (isEdgy) return 'still-edgy';
+
+    const files = await this.fitForUpload(replaced);
+    if (before.content.length === 0 && files.length === 0) return 'empty';
+
+    logger.info(
+      `deletedMessages: reposting ${snapshot.id} by ${snapshot.identity.name} as it was before an edit (edited after ${age}ms)`,
+    );
+    // No originalId: the relay is not the message as it stands (that one is still up), so nothing that
+    // dedupes a relay against its original may hide it.
+    await this.repost(channel, snapshot, withEditLine(before.content, message.url), files);
+    return 'reposted';
+  }
+
+  /** Runs `task` after everything already queued for this message (edits, then its deletion), in order. */
+  private inOrder<T>(snapshot: MessageSnapshot, task: () => Promise<T>): Promise<T> {
+    const run = snapshot.queue.then(task);
+    snapshot.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** The saved attachments a version still had. */
+  private async attachmentsOf(snapshot: MessageSnapshot, version: MessageVersion): Promise<SavedAttachment[]> {
+    const saved = await snapshot.attachments;
+    return saved.filter((a) => version.attachmentIds.includes(a.id));
+  }
+
+  /** The judge's verdict on one version of the message, asked once per version. undefined = no verdict. */
+  private verdictFor(
+    snapshot: MessageSnapshot,
+    version: MessageVersion,
+    attachments: SavedAttachment[],
+    message: Message | PartialMessage,
+  ): Promise<boolean | undefined> {
+    const key = versionKey(version);
+    let verdict = snapshot.verdicts.get(key);
+    if (!verdict) {
+      verdict = this.judgeVersion(snapshot, version, attachments, message);
+      snapshot.verdicts.set(key, verdict);
+    }
+    return verdict;
+  }
+
+  private async judgeVersion(
+    snapshot: MessageSnapshot,
+    version: MessageVersion,
+    attachments: SavedAttachment[],
+    message: Message | PartialMessage,
+  ): Promise<boolean | undefined> {
+    // Nothing to see is nothing edgy (an edit down to an embed).
+    if (version.content.trim().length === 0 && version.attachmentIds.length === 0) return false;
+    // Built lazily: only a message with an unsigned attachment link needs it.
+    const signUrls: UrlSigner = (urls) => this.signer(message)(urls);
+    const media = await this.judgeMedia(version.content, attachments, signUrls);
+    logger.info(`deletedMessages: judging ${snapshot.id} on ${describeMedia(version.content, media)}`);
+    if (isBlind(version.content, attachments, media)) {
+      logger.warn(`deletedMessages: could not open anything ${snapshot.id} showed, and it said nothing else`);
+      return undefined;
+    }
+    const verdict = await this.judge({
+      author: snapshot.identity.name,
+      text: version.content,
+      visuals: media.visuals,
+      attachmentNames: snapshot.posted.filter((a) => version.attachmentIds.includes(a.id)).map((a) => a.name),
+      mediaNotes: media.notes,
+    });
+    if (verdict === undefined) logger.warn(`deletedMessages: no verdict for ${snapshot.id}`);
+    return verdict;
+  }
+
+  /** Posts a regret as its author and records every post as theirs (a relay). */
+  private async repost(
+    channel: WebhookCapableChannel,
+    snapshot: MessageSnapshot,
+    content: string,
+    files: SnapshotAttachment[],
+    originalId?: string,
+  ): Promise<void> {
+    const reposts = await this.send(channel, snapshot.identity, regretPayloads(content, files));
     for (const repost of reposts) {
       if (!repost?.id) continue;
       recordRelay({
@@ -318,10 +479,9 @@ export class DeletedMessageReposter {
         authorId: snapshot.authorId,
         authorName: snapshot.identity.name,
         kind: 'regret',
-        originalId: snapshot.id,
+        ...(originalId ? { originalId } : {}),
       });
     }
-    return 'reposted';
   }
 
   /** Test-only: number of live snapshots. */
