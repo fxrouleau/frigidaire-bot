@@ -48,6 +48,7 @@ import { currentName, findPeopleInText, memoryKeyFor, namesOf } from './people';
 import { emojiCdnUrl, findCustomEmojis, formatIdentityLines } from './promptSections';
 import { getProvider } from './providerRegistry';
 import { toolDefinitions } from './tools';
+import { SteerableTurn, steeringPerson, type TurnRequest } from './turnSteering';
 import type {
   AiProvider,
   ConversationEntry,
@@ -320,6 +321,22 @@ export type HandleMentionOptions = {
   unprompted?: boolean;
 };
 
+/** What a running turn answers. Follow-ups folded into it (foldFollowUps) move it along. */
+type TurnContext = {
+  /** The message the reply goes to: the turn's own, then the newest follow-up. */
+  message: Message;
+  /** Nobody pinged: stays true only while every message the turn answers was routed by the gate. */
+  unprompted: boolean;
+  steering: SteerableTurn<HandleMentionOptions>;
+  startedAt: number;
+};
+
+/** A channel's turns: the one running, and the ones waiting for it. */
+type ChannelLine = {
+  running?: SteerableTurn<HandleMentionOptions>;
+  waiting: Array<TurnRequest<HandleMentionOptions>>;
+};
+
 /**
  * An attachment as the model reads it: `[image: photo.png <link>]` or `[attachment: data.csv (12 KB) <link>]`.
  * The link is Discord's signed CDN URL, so run_code can download the file (it expires after about a day).
@@ -366,6 +383,10 @@ export function staleKnowledgeNote(cutoff?: string, now: Date = new Date()): str
 export const LATE_MESSAGE_NOTE =
   "This message came in before your last reply, so it also shows up earlier in the history. Answer it now, without repeating what you've already said.";
 
+// Put before the follow-ups folded into a running turn (src/ai/turnSteering.ts).
+export const FOLLOW_UP_NOTE =
+  "They added more while you were working on your answer (below, with anything else said meanwhile). You haven't replied yet: answer all of it in one reply.";
+
 // Added to the dynamic context of a turn the gate routed (see HandleMentionOptions.unprompted).
 export const UNPROMPTED_NOTE =
   "Nobody pinged you this time: the last message doesn't @-mention you or reply to you. You're chiming in on your own because it was clearly meant for you (you were named, or you're mid-conversation with them). Don't say they pinged, tagged or mentioned you; just answer like you were part of the conversation.";
@@ -407,8 +428,9 @@ export class AgentOrchestrator {
   private readonly knowledgeCutoff: (model: string) => string | undefined;
   // One in-flight turn per channel: two mentions in the same channel run back to back, so the second
   // sees the first's reply in its history instead of both reading the same stale state and the last
-  // writer silently dropping the other turn.
-  private readonly channelQueues = new Map<string, Promise<void>>();
+  // writer silently dropping the other turn. A follow-up from the person whose turn is running goes into
+  // that turn instead (src/ai/turnSteering.ts).
+  private readonly channelLines = new Map<string, ChannelLine>();
   // CHANNEL_NOTES values already reported as invalid, so a bad value WARNs once rather than every turn.
   private readonly reportedInvalidNotes = new Set<string>();
 
@@ -431,19 +453,61 @@ export class AgentOrchestrator {
     this.knowledgeCutoff = opts.knowledgeCutoff ?? ((model) => getModelCatalog().lookupKnowledgeCutoff(model));
   }
 
+  /**
+   * Answers a message: queued behind the channel's running turn, or folded into it when it is a follow-up
+   * from the person that turn answers. Resolves once the turn that answered it is over.
+   */
   handleMention(message: Message, opts: HandleMentionOptions = {}): Promise<void> {
     const channelId = message.channel.id;
-    const previous = this.channelQueues.get(channelId) ?? Promise.resolve();
-    const run = previous.then(() => this.processMention(message, opts));
-    const settled = run.catch(() => undefined);
-    this.channelQueues.set(channelId, settled);
-    void settled.then(() => {
-      if (this.channelQueues.get(channelId) === settled) this.channelQueues.delete(channelId);
+    let line = this.channelLines.get(channelId);
+    if (!line) {
+      line = { waiting: [] };
+      this.channelLines.set(channelId, line);
+    }
+    const queue = line;
+    return new Promise<void>((resolve, reject) => {
+      const request: TurnRequest<HandleMentionOptions> = {
+        message,
+        opts,
+        person: steeringPerson(message),
+        resolve,
+        reject,
+      };
+      if (queue.running?.offer(request)) {
+        logger.info(`steer: message ${message.id} goes into the turn already answering its author in #${channelId}`);
+        return;
+      }
+      queue.waiting.push(request);
+      if (!queue.running) void this.drain(channelId, queue);
     });
-    return run;
   }
 
-  private async processMention(message: Message, opts: HandleMentionOptions): Promise<void> {
+  /** Runs a channel's turns one after the other until none are waiting. */
+  private async drain(channelId: string, line: ChannelLine): Promise<void> {
+    for (let next = line.waiting.shift(); next; next = line.waiting.shift()) {
+      const running = new SteerableTurn(next);
+      // The same person's turns already waiting (queued behind someone else's) go into this one.
+      line.waiting = line.waiting.filter((request) => !running.offer(request));
+      line.running = running;
+      let outcome: { ok: true } | { ok: false; error: unknown } = { ok: true };
+      try {
+        await this.processMention(next.message, next.opts, running);
+      } catch (error) {
+        outcome = { ok: false, error };
+      }
+      line.running = undefined;
+      // Follow-ups it never got to (it failed, or ran out of redrafts) are answered next, on their own.
+      line.waiting.unshift(...running.leftovers());
+      running.settle(outcome);
+    }
+    if (this.channelLines.get(channelId) === line) this.channelLines.delete(channelId);
+  }
+
+  private async processMention(
+    message: Message,
+    opts: HandleMentionOptions,
+    steering: SteerableTurn<HandleMentionOptions>,
+  ): Promise<void> {
     const channelId = message.channel.id;
     // Turns can land out of order: the gate takes seconds to route a message while a ping posted right
     // after it is routed at once. When a later turn already showed this message to the model, the bot has
@@ -459,6 +523,9 @@ export class AgentOrchestrator {
     let provider: AiProvider | undefined;
     let workingEntries: ConversationEntry[] = [];
     const turn = createTurnEffects();
+    // What the turn answers: its own message until follow-ups are folded in (the newest is then the one the
+    // reply goes to), and whether anyone asked (an explicit follow-up makes an unprompted turn a prompted one).
+    const ctx: TurnContext = { message, unprompted: opts.unprompted === true, steering, startedAt: Date.now() };
 
     try {
       provider = this.resolveProvider();
@@ -473,7 +540,7 @@ export class AgentOrchestrator {
       let intervening: ConversationEntry[] = [];
       if (existing) {
         state = existing;
-        intervening = await this.buildInterveningEntries(message, existing);
+        intervening = await this.buildInterveningEntries(message, existing.lastSeenMessageId, existing.entries);
       } else {
         const initial = await this.buildInitialHistory(message);
         state = {
@@ -530,14 +597,19 @@ export class AgentOrchestrator {
       }
 
       const served = new Set<string>();
-      const finalResponse = await this.runToolLoop(provider, workingEntries, message, channelId, turn, served);
-      const reply = this.applyReplyPolicy(finalResponse.text, message, workingEntries, provider.defaultModel, {
+      const finalResponse = await this.runToolLoop(provider, workingEntries, ctx, channelId, turn, served);
+      // The answer is final: a later follow-up waits for a turn of its own, which will see this reply.
+      if (steering.close().some((request) => !request.opts.unprompted)) ctx.unprompted = false;
+      const reply = this.applyReplyPolicy(finalResponse.text, ctx.message, workingEntries, provider.defaultModel, {
         reactions: turn.reactions.length,
         servedBy: served,
+        steered: steering.steered,
+        restarts: steering.restarts,
+        elapsedMs: Date.now() - ctx.startedAt,
       });
 
       stopTyping();
-      const sentIds = await this.sendReply(reply, message, turn, opts);
+      const sentIds = await this.sendReply(reply, ctx.message, turn, { unprompted: ctx.unprompted });
       const replyEntry = finalResponse.outputEntries.find(
         (e): e is Extract<ConversationEntry, { kind: 'message' }> => e.kind === 'message' && e.role === 'assistant',
       );
@@ -551,12 +623,13 @@ export class AgentOrchestrator {
       }
 
       const lastSeen = state.lastSeenMessageId;
+      const answered = ctx.message.id;
       this.store.set(channelId, {
         entries: trimmed.entries,
         injectedMemoryIds,
         injectedNoteKeys,
         timestamp: Date.now(),
-        lastSeenMessageId: lastSeen && compareSnowflakes(lastSeen, message.id) > 0 ? lastSeen : message.id,
+        lastSeenMessageId: lastSeen && compareSnowflakes(lastSeen, answered) > 0 ? lastSeen : answered,
       });
     } catch (error) {
       logger.error('Error while processing AI response:', error);
@@ -576,10 +649,10 @@ export class AgentOrchestrator {
       stopTyping();
       // Like an empty answer: nobody pinged on an unprompted turn, so a failure isn't announced either
       // (an outage would otherwise have the bot butt in with "hit me again" on every routed follow-up).
-      if (opts.unprompted) {
-        logger.info(`Unprompted turn for message ${message.id} in #${channelId} failed; nothing posted.`);
+      if (ctx.unprompted) {
+        logger.info(`Unprompted turn for message ${ctx.message.id} in #${channelId} failed; nothing posted.`);
       } else {
-        await this.sendErrorReply(message);
+        await this.sendErrorReply(ctx.message);
       }
     } finally {
       stopTyping();
@@ -600,6 +673,44 @@ export class AgentOrchestrator {
   private windowHasMessage(channelId: string, messageId: string): boolean {
     const state = this.store.get(channelId);
     return state !== undefined && collectMessageIds(state.entries).has(messageId);
+  }
+
+  /**
+   * Folds the follow-ups that reached a running turn into its working entries (src/ai/turnSteering.ts): the
+   * whole stretch of channel from what the model last saw up to the newest follow-up, the follow-ups as
+   * current messages (their voice notes transcribed, their links read, their reply context shown) and
+   * whatever else was said meanwhile as history, under FOLLOW_UP_NOTE. The reply then goes to the newest
+   * follow-up, and the turn counts as prompted once any of them pinged the bot.
+   */
+  private async foldFollowUps(ctx: TurnContext, workingEntries: ConversationEntry[], channelId: string): Promise<void> {
+    const arrived = ctx.steering.take();
+    if (arrived.length === 0) return;
+    if (arrived.some((request) => !request.opts.unprompted)) ctx.unprompted = false;
+    const newest = arrived.at(-1)?.message;
+    const since = ctx.steering.lastShown;
+    // Older ones (routed out of order) are in view already: the stretch before the newest showed them.
+    if (!newest || compareSnowflakes(newest.id, since) <= 0) return;
+
+    const answering = new Map(arrived.map((request) => [request.message.id, request.message]));
+    const entries = await this.buildInterveningEntries(newest, since, workingEntries, answering);
+    entries.push(...(await this.renderFollowUp(newest, workingEntries)));
+    ctx.steering.shown(newest.id);
+    ctx.message = newest;
+    workingEntries.push({ kind: 'message', role: 'developer', content: [{ type: 'text', text: FOLLOW_UP_NOTE }] });
+    workingEntries.push(...entries);
+    logger.info(
+      `steer: folded ${arrived.length} follow-up(s) into the turn in #${channelId}: ${entries.length} entries, now answering ${newest.id}`,
+    );
+  }
+
+  /** A follow-up folded into a running turn, rendered like a turn's own message: its reply context, then it. */
+  private async renderFollowUp(msg: Message, window: ConversationEntry[]): Promise<ConversationEntry[]> {
+    const replyContext = await this.buildReplyContext(msg, window);
+    const entry = await this.buildUserEntry(msg, 'current', {
+      attribution: attributeMessage(msg),
+      replyHeader: replyContext.header,
+    });
+    return replyContext.entry ? [replyContext.entry, entry] : [entry];
   }
 
   /**
@@ -642,11 +753,15 @@ export class AgentOrchestrator {
    * hit the model is forced into a text-only answer. No request ever carries an unanswered tool call:
    * calls that won't run get a synthetic "not executed" result first. `served` collects the models
    * that actually answered.
+   *
+   * Follow-ups from the turn's person (src/ai/turnSteering.ts) are folded in before every call, and one
+   * that arrives while a call is out cancels it: the call is made again with it, and whatever that call
+   * had answered (even a finished reply) is dropped, never posted or run.
    */
   private async runToolLoop(
     provider: AiProvider,
     workingEntries: ConversationEntry[],
-    message: Message,
+    ctx: TurnContext,
     channelId: string,
     turn: TurnEffects,
     served: Set<string>,
@@ -654,12 +769,26 @@ export class AgentOrchestrator {
     const providerTools = provider.supportedTools;
     const hostHandled = (calls: ProviderToolCall[]) =>
       calls.filter((call) => providerTools.find((tool) => tool.name === call.name)?.hostHandled ?? false);
-    const chat = async (toolChoice: 'auto' | 'none') => {
-      answerDanglingToolCalls(workingEntries, TOOL_NOT_EXECUTED_RESULT);
-      const response = await provider.chat({ messages: workingEntries, tools: providerTools, toolChoice });
-      if (response.servedBy) served.add(response.servedBy);
-      workingEntries.push(...response.outputEntries);
-      return response;
+    const chat = async (toolChoice: 'auto' | 'none'): Promise<ProviderChatResponse> => {
+      for (;;) {
+        await this.foldFollowUps(ctx, workingEntries, channelId);
+        answerDanglingToolCalls(workingEntries, TOOL_NOT_EXECUTED_RESULT);
+        const signal = ctx.steering.callStarted();
+        let response: ProviderChatResponse | undefined;
+        try {
+          response = await provider.chat({ messages: workingEntries, tools: providerTools, toolChoice, signal });
+        } catch (error) {
+          if (!signal.aborted) throw error;
+        } finally {
+          ctx.steering.callEnded();
+        }
+        if (response && !signal.aborted) {
+          if (response.servedBy) served.add(response.servedBy);
+          workingEntries.push(...response.outputEntries);
+          return response;
+        }
+        logger.info(`steer: a follow-up came in during a model call in #${channelId}; asking again with it`);
+      }
     };
 
     let response = await chat('auto');
@@ -686,7 +815,7 @@ export class AgentOrchestrator {
       }
 
       invocations += calls.length;
-      workingEntries.push(...(await this.executeToolCalls(calls, message, provider, channelId, turn)));
+      workingEntries.push(...(await this.executeToolCalls(calls, ctx.message, provider, channelId, turn)));
 
       if (round >= this.maxToolRounds) {
         logger.warn(`Tool round limit (${this.maxToolRounds}) reached in channel ${channelId}, forcing text response.`);
@@ -713,11 +842,19 @@ export class AgentOrchestrator {
     message: Message,
     workingEntries: ConversationEntry[],
     model: string,
-    stats: { reactions: number; servedBy: ReadonlySet<string> },
+    stats: {
+      reactions: number;
+      servedBy: ReadonlySet<string>;
+      /** Follow-ups folded into the turn, and the model calls cancelled or redrafted for them. */
+      steered: number;
+      restarts: number;
+      /** From the start of the turn to the answer (before it is sent). */
+      elapsedMs: number;
+    },
   ): string | undefined {
     const logStats = (chars: number, kept: string[], stripped: string[]) =>
       logger.info(
-        `reply_stats channel=${message.channel.id} model=${model} served_by=${stats.servedBy.size > 0 ? [...stats.servedBy].join(',') : 'unknown'} chars=${chars} emoji_kept=${kept.length} emoji_stripped=${stripped.length} reactions=${stats.reactions} names=${[...kept, ...stripped].join(',')}`,
+        `reply_stats channel=${message.channel.id} model=${model} served_by=${stats.servedBy.size > 0 ? [...stats.servedBy].join(',') : 'unknown'} chars=${chars} emoji_kept=${kept.length} emoji_stripped=${stripped.length} reactions=${stats.reactions} steered=${stats.steered} restarts=${stats.restarts} ms=${stats.elapsedMs} names=${[...kept, ...stripped].join(',')}`,
       );
 
     if (!text) {
@@ -854,8 +991,13 @@ export class AgentOrchestrator {
    * replies, anything quoted in a reply context, the relay of a message it already has) are not repeated.
    * A fetch failure degrades to nothing.
    */
-  private async buildInterveningEntries(message: Message, state: ConversationState): Promise<ConversationEntry[]> {
-    const since = state.lastSeenMessageId;
+  private async buildInterveningEntries(
+    message: Message,
+    since: string | undefined,
+    window: ConversationEntry[],
+    /** Messages among them the turn answers (follow-ups): rendered as current messages, not history. */
+    answering: ReadonlyMap<string, Message> = new Map(),
+  ): Promise<ConversationEntry[]> {
     if (!since || compareSnowflakes(message.id, since) <= 0) return [];
 
     let fetched: { messages: Message[]; skipped: number; skippedIsLowerBound: boolean };
@@ -867,13 +1009,20 @@ export class AgentOrchestrator {
     }
 
     const inWindow = windowMembership(
-      state.entries,
+      window,
       fetched.messages.map((msg) => msg.id),
     );
     const rendered = await Promise.all(
-      fetched.messages.filter((msg) => !inWindow(msg.id)).map((msg) => this.renderHistoryMessage(msg)),
+      fetched.messages
+        .filter((msg) => !inWindow(msg.id))
+        .map(async (msg) => {
+          const followUp = answering.get(msg.id);
+          if (followUp) return this.renderFollowUp(followUp, window);
+          const entry = await this.renderHistoryMessage(msg);
+          return entry ? [entry] : [];
+        }),
     );
-    const entries = rendered.filter((e): e is ConversationEntry => e !== undefined);
+    const entries = rendered.flat();
 
     if (fetched.skipped > 0) {
       const count = `${fetched.skipped}${fetched.skippedIsLowerBound ? '+' : ''}`;

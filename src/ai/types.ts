@@ -119,6 +119,8 @@ export type ChatInput = {
   messages: ConversationEntry[];
   tools: ProviderToolDefinition[];
   toolChoice?: 'auto' | 'none';
+  /** Cancels the request (a follow-up came in mid-call: src/ai/turnSteering.ts). */
+  signal?: AbortSignal;
 };
 
 export type ImageGenerationOptions = {

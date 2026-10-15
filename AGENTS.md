@@ -65,6 +65,7 @@ src/
 ├── storage/botDb.ts           # ./data/bot.db: the shared handle for small feature tables (ensureSchema/ensureColumn)
 ├── ai/
 │   ├── agent.ts               # AgentOrchestrator — per-channel turn queue, prompt/context building, tool loop, reply, emoji guardrail
+│   ├── turnSteering.ts        # SteerableTurn: a running turn's follow-ups from the same person (fold-in, cancelled calls, caps)
 │   ├── agentInstance.ts       # Shared orchestrator (with disk-backed conversation persistence)
 │   ├── conversationStore.ts conversationPersistence.ts  # Per-channel window state + its SQLite mirror (conversations.db)
 │   ├── historyBudget.ts       # Token estimates and trimming of a window to its budget
@@ -205,6 +206,11 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
    - Anything else in a gate channel goes to the [gate](#replying-without-a-mention-srcgate). A positive verdict calls `handleMention(message, { unprompted: true })`.
    - aiChat tells the gate about every routed turn and its end (`noteRouted` / `noteTurnDone`).
 2. **Per-channel queue**: two turns in one channel run back to back, so the second sees the first's reply (no lost-update race).
+   - **Follow-ups steer the running turn** (`turnSteering.ts`): people write in bursts, and the bot used to answer each line. A routed message from the person the running turn answers (`isSamePerson`, relays count as their author) goes into that turn instead of queueing. Same-person turns already waiting behind someone else's go into it too when it starts.
+   - It is folded in before the next model call. That is the whole stretch of channel from what the model last saw up to the follow-up, under `FOLLOW_UP_NOTE`: the follow-ups as current messages (paid enrichers, reply context), anything else said meanwhile as history.
+   - A model call in flight is cancelled (`ChatInput.signal`) and made again. Whatever it answered, even a finished reply, is dropped unposted. A running tool is never cancelled. At most `MAX_STEER_RESTARTS` (3) cancelled calls and `MAX_STEERED_MESSAGES` (8) follow-ups per turn; past the cap a follow-up waits for the next call or its own turn.
+   - The reply goes to the newest follow-up, and the turn counts as prompted once any of its messages pinged the bot. Its caller's promise settles when the turn ends, so the gate's `noteTurnDone` still fires for every routed message.
+   - Never folded in: someone else's message, a message older than the turn's own (routed late: see out-of-order turns below), anything after the answer is final (it queues and sees the reply).
 3. **The window**:
    - A new window is seeded from the 25 messages before the ping. It lives for `CONVERSATION_TIMEOUT_MS` (15 min) and is persisted across restarts (schema v4).
    - A live window **catches up** on everything posted since its last turn: the newest 100 messages, rendered as history even though nobody pinged. Up to 4 more pages are only counted, into one "N earlier messages were skipped" line.
@@ -248,7 +254,7 @@ Under Vitest every default handle is `:memory:`; tests inject their own through 
     - A request sends only the newest 40 image parts; older ones go as `[image]`. The cut moves in steps of 10 so the cached prefix rarely changes.
     - Downloads: an LRU cache (150 entries / 256 MB, 15 min TTL that restarts on use), 4 at a time. Non-Discord hosts go through the link reader's SSRF-guarded fetch.
 12. **Fallback models**: with `CHAT_FALLBACK_MODELS` set, requests send `models: [CHAT_MODEL, …fallbacks]` with the same `provider: { zdr: true, sort: 'throughput' }`; the response's `model` names whichever answered.
-13. **Metric**: one `reply_stats channel=… model=… served_by=… chars=… emoji_kept=… emoji_stripped=… reactions=… names=…` line per reply.
+13. **Metric**: one `reply_stats channel=… model=… served_by=… chars=… emoji_kept=… emoji_stripped=… reactions=… steered=… restarts=… ms=… names=…` line per reply (`steered`: follow-ups folded in; `restarts`: calls cancelled for them; `ms`: from the turn's start to its answer, before sending).
 
 ### Emoji policy (`src/ai/emojiPolicy.ts`)
 
