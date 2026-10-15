@@ -10,6 +10,7 @@ import {
   lowestEffort,
   modelEndpointsUrl,
   parseCatalogEntry,
+  parseKnowledgeCutoff,
   parsePricing,
   staticModelInfo,
 } from './modelCatalog';
@@ -297,6 +298,40 @@ describe('ModelCatalog: prices', () => {
     const fetch = vi.fn();
     const catalog = new ModelCatalog({ fetch, enabled: false });
     expect(await catalog.pricing('z-ai/glm-5.3-flash')).toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('ModelCatalog: knowledge cutoffs', () => {
+  it("reads a model's listed knowledge cutoff once the list has loaded (cache only, never waiting)", async () => {
+    const listing = {
+      data: [
+        { id: 'openai/gpt-5.6-terra', context_length: 400_000, knowledge_cutoff: '2026-02-16' },
+        { id: 'z-ai/glm-5.3-flash', context_length: 200_000, knowledge_cutoff: null },
+        { id: 'odd/model', knowledge_cutoff: 'early 2025' },
+      ],
+    };
+    const { catalog } = setup({ [MODELS_URL]: listing });
+    // The first read only starts the load.
+    expect(catalog.lookupKnowledgeCutoff('openai/gpt-5.6-terra')).toBeUndefined();
+    await catalog.contextLength('openai/gpt-5.6-terra');
+    expect(catalog.lookupKnowledgeCutoff('openai/gpt-5.6-terra')).toBe('2026-02-16');
+    expect(catalog.lookupKnowledgeCutoff('openai/gpt-5.6-terra:nitro')).toBe('2026-02-16');
+    expect(catalog.lookupKnowledgeCutoff('z-ai/glm-5.3-flash')).toBeUndefined();
+    expect(catalog.lookupKnowledgeCutoff('odd/model')).toBeUndefined();
+  });
+
+  it('accepts YYYY-MM-DD and YYYY-MM only', () => {
+    expect(parseKnowledgeCutoff('2026-02-16')).toBe('2026-02-16');
+    expect(parseKnowledgeCutoff(' 2025-07 ')).toBe('2025-07');
+    expect(parseKnowledgeCutoff('2025-13')).toBeUndefined();
+    expect(parseKnowledgeCutoff('2025')).toBeUndefined();
+    expect(parseKnowledgeCutoff(null)).toBeUndefined();
+  });
+
+  it('never fetches when disabled', () => {
+    const fetch = vi.fn();
+    expect(new ModelCatalog({ fetch, enabled: false }).lookupKnowledgeCutoff('openai/gpt-5.6-terra')).toBeUndefined();
     expect(fetch).not.toHaveBeenCalled();
   });
 });

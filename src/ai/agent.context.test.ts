@@ -17,6 +17,7 @@ import {
   compareSnowflakes,
   describeNowET,
   pickErrorReply,
+  staleKnowledgeNote,
 } from './agent';
 import type { ContentEnricher } from './enrichers';
 import { TRIMMED_NOTE } from './historyBudget';
@@ -780,7 +781,10 @@ describe('channel awareness and the current time', () => {
     expect(dynamic).toMatch(/^Current time: [A-Z][a-z]+day \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2} E[SD]T \(America\/New_York\)\./);
     expect(dynamic).toContain('Channel: #bagel-bar — no thoughts, only vibes');
     expect(dynamic).toContain('About this channel: the main hangout where basically everything happens');
+    // Right under the date: the model's own knowledge is older than it, so news gets searched.
+    expect(dynamic.split('\n')[1]).toBe(staleKnowledgeNote());
     const staticPrompt = textOf(messages[0]);
+    expect(staticPrompt).toContain('search before you answer instead of going from memory');
     expect(staticPrompt).not.toMatch(/current time is/i);
     expect(staticPrompt).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
   });
@@ -1405,6 +1409,35 @@ describe('in-character errors', () => {
 
     expect(ping.recorders.reply.calls).toEqual([[ERROR_REPLIES[Math.floor(0.5 * ERROR_REPLIES.length)]]]);
     expect(ping.recorders.reply.calls.flat().join(' ')).not.toMatch(/encountered an error/);
+  });
+});
+
+describe("the note on how old the model's knowledge is", () => {
+  it('names the listed cutoff and how long ago it was, else just says it is older than today', () => {
+    const now = new Date('2026-10-13T17:00:00Z');
+    expect(staleKnowledgeNote('2026-02-16', now)).toBe(
+      'Your own knowledge stops around February 2026, 8 months before this date: for news or anything else that changes over time, search before answering, and check the dates on what you find.',
+    );
+    expect(staleKnowledgeNote('2026-09', now)).toMatch(/^Your own knowledge stops around September 2026, a month before/);
+    // No cutoff, or one this month or later: nothing to count.
+    expect(staleKnowledgeNote(undefined, now)).toMatch(/^Your own knowledge is older than this date: for news/);
+    expect(staleKnowledgeNote('2026-10-01', now)).toBe(staleKnowledgeNote(undefined, now));
+  });
+
+  it("reads the chat model's cutoff for each turn, and only names one every model that may answer lists", async () => {
+    const ping = () =>
+      createFakeMessage({ ...BASE, messageId: '7100', content: 'what happened with the shutdown', channelMessages: [] });
+    const cutoffs: Record<string, string> = { 'fake-model': '2025-11-30' };
+
+    const provider = new FakeProvider([textResponse('ok')]);
+    await makeAgent(provider, { knowledgeCutoff: (model) => cutoffs[model] }).handleMention(ping().message);
+    expect(dynamicEntryText(provider.calls[0].messages)).toContain('Your own knowledge stops around November 2025');
+
+    // A fallback without a listed cutoff could be the one answering: no month is named then.
+    const withFallback = new FakeProvider([textResponse('ok')]);
+    Object.assign(withFallback, { chatModels: ['fake-model', 'other/model'] });
+    await makeAgent(withFallback, { knowledgeCutoff: (model) => cutoffs[model] }).handleMention(ping().message);
+    expect(dynamicEntryText(withFallback.calls[0].messages)).toContain('Your own knowledge is older than this date');
   });
 });
 
